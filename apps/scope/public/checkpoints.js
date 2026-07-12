@@ -118,7 +118,7 @@
   async function deleteCheckpoint(ref) {
     const cwd = selectedCwd();
     if (!cwd) { statusEl.textContent = "set a working directory first (Terminal pane)"; return; }
-    if (!confirm("Delete this checkpoint?\n\nThis removes the git ref (refs/checkpoints/...) and tag. The snapshot commit may linger until git gc but can no longer be restored.")) return;
+    if (!confirm("Delete this checkpoint?\n\nThis removes the git ref (refs/checkpoints/...). The snapshot commit may linger until git gc but can no longer be restored.")) return;
     const parts = ref.split("/");
     const id = parts.pop();
     const ns = parts[parts.length - 1];

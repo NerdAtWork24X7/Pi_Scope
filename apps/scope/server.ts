@@ -656,11 +656,9 @@ async function handle(req: Request): Promise<Response> {
       git(absCwd, ["branch", "-f", cpBranch, sha]);
       git(absCwd, ["switch", cpBranch]); // move HEAD onto the new checkpoint branch (working tree unchanged)
       const ref = `refs/checkpoints/${ns}/${id}`;
-      const tag = `checkpoint/${id}`;
       git(absCwd, ["update-ref", ref, sha]);
-      git(absCwd, ["tag", tag, sha]);
       git(absCwd, ["reset", "-q"]); // restore index to HEAD (now cpBranch); working tree unchanged
-      return jsonResponse({ ok: true, ref, tag, sha, message, session: ns, ts: new Date().toISOString() });
+      return jsonResponse({ ok: true, ref, sha, message, session: ns, ts: new Date().toISOString() });
     } catch (err: any) {
       return jsonResponse({ git: true, ok: false, error: String(err?.message ?? err).split("\n")[0] }, 500);
     }
@@ -761,7 +759,7 @@ async function handle(req: Request): Promise<Response> {
         try { git(absCwd, ["branch", "-D", cpBranch]); } catch {}
       }
       git(absCwd, ["update-ref", "-d", ref]);
-      if (id) { try { git(absCwd, ["tag", "-d", `checkpoint/${id}`]); } catch {} }
+
       const out: any = { ok: true, ref, deleteBranch: !!parsed.deleteBranch };
       if (msg) out.message = `checkpoint branch was checked out — ${msg} and deleted. Merge any uncommitted changes into another branch first.`;
       return jsonResponse(out);
