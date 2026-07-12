@@ -7,8 +7,11 @@ const path = require("node:path");
 const fs = require("node:fs");
 
 const ROOT = path.resolve(__dirname, "..", "..");
-const PNG_ICON = path.join(ROOT, "apps", "scope-launcher", "icon.png");
-const SVG_ICON = path.join(ROOT, "apps", "scope", "public", "logo.svg");
+const APP_DIR = app.getAppPath();
+const PNG_ICON = fs.existsSync(path.join(APP_DIR, "server-bundle", "icon.png"))
+  ? path.join(APP_DIR, "server-bundle", "icon.png")
+  : path.join(ROOT, "apps", "scope-launcher", "icon.png");
+const SVG_ICON = path.join(APP_DIR, "server-bundle", "public", "logo.svg");
 const APP_ICON = nativeImage.createFromPath(fs.existsSync(PNG_ICON) ? PNG_ICON : SVG_ICON);
 
 // Headless/container-friendly flags.

@@ -786,13 +786,21 @@ async function fetchSessionEvents(sid, sinceSeq) {
 
 // ─── Event rendering (single mode, append-only) ────────────────────────────
 
+// A failed tool call is recorded as a `tool_result` with payload.is_error,
+// not as a standalone `error` event — so the "error" filter chip must match both.
+function evtTypeInFilter(e) {
+  if (STATE.typeFilter.has(e.type)) return true;
+  if (STATE.typeFilter.has("error") && e.type === "tool_result" && e.payload?.is_error) return true;
+  return false;
+}
+
 function getFilteredEvents() {
   let evts = STATE.events;
   if (STATE.search) {
     const q = STATE.search.toLowerCase();
     evts = evts.filter(e => (summaryFor(e) + JSON.stringify(e.payload ?? {})).toLowerCase().includes(q));
   }
-  if (STATE.typeFilter.size > 0) evts = evts.filter(e => STATE.typeFilter.has(e.type));
+  if (STATE.typeFilter.size > 0) evts = evts.filter(evtTypeInFilter);
   return evts;
 }
 
@@ -840,7 +848,7 @@ function matchesFilters(evt) {
     const q = STATE.search.toLowerCase();
     if (!(summaryFor(evt) + JSON.stringify(evt.payload ?? {})).toLowerCase().includes(q)) return false;
   }
-  if (STATE.typeFilter.size > 0 && !STATE.typeFilter.has(evt.type)) return false;
+  if (STATE.typeFilter.size > 0 && !evtTypeInFilter(evt)) return false;
   return true;
 }
 

@@ -5,9 +5,17 @@
   "description": "One-click Electron launcher for Pi Scope: boots the SCOPE server and opens the WebUI inside the app window.",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build": "bash ../build-release.sh",
+    "dist": "bash ../build-release.sh"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "electron": "^33.2.0"
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0"
   }
 }

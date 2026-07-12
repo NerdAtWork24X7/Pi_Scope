@@ -19,3 +19,9 @@ tmp/
 db/scope.db
 db/scope.db-shm
 db/scope.db-wal
+
+# Build / release artifacts
+apps/scope-launcher/server-bundle/
+apps/scope-launcher/dist/
+apps/scope-launcher/node-portable/
+

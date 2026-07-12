@@ -190,7 +190,7 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       COALESCE(SUM(CASE WHEN type = 'assistant_message' THEN json_extract(payload_json, '$.usage.input') ELSE 0 END), 0)        AS input_tokens,
       COALESCE(SUM(CASE WHEN type = 'assistant_message' THEN json_extract(payload_json, '$.usage.output') ELSE 0 END), 0)       AS output_tokens,
       COALESCE(SUM(CASE WHEN type = 'assistant_message' THEN json_extract(payload_json, '$.usage.cost_total') ELSE 0 END), 0)   AS total_cost,
-      COALESCE(SUM(CASE WHEN type = 'error' THEN 1 ELSE 0 END), 0) AS error_count
+      COALESCE(SUM(CASE WHEN type = 'error' OR (type = 'tool_result' AND json_extract(payload_json, '$.is_error') = 1) THEN 1 ELSE 0 END), 0) AS error_count
     FROM events
     WHERE session_id = $session_id
   `);

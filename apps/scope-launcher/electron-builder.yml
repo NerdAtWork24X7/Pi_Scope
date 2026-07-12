@@ -1,0 +1,23 @@
+appId: com.piscope.app
+productName: Pi Scope
+copyright: Copyright © 2026 Pi Scope
+directories:
+  output: dist
+  buildResources: .
+files:
+  - main.js
+  - scope-control.js
+  - package.json
+  - server-bundle/**/*
+  - node_modules/**/*
+asar: false
+extraResources:
+  - from: node-portable
+    to: node
+linux:
+  target:
+    - AppImage
+  category: Development
+  icon: server-bundle/icon.png
+  artifactName: Pi-Scope-${version}.AppImage
+  executableName: pi-scope

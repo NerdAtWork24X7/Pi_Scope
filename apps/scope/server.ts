@@ -50,7 +50,7 @@ function corsOrigin(req: Request): string {
 // Persist the effective token to a local, owner-only file so other local
 // components (launcher UI, pi extension) can discover the per-run token
 // instead of relying on a hardcoded constant like "devtoken".
-const TOKEN_FILE = path.join(PROJECT_ROOT, "tmp", "scope_token");
+const TOKEN_FILE = process.env.SCOPE_TOKEN_FILE ?? path.join(PROJECT_ROOT, "tmp", "scope_token");
 try {
   fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
   fs.writeFileSync(TOKEN_FILE, AUTH_TOKEN, { mode: 0o600 });

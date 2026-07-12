@@ -6,6 +6,8 @@ const http = require("node:http");
 const path = require("node:path");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
+const os = require("node:os");
+const { app } = require("electron");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 const SCOPE_DIR = path.join(PROJECT_ROOT, "apps", "scope");
@@ -13,7 +15,8 @@ const SCOPE_DIR = path.join(PROJECT_ROOT, "apps", "scope");
 // pi extension can discover it without a hardcoded constant like "devtoken".
 const TOKEN_FILE = path.join(PROJECT_ROOT, "tmp", "scope_token");
 function readTokenFile() {
-  try { return fs.readFileSync(TOKEN_FILE, "utf8").trim(); } catch { return null; }
+  const tf = process.env.SCOPE_TOKEN_FILE ?? TOKEN_FILE;
+  try { return fs.readFileSync(tf, "utf8").trim(); } catch { return null; }
 }
 
 function config(overrides = {}) {
@@ -43,6 +46,18 @@ function waitForHealth(healthUrl, { timeoutMs = 20000, intervalMs = 300 } = {}) 
   });
 }
 
+  // Resolve how to launch the SCOPE server.
+  // Dev: `node apps/scope/server.ts`. Packaged: the bundled portable Node runs the
+  // compiled server bundle (node-pty/ws resolve from the app's node_modules).
+  function serverLaunch() {
+    if (app && app.isPackaged) {
+      const nodeBin = path.join(process.resourcesPath, "node", "bin", "node");
+      const serverPath = path.join(__dirname, "server-bundle", "server.js");
+      return { bin: nodeBin, args: [serverPath], cwd: __dirname };
+    }
+    return { bin: "node", args: ["server.ts"], cwd: SCOPE_DIR };
+  }
+
 // Ensure the SCOPE server is up. Reuses an existing one if already listening.
 // Returns { proc, spawned, cfg }. proc is null when an existing server was reused.
 async function ensureServer({ timeoutMs = 20000 } = {}) {
@@ -60,7 +75,15 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
       SCOPE_HOST: cfg.host,
       SCOPE_AUTH_TOKEN: cfg.token,
     };
-    const proc = spawn("node", ["server.ts"], { cwd: SCOPE_DIR, env, detached: true, stdio: "inherit" });
+    // Route DB + token to a writable location when packaged (resources/ is read-only).
+    if (app && app.isPackaged) {
+      const dataDir = path.join(os.homedir(), ".local", "share", "pi-scope");
+      fs.mkdirSync(dataDir, { recursive: true });
+      process.env.SCOPE_DB_PATH = path.join(dataDir, "scope.db");
+      process.env.SCOPE_TOKEN_FILE = path.join(dataDir, "scope_token");
+    }
+    const launch = serverLaunch();
+    const proc = spawn(launch.bin, launch.args, { cwd: launch.cwd, env, detached: true, stdio: "inherit" });
     proc.on("error", (err) => console.error("[scope-control] failed to spawn server:", err.message));
     await waitForHealth(cfg.healthUrl, { timeoutMs });
     return { proc, spawned: true, cfg };
