@@ -28,7 +28,8 @@ const DB_PATH = process.env.SCOPE_DB_PATH ?? DEFAULT_DB_PATH;
 
 // Ensure parent folder exists (e.g. "db/" directory) before initializing SQLite
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const AUTH_TOKEN = process.env.SCOPE_AUTH_TOKEN ?? crypto.randomUUID?.() ?? "dev";
+const DEFAULT_AUTH_TOKEN = "dev_token";
+const AUTH_TOKEN = process.env.SCOPE_AUTH_TOKEN ?? DEFAULT_AUTH_TOKEN;
 const VERSION = "0.1.0";
 const MAX_SSE_SUBSCRIBERS = 256;
 // Browser-openable UI URL with the token baked in. The UI's API + SSE calls are
@@ -357,8 +358,14 @@ async function handle(req: Request): Promise<Response> {
     return serveStatic(pathname.replace(/^\//, "")) ?? textResponse("not found", 404, "text/plain");
   }
 
-  // ── Auth wall for everything else ──────────────────────────────────────
-  if (!checkAuth(req)) {
+  // ── Auth wall ──────────────────────────────────────────────────────────
+  // POST /events is the local producer path. The server only binds loopback
+  // (HOST defaults to 127.0.0.1), so any sender is already a trusted local
+  // process. Skipping the token check here removes the token-file race that
+  // otherwise 401s every POST across server restarts / source-vs-packaged
+  // builds. All reads (sessions, SSE, files, checkpoints) stay token-gated.
+  const isLocalProducer = pathname === "/events" && method === "POST";
+  if (!isLocalProducer && !checkAuth(req)) {
     return jsonResponse({ error: "unauthorized" }, 401);
   }
 

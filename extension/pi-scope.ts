@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 
 // ━━ Truncation constants & helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // These were previously (erroneously) imported from "./pi-scope.ts" — a
@@ -158,7 +159,21 @@ let seqCounter = 0;
 // Per-run server token is persisted to tmp/scope_token by the server; reuse it
 // so the extension and server agree on auth without a hardcoded constant.
 const EXT_PROJECT_ROOT = path.resolve(__dirname, "..", "..");
-const SCOPE_TOKEN_FILE = path.join(EXT_PROJECT_ROOT, "tmp", "scope_token");
+// Candidate locations where the scope server may have persisted its per-run
+// token. In dev the server writes <project>/tmp/scope_token. When launched via
+// the packaged AppImage, scope-control sets SCOPE_TOKEN_FILE to
+// $HOME/.local/share/pi-scope/scope_token — so we must check that too.
+function tokenCandidates(): string[] {
+  const out: string[] = [];
+  if (process.env.SCOPE_TOKEN_FILE) out.push(process.env.SCOPE_TOKEN_FILE);
+  // Packaged AppImage server writes its per-run token to the data dir
+  // (~/.local/share/pi-scope/scope_token); check it BEFORE the dev
+  // tmp/scope_token so a stale dev token can't shadow the real one and
+  // cause every POST to 401 (no activity in the dashboard).
+  out.push(path.join(os.homedir(), ".local", "share", "pi-scope", "scope_token"));
+  out.push(path.join(EXT_PROJECT_ROOT, "tmp", "scope_token"));
+  return out;
+}
 
 // Friendly random agent name used when neither --o-name nor OBS_NAME is set,
 // so sessions stop falling back to the cwd folder name (e.g. "pi-agent-observability").
@@ -546,7 +561,13 @@ export default function (pi: ExtensionAPI) {
     const resolveToken = (): string => {
       const explicit = (pi.getFlag("obs-token") as string) || process.env.OBS_AUTH_TOKEN;
       if (explicit) return explicit;
-      try { return fs.readFileSync(SCOPE_TOKEN_FILE, "utf8").trim(); } catch { return ""; }
+      for (const f of tokenCandidates()) {
+        try {
+          const t = fs.readFileSync(f, "utf8").trim();
+          if (t) return t;
+        } catch { /* try next candidate */ }
+      }
+      return "";
     };
     const token = resolveToken();
     const pool = (pi.getFlag("o-pool") as string) || process.env.OBS_POOL || "default";

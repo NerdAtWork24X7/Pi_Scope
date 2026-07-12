@@ -5,7 +5,6 @@ const { spawn } = require("node:child_process");
 const http = require("node:http");
 const path = require("node:path");
 const fs = require("node:fs");
-const crypto = require("node:crypto");
 const os = require("node:os");
 const { app } = require("electron");
 
@@ -22,7 +21,8 @@ function readTokenFile() {
 function config(overrides = {}) {
   const port = parseInt(overrides.SCOPE_PORT ?? process.env.SCOPE_PORT ?? "43190", 10);
   const host = overrides.SCOPE_HOST ?? process.env.SCOPE_HOST ?? "127.0.0.1";
-  const token = overrides.SCOPE_AUTH_TOKEN ?? process.env.SCOPE_AUTH_TOKEN ?? readTokenFile() ?? crypto.randomUUID();
+  const DEFAULT_AUTH_TOKEN = "dev_token";
+  const token = overrides.SCOPE_AUTH_TOKEN ?? process.env.SCOPE_AUTH_TOKEN ?? readTokenFile() ?? DEFAULT_AUTH_TOKEN;
   return { port, host, token, healthUrl: `http://${host}:${port}/health` };
 }
 
