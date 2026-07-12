@@ -118,17 +118,22 @@
   async function deleteCheckpoint(ref) {
     const cwd = selectedCwd();
     if (!cwd) { statusEl.textContent = "set a working directory first (Terminal pane)"; return; }
-    if (!confirm("Delete this checkpoint?\n\nThis removes the git ref (refs/checkpoints/...). The snapshot commit may linger until git gc but can no longer be restored.")) return;
+    if (!confirm("Delete this checkpoint?\n\nThis removes the git ref (refs/checkpoints/...) and tag. The snapshot commit may linger until git gc but can no longer be restored.")) return;
+    const parts = ref.split("/");
+    const id = parts.pop();
+    const ns = parts[parts.length - 1];
+    const branchName = `checkpoints/${ns}/${id}`;
+    const deleteBranch = confirm(`Also delete the checkpoint branch ${branchName}?\n\nThis branch is unique to this checkpoint and safe to remove — it does not affect other checkpoints.`);
     statusEl.textContent = "deleting…";
     try {
       const res = await fetch(window.apiUrl("/checkpoints/delete", { token: S.token }), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd, ref }),
+        body: JSON.stringify({ cwd, ref, deleteBranch }),
       });
       const data = await res.json();
       if (!res.ok || !data.ok) statusEl.textContent = "delete failed: " + escapeHtml(data.error || res.status);
-      else { statusEl.textContent = "deleted " + (ref.split("/").pop() || ref); loadCheckpoints(); }
+      else { statusEl.textContent = "deleted " + (id || ref) + (data.deleteBranch ? " (branch removed)" : ""); loadCheckpoints(); }
     } catch (e) {
       statusEl.textContent = "error: " + escapeHtml(String(e));
     }

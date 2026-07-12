@@ -637,16 +637,21 @@ async function handle(req: Request): Promise<Response> {
       const ns = cwdNs(absCwd);
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       const message = `chk: ${id}${label ? " · " + label : ""}`;
-      // Land checkpoints on a dedicated branch (checkpoints/<ns>) instead of the
-      // current branch (main/master) so checkpoint commits never pollute mainline
-      // history. commit-tree + branch -f avoids disturbing the checked-out branch
-      // or working tree.
-      const cpBranch = `checkpoints/${ns}`;
+      // Each checkpoint gets its own branch (checkpoints/<ns>/<id>) instead of a
+      // shared ns branch, so deleting one checkpoint can delete its branch without
+      // touching others. commit-tree + branch -f avoids disturbing the checked-out
+      // branch or working tree.
+      const cpBranch = `checkpoints/${ns}/${id}`;
       git(absCwd, ["add", "-A"]);
       const tree = git(absCwd, ["write-tree"]).trim();
-      let parent: string;
-      try { git(absCwd, ["rev-parse", "--verify", `refs/heads/${cpBranch}`]); parent = `refs/heads/${cpBranch}`; }
-      catch { parent = "HEAD"; }
+      // Parent: most recent existing checkpoint commit for this cwd (keeps a linear
+      // history); fall back to current HEAD when this is the first checkpoint.
+      let parent = "HEAD";
+      try {
+        const prev = git(absCwd, ["for-each-ref", "--format=%(objectname)", "--sort=-creatordate", `refs/checkpoints/${ns}/*`])
+          .split("\n").map((l: string) => l.trim()).find((l: string) => l);
+        if (prev) parent = prev;
+      } catch {}
       const sha = git(absCwd, ["commit-tree", tree, "-p", parent, "-m", message]).trim();
       git(absCwd, ["branch", "-f", cpBranch, sha]);
       const ref = `refs/checkpoints/${ns}/${id}`;
@@ -730,9 +735,14 @@ async function handle(req: Request): Promise<Response> {
     if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     try {
       git(absCwd, ["update-ref", "-d", ref]);
-      const id = ref.split("/").pop();
+      const parts = ref.split("/");
+      const id = parts[parts.length - 1];
+      const ns = parts[2];
       if (id) { try { git(absCwd, ["tag", "-d", `checkpoint/${id}`]); } catch {} }
-      return jsonResponse({ ok: true, ref });
+      if (parsed.deleteBranch) {
+        try { git(absCwd, ["branch", "-D", `checkpoints/${ns}/${id}`]); } catch {}
+      }
+      return jsonResponse({ ok: true, ref, deleteBranch: !!parsed.deleteBranch });
     } catch (err: any) {
       return jsonResponse({ ok: false, error: String(err?.message ?? err).split("\n")[0] }, 500);
     }
