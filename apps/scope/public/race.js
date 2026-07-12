@@ -8,7 +8,7 @@
 const STATE = window.__SCOPE_STATE;
 const O = window.SCOPE;
 const {
-  summaryFor, summaryClass, renderDetailHTML, fmtTs, trunc, shortId,
+  summaryFor, summaryClass, turnFinalResponse, renderDetailHTML, fmtTs, trunc, shortId,
   fetchSessionEvents, renderSessions, apiUrl, authHeaders, fmtRel, fmtTokens,
   saveURLState, escapeHtml, toolNamePillHTML
 } = O;
@@ -242,11 +242,14 @@ function buildTurnGroup(track, group, active) {
   if (!active) {
     const last = group.events[group.events.length - 1];
     wrap.title = `${label} · ${group.events.length} events${prompt ? ` · ${prompt}` : ""}`;
+    const teCollapsed = group.events.find(e => e.type === "turn_end");
+    const frCollapsed = teCollapsed ? turnFinalResponse(teCollapsed, group.events) : "";
     wrap.innerHTML = `
       <div class="race-turn-collapsed">
         <span class="race-turn-label">${escapeHtml(label)}</span>
         <span class="race-turn-collapsed-count">${group.events.length} events</span>
         <span class="race-turn-collapsed-prompt">${escapeHtml(prompt)}</span>
+        ${frCollapsed ? `<span class="race-turn-collapsed-final">${escapeHtml(trunc(frCollapsed, 120))}</span>` : ""}
       </div>
     `;
     wrap.addEventListener("click", () => {
@@ -265,8 +268,15 @@ function buildTurnGroup(track, group, active) {
   events.className = "race-events";
   for (const evt of group.events) events.appendChild(buildRaceEvent(track, evt));
 
+  const te = group.events.find(e => e.type === "turn_end");
+  const fr = te ? turnFinalResponse(te, group.events) : "";
+  const finalBlock = fr
+    ? `<div class="race-turn-final"><div class="race-turn-final-label">final response</div><pre>${escapeHtml(fr)}</pre></div>`
+    : `<div class="race-turn-final empty"><div class="race-turn-final-label">final response</div><div class="race-llm-empty">no final response captured</div></div>`;
+
   wrap.appendChild(head);
   wrap.appendChild(events);
+  wrap.insertAdjacentHTML("beforeend", finalBlock);
   return wrap;
 }
 
@@ -276,7 +286,7 @@ function buildRaceEvent(track, evt) {
   node.title = summaryFor(evt);
   node.innerHTML = `
     <div class="race-event-top"><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${toolNamePillHTML(evt)}</div>
-    <div class="race-event-summary ${summaryClass(evt)}">${escapeHtml(summaryFor(evt))}</div>
+    <div class="race-event-summary ${summaryClass(evt, track.events)}">${escapeHtml(summaryFor(evt, track.events))}</div>
     <div class="race-event-time">${fmtTs(evt.ts)} · #${evt.seq}</div>
   `;
   node.addEventListener("click", () => openInspector(track, evt));

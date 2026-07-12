@@ -264,9 +264,10 @@ function appendLaneDOM(sid, evt, isLive = false) {
   const lane = LANES.get(sid);
   if (!lane) return;
 
+  const laneEvents = lane ? lane.events : null;
   const row = document.createElement("div");
   row.className = "lane-evt";
-  row.innerHTML = `<span class="lane-evt-ts">${fmtTs(evt.ts)}</span><span class="lane-evt-type"><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${toolNamePillHTML(evt)}</span><span class="lane-evt-summary ${summaryClass(evt)}">${escapeHtml(summaryFor(evt))}</span>`;
+  row.innerHTML = `<span class="lane-evt-ts">${fmtTs(evt.ts)}</span><span class="lane-evt-type"><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${toolNamePillHTML(evt)}</span><span class="lane-evt-summary ${summaryClass(evt, laneEvents)}">${escapeHtml(summaryFor(evt, laneEvents))}</span>`;
 
   if (isLive) {
     row.style.setProperty("--pulse-color", pulseColorFor(evt.type));

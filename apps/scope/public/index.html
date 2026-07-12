@@ -7,6 +7,10 @@
   <link rel="icon" type="image/png" href="logo.png">
   <link rel="stylesheet" href="vendor/xterm.css">
   <style>
+    @font-face{font-family:'MesloLGS NFM';font-style:normal;font-weight:400;src:url('fonts/MesloLGSNerdFontMono-Regular.ttf') format('truetype');}
+    @font-face{font-family:'MesloLGS NFM';font-style:normal;font-weight:700;src:url('fonts/MesloLGSNerdFontMono-Bold.ttf') format('truetype');}
+    @font-face{font-family:'MesloLGS NFM';font-style:italic;font-weight:400;src:url('fonts/MesloLGSNerdFontMono-Italic.ttf') format('truetype');}
+    @font-face{font-family:'MesloLGS NFM';font-style:italic;font-weight:700;src:url('fonts/MesloLGSNerdFontMono-BoldItalic.ttf') format('truetype');}
     :root {
       --bg:#0d1117;--surface:#161b22;--border:#30363d;
       --text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;
@@ -30,6 +34,12 @@
     #age-ticker{display:inline-block;width:80px;text-align:right}
     #live-dot{width:7px;height:7px;border-radius:50%}
     #live-dot.green{background:var(--green);box-shadow:0 0 4px var(--green)}
+    .term-menu{position:fixed;z-index:1000;background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:3px;box-shadow:0 4px 14px rgba(0,0,0,.5);min-width:120px}
+    .term-menu[hidden]{display:none}
+    .term-menu button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font-family:monospace;font-size:13.5px;padding:6px 10px;border-radius:3px;cursor:pointer}
+    .term-menu button:hover:not(:disabled){background:var(--accent);color:#fff}
+    .term-menu button:disabled{color:var(--muted);cursor:default;opacity:.5}
+
     #live-dot.red{background:var(--red);box-shadow:0 0 4px var(--red)}
     #btn-help{background:none;border:1px solid var(--border);color:var(--muted);cursor:pointer;font-size:19.5px;padding:1px 6px;border-radius:3px;line-height:1}
     #btn-help:hover{color:var(--text);border-color:var(--accent)}
@@ -208,6 +218,11 @@
     .race-turn-collapsed .race-turn-label{font-size:12px}
     .race-turn-collapsed-count{color:var(--text)}
     .race-turn-collapsed-prompt{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
+    .race-turn-collapsed-final{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--accent);opacity:0.85}
+    .race-turn-final{margin-top:10px;padding:8px 10px;border:1px solid rgba(88,166,255,0.40);border-radius:8px;background:rgba(88,166,255,0.06)}
+    .race-turn-final-label{font-size:11px;text-transform:uppercase;letter-spacing:0.7px;color:var(--accent);margin-bottom:4px;font-family:monospace}
+    .race-turn-final pre{margin:0;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.4}
+    .race-turn-final.empty{color:var(--muted);background:transparent;border-style:dashed}
     .race-events{display:flex;align-items:center;gap:30px;min-height:64px;width:max-content;min-width:0}
     .race-event{position:relative;flex:0 0 150px;width:150px;padding:9px 10px;border:1px solid rgba(57,197,207,0.58);border-radius:10px;background:#101722;cursor:pointer;box-shadow:0 0 0 1px rgba(255,255,255,0.02),0 0 12px rgba(57,197,207,0.07);transition:transform .08s ease,border-color .08s ease,background .08s ease}
     .race-event:hover{transform:translateY(-1px);border-color:var(--cyan);background:#142033}
@@ -482,7 +497,7 @@
 
 <header>
   <div class="brand-logo-container" style="display:flex;align-items:center;gap:10px">
-    <img src="logo.png" alt="Pi Scope" height="28" style="flex-shrink:0" />
+    <img src="logo.png" alt="Pi Scope" height="40" style="flex-shrink:0" />
     <div class="brand">
       <h1>Pi Scope</h1>
       <div class="subtitle">Measure to Improve</div>

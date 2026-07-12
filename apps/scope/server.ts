@@ -35,6 +35,27 @@ const MAX_SSE_SUBSCRIBERS = 256;
 // Print this so copy/paste straight from the boot banner just works.
 const OPEN_URL = `http://${HOST}:${PORT}/?token=${encodeURIComponent(AUTH_TOKEN)}`;
 
+// Restrict CORS to loopback origins that match this server. Prevents a remote
+// site from reading responses cross-origin (CSRF / data exfiltration).
+const ALLOWED_ORIGINS = new Set([
+  `http://${HOST}:${PORT}`,
+  `http://127.0.0.1:${PORT}`,
+  `http://localhost:${PORT}`,
+]);
+function corsOrigin(req: Request): string {
+  const o = req.headers.get("origin");
+  return o && ALLOWED_ORIGINS.has(o) ? o : `http://127.0.0.1:${PORT}`;
+}
+
+// Persist the effective token to a local, owner-only file so other local
+// components (launcher UI, pi extension) can discover the per-run token
+// instead of relying on a hardcoded constant like "devtoken".
+const TOKEN_FILE = path.join(PROJECT_ROOT, "tmp", "scope_token");
+try {
+  fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
+  fs.writeFileSync(TOKEN_FILE, AUTH_TOKEN, { mode: 0o600 });
+} catch {}
+
 // ─── Init ───────────────────────────────────────────────────────────────────
 
 // Restrict the on-disk DB (and its WAL/shm sidecars) to the owner only, so
@@ -200,6 +221,7 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".ico": "image/x-icon",
+  ".ttf": "font/ttf",
 };
 
 function serveStatic(pathname: string): Response | null {
@@ -226,6 +248,39 @@ function resolveWithinCwd(cwd: string, file: string): string | null {
   const rel = path.relative(absCwd, absFile);
   if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null;
   return absFile;
+}
+
+/**
+ * Validate `cwd`: must exist as a real directory (symlinks resolved). When
+ * SCOPE_FILE_ROOT is set (comma-separated allowlist), the cwd must lie within
+ * one of those roots. Returns the resolved absolute path, or null if invalid
+ * or disallowed. This stops the /files/* and /checkpoints/* endpoints from
+ * trusting an arbitrary caller-supplied absolute path.
+ */
+function validateCwd(cwd: string): string | null {
+  if (!cwd) return null;
+  let abs: string;
+  try {
+    abs = fs.realpathSync(path.resolve(cwd));
+  } catch {
+    return null;
+  }
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return null;
+  }
+  if (!st.isDirectory()) return null;
+  const roots = (process.env.SCOPE_FILE_ROOT ?? "")
+    .split(",").map((s) => s.trim()).filter(Boolean)
+    .map((s) => { try { return fs.realpathSync(path.resolve(s)); } catch { return null; } })
+    .filter((s): s is string => s !== null);
+  if (roots.length) {
+    const ok = roots.some((r) => abs === r || abs.startsWith(r + path.sep));
+    if (!ok) return null;
+  }
+  return abs;
 }
 
 /** Run a git command in `cwd`; returns stdout string, throws on failure. */
@@ -297,7 +352,7 @@ async function handle(req: Request): Promise<Response> {
     return serveStatic("index.html") ?? textResponse("not found", 404, "text/plain");
   }
 
-  if (pathname.match(/\.(js|css|svg|png|ico)$/)) {
+  if (pathname.match(/\.(js|css|svg|png|ico|ttf|woff2?)$/)) {
     return serveStatic(pathname.replace(/^\//, "")) ?? textResponse("not found", 404, "text/plain");
   }
 
@@ -477,7 +532,8 @@ async function handle(req: Request): Promise<Response> {
     const cwd = url.searchParams.get("cwd") ?? "";
     if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
     const includeIgnored = url.searchParams.get("ignored") === "1";
-    const absCwd = path.resolve(cwd);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     try {
       const out = git(absCwd, ["status", "--porcelain", "-uall", ...(includeIgnored ? ["--ignored"] : [])]);
       const files: any[] = [];
@@ -511,7 +567,8 @@ async function handle(req: Request): Promise<Response> {
     const cwd = url.searchParams.get("cwd") ?? "";
     const file = url.searchParams.get("file") ?? "";
     if (!cwd || !file) return jsonResponse({ error: "missing cwd or file" }, 400);
-    const absCwd = path.resolve(cwd);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     const absFile = resolveWithinCwd(absCwd, file);
     if (!absFile) return jsonResponse({ error: "invalid file path" }, 400);
     try {
@@ -538,7 +595,8 @@ async function handle(req: Request): Promise<Response> {
     const file = parsed.file ?? "";
     const content = typeof parsed.content === "string" ? parsed.content : "";
     if (!cwd || !file) return jsonResponse({ error: "missing cwd or file" }, 400);
-    const absCwd = path.resolve(cwd);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     const absFile = resolveWithinCwd(absCwd, file);
     if (!absFile) return jsonResponse({ error: "invalid file path" }, 400);
     try {
@@ -563,7 +621,8 @@ async function handle(req: Request): Promise<Response> {
     try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
     const cwd = parsed.cwd ?? "";
     if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = path.resolve(cwd);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     const label = typeof parsed.label === "string" && parsed.label.trim() ? parsed.label.trim().slice(0, 120) : "";
     try {
       git(absCwd, ["rev-parse", "--is-inside-work-tree"]);
@@ -587,7 +646,8 @@ async function handle(req: Request): Promise<Response> {
   if (pathname === "/checkpoints/list" && method === "GET") {
     const cwd = url.searchParams.get("cwd") ?? "";
     if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = path.resolve(cwd);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     const ns = cwdNs(absCwd);
     const glob = `refs/checkpoints/${ns}/*`;
     try {
@@ -623,7 +683,8 @@ async function handle(req: Request): Promise<Response> {
     }
     const cwd = parsed.cwd ?? "";
     if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = path.resolve(cwd);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     try {
       git(absCwd, ["rev-parse", "--verify", ref]);
       git(absCwd, ["reset", "--hard", ref]);
@@ -647,7 +708,8 @@ async function handle(req: Request): Promise<Response> {
     }
     const cwd = parsed.cwd ?? "";
     if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = path.resolve(cwd);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     try {
       git(absCwd, ["update-ref", "-d", ref]);
       const id = ref.split("/").pop();
@@ -704,6 +766,8 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     response = jsonResponse({ error: String(err) }, 500);
   }
+  // Restrict CORS to loopback origins that match this server (see corsOrigin).
+  response.headers.set("access-control-allow-origin", corsOrigin(request));
   res.statusCode = response.status;
   response.headers.forEach((value, key) => res.setHeader(key, value));
   if (response.body) {

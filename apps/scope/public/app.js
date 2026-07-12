@@ -120,7 +120,30 @@ const spCloseBtn = $("#sp-close");
 const ALL_TYPES = ["session_start","session_shutdown","agent_start","llm_request","agent_end","turn_start","turn_end","user_message","assistant_message","tool_call","tool_result","thinking","model_change","compaction","branch_nav","error","custom"];
 const CHIP_TYPES = ["user_message","assistant_message","thinking","tool_call","tool_result","model_change","compaction","branch_nav","error"];
 
-function summaryFor(evt) {
+// Find the LLM's final text response for the turn closed by `turnEnd`.
+// Scans backward through `events` (session-ordered by seq) and returns the last
+// assistant_message text (or agent_end.final_response) seen before the turn
+// ended. Empty string when nothing was captured.
+function turnFinalResponse(turnEnd, events) {
+  if (!events || !events.length) return "";
+  const sid = turnEnd.session_id;
+  const ti = turnEnd.payload?.turn_index;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.seq > turnEnd.seq) continue;
+    if (e.session_id !== sid) continue;
+    if (ti != null && e.payload?.turn_index != null && e.payload.turn_index !== ti) continue;
+    if (e.type === "agent_end" && e.payload?.final_response) return e.payload.final_response;
+    if (e.type === "assistant_message") {
+      const t = e.payload?.text ?? e.payload?.content ?? "";
+      if (t) return t;
+    }
+  }
+  return "";
+}
+
+function summaryFor(evt, events) {
+  events = events || window.__SCOPE_STATE.events;
   const p = evt.payload ?? {};
   switch (evt.type) {
     case "session_start": return `start · ${p.reason ?? "?"}`;
@@ -141,7 +164,12 @@ function summaryFor(evt) {
       return p.final_response ? `${base} · ${trunc(p.final_response, 220)}` : base;
     }
     case "turn_start": return `turn #${p.turn_index ?? "?"}`;
-    case "turn_end": return `turn #${p.turn_index ?? "?"}${p.usage ? " · " + p.usage.total_tokens + "tk" : ""}`;
+    case "turn_end": {
+      const fr = turnFinalResponse(evt, events);
+      const base = `turn #${p.turn_index ?? "?"}`;
+      const usage = p.usage ? ` · ${p.usage.total_tokens}tk` : "";
+      return fr ? `${base}${usage} · ${trunc(fr, 200)}` : `${base}${usage}`;
+    }
     case "user_message": return `you: ${trunc(p.text, 100)}`;
     case "assistant_message": return `ai: ${trunc(p.text, 100)} · ${p.usage?.total_tokens ?? 0}tk · $${(p.usage?.cost_total ?? 0).toFixed(4)}${p.latency_ms ? " · " + p.latency_ms + "ms" : ""}`;
     case "thinking": return `〽 ${trunc(p.text, 100)}`;
@@ -156,20 +184,34 @@ function summaryFor(evt) {
   }
 }
 
-function summaryClass(evt) {
+function summaryClass(evt, events) {
+  events = events || window.__SCOPE_STATE.events;
   if (evt.type === "thinking") return "italic dim";
   if (evt.type === "agent_end") return evt.payload?.final_response ? "" : "dim";
-  if (["session_shutdown","turn_start","turn_end"].includes(evt.type)) return "dim";
+  if (evt.type === "turn_end") return turnFinalResponse(evt, events) ? "" : "dim";
+  if (["session_shutdown","turn_start"].includes(evt.type)) return "dim";
   return "";
 }
 
 function renderDetailHTML(evt) {
+  const cBtn = `<button class="copy-btn" onclick="event.stopPropagation();SCOPE.copyEvent('${evt.event_id}')">📋</button>`;
+  const wBtn = `<button class="wrap-btn" onclick="event.stopPropagation();let p=this.parentElement.querySelector('pre');p.style.whiteSpace=p.style.whiteSpace==='pre-wrap'?'pre':'pre-wrap';this.textContent=p.style.whiteSpace==='pre-wrap'?'↩':'→'">→</button>`;
+
   if (evt.type === "agent_end") {
     const fr = evt.payload?.final_response
       ? `<pre>${escapeHtml(evt.payload.final_response)}</pre>`
       : `<div class="race-llm-empty">no final response captured</div>`;
     return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · ${evt.payload?.message_count ?? "?"} messages</div>${fr}`;
   }
+
+  if (evt.type === "turn_end") {
+    const fr = turnFinalResponse(evt, window.__SCOPE_STATE.events);
+    const frHTML = fr
+      ? `<pre>${escapeHtml(fr)}</pre>`
+      : `<div class="race-llm-empty">no final response captured</div>`;
+    return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+  }
+
   const chips = [];
   if (evt.type === "tool_result" && evt.payload?.details_summary?.exit_code !== undefined) {
     const ec = evt.payload.details_summary.exit_code;
@@ -180,8 +222,6 @@ function renderDetailHTML(evt) {
     if (evt.payload?.latency_ms) chips.push(`<span class="exit-chip ok">${evt.payload.latency_ms}ms</span>`);
     if (evt.payload?.turn_index !== undefined) chips.push(`<span class="exit-chip ok">turn ${evt.payload.turn_index}</span>`);
   }
-  const cBtn = `<button class="copy-btn" onclick="event.stopPropagation();SCOPE.copyEvent('${evt.event_id}')">📋</button>`;
-  const wBtn = `<button class="wrap-btn" onclick="event.stopPropagation();let p=this.parentElement.querySelector('pre');p.style.whiteSpace=p.style.whiteSpace==='pre-wrap'?'pre':'pre-wrap';this.textContent=p.style.whiteSpace==='pre-wrap'?'↩':'→'">→</button>`;
   return `${cBtn}${wBtn}${chips.join(" ")}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
 }
 
@@ -1231,7 +1271,7 @@ function parseDuration(str) {
 // ─── Exports to window.SCOPE ──────────────────────────────────────────────────
 
 Object.assign(window.SCOPE, {
-  getState: () => STATE, summaryFor, summaryClass, renderDetailHTML,
+  getState: () => STATE, summaryFor, summaryClass, renderDetailHTML, turnFinalResponse,
   fmtTs, trunc, shortId, fetchSessionEvents, renderSessions, apiUrl, authHeaders,
   fmtRel, fmtTokens, escapeHtml, toolNamePillHTML, saveURLState, updateBreadcrumb,
   getContextWindow, computeAgentInfo, fmtDuration,

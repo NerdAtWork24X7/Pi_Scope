@@ -16,3 +16,6 @@ tmp/
 .DS_Store
 .idea/
 *.log
+db/scope.db
+db/scope.db-shm
+db/scope.db-wal

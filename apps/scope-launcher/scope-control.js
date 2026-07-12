@@ -4,14 +4,22 @@
 const { spawn } = require("node:child_process");
 const http = require("node:http");
 const path = require("node:path");
+const fs = require("node:fs");
+const crypto = require("node:crypto");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 const SCOPE_DIR = path.join(PROJECT_ROOT, "apps", "scope");
+// The server persists its per-run token here (0600) so the launcher UI and the
+// pi extension can discover it without a hardcoded constant like "devtoken".
+const TOKEN_FILE = path.join(PROJECT_ROOT, "tmp", "scope_token");
+function readTokenFile() {
+  try { return fs.readFileSync(TOKEN_FILE, "utf8").trim(); } catch { return null; }
+}
 
 function config(overrides = {}) {
   const port = parseInt(overrides.SCOPE_PORT ?? process.env.SCOPE_PORT ?? "43190", 10);
   const host = overrides.SCOPE_HOST ?? process.env.SCOPE_HOST ?? "127.0.0.1";
-  const token = overrides.SCOPE_AUTH_TOKEN ?? process.env.SCOPE_AUTH_TOKEN ?? "devtoken";
+  const token = overrides.SCOPE_AUTH_TOKEN ?? process.env.SCOPE_AUTH_TOKEN ?? readTokenFile() ?? crypto.randomUUID();
   return { port, host, token, healthUrl: `http://${host}:${port}/health` };
 }
 
@@ -41,7 +49,10 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
   const cfg = config();
   try {
     await waitForHealth(cfg.healthUrl, { timeoutMs: 3000 }); // already up?
-    return { proc: null, spawned: false, cfg };
+    // Adopt the running server's token (written to tmp/scope_token) so the UI
+    // auth matches the already-listening instance.
+    const runningToken = readTokenFile() ?? cfg.token;
+    return { proc: null, spawned: false, cfg: { ...cfg, token: runningToken } };
   } catch {
     const env = {
       ...process.env,

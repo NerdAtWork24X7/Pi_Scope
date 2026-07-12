@@ -69,6 +69,8 @@ interface LLMRequestPayload {
 
 interface AgentEndPayload {
   message_count: number;
+  final_response?: string;
+  final_response_truncated?: boolean;
 }
 
 interface TurnStartPayload {
@@ -152,6 +154,11 @@ interface BranchNavPayload {
 
 // ━━ Module-scope state ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 let seqCounter = 0;
+
+// Per-run server token is persisted to tmp/scope_token by the server; reuse it
+// so the extension and server agree on auth without a hardcoded constant.
+const EXT_PROJECT_ROOT = path.resolve(__dirname, "..", "..");
+const SCOPE_TOKEN_FILE = path.join(EXT_PROJECT_ROOT, "tmp", "scope_token");
 
 // Friendly random agent name used when neither --o-name nor OBS_NAME is set,
 // so sessions stop falling back to the cwd folder name (e.g. "pi-agent-observability").
@@ -348,7 +355,7 @@ class EventQueue {
 
   constructor(
     private serverUrl: string,
-    private token: string,
+    private tokenProvider: () => string,
     private pi: ExtensionAPI,
     private onPostFailed: (err: any) => void,
     getNextSeq: () => number
@@ -411,8 +418,9 @@ class EventQueue {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
-      if (this.token) {
-        headers["Authorization"] = `Bearer ${this.token}`;
+      const tok = this.tokenProvider();
+      if (tok) {
+        headers["Authorization"] = `Bearer ${tok}`;
       }
 
       const response = await fetch(`${this.serverUrl}/events`, {
@@ -482,6 +490,10 @@ export default function (pi: ExtensionAPI) {
     type: "string",
     default: undefined,
   });
+  // Captures the `--o-name <role>` the agent-teams harness passes to each spawned
+  // process (subagents, memory summarizer, …) so observability labels it by its real
+  // role. NOTE: pi's built-in `--name` is NOT forwarded to extensions, so `--o-name`
+  // (which pi.getFlag DOES forward) is the signal used.
   pi.registerFlag("obs-disable", {
     description: "Disable Pi Scope extension entirely (overrides env OBS_DISABLE)",
     type: "boolean",
@@ -527,9 +539,27 @@ export default function (pi: ExtensionAPI) {
 
     // 2. Resolve parameters
     const serverUrl = (pi.getFlag("obs-server-url") as string) || process.env.OBS_SERVER_URL || "http://127.0.0.1:43190";
-    const token = (pi.getFlag("obs-token") as string) || process.env.OBS_AUTH_TOKEN || "";
+    // Resolve the auth token lazily: prefer an explicit flag/env, then fall
+    // back to the per-run token the server wrote to tmp/scope_token. Using a
+    // provider (not a snapshot) means a token generated after this extension
+    // started is still picked up on the first POST.
+    const resolveToken = (): string => {
+      const explicit = (pi.getFlag("obs-token") as string) || process.env.OBS_AUTH_TOKEN;
+      if (explicit) return explicit;
+      try { return fs.readFileSync(SCOPE_TOKEN_FILE, "utf8").trim(); } catch { return ""; }
+    };
+    const token = resolveToken();
     const pool = (pi.getFlag("o-pool") as string) || process.env.OBS_POOL || "default";
-    const name = (pi.getFlag("o-name") as string) || process.env.OBS_NAME || genAgentName();
+    // Resolution order:
+    //   1. explicit operator override (--o-name / OBS_NAME)
+    //   2. spawned-process role (--o-name, passed by agent-teams to subagents & memory summarizer)
+    //   3. orchestrator label (SCOPE_NAME=orchestrator, set by agent-teams when a team is active)
+    //   4. random friendly name (standalone sessions)
+    const name =
+      (pi.getFlag("o-name") as string) ||
+      process.env.OBS_NAME ||
+      process.env.SCOPE_NAME ||
+      genAgentName();
 
     // Parse tags
     const rawTag = pi.getFlag("o-tag");
@@ -551,7 +581,7 @@ export default function (pi: ExtensionAPI) {
     // 4. Initialize Queue Manager
     queue = new EventQueue(
       serverUrl,
-      token,
+      resolveToken,
       pi,
       (err) => {
         logObs("post_failed", { error: err?.message || String(err) });
@@ -649,8 +679,30 @@ export default function (pi: ExtensionAPI) {
   // ━━ agent_end ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   pi.on("agent_end", async (event, _ctx) => {
     if (!queue || !sessionInfo) return;
+    const messages = Array.isArray(event.messages) ? event.messages : [];
+    let final_response: string | undefined;
+    let final_response_truncated = false;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m && m.role === "assistant") {
+        let text = "";
+        if (typeof m.content === "string") {
+          text = m.content;
+        } else if (Array.isArray(m.content)) {
+          for (const b of m.content) {
+            if (b && b.type === "text") text += (b.text || "") + "\n";
+          }
+        }
+        const tr = truncateToBytes(text.trim(), MAX_TEXT_FIELD);
+        final_response = tr.text || undefined;
+        final_response_truncated = tr.truncated;
+        break;
+      }
+    }
     const payload: AgentEndPayload = {
-      message_count: event.messages ? event.messages.length : 0,
+      message_count: messages.length,
+      final_response,
+      final_response_truncated,
     };
     queue.push(createEventEnvelope("agent_end", payload, sessionInfo));
   });
