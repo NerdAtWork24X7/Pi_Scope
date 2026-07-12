@@ -634,16 +634,26 @@ async function handle(req: Request): Promise<Response> {
     const label = typeof parsed.label === "string" && parsed.label.trim() ? parsed.label.trim().slice(0, 120) : "";
     try {
       git(absCwd, ["rev-parse", "--is-inside-work-tree"]);
+      const ns = cwdNs(absCwd);
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       const message = `chk: ${id}${label ? " · " + label : ""}`;
+      // Land checkpoints on a dedicated branch (checkpoints/<ns>) instead of the
+      // current branch (main/master) so checkpoint commits never pollute mainline
+      // history. commit-tree + branch -f avoids disturbing the checked-out branch
+      // or working tree.
+      const cpBranch = `checkpoints/${ns}`;
       git(absCwd, ["add", "-A"]);
-      git(absCwd, ["commit", "--allow-empty", "-m", message]);
-      const sha = git(absCwd, ["rev-parse", "HEAD"]).trim();
-      const ns = cwdNs(absCwd);
+      const tree = git(absCwd, ["write-tree"]).trim();
+      let parent: string;
+      try { git(absCwd, ["rev-parse", "--verify", `refs/heads/${cpBranch}`]); parent = `refs/heads/${cpBranch}`; }
+      catch { parent = "HEAD"; }
+      const sha = git(absCwd, ["commit-tree", tree, "-p", parent, "-m", message]).trim();
+      git(absCwd, ["branch", "-f", cpBranch, sha]);
       const ref = `refs/checkpoints/${ns}/${id}`;
       const tag = `checkpoint/${id}`;
       git(absCwd, ["update-ref", ref, sha]);
       git(absCwd, ["tag", tag, sha]);
+      git(absCwd, ["reset", "-q"]); // restore index to HEAD; working tree + checkpoint branch untouched
       return jsonResponse({ ok: true, ref, tag, sha, message, session: ns, ts: new Date().toISOString() });
     } catch (err: any) {
       return jsonResponse({ git: true, ok: false, error: String(err?.message ?? err).split("\n")[0] }, 500);
