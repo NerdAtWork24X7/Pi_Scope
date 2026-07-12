@@ -27,6 +27,9 @@ echo "[build] copying WebUI assets..."
 cp -r "$ROOT/apps/scope/public/." "$LAUNCHER/server-bundle/public/"
 cp "$ROOT/apps/scope-launcher/icon.png" "$LAUNCHER/server-bundle/icon.png"
 
+echo "[build] writing server-bundle/package.json (type:module) to silence ESM warning..."
+printf '{"type":"module"}\n' > "$LAUNCHER/server-bundle/package.json"
+
 echo "[build] provisioning portable Node ($NODE_VER) for the bundled server..."
 if [ ! -x "$LAUNCHER/node-portable/bin/node" ]; then
   mkdir -p "$LAUNCHER/node-portable"

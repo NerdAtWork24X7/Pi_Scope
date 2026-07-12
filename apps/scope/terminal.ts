@@ -15,7 +15,7 @@ import { execFileSync } from "node:child_process";
 import pty from "node-pty";
 import { WebSocketServer, WebSocket } from "ws";
 
-interface TerminalConfig { port: number; host: string; token: string; projectRoot: string; }
+interface TerminalConfig { port: number; host: string; token: string; launchCwd: string; }
 
 // ─── Herdr integration ────────────────────────────────────────────────────
 // When Herdr (a terminal multiplexer) is the user's actual terminal, the
@@ -77,7 +77,7 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
   wss.on("connection", (ws: WebSocket) => {
     const shell = process.env.SHELL || "bash";
     const term = pty.spawn(shell, [], {
-      name: "xterm-256color", cols: 80, rows: 24, cwd: cfg.projectRoot,
+      name: "xterm-256color", cols: 80, rows: 24, cwd: cfg.launchCwd,
       env: { ...process.env, TERM: "xterm-256color" },
     });
 
@@ -99,7 +99,7 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
       if (cwdBusy) return;
       cwdBusy = true;
       const shellCwd = getShellCwd(term.pid);
-      if (shellCwd && shellCwd !== cfg.projectRoot) shellNavigated = true;
+      if (shellCwd && shellCwd !== cfg.launchCwd) shellNavigated = true;
       let cwd: string | null = shellCwd;
       if (!shellNavigated) {
         // Shell still parked at launch dir -> user is likely in Herdr.

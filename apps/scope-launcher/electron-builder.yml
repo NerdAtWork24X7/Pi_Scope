@@ -1,6 +1,7 @@
 appId: com.piscope.app
 productName: Pi Scope
 copyright: Copyright © 2026 Pi Scope
+afterPack: after-pack.cjs
 directories:
   output: dist
   buildResources: .
@@ -11,6 +12,7 @@ files:
   - server-bundle/**/*
   - node_modules/**/*
 asar: false
+publish: null
 extraResources:
   - from: node-portable
     to: node

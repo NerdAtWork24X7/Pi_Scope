@@ -6,6 +6,7 @@
  */
 
 import * as path from "node:path";
+import * as os from "node:os";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import { Readable } from "node:stream";
@@ -778,7 +779,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 // WebSocket terminal bridge (xterm.js in the browser ↔ node-pty shell on the server)
-attachTerminal(server, { port: PORT, host: HOST, token: AUTH_TOKEN, projectRoot: PROJECT_ROOT });
+// Terminal launches at $HOME when packaged (AppImage mount is read-only); in
+// dev it opens at the project root so the shell starts where you're working.
+const TERMINAL_CWD = process.env.SCOPE_PACKAGED ? os.homedir() : PROJECT_ROOT;
+attachTerminal(server, { port: PORT, host: HOST, token: AUTH_TOKEN, launchCwd: TERMINAL_CWD });
 
 server.listen(PORT, HOST, () => {
   console.log(`  Listening on http://${HOST}:${PORT}`);

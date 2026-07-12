@@ -61,10 +61,21 @@ function waitForHealth(healthUrl, { timeoutMs = 20000, intervalMs = 300 } = {}) 
 // Ensure the SCOPE server is up. Reuses an existing one if already listening.
 // Returns { proc, spawned, cfg }. proc is null when an existing server was reused.
 async function ensureServer({ timeoutMs = 20000 } = {}) {
+  // Route DB + token to a writable location when packaged (resources/ is a
+  // read-only AppImage/squashfs mount). Must be set on process.env BEFORE config()
+  // and readTokenFile() run so the "reuse already-running server" path reads the
+  // right token, and the spawned server inherits it via the env snapshot below.
+  if (app && app.isPackaged) {
+    const dataDir = path.join(os.homedir(), ".local", "share", "pi-scope");
+    fs.mkdirSync(dataDir, { recursive: true });
+    process.env.SCOPE_DB_PATH = path.join(dataDir, "scope.db");
+    process.env.SCOPE_TOKEN_FILE = path.join(dataDir, "scope_token");
+    process.env.SCOPE_PACKAGED = "1";
+  }
   const cfg = config();
   try {
     await waitForHealth(cfg.healthUrl, { timeoutMs: 3000 }); // already up?
-    // Adopt the running server's token (written to tmp/scope_token) so the UI
+    // Adopt the running server's token (written to the data dir) so the UI
     // auth matches the already-listening instance.
     const runningToken = readTokenFile() ?? cfg.token;
     return { proc: null, spawned: false, cfg: { ...cfg, token: runningToken } };
@@ -75,13 +86,6 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
       SCOPE_HOST: cfg.host,
       SCOPE_AUTH_TOKEN: cfg.token,
     };
-    // Route DB + token to a writable location when packaged (resources/ is read-only).
-    if (app && app.isPackaged) {
-      const dataDir = path.join(os.homedir(), ".local", "share", "pi-scope");
-      fs.mkdirSync(dataDir, { recursive: true });
-      process.env.SCOPE_DB_PATH = path.join(dataDir, "scope.db");
-      process.env.SCOPE_TOKEN_FILE = path.join(dataDir, "scope_token");
-    }
     const launch = serverLaunch();
     const proc = spawn(launch.bin, launch.args, { cwd: launch.cwd, env, detached: true, stdio: "inherit" });
     proc.on("error", (err) => console.error("[scope-control] failed to spawn server:", err.message));
