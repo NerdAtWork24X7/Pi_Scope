@@ -93,6 +93,7 @@ Type an optional label, then click **`＋ Checkpoint now`** to snapshot the work
 (git-backed).
 
 - Each checkpoint shows its message, short SHA, and timestamp, with `↺ restore` and `✕ delete` buttons.
+- **Create** also switches the repo's current branch (HEAD) to the new `checkpoints/<ns>/<id>` branch. **Delete** of a checked-out checkpoint branch first switches HEAD to the previous checkpoint branch (or the base branch) before removing it; uncommitted changes stay in the working tree — merge them elsewhere first.
 - **Restore** confirms, then runs `git reset --hard` + `git clean -fd` — destructive; uncommitted and untracked changes are discarded.
 - **Delete** confirms, then removes the git ref.
 - Needs a working directory (set in the Terminal pane) and git available. Empty states: `no working directory set — choose one in the Terminal pane`, `no checkpoints yet — click "Checkpoint now"`, `git unavailable in <cwd>`.

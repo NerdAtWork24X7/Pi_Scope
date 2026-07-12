@@ -133,7 +133,12 @@
       });
       const data = await res.json();
       if (!res.ok || !data.ok) statusEl.textContent = "delete failed: " + escapeHtml(data.error || res.status);
-      else { statusEl.textContent = "deleted " + (id || ref) + (data.deleteBranch ? " (branch removed)" : ""); loadCheckpoints(); }
+      else {
+        let s = "deleted " + (id || ref) + (data.deleteBranch ? " (branch removed)" : "");
+        if (data.message) s += " — " + data.message;
+        statusEl.textContent = s;
+        loadCheckpoints();
+      }
     } catch (e) {
       statusEl.textContent = "error: " + escapeHtml(String(e));
     }

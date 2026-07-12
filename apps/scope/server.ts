@@ -639,8 +639,8 @@ async function handle(req: Request): Promise<Response> {
       const message = `chk: ${id}${label ? " · " + label : ""}`;
       // Each checkpoint gets its own branch (checkpoints/<ns>/<id>) instead of a
       // shared ns branch, so deleting one checkpoint can delete its branch without
-      // touching others. commit-tree + branch -f avoids disturbing the checked-out
-      // branch or working tree.
+      // touching others. commit-tree + branch -f creates the branch without moving
+      // the working tree; we then `git switch` onto it so HEAD tracks the checkpoint.
       const cpBranch = `checkpoints/${ns}/${id}`;
       git(absCwd, ["add", "-A"]);
       const tree = git(absCwd, ["write-tree"]).trim();
@@ -654,11 +654,12 @@ async function handle(req: Request): Promise<Response> {
       } catch {}
       const sha = git(absCwd, ["commit-tree", tree, "-p", parent, "-m", message]).trim();
       git(absCwd, ["branch", "-f", cpBranch, sha]);
+      git(absCwd, ["switch", cpBranch]); // move HEAD onto the new checkpoint branch (working tree unchanged)
       const ref = `refs/checkpoints/${ns}/${id}`;
       const tag = `checkpoint/${id}`;
       git(absCwd, ["update-ref", ref, sha]);
       git(absCwd, ["tag", tag, sha]);
-      git(absCwd, ["reset", "-q"]); // restore index to HEAD; working tree + checkpoint branch untouched
+      git(absCwd, ["reset", "-q"]); // restore index to HEAD (now cpBranch); working tree unchanged
       return jsonResponse({ ok: true, ref, tag, sha, message, session: ns, ts: new Date().toISOString() });
     } catch (err: any) {
       return jsonResponse({ git: true, ok: false, error: String(err?.message ?? err).split("\n")[0] }, 500);
@@ -734,15 +735,36 @@ async function handle(req: Request): Promise<Response> {
     const absCwd = validateCwd(cwd);
     if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     try {
-      git(absCwd, ["update-ref", "-d", ref]);
       const parts = ref.split("/");
       const id = parts[parts.length - 1];
       const ns = parts[2];
-      if (id) { try { git(absCwd, ["tag", "-d", `checkpoint/${id}`]); } catch {} }
+      let msg = "";
       if (parsed.deleteBranch) {
-        try { git(absCwd, ["branch", "-D", `checkpoints/${ns}/${id}`]); } catch {}
+        const cpBranch = `checkpoints/${ns}/${id}`;
+        // git can't delete the currently checked-out branch. Move HEAD to the
+        // parent commit first — preferring an existing branch that already points
+        // there (e.g. the previous checkpoint branch or the base branch) — then
+        // delete it. If there are conflicting uncommitted changes we can't switch,
+        // so report and bail out without deleting anything.
+        try {
+          const cur = git(absCwd, ["branch", "--show-current"]).trim();
+          if (cur === cpBranch) {
+            const parent = git(absCwd, ["rev-parse", `${cpBranch}^`]).trim();
+            const onParent = git(absCwd, ["for-each-ref", "--format=%(refname:lstrip=2)", "--points-at", parent, "refs/heads"])
+              .split("\n").map((l: string) => l.trim()).find((l: string) => l && l !== cpBranch);
+            if (onParent) { git(absCwd, ["switch", onParent]); msg = `switched to '${onParent}'`; }
+            else { git(absCwd, ["switch", "--detach", parent]); msg = `switched to detached HEAD ${parent.slice(0, 8)}`; }
+          }
+        } catch {
+          return jsonResponse({ ok: false, git: true, error: "checkpoint branch is checked out and has uncommitted changes — commit or stash them, then merge into another branch before deleting" }, 409);
+        }
+        try { git(absCwd, ["branch", "-D", cpBranch]); } catch {}
       }
-      return jsonResponse({ ok: true, ref, deleteBranch: !!parsed.deleteBranch });
+      git(absCwd, ["update-ref", "-d", ref]);
+      if (id) { try { git(absCwd, ["tag", "-d", `checkpoint/${id}`]); } catch {} }
+      const out: any = { ok: true, ref, deleteBranch: !!parsed.deleteBranch };
+      if (msg) out.message = `checkpoint branch was checked out — ${msg} and deleted. Merge any uncommitted changes into another branch first.`;
+      return jsonResponse(out);
     } catch (err: any) {
       return jsonResponse({ ok: false, error: String(err?.message ?? err).split("\n")[0] }, 500);
     }
