@@ -46,6 +46,15 @@
     if (cwdLabel) cwdLabel.textContent = S.cwd ? S.cwd : "no directory set — choose one in the Terminal pane";
   }
 
+  function clearDiff() {
+    current = { cwd: current.cwd, file: "", oldBuf: [], newBuf: [], binary: false, dirty: false, baseOldBuf: [], baseNewBuf: [] };
+    diffFilename.textContent = "no file selected";
+    diffStats.textContent = "";
+    diffOld.innerHTML = "";
+    diffNew.innerHTML = "";
+    exitEditMode();
+  }
+
   async function loadModified() {
     const cwd = selectedCwd();
     current.cwd = cwd;
@@ -53,6 +62,7 @@
     filesList.innerHTML = '<div class="empty-state">scanning…</div>';
     if (!cwd) {
       filesList.innerHTML = '<div class="empty-state">no working directory set — choose one in the Terminal pane</div>';
+      clearDiff();
       return;
     }
     const ignored = showIgnored && showIgnored.checked ? 1 : 0;
@@ -61,11 +71,13 @@
       const data = await res.json();
       if (!data.git) {
         filesList.innerHTML = `<div class="empty-state">git unavailable in<br><code>${escapeHtml(cwd)}</code><br><small>${escapeHtml(data.error || "")}</small></div>`;
+        clearDiff();
         return;
       }
       const files = data.files || [];
       if (!files.length) {
         filesList.innerHTML = '<div class="empty-state">no modified files</div>';
+        clearDiff();
         return;
       }
       const rank = (f) => (f.status === "ignored" ? 3 : f.status === "untracked" ? 2 : 1);
