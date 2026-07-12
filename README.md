@@ -1,5 +1,7 @@
 # Pi Scope — Using the UI
-![Icon](apps/scope-launcher/icon.png)  
+<img src="docs/shots/logo.png" alt="Pi Scope" width="512" align="center" />
+
+
 Pi Scope is a live dashboard for watching an AI coding agent work — every message, tool
 call, shell command, and file edit, rendered in a browser UI you can watch or replay.
 This guide covers the web UI itself.
