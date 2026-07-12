@@ -1,0 +1,13 @@
+{
+  "name": "pi-scope-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": ["./pi-scope.ts"]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "pi-scope-launcher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "One-click Electron launcher for Pi Scope: boots the SCOPE server and opens the WebUI inside the app window.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

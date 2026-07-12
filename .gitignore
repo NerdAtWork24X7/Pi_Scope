@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Agent / working state
+.pi/
+.pi_memory/
+tmp/
+.env
+
+# Editor & OS
+.DS_Store
+.idea/
+*.log

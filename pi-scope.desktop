@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Pi Scope
+Comment=One-click Pi Scope — boots the SCOPE server and opens the WebUI
+Exec=/home/alexa/wk/Pi_Scope/apps/scope-launcher/run.sh
+Icon=/home/alexa/wk/Pi_Scope/apps/scope-launcher/icon.png
+Terminal=false
+Categories=Development;Utility;Monitor;
+StartupWMClass=pi-scope-launcher
