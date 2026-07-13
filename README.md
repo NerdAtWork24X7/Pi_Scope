@@ -1,20 +1,81 @@
-# Pi Scope — Using the UI
+# Pi Scope
 <img src="docs/shots/logo.png" alt="Pi Scope" width="512" align="center" />
 
 
 Pi Scope is a live dashboard for watching an AI coding agent work — every message, tool
 call, shell command, and file edit, rendered in a browser UI you can watch or replay.
-This guide covers the web UI itself.
 
-## Get the UI open
+## Getting started
+
+Pi Scope is two pieces: a **server + dashboard** that you open, and a **pi extension**
+that feeds it agent telemetry. Get the server running first, then point a `pi` agent at
+it so the dashboard has something to show.
+
+### Run the AppImage (no build — end users)
+
+The release is a self-contained Linux AppImage that bundles its own Node 24 plus the
+server and WebUI. Double-click it (or run it from a shell) and it boots the server and
+opens the dashboard in an embedded browser — no `npm`, no dev dependencies.
 
 ```bash
-cd apps/scope
-node server.ts      # requires Node.js 24+
+chmod +x Pi-Scope-1.0.0.AppImage
+./Pi-Scope-1.0.0.AppImage
 ```
 
-Open the URL it prints, e.g. `http://127.0.0.1:43190/?token=<uuid>`. The UI is empty
-until an agent feeds it — see **Where data comes from** at the bottom.
+- Data (SQLite DB + per-run auth token) lives in `~/.local/share/pi-scope/`, so it
+  survives relaunch and never writes into the read-only AppImage mount.
+- Closing the window stops the server it started. If a server is already listening on
+  the port, the AppImage reuses it instead of starting a second one.
+- Built with `./build-release.sh` → `apps/scope-launcher/dist/Pi-Scope-<version>.AppImage`.
+  An extracted `linux-unpacked/` directory is also produced if you prefer that over a
+  single file.
+
+### Install the pi extension (`extension/pi-scope.ts`)
+
+The dashboard is empty until a `pi` agent feeds it. This extension hooks the agent
+lifecycle and streams events to the server, auto-discovering its auth token.
+
+**One session** — pass the path when you launch `pi`:
+
+```bash
+pi -e /path/to/Pi_Scope/extension/pi-scope.ts
+```
+
+**Every session** — add it to your pi agent config so it loads automatically:
+
+```json
+// ~/.pi/agent/settings.json
+{
+  "extensions": [
+    "/absolute/path/to/Pi_Scope/extension/pi-scope.ts"
+  ]
+}
+```
+
+(Or copy `extension/pi-scope.ts` into `~/.pi/agent/extensions/` and list it as
+`"+extensions/pi-scope.ts"`.)
+
+The extension finds the token in dev from `tmp/scope_token`, and from
+`~/.local/share/pi-scope/scope_token` when running the AppImage, so you usually set
+nothing else. If your server isn't on the default port, point the extension at it with
+`--obs-server-url` (flag) or `OBS_SERVER_URL` (env); both default to
+`http://127.0.0.1:43190`.
+
+### Run from the git repo (developers)
+
+```bash
+git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
+apps/scope-launcher/run.sh                 # requires Node.js 24+ (uses node:sqlite)
+```
+
+Open the URL it prints (`http://127.0.0.1:43190/?token=<uuid>`), then launch `pi` with
+the extension (above) to feed it. The server writes its per-run token to `tmp/scope_token`
+(mode `0600`) for the extension to pick up.
+
+> `npm run dev` adds `--watch`. The DB defaults to `db/scope.db`. Override with the
+> `SCOPE_PORT`, `SCOPE_HOST`, and `SCOPE_AUTH_TOKEN` environment variables.
+
+## Using the UI
 
 ## The layout
 
@@ -124,7 +185,7 @@ Disabled while the Terminal view is open.
 
 The UI is empty until something feeds it. Fastest options:
 
-- Attach the extension to a `pi` agent: `pi -e ./extension/pi-scope.ts` (it auto-discovers the token).
+- Attach the extension to a `pi` agent — see **Install the pi extension** above (it auto-discovers the token).
 - Or POST events directly to `POST /events` (needs `event_id`, `type`, `session_id`).
 
 This is fork of https://github.com/disler/pi-agent-observability
