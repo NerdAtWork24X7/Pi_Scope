@@ -1,6 +1,6 @@
 (function () {
   const TERMINAL_PATH = "/terminal";
-  let term = null, fit = null, ws = null, container = null, terminalVisible = false, terminalDomFocused = false;
+  let term = null, fit = null, ws = null, container = null, terminalVisible = false, terminalDomFocused = false, herdrDetected = false;
 
   function token() { return new URLSearchParams(location.search).get("token") || ""; }
   function wsUrl() {
@@ -92,6 +92,10 @@
             if (cwdReqCb) { const cb = cwdReqCb; cwdReqCb = null; cb(m); }
             return;
           }
+          if (m && m.type === "herdr" && typeof m.detected === "boolean") {
+            herdrDetected = m.detected;
+            return;
+          }
         } catch {}
       }
       if (term) term.write(data);
@@ -162,6 +166,7 @@
       document.body.removeChild(ta);
     }
     container.addEventListener("contextmenu", (e) => {
+      if (herdrDetected) return; // let Herdr's own right-click menu handle it
       e.preventDefault();
       showMenu(e.clientX, e.clientY);
     });

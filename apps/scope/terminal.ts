@@ -102,6 +102,7 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
     let cwdBusy = false;
     let terminalFocused = true;
     let shellNavigated = false;
+    let lastHerdrDetected: boolean | null = null;
     const pushCwd = async () => {
       if (cwdBusy) return;
       cwdBusy = true;
@@ -122,6 +123,10 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
       if (cwd && cwd !== lastCwd) {
         lastCwd = cwd;
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "cwd", cwd }));
+      }
+      if (runningHerdr !== lastHerdrDetected) {
+        lastHerdrDetected = runningHerdr;
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "herdr", detected: runningHerdr }));
       }
     };
     pushCwd();
