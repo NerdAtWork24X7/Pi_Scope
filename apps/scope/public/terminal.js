@@ -1,6 +1,6 @@
 (function () {
   const TERMINAL_PATH = "/terminal";
-  let term = null, fit = null, ws = null, container = null;
+  let term = null, fit = null, ws = null, container = null, terminalVisible = false, terminalDomFocused = false;
 
   function token() { return new URLSearchParams(location.search).get("token") || ""; }
   function wsUrl() {
@@ -30,7 +30,39 @@
     term.onResize(({ cols, rows }) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
     });
+    // Track real DOM focus inside the xterm.js terminal. xterm.js keeps a
+    // hidden textarea inside term.element; when the user clicks/types there,
+    // focusin fires on that textarea and we report focused=true. When focus
+    // moves outside term.element, we report focused=false.
+    document.addEventListener("focusin", (e) => {
+      if (!term || !term.element) return;
+      if (term.element.contains(e.target)) updateDomFocus(true);
+      else if (terminalDomFocused) updateDomFocus(false);
+    });
+    document.addEventListener("focusout", (e) => {
+      if (!term || !term.element) return;
+      // If focus is moving to another element still inside the terminal, keep
+      // focused=true; focusin on that element will confirm it. If focus is
+      // leaving the terminal entirely, mark as blurred.
+      if (terminalDomFocused && !term.element.contains(e.relatedTarget)) {
+        updateDomFocus(false);
+      }
+    });
     window.addEventListener("resize", () => { requestAnimationFrame(() => { try { fit.fit(); } catch {} }); });
+  }
+
+  function sendFocus(focused) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "terminalFocus", focused: !!focused }));
+    }
+  }
+
+  function updateDomFocus(focused) {
+    if (terminalDomFocused === focused) return;
+    terminalDomFocused = focused;
+    // Only notify the server when the terminal pane is visible; when hidden,
+    // the server already treats the terminal as not focused.
+    if (terminalVisible) sendFocus(focused);
   }
 
   function connect() {
@@ -41,6 +73,9 @@
     ws = new WebSocket(wsUrl());
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+      // Sync the server with the actual visibility state, so reconnects while
+      // the terminal is hidden don't incorrectly claim focus.
+      sendFocus(terminalVisible);
       setStatus("connected", true);
     };
     ws.onmessage = (ev) => {
@@ -51,6 +86,10 @@
           const m = JSON.parse(data);
           if (m && m.type === "cwd" && typeof m.cwd === "string") {
             if (window.__setCwd) window.__setCwd(m.cwd);
+            return;
+          }
+          if (m && m.type === "cwdRes") {
+            if (cwdReqCb) { const cb = cwdReqCb; cwdReqCb = null; cb(m); }
             return;
           }
         } catch {}
@@ -130,21 +169,62 @@
     container.addEventListener("scroll", hideMenu, true);
   }
 
+  function copyText(text) {
+    if (!text) return false;
+    try { navigator.clipboard.writeText(text); return true; } catch { return false; }
+  }
+  function flashStatus(text, ok) {
+    setStatus(text, !!ok);
+    setTimeout(() => {
+      const live = ws && ws.readyState === WebSocket.OPEN;
+      setStatus(live ? "connected" : "disconnected", live);
+    }, 1500);
+  }
+
+  let cwdReqCb = null;
+  function requestCwd(cb) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { flashStatus("not connected", false); return; }
+    cwdReqCb = cb;
+    ws.send(JSON.stringify({ type: "cwdReq" }));
+  }
+
   function disconnect() {
     if (ws) { try { ws.close(); } catch {} ws = null; }
     if (term) { try { term.dispose(); } catch {} term = null; fit = null; }
   }
 
-  window.__terminalClear = function () { if (term) term.reset(); };
   window.__terminalOnShow = function () {
+    terminalVisible = true;
     if (!container) container = document.getElementById("terminal-mount");
     connect();
+    // Report the actual DOM focus state now that the pane is visible. If the
+    // user clicked the Terminal tab, xterm.js may already have focus; if not,
+    // we stay unfocused and mirror Herdr.
+    sendFocus(terminalDomFocused);
     // Pane just became visible (was display:none) — recompute size before fit.
     requestAnimationFrame(() => { try { if (fit) fit.fit(); } catch {} });
   };
   window.__terminalOnHide = function () {
+    terminalVisible = false;
     // Keep the PTY + socket alive so the session survives view switches.
+    // Tell the server the user is no longer looking at the in-browser terminal
+    // so it can mirror Herdr's focused pane instead.
+    sendFocus(false);
     // Only tear down fully on unload.
   };
   window.addEventListener("beforeunload", disconnect);
+
+  (function wireCwdButton() {
+    const btn = document.getElementById("btn-cwd");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      // Ask the server for the in-browser terminal's real cwd (where the user
+      // actually is), so it matches the directory inside the terminal.
+      requestCwd((m) => {
+        const cwd = (m && m.cwd) || "";
+        const ok = copyText(cwd);
+        flashStatus(ok ? "cwd copied" : "cwd unavailable", ok);
+      });
+    });
+  })();
 })();

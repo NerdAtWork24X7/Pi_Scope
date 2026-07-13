@@ -23,15 +23,20 @@ interface TerminalConfig { port: number; host: string; token: string; launchCwd:
 // navigates Herdr panes. Herdr exposes the focused pane's live cwd over its
 // socket API (pane.current -> foreground_cwd), so we use that as the source
 // of truth when a socket is reachable, falling back to /proc/<pid>/cwd.
-const HERDR_SOCK =
-  process.env.HERDR_SOCKET_PATH && fs.existsSync(process.env.HERDR_SOCKET_PATH)
-    ? process.env.HERDR_SOCKET_PATH
-    : (() => { const p = path.join(os.homedir(), ".config/herdr/herdr.sock"); return fs.existsSync(p) ? p : null; })();
+// Resolve the socket path dynamically so a late-starting Herdr is detected.
+function herdrSockPath(): string | null {
+  if (process.env.HERDR_SOCKET_PATH && fs.existsSync(process.env.HERDR_SOCKET_PATH)) {
+    return process.env.HERDR_SOCKET_PATH;
+  }
+  const p = path.join(os.homedir(), ".config/herdr/herdr.sock");
+  return fs.existsSync(p) ? p : null;
+}
 
 function herdrFocusedCwd(): Promise<string | null> {
   return new Promise((resolve) => {
-    if (!HERDR_SOCK) return resolve(null);
-    const sock = net.connect(HERDR_SOCK);
+    const sockPath = herdrSockPath();
+    if (!sockPath) return resolve(null);
+    const sock = net.connect(sockPath);
     let buf = "";
     let done = false;
     const to = setTimeout(() => finish(null), 1500);
@@ -88,22 +93,29 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
     // Two sources compete:
     //   1. the in-browser shell's own cwd (the "normal" terminal) via /proc/<pid>/cwd
     //   2. Herdr's focused pane cwd (the user's real terminal) via its socket
-    // We trust the in-browser shell the moment the user navigates it (cd's away
-    // from the launch dir); until then we assume the user is actually driving
-    // Herdr and mirror its focused pane. This way BOTH a normal in-browser
-    // session and a Herdr session keep the cwd display in sync.
+    // The client tells us which pane the user is looking at via a
+    // `terminalFocus` control frame. When the in-browser terminal is focused,
+    // trust the shell cwd; otherwise mirror Herdr's focused pane. This way
+    // BOTH a normal in-browser session and a Herdr session keep the cwd
+    // display in sync.
     let lastCwd = "";
     let cwdBusy = false;
+    let terminalFocused = true;
     let shellNavigated = false;
     const pushCwd = async () => {
       if (cwdBusy) return;
       cwdBusy = true;
       const shellCwd = getShellCwd(term.pid);
+      const runningHerdr = hasHerdrDescendant(term.pid);
       if (shellCwd && shellCwd !== cfg.launchCwd) shellNavigated = true;
       let cwd: string | null = shellCwd;
-      if (!shellNavigated) {
-        // Shell still parked at launch dir -> user is likely in Herdr.
-        const h = HERDR_SOCK ? await herdrFocusedCwd() : null;
+      // Prefer Herdr's focused pane cwd when:
+      //   1. the in-browser PTY is running Herdr (shell cwd is just the launch dir), or
+      //   2. the user has switched away from the in-browser terminal (likely in Herdr), or
+      //   3. the in-browser shell hasn't navigated away from its launch dir yet,
+      //      so its cwd is not a useful source of truth.
+      if (runningHerdr || !terminalFocused || !shellNavigated) {
+        const h = await herdrFocusedCwd();
         if (h) cwd = h;
       }
       cwdBusy = false;
@@ -115,13 +127,26 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
     pushCwd();
     const cwdTimer = setInterval(pushCwd, 2000);
 
-    ws.on("message", (msg: Buffer | ArrayBuffer | Buffer[]) => {
+    ws.on("message", async (msg: Buffer | ArrayBuffer | Buffer[]) => {
       const raw = typeof msg === "string" ? msg : Buffer.from(msg as Uint8Array).toString();
       if (raw.charCodeAt(0) === 0x7b /* '{' */) {
         try {
           const ctrl = JSON.parse(raw);
           if (ctrl.type === "resize" && Number.isInteger(ctrl.cols) && Number.isInteger(ctrl.rows)) {
             term.resize(Math.max(1, ctrl.cols), Math.max(1, ctrl.rows)); return;
+          }
+          if (ctrl.type === "terminalFocus" && typeof ctrl.focused === "boolean") {
+            terminalFocused = ctrl.focused;
+            pushCwd();
+            return;
+          }
+          if (ctrl.type === "cwdReq") {
+            // Live read of the in-browser shell's real cwd — what the user is
+            // actually inside — independent of the auto-detect display logic.
+            const shellCwd = getShellCwd(term.pid);
+            if (ws.readyState === WebSocket.OPEN)
+              ws.send(JSON.stringify({ type: "cwdRes", cwd: shellCwd }));
+            return;
           }
         } catch {}
       }
@@ -146,5 +171,60 @@ function getShellCwd(pid: number): string | null {
     }
   } catch {}
   return null;
+}
+
+const herdrDescendantCache = new Map<number, { result: boolean; at: number }>();
+const HERDR_CACHE_TTL_MS = 3000;
+
+function isHerdrExecutable(name: string): boolean {
+  const base = path.basename(name).toLowerCase();
+  return base === "herdr" || base.startsWith("herdr");
+}
+
+// Detect whether the PTY process (or any of its descendants) is Herdr.
+// When the in-browser terminal is running Herdr directly, /proc/<pid>/cwd is
+// the launch directory and is not useful; we must mirror Herdr's focused pane
+// cwd instead. Herdr may be a child/grandchild of the shell, so we walk the
+// process tree rather than only checking the PTY process itself.
+function hasHerdrDescendant(pid: number): boolean {
+  const now = Date.now();
+  const cached = herdrDescendantCache.get(pid);
+  if (cached && now - cached.at < HERDR_CACHE_TTL_MS) return cached.result;
+  const result = hasHerdrDescendantInner(pid, new Set());
+  herdrDescendantCache.set(pid, { result, at: now });
+  return result;
+}
+
+function hasHerdrDescendantInner(pid: number, seen: Set<number>): boolean {
+  if (seen.has(pid)) return false;
+  seen.add(pid);
+  try {
+    if (process.platform === "linux") {
+      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      // cmdline is null-separated; the first element is the executable path.
+      const exe = cmdline.split("\0")[0];
+      if (isHerdrExecutable(exe)) return true;
+      const children = fs.readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8").trim().split(/\s+/).filter(Boolean);
+      for (const child of children) {
+        const childPid = parseInt(child, 10);
+        if (!Number.isNaN(childPid) && hasHerdrDescendantInner(childPid, seen)) return true;
+      }
+      return false;
+    }
+    if (process.platform === "darwin") {
+      const out = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+      if (isHerdrExecutable(out.trim())) return true;
+      // Get direct children via pgrep.
+      try {
+        const children = execFileSync("pgrep", ["-P", String(pid)], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+        for (const child of children) {
+          const childPid = parseInt(child, 10);
+          if (!Number.isNaN(childPid) && hasHerdrDescendantInner(childPid, seen)) return true;
+        }
+      } catch {}
+      return false;
+    }
+  } catch {}
+  return false;
 }
 
