@@ -133,6 +133,12 @@
       });
     }
     function hideMenu() { menu.setAttribute("hidden", ""); }
+    function getSelectedText() {
+      // xterm.js may clear its internal selection on right-click, but the
+      // browser's native selection (backed by xterm's hidden textarea) still
+      // holds the highlighted text. Prefer xterm's selection, then fall back.
+      return (term && (term.getSelection() || window.getSelection()?.toString())) || "";
+    }
     function showMenu(x, y) {
       menu.removeAttribute("hidden");
       // Keep the menu inside the viewport.
@@ -142,11 +148,10 @@
       menu.style.left = Math.max(4, px) + "px";
       menu.style.top = Math.max(4, py) + "px";
       const copyBtn = menu.querySelector('[data-act="copy"]');
-      if (copyBtn) copyBtn.disabled = !(term && term.getSelection());
+      if (copyBtn) copyBtn.disabled = !getSelectedText();
     }
     async function doCopy() {
-      if (!term) return;
-      const text = term.getSelection();
+      const text = getSelectedText();
       if (!text) return;
       try { await navigator.clipboard.writeText(text); }
       catch { fallbackCopy(text); }
