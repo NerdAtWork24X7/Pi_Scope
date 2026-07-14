@@ -16,10 +16,6 @@
   const btnCreate = $("#btn-checkpoints-create");
   const btnRefresh = $("#btn-checkpoints-refresh");
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  }
-
   function selectedCwd() {
     return S.cwd || "";
   }
@@ -36,7 +32,7 @@
       const res = await fetch(window.apiUrl("/checkpoints/list", { cwd, token: S.token }), { headers: window.authHeaders() });
       const data = await res.json();
       if (!data.git) {
-        listEl.innerHTML = `<div class="empty-state">git unavailable in<br><code>${escapeHtml(cwd)}</code></div>`;
+        listEl.innerHTML = `<div class="empty-state">git unavailable in<br><code>${window.SCOPE.escapeHtml(cwd)}</code></div>`;
         return;
       }
       const items = data.items || [];
@@ -54,8 +50,8 @@
         msg.title = it.ref;
         const meta = document.createElement("span");
         meta.className = "cp-meta";
-        const t = it.ts ? new Date(it.ts).toLocaleString() : "";
-        meta.innerHTML = `<span class="cp-sha">${escapeHtml((it.sha || "").slice(0, 8))}</span> · ${escapeHtml(t)}`;
+        const t = window.SCOPE.fmtRel(it.ts);
+        meta.innerHTML = `<span class="cp-sha">${window.SCOPE.escapeHtml(window.SCOPE.shortId(it.sha))}</span> · ${window.SCOPE.escapeHtml(t)}`;
         const restore = document.createElement("button");
         restore.className = "btn-sm cp-restore";
         restore.textContent = "↺ restore";
@@ -71,7 +67,7 @@
         listEl.appendChild(row);
       }
     } catch (e) {
-      listEl.innerHTML = `<div class="empty-state">error: ${escapeHtml(String(e))}</div>`;
+      listEl.innerHTML = `<div class="empty-state">error: ${window.SCOPE.escapeHtml(String(e))}</div>`;
     }
   }
 
@@ -87,10 +83,10 @@
         body: JSON.stringify({ cwd, label: labelInput.value.trim() }),
       });
       const data = await res.json();
-      if (!res.ok || !data.ok) statusEl.textContent = "failed: " + escapeHtml(data.error || res.status);
-      else { statusEl.textContent = "created " + (data.sha || "").slice(0, 8); labelInput.value = ""; loadCheckpoints(); }
+      if (!res.ok || !data.ok) statusEl.textContent = "failed: " + window.SCOPE.escapeHtml(data.error || res.status);
+      else { statusEl.textContent = "created " + window.SCOPE.shortId(data.sha); labelInput.value = ""; loadCheckpoints(); }
     } catch (e) {
-      statusEl.textContent = "error: " + escapeHtml(String(e));
+      statusEl.textContent = "error: " + window.SCOPE.escapeHtml(String(e));
     } finally {
       btnCreate.disabled = false;
     }
@@ -108,10 +104,10 @@
         body: JSON.stringify({ cwd, ref }),
       });
       const data = await res.json();
-      if (!res.ok || !data.ok) statusEl.textContent = "restore failed: " + escapeHtml(data.error || res.status);
-      else { statusEl.textContent = "restored to " + (data.sha || "").slice(0, 8); loadCheckpoints(); }
+      if (!res.ok || !data.ok) statusEl.textContent = "restore failed: " + window.SCOPE.escapeHtml(data.error || res.status);
+      else { statusEl.textContent = "restored to " + window.SCOPE.shortId(data.sha); loadCheckpoints(); }
     } catch (e) {
-      statusEl.textContent = "error: " + escapeHtml(String(e));
+      statusEl.textContent = "error: " + window.SCOPE.escapeHtml(String(e));
     }
   }
 
@@ -132,7 +128,7 @@
         body: JSON.stringify({ cwd, ref, deleteBranch }),
       });
       const data = await res.json();
-      if (!res.ok || !data.ok) statusEl.textContent = "delete failed: " + escapeHtml(data.error || res.status);
+      if (!res.ok || !data.ok) statusEl.textContent = "delete failed: " + window.SCOPE.escapeHtml(data.error || res.status);
       else {
         let s = "deleted " + (id || ref) + (data.deleteBranch ? " (branch removed)" : "");
         if (data.message) s += " — " + data.message;
@@ -140,7 +136,7 @@
         loadCheckpoints();
       }
     } catch (e) {
-      statusEl.textContent = "error: " + escapeHtml(String(e));
+      statusEl.textContent = "error: " + window.SCOPE.escapeHtml(String(e));
     }
   }
 

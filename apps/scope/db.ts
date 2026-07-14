@@ -52,6 +52,7 @@ export interface PreparedQueries {
   upsertSession: StatementSync;
   upsertSessionNoBump: StatementSync;
   listSessions: StatementSync;
+  listModels: StatementSync;
   getSessionEvents: StatementSync;
   getSessionEventsSince: StatementSync;
   getSessionStats: StatementSync;
@@ -101,14 +102,18 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       first_ts     = COALESCE(sessions.first_ts,     excluded.last_ts),
       last_ts      = MAX(excluded.last_ts,           sessions.last_ts),
       event_count  = sessions.event_count + 1,
-      tags_json    = (
-        SELECT json_group_array(DISTINCT value)
-        FROM (
-          SELECT value FROM json_each(sessions.tags_json)
-          UNION
-          SELECT value FROM json_each(excluded.tags_json)
+      tags_json    = CASE
+        WHEN excluded.tags_json = '[]' THEN sessions.tags_json
+        WHEN excluded.tags_json = sessions.tags_json THEN sessions.tags_json
+        ELSE (
+          SELECT json_group_array(DISTINCT value)
+          FROM (
+            SELECT value FROM json_each(sessions.tags_json)
+            UNION
+            SELECT value FROM json_each(excluded.tags_json)
+          )
         )
-      )
+      END
   `);
 
   // ── Upsert session without bumping event_count (duplicate events) ──────
@@ -126,14 +131,18 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       model        = COALESCE(excluded.model,        sessions.model),
       first_ts     = COALESCE(sessions.first_ts,     excluded.last_ts),
       last_ts      = MAX(excluded.last_ts,           sessions.last_ts),
-      tags_json    = (
-        SELECT json_group_array(DISTINCT value)
-        FROM (
-          SELECT value FROM json_each(sessions.tags_json)
-          UNION
-          SELECT value FROM json_each(excluded.tags_json)
+      tags_json    = CASE
+        WHEN excluded.tags_json = '[]' THEN sessions.tags_json
+        WHEN excluded.tags_json = sessions.tags_json THEN sessions.tags_json
+        ELSE (
+          SELECT json_group_array(DISTINCT value)
+          FROM (
+            SELECT value FROM json_each(sessions.tags_json)
+            UNION
+            SELECT value FROM json_each(excluded.tags_json)
+          )
         )
-      )
+      END
   `);
 
   // ── List sessions (with optional pool/tag/since/limit filters) ──────────
@@ -154,6 +163,15 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       ))
     ORDER BY last_ts DESC
     LIMIT $limit
+  `);
+
+  // ── List distinct models used across sessions ───────────────────────────
+  const listModels = db.prepare(`
+    SELECT DISTINCT COALESCE(NULLIF(model, ''), 'unknown') AS model
+    FROM events
+    WHERE type = 'assistant_message'
+      AND json_extract(payload_json, '$.usage.total_tokens') IS NOT NULL
+    ORDER BY model ASC
   `);
 
   // ── Get events for a session (backward pagination) ─────────────────────
@@ -193,6 +211,22 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       COALESCE(SUM(CASE WHEN type = 'error' OR (type = 'tool_result' AND json_extract(payload_json, '$.is_error') = 1) THEN 1 ELSE 0 END), 0) AS error_count
     FROM events
     WHERE session_id = $session_id
+  `);
+
+  // ── Per-model token usage for a session ───────────────────────────────
+  const getSessionModelTokens = db.prepare(`
+    SELECT
+      COALESCE(NULLIF(model, ''), 'unknown') AS model,
+      COALESCE(SUM(json_extract(payload_json, '$.usage.total_tokens')), 0) AS total_tokens,
+      COALESCE(SUM(json_extract(payload_json, '$.usage.input')), 0)        AS input_tokens,
+      COALESCE(SUM(json_extract(payload_json, '$.usage.output')), 0)       AS output_tokens,
+      COALESCE(SUM(json_extract(payload_json, '$.usage.cost_total')), 0)   AS cost_total
+    FROM events
+    WHERE session_id = $session_id
+      AND type = 'assistant_message'
+      AND json_extract(payload_json, '$.usage.total_tokens') IS NOT NULL
+    GROUP BY model
+    ORDER BY total_tokens DESC
   `);
 
   // ── Latest assistant_message context size ───────────────────────
@@ -245,9 +279,11 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     upsertSession,
     upsertSessionNoBump,
     listSessions,
+    listModels,
     getSessionEvents,
     getSessionEventsSince,
     getSessionStats,
+    getSessionModelTokens,
     getSessionContext,
     countTotals,
     clearSessions,

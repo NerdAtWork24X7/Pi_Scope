@@ -34,10 +34,6 @@
   let activeSide = "new";
   let fullView = true;
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  }
-
   function selectedCwd() {
     return S.cwd || "";
   }
@@ -70,7 +66,7 @@
       const res = await fetch(window.apiUrl("/files/modified", { cwd, token: S.token, ignored }), { headers: window.authHeaders() });
       const data = await res.json();
       if (!data.git) {
-        filesList.innerHTML = `<div class="empty-state">git unavailable in<br><code>${escapeHtml(cwd)}</code><br><small>${escapeHtml(data.error || "")}</small></div>`;
+        filesList.innerHTML = `<div class="empty-state">git unavailable in<br><code>${window.SCOPE.escapeHtml(cwd)}</code><br><small>${window.SCOPE.escapeHtml(data.error || "")}</small></div>`;
         clearDiff();
         return;
       }
@@ -99,7 +95,7 @@
       const active = ranked.find((f) => f.path === current.file) || ranked[0];
       if (active) { markActive(filesList.querySelector(`[data-file="${CSS.escape(active.path)}"]`)); openFile(active.path); }
     } catch (e) {
-      filesList.innerHTML = `<div class="empty-state">error: ${escapeHtml(String(e))}</div>`;
+      filesList.innerHTML = `<div class="empty-state">error: ${window.SCOPE.escapeHtml(String(e))}</div>`;
     }
   }
 
@@ -184,7 +180,7 @@
       current.baseNewBuf = current.newBuf.slice();
       renderDiff();
     } catch (e) {
-      diffOld.innerHTML = `<div class="diff-binary">error: ${escapeHtml(String(e))}</div>`;
+      diffOld.innerHTML = `<div class="diff-binary">error: ${window.SCOPE.escapeHtml(String(e))}</div>`;
     }
   }
 
@@ -365,7 +361,7 @@
       });
       const data = await res.json();
       if (!res.ok) {
-        diffStats.innerHTML = `<span class="del">save failed: ${escapeHtml(data.error || res.status)}</span>`;
+        diffStats.innerHTML = `<span class="del">save failed: ${window.SCOPE.escapeHtml(data.error || res.status)}</span>`;
         return;
       }
       if (activeSide === "old") current.newBuf = current.oldBuf.slice();
@@ -377,7 +373,7 @@
       exitEditMode();
       renderDiff();
     } catch (e) {
-      diffStats.innerHTML = `<span class="del">save error: ${escapeHtml(String(e))}</span>`;
+      diffStats.innerHTML = `<span class="del">save error: ${window.SCOPE.escapeHtml(String(e))}</span>`;
     }
   }
 

@@ -252,12 +252,20 @@ function resolveWithinCwd(cwd: string, file: string): string | null {
   return absFile;
 }
 
+// Default file-system sandbox for /files/* and /checkpoints/* endpoints.
+// When SCOPE_FILE_ROOT is not set, operations are restricted to the project
+// root so the server cannot be used to read or write arbitrary git-backed
+// directories. Set SCOPE_FILE_ROOT to a comma-separated list of allowed roots
+// (e.g. "/home/user/projects,/home/user/work") to broaden access.
+const DEFAULT_FILE_ROOT = PROJECT_ROOT;
+
 /**
  * Validate `cwd`: must exist as a real directory (symlinks resolved). When
  * SCOPE_FILE_ROOT is set (comma-separated allowlist), the cwd must lie within
- * one of those roots. Returns the resolved absolute path, or null if invalid
- * or disallowed. This stops the /files/* and /checkpoints/* endpoints from
- * trusting an arbitrary caller-supplied absolute path.
+ * one of those roots. Otherwise it must lie within the project root. Returns
+ * the resolved absolute path, or null if invalid or disallowed. This stops
+ * the /files/* and /checkpoints/* endpoints from trusting an arbitrary
+ * caller-supplied absolute path.
  */
 function validateCwd(cwd: string): string | null {
   if (!cwd) return null;
@@ -274,14 +282,13 @@ function validateCwd(cwd: string): string | null {
     return null;
   }
   if (!st.isDirectory()) return null;
-  const roots = (process.env.SCOPE_FILE_ROOT ?? "")
+  const rawRoots = process.env.SCOPE_FILE_ROOT ?? DEFAULT_FILE_ROOT;
+  const roots = rawRoots
     .split(",").map((s) => s.trim()).filter(Boolean)
     .map((s) => { try { return fs.realpathSync(path.resolve(s)); } catch { return null; } })
     .filter((s): s is string => s !== null);
-  if (roots.length) {
-    const ok = roots.some((r) => abs === r || abs.startsWith(r + path.sep));
-    if (!ok) return null;
-  }
+  const ok = roots.some((r) => abs === r || abs.startsWith(r + path.sep));
+  if (!ok) return null;
   return abs;
 }
 
@@ -411,6 +418,16 @@ async function handle(req: Request): Promise<Response> {
     return jsonResponse({ ingested: ingested.length, rejected });
   }
 
+  // ── GET /models ────────────────────────────────────────────────────────
+  if (pathname === "/models" && method === "GET") {
+    try {
+      const rows = q.listModels.all() as any[];
+      return jsonResponse({ models: rows.map((r) => r.model) });
+    } catch (err: any) {
+      return jsonResponse({ error: err.message }, 500);
+    }
+  }
+
   // ── GET /sessions ──────────────────────────────────────────────────────
   if (pathname === "/sessions" && method === "GET") {
     const pool = url.searchParams.get("pool") ?? "";
@@ -487,6 +504,7 @@ async function handle(req: Request): Promise<Response> {
     try {
       const row = q.getSessionStats.get({ $session_id: sidStats }) as any;
       const ctx = q.getSessionContext.get({ $session_id: sidStats }) as any;
+      const modelRows = q.getSessionModelTokens.all({ $session_id: sidStats }) as any[];
       return jsonResponse({
         total_tokens: row.total_tokens ?? 0,
         input_tokens: row.input_tokens ?? 0,
@@ -495,6 +513,13 @@ async function handle(req: Request): Promise<Response> {
         error_count: row.error_count ?? 0,
         latest_input: ctx?.latest_input ?? null,
         latest_ts: ctx?.latest_ts ?? null,
+        models: (modelRows ?? []).map((m) => ({
+          model: m.model ?? "unknown",
+          total_tokens: m.total_tokens ?? 0,
+          input_tokens: m.input_tokens ?? 0,
+          output_tokens: m.output_tokens ?? 0,
+          cost_total: m.cost_total ?? 0,
+        })),
       });
     } catch (err: any) {
       return jsonResponse({ error: err.message }, 500);

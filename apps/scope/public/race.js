@@ -8,15 +8,15 @@
 const STATE = window.__SCOPE_STATE;
 const O = window.SCOPE;
 const {
-  summaryFor, summaryClass, turnFinalResponse, renderDetailHTML, fmtTs, trunc, shortId,
-  fetchSessionEvents, renderSessions, apiUrl, authHeaders, fmtRel, fmtTokens,
-  saveURLState, escapeHtml, toolNamePillHTML
+  summaryFor, summaryClass, turnFinalResponse, renderDetailHTML,
+  fetchSessionEvents, renderSessions, apiUrl, authHeaders, saveURLState
 } = O;
 
 const TRACKS = new Map();
 let autoAddRaceTracks = true;
 let raceSSEResynced = false;
 let openEventId = null;
+const MAX_EVENTS_IN_MEMORY = 6000;
 
 const raceContainer = document.getElementById("race-container");
 const raceEmpty = document.getElementById("race-empty");
@@ -107,7 +107,7 @@ window.__raceAutoAddChange = function(val) { autoAddRaceTracks = val; };
 window.__raceStatsUpdate = function(sid, stats) {
   const track = TRACKS.get(sid);
   if (!track) return;
-  track.costStr = `$${stats.total_cost.toFixed(4)} · ${fmtTokens(stats.total_tokens)} tk`;
+  track.costStr = `$${stats.total_cost.toFixed(4)} · ${window.SCOPE.fmtTokens(stats.total_tokens)} tk`;
   renderTrack(sid);
 };
 
@@ -127,7 +127,7 @@ function createTrack(sid) {
   raceContainer.appendChild(el);
 
   const stats = STATE.sessionStats[sid];
-  const costStr = stats ? `$${stats.total_cost.toFixed(4)} · ${fmtTokens(stats.total_tokens)} tk` : "";
+  const costStr = stats ? `$${stats.total_cost.toFixed(4)} · ${window.SCOPE.fmtTokens(stats.total_tokens)} tk` : "";
   TRACKS.set(sid, { session: sess, events: [], lastSeq: -1, el, costStr, activeGroupKey: null });
   updateEmpty();
   loadTrackEvents(sid);
@@ -150,6 +150,7 @@ async function loadTrackEvents(sid) {
   if (!TRACKS.has(sid)) return;
   track.events = events || [];
   track.lastSeq = track.events.length ? track.events[track.events.length - 1].seq : -1;
+  pruneTrack(track);
   renderTrack(sid);
   maybeRestoreInspector(track);
 }
@@ -166,12 +167,19 @@ async function resyncAllTracks() {
             track.lastSeq = evt.seq;
           }
         }
+        pruneTrack(track);
         renderTrack(sid);
         maybeRestoreInspector(track);
       }));
     } else ps.push(loadTrackEvents(sid));
   }
   await Promise.allSettled(ps);
+}
+
+function pruneTrack(track) {
+  if (track.events.length <= MAX_EVENTS_IN_MEMORY) return;
+  const drop = track.events.length - MAX_EVENTS_IN_MEMORY;
+  track.events.splice(0, drop);
 }
 
 function routeSSEEvent(evt) {
@@ -183,6 +191,7 @@ function routeSSEEvent(evt) {
   if (!track || evt.seq <= track.lastSeq) return;
   track.events.push(evt);
   track.lastSeq = evt.seq;
+  pruneTrack(track);
   renderTrack(evt.session_id);
 }
 
@@ -200,20 +209,20 @@ function renderTrack(sid) {
   if (!track?.el) return;
   const sess = STATE.sessions.find(s => s.session_id === sid) || track.session;
   if (sess) track.session = sess;
-  const name = sess?.agent_name ?? sess?.cwd?.split("/").pop() ?? shortId(sid);
+  const name = sess?.agent_name ?? sess?.cwd?.split("/").pop() ?? window.SCOPE.shortId(sid);
   const groups = buildTurnGroups(track.events);
   const latest = track.events[track.events.length - 1];
-  const model = sess?.model ? ` · ${escapeHtml(sess.model)}` : "";
+  const model = sess?.model ? ` · ${window.SCOPE.escapeHtml(sess.model)}` : "";
 
   track.el.innerHTML = "";
 
   const agent = document.createElement("div");
   agent.className = "race-agent-card";
   agent.innerHTML = `
-    <div class="race-agent-name" title="${escapeHtml(sid)}">${escapeHtml(name)}</div>
-    <div class="race-agent-meta"><code>${escapeHtml(shortId(sid))}</code>${model}</div>
-    <div class="race-agent-meta">${track.events.length} events${latest ? ` · ${fmtRel(latest.ts)}` : ""}</div>
-    ${track.costStr ? `<div class="race-agent-cost">${escapeHtml(track.costStr)}</div>` : ""}
+    <div class="race-agent-name" title="${window.SCOPE.escapeHtml(sid)}">${window.SCOPE.escapeHtml(name)}</div>
+    <div class="race-agent-meta"><code>${window.SCOPE.escapeHtml(window.SCOPE.shortId(sid))}</code>${model}</div>
+    <div class="race-agent-meta">${track.events.length} events${latest ? ` · ${window.SCOPE.fmtRel(latest.ts)}` : ""}</div>
+    ${track.costStr ? `<div class="race-agent-cost">${window.SCOPE.escapeHtml(track.costStr)}</div>` : ""}
   `;
 
   const turns = document.createElement("div");
@@ -237,7 +246,7 @@ function buildTurnGroup(track, group, active) {
   const wrap = document.createElement("div");
   wrap.className = "race-turn-group" + (active ? " active" : " collapsed");
   const label = group.setup ? "setup" : `turn ${group.turnIndex ?? group.ordinal}`;
-  const prompt = group.prompt ? trunc(group.prompt, active ? 92 : 30) : `${group.events.length} events`;
+  const prompt = group.prompt ? window.SCOPE.trunc(group.prompt, active ? 92 : 30) : `${group.events.length} events`;
 
   if (!active) {
     const last = group.events[group.events.length - 1];
@@ -246,10 +255,10 @@ function buildTurnGroup(track, group, active) {
     const frCollapsed = teCollapsed ? turnFinalResponse(teCollapsed, group.events) : "";
     wrap.innerHTML = `
       <div class="race-turn-collapsed">
-        <span class="race-turn-label">${escapeHtml(label)}</span>
+        <span class="race-turn-label">${window.SCOPE.escapeHtml(label)}</span>
         <span class="race-turn-collapsed-count">${group.events.length} events</span>
-        <span class="race-turn-collapsed-prompt">${escapeHtml(prompt)}</span>
-        ${frCollapsed ? `<span class="race-turn-collapsed-final">${escapeHtml(trunc(frCollapsed, 120))}</span>` : ""}
+        <span class="race-turn-collapsed-prompt">${window.SCOPE.escapeHtml(prompt)}</span>
+        ${frCollapsed ? `<span class="race-turn-collapsed-final">${window.SCOPE.escapeHtml(window.SCOPE.trunc(frCollapsed, 120))}</span>` : ""}
       </div>
     `;
     wrap.addEventListener("click", () => {
@@ -262,7 +271,7 @@ function buildTurnGroup(track, group, active) {
 
   const head = document.createElement("div");
   head.className = "race-turn-head";
-  head.innerHTML = `<span class="race-turn-label">${escapeHtml(label)}</span><span class="race-turn-prompt" title="${escapeHtml(prompt)}">${escapeHtml(prompt)}</span>`;
+  head.innerHTML = `<span class="race-turn-label">${window.SCOPE.escapeHtml(label)}</span><span class="race-turn-prompt" title="${window.SCOPE.escapeHtml(prompt)}">${window.SCOPE.escapeHtml(prompt)}</span>`;
 
   const events = document.createElement("div");
   events.className = "race-events";
@@ -271,7 +280,7 @@ function buildTurnGroup(track, group, active) {
   const te = group.events.find(e => e.type === "turn_end");
   const fr = te ? turnFinalResponse(te, group.events) : "";
   const finalBlock = fr
-    ? `<div class="race-turn-final"><div class="race-turn-final-label">final response</div><pre>${escapeHtml(fr)}</pre></div>`
+    ? `<div class="race-turn-final"><div class="race-turn-final-label">final response</div><pre>${window.SCOPE.escapeHtml(fr)}</pre></div>`
     : `<div class="race-turn-final empty"><div class="race-turn-final-label">final response</div><div class="race-llm-empty">no final response captured</div></div>`;
 
   wrap.appendChild(head);
@@ -285,9 +294,9 @@ function buildRaceEvent(track, evt) {
   node.className = `race-event ${evt.type}`;
   node.title = summaryFor(evt);
   node.innerHTML = `
-    <div class="race-event-top"><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${toolNamePillHTML(evt)}</div>
-    <div class="race-event-summary ${summaryClass(evt, track.events)}">${escapeHtml(summaryFor(evt, track.events))}</div>
-    <div class="race-event-time">${fmtTs(evt.ts)} · #${evt.seq}</div>
+    <div class="race-event-top"><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${window.SCOPE.toolNamePillHTML(evt)}</div>
+    <div class="race-event-summary ${summaryClass(evt, track.events)}">${window.SCOPE.escapeHtml(summaryFor(evt, track.events))}</div>
+    <div class="race-event-time">${window.SCOPE.fmtTs(evt.ts)} · #${evt.seq}</div>
   `;
   node.addEventListener("click", () => openInspector(track, evt));
   return node;
@@ -357,17 +366,17 @@ function openInspector(track, evt) {
   currentInspectorEvent = evt;
   if (inspectorWrap) inspectorWrap.textContent = "↩";
   const sess = track.session || STATE.sessions.find(s => s.session_id === evt.session_id);
-  const name = sess?.agent_name ?? sess?.cwd?.split("/").pop() ?? shortId(evt.session_id);
+  const name = sess?.agent_name ?? sess?.cwd?.split("/").pop() ?? window.SCOPE.shortId(evt.session_id);
   inspectorTitle.textContent = evt.type.replace(/_/g, " ");
 
   const metaHTML = `
     <div class="race-inspector-meta">
-      <span>agent</span><span title="${escapeHtml(evt.session_id)}">${escapeHtml(name)} · ${escapeHtml(shortId(evt.session_id))}</span>
-      <span>time</span><span>${escapeHtml(fmtTs(evt.ts))}</span>
+      <span>agent</span><span title="${window.SCOPE.escapeHtml(evt.session_id)}">${window.SCOPE.escapeHtml(name)} · ${window.SCOPE.escapeHtml(window.SCOPE.shortId(evt.session_id))}</span>
+      <span>time</span><span>${window.SCOPE.escapeHtml(window.SCOPE.fmtTs(evt.ts))}</span>
       <span>seq</span><span>${evt.seq}</span>
-      <span>type</span><span><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${toolNamePillHTML(evt)}</span>
+      <span>type</span><span><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${window.SCOPE.toolNamePillHTML(evt)}</span>
     </div>
-    <div class="race-inspector-summary">${escapeHtml(summaryFor(evt))}</div>
+    <div class="race-inspector-summary">${window.SCOPE.escapeHtml(summaryFor(evt))}</div>
   `;
 
   // user_message fires the LLM request that costs tokens; surface the boot
@@ -382,7 +391,7 @@ function openInspector(track, evt) {
           <button class="race-inspector-tab active" data-tab="payload">payload</button>
           <button class="race-inspector-tab" data-tab="llm">llm request</button>
         </div>
-        <div class="race-inspector-tabpanel" data-panel="payload"><pre class="race-llm-json">${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre></div>
+        <div class="race-inspector-tabpanel" data-panel="payload"><pre class="race-llm-json">${window.SCOPE.escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre></div>
         <div class="race-inspector-tabpanel" data-panel="llm" hidden>${renderLLMRequestHTML(snap ? snap.payload : null)}</div>
       </div>
     `;
@@ -390,7 +399,7 @@ function openInspector(track, evt) {
   } else {
     inspectorBody.innerHTML = `
       ${metaHTML}
-      <div class="race-inspector-detail"><pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre></div>
+      <div class="race-inspector-detail"><pre>${window.SCOPE.escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre></div>
     `;
   }
   inspector.classList.add("open");
@@ -436,17 +445,17 @@ function renderLLMRequestHTML(payload) {
   parts.push(`
     <section class="race-llm-section">
       <h4>System prompt</h4>
-      ${payload.system_prompt ? `<pre class="race-llm-pre">${escapeHtml(payload.system_prompt)}</pre>` : `<div class="race-llm-empty">not captured</div>`}
+      ${payload.system_prompt ? `<pre class="race-llm-pre">${window.SCOPE.escapeHtml(payload.system_prompt)}</pre>` : `<div class="race-llm-empty">not captured</div>`}
     </section>
   `);
 
   const tools = Array.isArray(payload.tools) ? payload.tools : [];
   const toolsHTML = tools.length
-    ? `<ul class="race-llm-tools">` + tools.map(t => `<li><code>${escapeHtml(t)}</code></li>`).join("") + `</ul>`
+    ? `<ul class="race-llm-tools">` + tools.map(t => `<li><code>${window.SCOPE.escapeHtml(t)}</code></li>`).join("") + `</ul>`
     : `<div class="race-llm-empty">no tools captured</div>`;
   parts.push(`<section class="race-llm-section"><h4>Tools (${tools.length}) sent to LLM</h4>${toolsHTML}</section>`);
 
-  if (payload.model) parts.push(`<section class="race-llm-section"><h4>Model</h4><div class="race-llm-empty">${escapeHtml(payload.model)}</div></section>`);
+  if (payload.model) parts.push(`<section class="race-llm-section"><h4>Model</h4><div class="race-llm-empty">${window.SCOPE.escapeHtml(payload.model)}</div></section>`);
   if (payload.message_count != null) parts.push(`<section class="race-llm-section"><h4>Messages</h4><div class="race-llm-empty">${payload.message_count}</div></section>`);
 
   return parts.join("");
@@ -489,7 +498,7 @@ function updateRaceRollup() {
       tokens += u.total_tokens ?? 0;
     }
   }
-  raceRollup.textContent = `$${cost.toFixed(4)} · ${fmtTokens(tokens)} tk`;
+  raceRollup.textContent = `$${cost.toFixed(4)} · ${window.SCOPE.fmtTokens(tokens)} tk`;
 }
 
 function scrollRaceToRight() {

@@ -4,22 +4,25 @@
  */
 (function() {
 
+
 // ─── State ──────────────────────────────────────────────────────────────────
 
 const STATE = {
   // V3 regression fix: token must come from ?token=… query param. The hash is
   // for shareable view-state only; we don't want the token in shared URLs.
   token: new URLSearchParams(location.search).get("token") ?? "",
-  view: "single", mode: "form", pool: "", tag: "", search: "", sort: "latest", hideAfter: "30m", showHidden: false,
+  view: "single", mode: "form", search: "", sort: "latest", showHidden: false,
   typeFilter: new Set(), autoScroll: true,
   selectedSessionId: null, cwd: "", sessions: [], events: [], sessionsLoaded: false, hiddenSessions: loadHiddenSessions(),
   sidebarCollapsed: loadSidebarCollapsed(),
   focusedIdx: -1, lastEventTs: null,
   sseReconnectDelay: 1000, maxReconnectDelay: 10_000,
   renderDirty: true, seenIds: new Set(),
-  sessionStats: {}, // sid → {total_cost,total_tokens,error_count}
+  sessionStats: {}, // sid → {total_cost,total_tokens,error_count,models:[]}
   ackd: new Set(),
   sessionsSig: "",
+  models: [], // list of model names from /models
+  modelFilter: "", // selected model filter
 };
 
 window.__SCOPE_STATE = STATE;
@@ -34,10 +37,8 @@ function loadURLState() {
   if (!["single", "swimlane", "race", "terminal", "files", "checkpoints"].includes(STATE.view)) STATE.view = "single";
   if (p.has("mode")) STATE.mode = p.get("mode");
   else { const stored = localStorage.getItem("scope-mode"); if (stored === "form" || stored === "function") STATE.mode = stored; }
-  if (p.has("pool")) { STATE.pool = p.get("pool"); poolFilter.value = STATE.pool; }
-  if (p.has("tag")) { STATE.tag = p.get("tag"); tagFilter.value = STATE.tag; }
   if (p.has("sort")) { STATE.sort = p.get("sort"); sortSelect.value = STATE.sort; }
-  if (p.has("hide_after")) { STATE.hideAfter = p.get("hide_after"); hideAfterSelect.value = STATE.hideAfter; }
+  if (p.has("model")) { STATE.modelFilter = p.get("model") ?? ""; if (modelSelect) modelSelect.value = STATE.modelFilter; }
   if (p.has("show_hidden")) { STATE.showHidden = p.get("show_hidden") === "1"; showHiddenCB.checked = STATE.showHidden; }
   if (p.has("sid")) { STATE.selectedSessionId = p.get("sid"); STATE.ackd.add(STATE.selectedSessionId); }
   if (p.has("lanes")) {
@@ -59,10 +60,8 @@ function saveURLState() {
   const p = new URLSearchParams();
   p.set("view", STATE.view);
   if (STATE.mode !== "form") p.set("mode", STATE.mode);
-  if (STATE.pool) p.set("pool", STATE.pool);
-  if (STATE.tag) p.set("tag", STATE.tag);
   if (STATE.sort !== "latest") p.set("sort", STATE.sort);
-  if (STATE.hideAfter !== "30m") p.set("hide_after", STATE.hideAfter);
+  if (STATE.modelFilter) p.set("model", STATE.modelFilter);
   if (STATE.showHidden) p.set("show_hidden", "1");
   if (STATE.view === "single" && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
   if (STATE.view === "swimlane") {
@@ -85,10 +84,8 @@ function saveURLState() {
 
 const $ = s => document.querySelector(s);
 const sessionSubnav = document.querySelector("#session-subnav");
-const poolFilter = $("#pool-filter");
-const tagFilter = $("#tag-filter");
 const sortSelect = $("#sort-select");
-const hideAfterSelect = $("#hide-after-select");
+const modelSelect = $("#model-select");
 const showHiddenCB = $("#show-hidden-sessions");
 const sessionList = $("#session-list");
 const eventView = $("#event-view");
@@ -149,7 +146,7 @@ function summaryFor(evt, events) {
     case "session_start": return `start · ${p.reason ?? "?"}`;
     case "session_shutdown": return `shutdown · ${p.reason ?? "?"}`;
     case "agent_start": {
-      return `▶ ${trunc(p.prompt, 80)}`;
+      return `▶ ${window.SCOPE.trunc(p.prompt, 80)}`;
     }
     case "llm_request": {
       const parts = [`System prompt`];
@@ -161,24 +158,24 @@ function summaryFor(evt, events) {
     }
     case "agent_end": {
       const base = `■ ${p.message_count ?? "?"} messages`;
-      return p.final_response ? `${base} · ${trunc(p.final_response, 220)}` : base;
+      return p.final_response ? `${base} · ${window.SCOPE.trunc(p.final_response, 220)}` : base;
     }
     case "turn_start": return `turn #${p.turn_index ?? "?"}`;
     case "turn_end": {
       const fr = turnFinalResponse(evt, events);
       const base = `turn #${p.turn_index ?? "?"}`;
       const usage = p.usage ? ` · ${p.usage.total_tokens}tk` : "";
-      return fr ? `${base}${usage} · ${trunc(fr, 200)}` : `${base}${usage}`;
+      return fr ? `${base}${usage} · ${window.SCOPE.trunc(fr, 200)}` : `${base}${usage}`;
     }
-    case "user_message": return `you: ${trunc(p.text, 100)}`;
-    case "assistant_message": return `ai: ${trunc(p.text, 100)} · ${p.usage?.total_tokens ?? 0}tk · $${(p.usage?.cost_total ?? 0).toFixed(4)}${p.latency_ms ? " · " + p.latency_ms + "ms" : ""}`;
-    case "thinking": return `〽 ${trunc(p.text, 100)}`;
-    case "tool_call": return `→ ${p.tool_name}(${trunc(JSON.stringify(p.args ?? {}), 60)})`;
-    case "tool_result": return `← ${p.tool_name} · ${p.is_error ? "✗" : "✓"} · ${trunc(p.content_text, 80)}`;
+    case "user_message": return `you: ${window.SCOPE.trunc(p.text, 100)}`;
+    case "assistant_message": return `ai: ${window.SCOPE.trunc(p.text, 100)} · ${p.usage?.total_tokens ?? 0}tk · $${(p.usage?.cost_total ?? 0).toFixed(4)}${p.latency_ms ? " · " + p.latency_ms + "ms" : ""}`;
+    case "thinking": return `〽 ${window.SCOPE.trunc(p.text, 100)}`;
+    case "tool_call": return `→ ${p.tool_name}(${window.SCOPE.trunc(JSON.stringify(p.args ?? {}), 60)})`;
+    case "tool_result": return `← ${p.tool_name} · ${p.is_error ? "✗" : "✓"} · ${window.SCOPE.trunc(p.content_text, 80)}`;
     case "model_change": return `model: ${p.previous_model ?? "?"} → ${p.provider}/${p.model}`;
-    case "compaction": return `📦 compact · ${p.tokens_before ?? "?"} tk → "${trunc(p.summary_preview, 60)}"`;
-    case "branch_nav": return `🌿 branch · ${shortId(p.from_id)} → ${shortId(p.to_id)}`;
-    case "error": return `! ${trunc(p.message, 100)}`;
+    case "compaction": return `📦 compact · ${p.tokens_before ?? "?"} tk → "${window.SCOPE.trunc(p.summary_preview, 60)}"`;
+    case "branch_nav": return `🌿 branch · ${window.SCOPE.shortId(p.from_id)} → ${window.SCOPE.shortId(p.to_id)}`;
+    case "error": return `! ${window.SCOPE.trunc(p.message, 100)}`;
     case "custom": return `${p.custom_type ?? "custom"}`;
     default: return "";
   }
@@ -199,7 +196,7 @@ function renderDetailHTML(evt) {
 
   if (evt.type === "agent_end") {
     const fr = evt.payload?.final_response
-      ? `<pre>${escapeHtml(evt.payload.final_response)}</pre>`
+      ? `<pre>${window.SCOPE.escapeHtml(evt.payload.final_response)}</pre>`
       : `<div class="race-llm-empty">no final response captured</div>`;
     return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · ${evt.payload?.message_count ?? "?"} messages</div>${fr}`;
   }
@@ -207,9 +204,9 @@ function renderDetailHTML(evt) {
   if (evt.type === "turn_end") {
     const fr = turnFinalResponse(evt, window.__SCOPE_STATE.events);
     const frHTML = fr
-      ? `<pre>${escapeHtml(fr)}</pre>`
+      ? `<pre>${window.SCOPE.escapeHtml(fr)}</pre>`
       : `<div class="race-llm-empty">no final response captured</div>`;
-    return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+    return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}<pre>${window.SCOPE.escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
   }
 
   const chips = [];
@@ -218,11 +215,11 @@ function renderDetailHTML(evt) {
     chips.push(`<span class="exit-chip ${ec !== 0 ? 'err' : 'ok'}">exit ${ec}</span>`);
   }
   if (evt.type === "assistant_message") {
-    if (evt.payload?.stop_reason) chips.push(`<span class="exit-chip ok">${escapeHtml(evt.payload.stop_reason)}</span>`);
+    if (evt.payload?.stop_reason) chips.push(`<span class="exit-chip ok">${window.SCOPE.escapeHtml(evt.payload.stop_reason)}</span>`);
     if (evt.payload?.latency_ms) chips.push(`<span class="exit-chip ok">${evt.payload.latency_ms}ms</span>`);
     if (evt.payload?.turn_index !== undefined) chips.push(`<span class="exit-chip ok">turn ${evt.payload.turn_index}</span>`);
   }
-  return `${cBtn}${wBtn}${chips.join(" ")}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+  return `${cBtn}${wBtn}${chips.join(" ")}<pre>${window.SCOPE.escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
 }
 
 // ─── API helpers ────────────────────────────────────────────────────────────
@@ -331,9 +328,15 @@ function computeAgentInfo(sid) {
   const end = new Date(s.last_ts).getTime();
   const durationMs = Math.max(0, end - start);
 
+  // Per-model token usage from server stats (falls back to client-side compute).
+  let modelTokens = stats.models ?? [];
+  if (!modelTokens.length && (inputTokens + outputTokens > 0)) {
+    modelTokens = [{ model: s.model || "unknown", total_tokens: inputTokens + outputTokens, input_tokens: inputTokens, output_tokens: outputTokens }];
+  }
+
   return {
-    name: s.agent_name ?? s.cwd?.split("/").pop() ?? shortId(sid),
-    sid, shortSid: shortId(sid),
+    name: s.agent_name ?? s.cwd?.split("/").pop() ?? window.SCOPE.shortId(sid),
+    sid, shortSid: window.SCOPE.shortId(sid),
     model: s.model || "", provider: s.provider || "",
     tags: s.tags || [], pool: s.pool || "default",
     eventCount: s.event_count ?? events.length,
@@ -342,17 +345,8 @@ function computeAgentInfo(sid) {
     totalTokens: stats.total_tokens ?? (inputTokens + outputTokens),
     contextUsed, contextTotal, contextRemaining, contextRemainingPct,
     latestPrefillMs, latestOutputTps, latestGenMs, latestLatencyMs,
+    modelTokens,
   };
-}
-
-function fmtDuration(ms) {
-  if (!ms || ms < 1000) return ms ? `${ms}ms` : "0s";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
 }
 
 function renderAgentSubnav() {
@@ -365,34 +359,39 @@ function renderAgentSubnav() {
   if (!info) { sessionSubnav.style.display = "none"; return; }
   sessionSubnav.style.display = "flex";
   const tagsHtml = info.tags.length
-    ? info.tags.map(t => `<span class="snav-tag">${escapeHtml(t)}</span>`).join("")
+    ? info.tags.map(t => `<span class="snav-tag">${window.SCOPE.escapeHtml(t)}</span>`).join("")
     : `<span class="snav-tag dim">no tags</span>`;
   const ctxPctUsed = info.contextTotal ? Math.round((info.contextUsed / info.contextTotal) * 100) : 0;
   const ctxBarColor = ctxPctUsed > 90 ? "var(--red)" : ctxPctUsed > 70 ? "var(--orange)" : "var(--green)";
+  const modelsHtml = info.modelTokens.length
+    ? `<div class="snav-group snav-models" title="token usage per model used in this session">${info.modelTokens.map(m => `<div class="snav-stat snav-model-pill"><span class="snav-label">${window.SCOPE.escapeHtml(m.model)}</span><span class="snav-value">${window.SCOPE.fmtTokens(m.total_tokens)} tk</span></div>`).join("")}</div>`
+    : "";
+
   sessionSubnav.innerHTML = `
     <div class="snav-group snav-identity">
-      <div class="snav-name" title="${escapeHtml(info.sid)}">${escapeHtml(info.name)}</div>
-      <div class="snav-sid"><code>${info.shortSid}</code>${info.model ? `<span class="snav-model">${escapeHtml(info.model)}</span>` : ""}</div>
-      <div class="snav-tags"><span class="snav-pool">${escapeHtml(info.pool)}</span>${tagsHtml}</div>
+      <div class="snav-name" title="${window.SCOPE.escapeHtml(info.sid)}">${window.SCOPE.escapeHtml(info.name)}</div>
+      <div class="snav-sid"><code>${info.shortSid}</code>${info.model ? `<span class="snav-model">${window.SCOPE.escapeHtml(info.model)}</span>` : ""}</div>
+      <div class="snav-tags"><span class="snav-pool">${window.SCOPE.escapeHtml(info.pool)}</span>${tagsHtml}</div>
     </div>
     <div class="snav-group snav-stats">
       <div class="snav-stat"><span class="snav-label">events</span><span class="snav-value">${info.eventCount}</span></div>
-      <div class="snav-stat"><span class="snav-label">duration</span><span class="snav-value">${fmtDuration(info.durationMs)}</span></div>
+      <div class="snav-stat"><span class="snav-label">duration</span><span class="snav-value">${window.SCOPE.fmtDuration(info.durationMs)}</span></div>
       <div class="snav-stat snav-cost-pill"><span class="snav-label">cost</span><span class="snav-value snav-cost">$${info.cost.toFixed(4)}</span></div>
-      <div class="snav-stat"><span class="snav-label">in</span><span class="snav-value">${fmtTokens(info.inputTokens)}</span></div>
-      <div class="snav-stat"><span class="snav-label">out</span><span class="snav-value">${fmtTokens(info.outputTokens)}</span></div>
+      <div class="snav-stat"><span class="snav-label">in</span><span class="snav-value">${window.SCOPE.fmtTokens(info.inputTokens)}</span></div>
+      <div class="snav-stat"><span class="snav-label">out</span><span class="snav-value">${window.SCOPE.fmtTokens(info.outputTokens)}</span></div>
       <!-- Form mode: dual cache pills (per obv-flash). Function mode: single combined pill (CSS hides .snav-cache-r/.snav-cache-w and shows .snav-cache-combined). -->
-      <div class="snav-stat snav-cache-r" title="cumulative input tokens served from cache"><span class="snav-label">cache r</span><span class="snav-value">${fmtTokens(info.cacheRead)}</span></div>
-      <div class="snav-stat snav-cache-w" title="cumulative tokens written to cache this session"><span class="snav-label">cache w</span><span class="snav-value">${fmtTokens(info.cacheWrite)}</span></div>
-      <div class="snav-stat snav-cache-combined" title="cache read / write tokens (cumulative)"><span class="snav-label">cache</span><span class="snav-value">${fmtTokens(info.cacheRead)}/${fmtTokens(info.cacheWrite)}</span></div>
+      <div class="snav-stat snav-cache-r" title="cumulative input tokens served from cache"><span class="snav-label">cache r</span><span class="snav-value">${window.SCOPE.fmtTokens(info.cacheRead)}</span></div>
+      <div class="snav-stat snav-cache-w" title="cumulative tokens written to cache this session"><span class="snav-label">cache w</span><span class="snav-value">${window.SCOPE.fmtTokens(info.cacheWrite)}</span></div>
+      <div class="snav-stat snav-cache-combined" title="cache read / write tokens (cumulative)"><span class="snav-label">cache</span><span class="snav-value">${window.SCOPE.fmtTokens(info.cacheRead)}/${window.SCOPE.fmtTokens(info.cacheWrite)}</span></div>
       <!-- Latest-turn perf (TPS + prefill). em-dash when undefined (non-streaming turn or no assistant_message yet). -->
       <div class="snav-stat snav-perf" title="estimated output tokens/sec on the most recent assistant turn (post-prefill). Approximated from streaming delta timing — accurate within a single-batch arrival window; turns with gen_ms &lt; 50ms are suppressed to avoid measurement noise."><span class="snav-label">~TPS</span><span class="snav-value">${info.latestOutputTps != null ? info.latestOutputTps : "—"}</span></div>
       <div class="snav-stat snav-perf" title="prefill (time-to-first-token) on the most recent assistant turn"><span class="snav-label">prefill</span><span class="snav-value">${info.latestPrefillMs != null ? info.latestPrefillMs + "ms" : "—"}</span></div>
     </div>
+    ${modelsHtml}
     <div class="snav-group snav-context">
       <div class="snav-context-top">
         <span class="snav-label">context</span>
-        <span class="snav-context-fig">${fmtTokens(info.contextUsed)} / ${fmtTokens(info.contextTotal)}</span>
+        <span class="snav-context-fig">${window.SCOPE.fmtTokens(info.contextUsed)} / ${window.SCOPE.fmtTokens(info.contextTotal)}</span>
         <span class="snav-context-pct">${info.contextRemainingPct}% remaining</span>
       </div>
       <div class="snav-context-bar"><div class="snav-context-bar-fill" style="width:${ctxPctUsed}%;background:${ctxBarColor}"></div></div>
@@ -485,9 +484,62 @@ window.setView = function(mode) {
 
 // ─── Sessions ───────────────────────────────────────────────────────────────
 
+async function fetchModels() {
+  try {
+    const res = await fetch(apiUrl("/models"), { headers: authHeaders() });
+    if (!res.ok) return;
+    const data = await res.json();
+    STATE.models = data.models ?? [];
+    renderModelSelect();
+  } catch { /* ignore */ }
+}
+
+function renderModelSelect() {
+  if (!modelSelect) return;
+  const current = STATE.modelFilter;
+  const sig = STATE.models.join("|");
+  if (modelSelect.dataset.sig === sig) return;
+  modelSelect.dataset.sig = sig;
+  modelSelect.innerHTML = '<option value="">All models</option>';
+  for (const m of STATE.models) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m;
+    modelSelect.appendChild(opt);
+  }
+  modelSelect.value = current;
+}
+
+function renderModelSummary() {
+  const el = document.getElementById("model-summary");
+  if (!el) return;
+  if (!STATE.modelFilter) {
+    el.style.display = "none";
+    el.classList.remove("active");
+    el.innerHTML = "";
+    return;
+  }
+  let totalTokens = 0;
+  let totalCost = 0;
+  let sessionCount = 0;
+  for (const s of visibleSessions()) {
+    const stats = STATE.sessionStats[s.session_id];
+    if (!stats?.models?.length) continue;
+    const mstat = stats.models.find(m => m.model === STATE.modelFilter);
+    if (mstat) {
+      totalTokens += mstat.total_tokens || 0;
+      totalCost += mstat.cost_total || 0;
+      sessionCount += 1;
+    }
+  }
+  el.style.display = "block";
+  el.classList.add("active");
+  el.innerHTML = `<span class="ms-label">model total</span><span class="ms-model">${window.SCOPE.escapeHtml(STATE.modelFilter)}</span><span class="ms-tokens">${window.SCOPE.fmtTokens(totalTokens)} tk · $${totalCost.toFixed(4)}</span><span class="ms-sessions">across ${sessionCount} session${sessionCount === 1 ? "" : "s"}</span>`;
+}
+
 async function fetchSessions() {
   try {
-    const url = apiUrl("/sessions", { pool: STATE.pool, tag: STATE.tag, limit: 100 });
+    const url = apiUrl("/sessions", { limit: 100 });
     const res = await fetch(url, { headers: authHeaders() });
     if (!res.ok) return;
     const data = await res.json();
@@ -503,9 +555,8 @@ async function fetchSessions() {
     STATE.sessionsLoaded = true;
     // Skip the full sidebar DOM rebuild when the session list is unchanged
     // (avoids a needless teardown/re-create on every 3s poll).
-    const sig = sessions.map((s) => [s.session_id, s.event_count, s.last_ts, s.agent_name, s.model, s.pool, s.cwd].join(":")).join("|");
-    if (sig !== STATE.sessionsSig) { STATE.sessionsSig = sig; renderSessions(); }
-    updateBreadcrumb();
+    const sig = sessions.map((s) => [s.session_id, s.event_count, s.last_ts, s.agent_name, s.model, s.cwd].join(":")).join("|") + "|model=" + STATE.modelFilter;
+    if (sig !== STATE.sessionsSig) { STATE.sessionsSig = sig; renderSessions(); renderModelSummary(); }
     if (STATE.view === "swimlane") window.__swimlaneOnSessions?.();
     if (STATE.view === "race") window.__raceOnSessions?.();
     if (STATE.view === "files") window.__filesOnSessions?.();
@@ -525,23 +576,23 @@ async function fetchSessionStats(sid) {
     const stats = await res.json();
     STATE.sessionStats[sid] = stats;
     // Re-render sidebar if this session is visible
-    if (STATE.sessions.some(s => s.session_id === sid)) renderSessions();
+    if (STATE.sessions.some(s => s.session_id === sid)) { renderSessions(); renderModelSummary(); }
     if (STATE.view === "swimlane") window.__swimlaneStatsUpdate?.(sid, stats);
     if (STATE.view === "race") window.__raceStatsUpdate?.(sid, stats);
     if (sid === STATE.selectedSessionId) renderAgentSubnav();
   } catch { /* ignore */ }
 }
 
-function isHiddenByAge(s) {
-  if (!STATE.hideAfter || STATE.hideAfter === "never") return false;
-  const limitMs = parseDuration(STATE.hideAfter);
-  const elapsed = Date.now() - new Date(s.last_ts).getTime();
-  return !Number.isFinite(elapsed) || elapsed > limitMs;
-}
-
 function visibleSessions() {
-  if (STATE.showHidden) return [...STATE.sessions];
-  return STATE.sessions.filter(s => !STATE.hiddenSessions.has(s.session_id) && !isHiddenByAge(s));
+  let list = STATE.showHidden ? [...STATE.sessions] : STATE.sessions.filter(s => !STATE.hiddenSessions.has(s.session_id));
+  if (STATE.modelFilter) {
+    list = list.filter(s => {
+      const stats = STATE.sessionStats[s.session_id];
+      if (stats?.models?.length) return stats.models.some(m => m.model === STATE.modelFilter);
+      return (s.model || "unknown") === STATE.modelFilter;
+    });
+  }
+  return list;
 }
 
 function saveHiddenSessions() {
@@ -646,17 +697,25 @@ function renderSessions() {
         ? window.__swimlaneIsSelected?.(s.session_id)
         : window.__raceIsSelected?.(s.session_id);
     const hiddenByUser = STATE.hiddenSessions.has(s.session_id);
-    const hiddenByAge = isHiddenByAge(s);
-    el.className = "session-item" + (isSel ? " selected" : "") + ((hiddenByUser || hiddenByAge) ? " hidden-session" : "");
+    el.className = "session-item" + (isSel ? " selected" : "") + (hiddenByUser ? " hidden-session" : "");
     const shortId = s.session_id.slice(0, 8);
     const stats = STATE.sessionStats[s.session_id];
-    const costStr = stats ? `$${stats.total_cost.toFixed(4)} · ${fmtTokens(stats.total_tokens)} tk` : "";
+    let costStr = "";
+    if (stats) {
+      if (STATE.modelFilter) {
+        const mstat = stats.models?.find(m => m.model === STATE.modelFilter);
+        const tk = mstat ? mstat.total_tokens : 0;
+        costStr = `${window.SCOPE.fmtTokens(tk)} tk`;
+      } else {
+        costStr = `$${stats.total_cost.toFixed(4)} · ${window.SCOPE.fmtTokens(stats.total_tokens)} tk`;
+      }
+    }
     const hasErr = stats && stats.error_count > 0;
     const isAckd = STATE.ackd.has(s.session_id);
     const errDotHtml = hasErr ? ` <span class="err-dot${isAckd ? ' ackd' : ''}">●</span>` : '';
     const name = s.agent_name ?? s.cwd?.split("/").pop() ?? shortId;
-    const hiddenNote = hiddenByUser ? ' <span class="session-hidden-note">hidden</span>' : (hiddenByAge ? ' <span class="session-hidden-note">aged</span>' : '');
-    const relTime = fmtRel(s.last_ts);
+    const hiddenNote = hiddenByUser ? ' <span class="session-hidden-note">hidden</span>' : '';
+    const relTime = window.SCOPE.fmtRel(s.last_ts);
 
     if (STATE.view === "swimlane" || STATE.view === "race") {
       const cb = document.createElement("input");
@@ -668,7 +727,7 @@ function renderSessions() {
 
     const info = document.createElement("div");
     info.className = "info";
-    info.innerHTML = `<div class="name">${escapeHtml(name)}${errDotHtml}${hiddenNote}</div><div class="uuid">${shortId}${s.model ? " · " + escapeHtml(s.model) : ""}</div><div class="meta">${escapeHtml(s.pool)} · ${s.event_count} events · ${relTime}</div>${costStr ? `<div class="cost">${costStr}</div>` : ""}`;
+    info.innerHTML = `<div class="name">${window.SCOPE.escapeHtml(name)}${errDotHtml}${hiddenNote}</div><div class="uuid">${shortId}${s.model ? " · " + window.SCOPE.escapeHtml(s.model) : ""}</div><div class="meta">${s.event_count} events · ${relTime}</div>${costStr ? `<div class="cost">${costStr}</div>` : ""}`;
 
     if (STATE.view === "single") {
       el.addEventListener("click", () => selectSession(s.session_id));
@@ -707,10 +766,10 @@ function buildMiniSessionItem(s) {
   const name = s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id;
   const stats = STATE.sessionStats[s.session_id];
   const costStr = stats ? ` · $${stats.total_cost.toFixed(4)}` : "";
-  el.title = `${name}\n${s.session_id.slice(0, 8)} · ${s.event_count} events · ${fmtRel(s.last_ts)}${costStr}`;
-  el.textContent = agentLetter(s);
+  el.title = `${name}\n${s.session_id.slice(0, 8)} · ${s.event_count} events · ${window.SCOPE.fmtRel(s.last_ts)}${costStr}`;
+  el.textContent = window.SCOPE.agentLetter(s);
   const dot = document.createElement("span");
-  dot.className = "mini-dot " + activityStatus(s);
+  dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
   el.appendChild(dot);
   if (STATE.view === "single") {
     el.addEventListener("click", () => selectSession(s.session_id));
@@ -731,7 +790,7 @@ setInterval(() => {
     const s = STATE.sessions.find(x => x.session_id === sid);
     if (!s) return;
     const dot = el.querySelector(".mini-dot");
-    if (dot) dot.className = "mini-dot " + activityStatus(s);
+    if (dot) dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
   });
 }, 2000);
 
@@ -759,7 +818,7 @@ function selectSession(sid) {
 
 async function loadSession(sid) {
   const s = STATE.sessions.find(x => x.session_id === sid);
-  paneLabel.textContent = s ? (s.agent_name ?? s.cwd?.split("/").pop() ?? shortId(sid)) : shortId(sid);
+  paneLabel.textContent = s ? (s.agent_name ?? s.cwd?.split("/").pop() ?? window.SCOPE.shortId(sid)) : window.SCOPE.shortId(sid);
   const events = await fetchSessionEvents(sid);
   if (STATE.selectedSessionId !== sid) return;
   STATE.events = events || [];
@@ -857,7 +916,7 @@ function buildEventRow(evt, idx, isLive = false) {
   const row = document.createElement("div");
   row.className = "evt-row" + (idx === STATE.focusedIdx ? " focused" : "");
   row.dataset.idx = idx;
-  row.innerHTML = `<span class="evt-ts">${fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${toolNamePillHTML(evt)}</span><span class="evt-summary ${summaryClass(evt)}">${escapeHtml(summaryFor(evt))}</span>`;
+  row.innerHTML = `<span class="evt-ts">${window.SCOPE.fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${window.SCOPE.toolNamePillHTML(evt)}</span><span class="evt-summary ${summaryClass(evt)}">${window.SCOPE.escapeHtml(summaryFor(evt))}</span>`;
 
   if (isLive && typeof window.__pulseColorFor === "function") {
     row.style.setProperty("--pulse-color", window.__pulseColorFor(evt.type));
@@ -1098,10 +1157,7 @@ function updateAgeTicker() {
 // ─── Breadcrumb ─────────────────────────────────────────────────────────────
 
 function updateBreadcrumb() {
-  const parts = [];
-  if (STATE.pool && STATE.pool !== "default") parts.push(`pool=${STATE.pool}`);
-  if (STATE.tag) parts.push(`tag=${STATE.tag}`);
-  headerBreadcrumb.textContent = parts.join(" · ");
+  headerBreadcrumb.textContent = "";
 }
 
 // ─── SSE ────────────────────────────────────────────────────────────────────
@@ -1115,8 +1171,6 @@ function updateSSEFilter() {
 
 function connectSSE() {
   const params = {};
-  if (STATE.pool) params.pool = STATE.pool;
-  if (STATE.tag) params.tag = STATE.tag;
   if (STATE.view === "single" && STATE.selectedSessionId) params.session_id = STATE.selectedSessionId;
   if (STATE.token) params.token = STATE.token;
   const url = apiUrl("/events/stream", params);
@@ -1152,21 +1206,7 @@ function connectSSE() {
 function disconnectSSE() { if (es) { es.close(); es = null; } setLive(false); }
 function setLive(on) { liveDot.className = on ? "green" : "red"; liveLabel.textContent = on ? "live" : "off"; }
 
-// ─── Pool/tag/sort ──────────────────────────────────────────────────────────
-
-function onFilterChange() {
-  STATE.pool = poolFilter.value.trim();
-  STATE.tag = tagFilter.value.trim();
-  updateBreadcrumb();
-  updateSSEFilter();
-  fetchSessions();
-  if (STATE.view === "swimlane") window.__swimlaneFilterChange?.();
-  if (STATE.view === "race") window.__raceFilterChange?.();
-  saveURLState();
-}
-
-poolFilter.addEventListener("input", onFilterChange);
-tagFilter.addEventListener("input", onFilterChange);
+// ─── Sort / show hidden / auto-add ──────────────────────────────────────────
 
 sortSelect.addEventListener("change", () => {
   STATE.sort = sortSelect.value;
@@ -1174,11 +1214,15 @@ sortSelect.addEventListener("change", () => {
   saveURLState();
 });
 
-hideAfterSelect.addEventListener("change", () => {
-  STATE.hideAfter = hideAfterSelect.value;
-  renderSessions();
-  saveURLState();
-});
+if (modelSelect) {
+  modelSelect.addEventListener("change", () => {
+    STATE.modelFilter = modelSelect.value;
+    STATE.sessionsSig = ""; // force re-render on filter change
+    renderSessions();
+    renderModelSummary();
+    saveURLState();
+  });
+}
 
 showHiddenCB.addEventListener("change", () => {
   STATE.showHidden = showHiddenCB.checked;
@@ -1210,79 +1254,13 @@ function loadSidebarCollapsed() {
   return localStorage.getItem("scope-sidebar-collapsed") === "1";
 }
 
-// Activity-window classification for the collapsed-sidebar status dot.
-// Tracks last_ts so it works across all three views without per-view code.
-function activityStatus(s) {
-  if (!s?.last_ts) return "gray";
-  const ageS = (Date.now() - new Date(s.last_ts).getTime()) / 1000;
-  if (ageS <= 10) return "green";
-  if (ageS <= 20) return "orange";
-  return "gray";
-}
-
-function agentLetter(s) {
-  const name = s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id ?? "?";
-  const ch = String(name).trim().charAt(0).toUpperCase();
-  return ch || "?";
-}
-
-function fmtTs(ts) {
-  try { return new Date(ts).toLocaleTimeString("en-US", { hour12: false, hour:"2-digit", minute:"2-digit", second:"2-digit" }); }
-  catch { return ts?.slice(11,19) ?? "?"; }
-}
-function fmtRel(ts) {
-  if (!ts) return "";
-  const s = Math.round((Date.now() - new Date(ts).getTime()) / 1000);
-  if (s < 60) return s <= 0 ? "now" : `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s/60)}m ago`;
-  return `${Math.floor(s/3600)}h ago`;
-}
-function fmtTokens(n) { return n >= 1000 ? (n/1000).toFixed(1) + "k" : String(n); }
-function trunc(s, n) { if (!s) return ""; s = String(s); return s.length > n ? s.slice(0,n) + "…" : s; }
-function shortId(id) { return id?.slice(0,8) ?? "?"; }
-function escapeHtml(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
-function hashString(s) {
-  let h = 2166136261;
-  for (let i = 0; i < String(s).length; i++) {
-    h ^= String(s).charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-function toolNameColors(name) {
-  const h = hashString(name);
-  const hue = h % 360;
-  const sat = 58 + ((h >>> 8) % 14);
-  return {
-    bg: `hsl(${hue} ${sat}% 22%)`,
-    border: `hsl(${hue} ${Math.min(86, sat + 12)}% 46%)`,
-    fg: `hsl(${hue} 92% 88%)`,
-  };
-}
-function toolNamePillHTML(evt) {
-  if (evt.type !== "tool_call" && evt.type !== "tool_result") return "";
-  const name = evt.payload?.tool_name;
-  if (!name) return "";
-  const c = toolNameColors(name);
-  return `<span class="tool-name-pill" title="${escapeHtml(name)}" style="--tool-bg:${c.bg};--tool-border:${c.border};--tool-fg:${c.fg}">${escapeHtml(trunc(name, 36))}</span>`;
-}
-function parseDuration(str) {
-  const m = str.match(/^(\d+)([mh])$/);
-  if (!m) return 0;
-  const val = parseInt(m[1], 10);
-  const unit = m[2];
-  if (unit === "m") return val * 60 * 1000;
-  if (unit === "h") return val * 60 * 60 * 1000;
-  return 0;
-}
-
 // ─── Exports to window.SCOPE ──────────────────────────────────────────────────
 
 Object.assign(window.SCOPE, {
   getState: () => STATE, summaryFor, summaryClass, renderDetailHTML, turnFinalResponse,
-  fmtTs, trunc, shortId, fetchSessionEvents, renderSessions, apiUrl, authHeaders,
-  fmtRel, fmtTokens, escapeHtml, toolNamePillHTML, saveURLState, updateBreadcrumb,
-  getContextWindow, computeAgentInfo, fmtDuration,
+  fetchSessionEvents, renderSessions, apiUrl, authHeaders,
+  saveURLState, updateBreadcrumb,
+  getContextWindow, computeAgentInfo,
 });
 
 // ─── Boot ───────────────────────────────────────────────────────────────────
@@ -1293,9 +1271,10 @@ setMode(STATE.mode);
 STATE.cwd = localStorage.getItem("scope-cwd") || "";
 setView(STATE.view);
 applySidebarCollapsed();
+fetchModels();
 fetchSessions();
 connectSSE();
-setInterval(fetchSessions, 10000);
+setInterval(() => { fetchModels(); fetchSessions(); }, 10000);
 updateBreadcrumb();
 initCwd();
 

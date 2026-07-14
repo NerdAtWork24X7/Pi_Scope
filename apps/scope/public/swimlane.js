@@ -6,11 +6,12 @@
 
 const STATE = window.__SCOPE_STATE;
 const O = window.SCOPE;
-const { summaryFor, summaryClass, renderDetailHTML, fmtTs, trunc, shortId, fetchSessionEvents, renderSessions, apiUrl, authHeaders, fmtRel, fmtTokens, saveURLState, getContextWindow, toolNamePillHTML } = O;
+const { summaryFor, summaryClass, renderDetailHTML, fetchSessionEvents, renderSessions, apiUrl, authHeaders, saveURLState, getContextWindow, fmtTs, trunc, shortId, fmtRel, fmtTokens, toolNamePillHTML, escapeHtml } = O;
 
 const LANES = new Map();
 let autoAddLanes = true;
 let swimlaneSSEResynced = false;
+const MAX_EVENTS_IN_MEMORY = 6000;
 
 // ─── Live-event pulse styling ───────────────────────────────────────────────
 // Each SSE-arrived row gets `.evt-new` for a one-shot slide-in + background
@@ -210,6 +211,7 @@ async function loadLaneEvents(sid) {
   if (events?.length) {
     lane.events = events;
     lane.lastSeq = events[events.length - 1].seq;
+    pruneLane(lane);
     renderLaneBody(sid);
     updateLaneAge(sid);
   }
@@ -224,6 +226,7 @@ async function resyncAllLanes() {
           for (const evt of events) {
             if (evt.seq > lane.lastSeq) { lane.events.push(evt); lane.lastSeq = evt.seq; appendLaneDOM(sid, evt); }
           }
+          pruneLane(lane);
         }
       }));
     } else { ps.push(loadLaneEvents(sid)); }
@@ -234,6 +237,17 @@ async function resyncAllLanes() {
 
 // ─── SSE routing ────────────────────────────────────────────────────────────
 
+function pruneLane(lane) {
+  if (!lane || lane.events.length <= MAX_EVENTS_IN_MEMORY) return;
+  const drop = lane.events.length - MAX_EVENTS_IN_MEMORY;
+  lane.events.splice(0, drop);
+  // Each event appends a row + detail div; remove the oldest DOM nodes.
+  const content = lane.content;
+  while (content.childNodes.length > lane.events.length * 2) {
+    content.removeChild(content.firstChild);
+  }
+}
+
 function routeSSEEvent(evt) {
   if (!LANES.has(evt.session_id)) {
     if (autoAddLanes) createLane(evt.session_id);
@@ -243,6 +257,7 @@ function routeSSEEvent(evt) {
   if (!lane || evt.seq <= lane.lastSeq) return;
   lane.events.push(evt);
   lane.lastSeq = evt.seq;
+  pruneLane(lane);
   appendLaneDOM(evt.session_id, evt, true);
   updateLaneAge(evt.session_id);
   updateLaneRow2(evt.session_id);
@@ -377,7 +392,7 @@ function updateLaneAge(sid) {
   if (!ageEl) return;
   const evts = lane.events;
   if (!evts.length) { ageEl.textContent = ""; return; }
-  ageEl.textContent = fmtRel(evts[evts.length - 1].ts);
+  ageEl.textContent = window.SCOPE.fmtRel(evts[evts.length - 1].ts);
 
   const dot = document.getElementById(`lane-dot-${sid}`);
   const s = evts.length ? Math.round((Date.now() - new Date(evts[evts.length - 1].ts).getTime()) / 1000) : 999;
@@ -385,9 +400,5 @@ function updateLaneAge(sid) {
 }
 
 setInterval(() => { for (const sid of LANES.keys()) updateLaneAge(sid); }, 2000);
-
-// ─── Helpers (mirrored from app.js since we're in an IIFE) ──────────────────
-
-function escapeHtml(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 
 })();

@@ -23,6 +23,7 @@ SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 | `SCOPE_HOST` | `127.0.0.1` | Bind address |
 | `SCOPE_DB_PATH` | `db/scope.db` | SQLite database path |
 | `SCOPE_AUTH_TOKEN` | dev_token | Bearer token for auth |
+| `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
 
 ## Smoke test
 
