@@ -93,14 +93,12 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
     // Two sources compete:
     //   1. the in-browser shell's own cwd (the "normal" terminal) via /proc/<pid>/cwd
     //   2. Herdr's focused pane cwd (the user's real terminal) via its socket
-    // The client tells us which pane the user is looking at via a
-    // `terminalFocus` control frame. When the in-browser terminal is focused,
-    // trust the shell cwd; otherwise mirror Herdr's focused pane. This way
-    // BOTH a normal in-browser session and a Herdr session keep the cwd
-    // display in sync.
+    // When the in-browser PTY is running Herdr, mirror Herdr's focused pane so
+    // the UI follows the user's actual terminal. Otherwise trust the in-browser
+    // shell's cwd once it has navigated away from its launch dir. This keeps
+    // the cwd consistent when switching between Terminal, Files and Checkpoints.
     let lastCwd = "";
     let cwdBusy = false;
-    let terminalFocused = true;
     let shellNavigated = false;
     let lastHerdrDetected: boolean | null = null;
     const pushCwd = async () => {
@@ -112,10 +110,9 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
       let cwd: string | null = shellCwd;
       // Prefer Herdr's focused pane cwd when:
       //   1. the in-browser PTY is running Herdr (shell cwd is just the launch dir), or
-      //   2. the user has switched away from the in-browser terminal (likely in Herdr), or
-      //   3. the in-browser shell hasn't navigated away from its launch dir yet,
+      //   2. the in-browser shell hasn't navigated away from its launch dir yet,
       //      so its cwd is not a useful source of truth.
-      if (runningHerdr || !terminalFocused || !shellNavigated) {
+      if (runningHerdr || !shellNavigated) {
         const h = await herdrFocusedCwd();
         if (h) cwd = h;
       }
@@ -141,7 +138,8 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
             term.resize(Math.max(1, ctrl.cols), Math.max(1, ctrl.rows)); return;
           }
           if (ctrl.type === "terminalFocus" && typeof ctrl.focused === "boolean") {
-            terminalFocused = ctrl.focused;
+            // Focus changed (e.g. user switched to/from the Terminal pane);
+            // push an updated cwd immediately.
             pushCwd();
             return;
           }
