@@ -15,6 +15,7 @@ import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { attachTerminal } from "./terminal.ts";
 import { execFileSync } from "node:child_process";
+import { WebSocket } from "ws";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -24,6 +25,9 @@ const HOST = process.env.SCOPE_HOST ?? "127.0.0.1";
 // Otherwise, default to the "db/scope.db" directory relative to the project root.
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "../..");
 const DEFAULT_DB_PATH = path.join(PROJECT_ROOT, "db", "scope.db");
+// Terminal launches at $HOME when packaged (AppImage mount is read-only); in
+// dev it opens at the project root so the shell starts where you're working.
+const TERMINAL_CWD = process.env.SCOPE_PACKAGED ? os.homedir() : PROJECT_ROOT;
 const DB_PATH = process.env.SCOPE_DB_PATH ?? DEFAULT_DB_PATH;
 
 // Ensure parent folder exists (e.g. "db/" directory) before initializing SQLite
@@ -253,11 +257,18 @@ function resolveWithinCwd(cwd: string, file: string): string | null {
 }
 
 // Default file-system sandbox for /files/* and /checkpoints/* endpoints.
-// When SCOPE_FILE_ROOT is not set, operations are restricted to the project
-// root so the server cannot be used to read or write arbitrary git-backed
-// directories. Set SCOPE_FILE_ROOT to a comma-separated list of allowed roots
-// (e.g. "/home/user/projects,/home/user/work") to broaden access.
-const DEFAULT_FILE_ROOT = PROJECT_ROOT;
+// When SCOPE_FILE_ROOT is not set, operations are restricted to the directory
+// that contains the terminal's launch directory. In dev the terminal launches
+// at the project root, so sibling projects in the same workspace are allowed.
+// In packaged mode the terminal launches at $HOME, so the whole home directory
+// is allowed. Set SCOPE_FILE_ROOT to a comma-separated list of allowed roots
+// (e.g. "/home/user/projects,/home/user/work") to override this.
+const DEFAULT_FILE_ROOT = process.env.SCOPE_PACKAGED ? TERMINAL_CWD : path.dirname(TERMINAL_CWD);
+
+// Live current working directories reported by connected terminal sessions.
+// validateCwd uses these so the Files/Checkpoints views can follow the user
+// wherever the terminal navigates, without requiring SCOPE_FILE_ROOT.
+const liveTerminalCwds = new Map<WebSocket, string>();
 
 /**
  * Validate `cwd`: must exist as a real directory (symlinks resolved). When
@@ -287,7 +298,16 @@ function validateCwd(cwd: string): string | null {
     .split(",").map((s) => s.trim()).filter(Boolean)
     .map((s) => { try { return fs.realpathSync(path.resolve(s)); } catch { return null; } })
     .filter((s): s is string => s !== null);
-  const ok = roots.some((r) => abs === r || abs.startsWith(r + path.sep));
+  let ok = roots.some((r) => abs === r || abs.startsWith(r + path.sep));
+  // Also allow any directory that a connected terminal has reported as its live
+  // cwd, so the file root follows the terminal even when it leaves the default
+  // sandbox (e.g. switching to another project).
+  if (!ok) {
+    ok = Array.from(liveTerminalCwds.values()).some((cwd) => {
+      const live = path.resolve(cwd);
+      return abs === live || abs.startsWith(live + path.sep);
+    });
+  }
   if (!ok) return null;
   return abs;
 }
@@ -851,10 +871,14 @@ const server = http.createServer(async (req, res) => {
 });
 
 // WebSocket terminal bridge (xterm.js in the browser ↔ node-pty shell on the server)
-// Terminal launches at $HOME when packaged (AppImage mount is read-only); in
-// dev it opens at the project root so the shell starts where you're working.
-const TERMINAL_CWD = process.env.SCOPE_PACKAGED ? os.homedir() : PROJECT_ROOT;
-attachTerminal(server, { port: PORT, host: HOST, token: AUTH_TOKEN, launchCwd: TERMINAL_CWD });
+attachTerminal(server, {
+  port: PORT,
+  host: HOST,
+  token: AUTH_TOKEN,
+  launchCwd: TERMINAL_CWD,
+  onCwdChange: (ws, cwd) => liveTerminalCwds.set(ws, cwd),
+  onClose: (ws) => liveTerminalCwds.delete(ws),
+});
 
 server.listen(PORT, HOST, () => {
   console.log(`  Listening on http://${HOST}:${PORT}`);

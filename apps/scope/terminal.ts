@@ -15,7 +15,16 @@ import { execFileSync } from "node:child_process";
 import pty from "node-pty";
 import { WebSocketServer, WebSocket } from "ws";
 
-interface TerminalConfig { port: number; host: string; token: string; launchCwd: string; }
+interface TerminalConfig {
+  port: number;
+  host: string;
+  token: string;
+  launchCwd: string;
+  /** Called whenever the terminal's live cwd changes. */
+  onCwdChange?: (ws: WebSocket, cwd: string) => void;
+  /** Called when a terminal connection closes. */
+  onClose?: (ws: WebSocket) => void;
+}
 
 // ─── Herdr integration ────────────────────────────────────────────────────
 // When Herdr (a terminal multiplexer) is the user's actual terminal, the
@@ -120,6 +129,7 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
       if (cwd && cwd !== lastCwd) {
         lastCwd = cwd;
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "cwd", cwd }));
+        cfg.onCwdChange?.(ws, cwd);
       }
       if (runningHerdr !== lastHerdrDetected) {
         lastHerdrDetected = runningHerdr;
@@ -155,8 +165,8 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
       }
       term.write(raw);
     });
-    ws.on("close", () => { try { clearInterval(cwdTimer); } catch {} try { term.kill(); } catch {} });
-    ws.on("error", () => { try { clearInterval(cwdTimer); } catch {} try { term.kill(); } catch {} });
+    ws.on("close", () => { try { clearInterval(cwdTimer); } catch {} try { term.kill(); } catch {} cfg.onClose?.(ws); });
+    ws.on("error", () => { try { clearInterval(cwdTimer); } catch {} try { term.kill(); } catch {} cfg.onClose?.(ws); });
   });
 }
 
