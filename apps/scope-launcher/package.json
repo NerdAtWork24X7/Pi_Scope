@@ -14,8 +14,8 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "electron": "^39.8.5",
+    "electron": "^43.1.1",
     "electron-builder": "^26.15.3",
-    "esbuild": "^0.24.0"
+    "esbuild": "^0.28.1"
   }
 }
