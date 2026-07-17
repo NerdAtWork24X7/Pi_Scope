@@ -616,7 +616,10 @@
       <span id="terminal-title" style="font-weight:500">Terminal</span>
       <input id="terminal-cwd" type="text" placeholder="/path/to/repo" title="Shared working directory — auto-synced from the terminal's current directory; used by Files &amp; Checkpoints. You can still override it manually." style="font-family:monospace;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);font-size:13.5px;padding:3px 6px;min-width:280px;flex:1">
       </input>
-      <button class="btn-sm" id="btn-cwd" type="button" title="Copy the active terminal's current working directory">CWD</button>
+      <div id="terminal-shell-picker" style="display:flex;gap:6px;align-items:center;">
+        <button class="btn-sm" id="btn-bash" type="button" title="Open a Bash terminal">Bash</button>
+        <button class="btn-sm" id="btn-herdr" type="button" title="Open a Herdr terminal">Herdr</button>
+      </div>
       <span id="terminal-status" style="margin-left:auto;color:var(--muted);font-size:13.5px">connecting…</span>
       <span id="terminal-dot" class="live-dot red" style="margin-left:6px"></span>
     </div>

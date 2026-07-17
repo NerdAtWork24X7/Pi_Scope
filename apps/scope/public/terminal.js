@@ -1,17 +1,69 @@
 (function () {
   const TERMINAL_PATH = "/terminal";
+  const LAST_SHELL_KEY = "scope-terminal-shell";
   let term = null, fit = null, ws = null, container = null, terminalVisible = false, terminalDomFocused = false, herdrDetected = false;
+  let selectedShell = "bash";
+  try { selectedShell = localStorage.getItem(LAST_SHELL_KEY) || "bash"; } catch {}
+  // Keep references to global listeners so disconnect() can remove them and
+  // avoid leaking listeners every time the terminal is recreated.
+  let focusinHandler = null, focusoutHandler = null, resizeHandler = null;
+  let ctxMenuMousedownHandler = null, ctxMenuKeydownHandler = null, ctxMenuResizeHandler = null;
+  let ctxContainerContextMenuHandler = null, ctxContainerScrollHandler = null;
+  let isConnected = false;
 
   function token() { return new URLSearchParams(location.search).get("token") || ""; }
   function wsUrl() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    return proto + "//" + location.host + TERMINAL_PATH + "?token=" + encodeURIComponent(token());
+    return proto + "//" + location.host + TERMINAL_PATH + "?token=" + encodeURIComponent(token()) + "&shell=" + encodeURIComponent(selectedShell);
   }
   function setStatus(text, live) {
     const el = document.getElementById("terminal-status");
     if (el) el.textContent = text;
     const d = document.getElementById("terminal-dot");
     if (d) d.className = "live-dot " + (live ? "green" : "red");
+  }
+
+  function shellPromptEl() {
+    let el = document.getElementById("terminal-shell-prompt");
+    if (!el && container) {
+      el = document.createElement("div");
+      el.id = "terminal-shell-prompt";
+      el.style.cssText = "display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--muted);font-family:monospace;gap:10px;";
+      el.innerHTML = '<span id="terminal-prompt-title" style="font-size:15px;">Select a terminal to start</span><span id="terminal-prompt-sub" style="font-size:13px;">Click Bash or Herdr above</span>';
+      container.appendChild(el);
+    }
+    return el;
+  }
+  function showShellPrompt(error) {
+    const el = shellPromptEl();
+    if (el) el.style.display = "flex";
+    if (container) container.style.background = "var(--bg)";
+    const sub = document.getElementById("terminal-prompt-sub");
+    if (sub) sub.textContent = error || "Click Bash or Herdr above";
+  }
+  function hideShellPrompt() {
+    const el = document.getElementById("terminal-shell-prompt");
+    if (el) el.style.display = "none";
+  }
+
+  function updateShellButtons() {
+    const bashBtn = document.getElementById("btn-bash");
+    const herdrBtn = document.getElementById("btn-herdr");
+    if (bashBtn) bashBtn.classList.toggle("active", selectedShell === "bash");
+    if (herdrBtn) herdrBtn.classList.toggle("active", selectedShell === "herdr");
+  }
+
+  function setShell(shell) {
+    if (shell !== "bash" && shell !== "herdr") return;
+    if (selectedShell === shell && isConnected) return;
+    selectedShell = shell;
+    try { localStorage.setItem(LAST_SHELL_KEY, selectedShell); } catch {}
+    updateShellButtons();
+    // Disconnect if already connected so we can reconnect with the chosen shell.
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      disconnect();
+    }
+    connect();
   }
 
   function ensureTerm() {
@@ -34,12 +86,12 @@
     // hidden textarea inside term.element; when the user clicks/types there,
     // focusin fires on that textarea and we report focused=true. When focus
     // moves outside term.element, we report focused=false.
-    document.addEventListener("focusin", (e) => {
+    focusinHandler = (e) => {
       if (!term || !term.element) return;
       if (term.element.contains(e.target)) updateDomFocus(true);
       else if (terminalDomFocused) updateDomFocus(false);
-    });
-    document.addEventListener("focusout", (e) => {
+    };
+    focusoutHandler = (e) => {
       if (!term || !term.element) return;
       // If focus is moving to another element still inside the terminal, keep
       // focused=true; focusin on that element will confirm it. If focus is
@@ -47,8 +99,11 @@
       if (terminalDomFocused && !term.element.contains(e.relatedTarget)) {
         updateDomFocus(false);
       }
-    });
-    window.addEventListener("resize", () => { requestAnimationFrame(() => { try { fit.fit(); } catch {} }); });
+    };
+    resizeHandler = () => { requestAnimationFrame(() => { try { fit.fit(); } catch {} }); };
+    document.addEventListener("focusin", focusinHandler);
+    document.addEventListener("focusout", focusoutHandler);
+    window.addEventListener("resize", resizeHandler);
   }
 
   function sendFocus(focused) {
@@ -66,12 +121,14 @@
   }
 
   function connect() {
-    ensureTerm();
     // Reuse the existing socket if it's still live — switching away from and
     // back to the Terminal view must NOT reset the session.
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    hideShellPrompt();
+    ensureTerm();
     ws = new WebSocket(wsUrl());
     ws.onopen = () => {
+      isConnected = true;
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
       // Sync the server with the actual visibility state, so reconnects while
       // the terminal is hidden don't incorrectly claim focus.
@@ -88,20 +145,31 @@
             if (window.__setCwd) window.__setCwd(m.cwd);
             return;
           }
-          if (m && m.type === "cwdRes") {
-            if (cwdReqCb) { const cb = cwdReqCb; cwdReqCb = null; cb(m); }
-            return;
-          }
           if (m && m.type === "herdr" && typeof m.detected === "boolean") {
             herdrDetected = m.detected;
+            return;
+          }
+          if (m && m.type === "error" && typeof m.message === "string") {
+            showShellPrompt(m.message);
             return;
           }
         } catch {}
       }
       if (term) term.write(data);
     };
-    ws.onclose = () => { setStatus("disconnected", false); ws = null; };
-    ws.onerror = () => { setStatus("error", false); };
+    ws.onclose = (ev) => {
+      const wasClean = ev && ev.wasClean;
+      ws = null;
+      disconnect();
+      setStatus("disconnected", false);
+      if (terminalVisible && !wasClean) {
+        showShellPrompt("Connection closed — select a shell to retry");
+      }
+    };
+    ws.onerror = () => {
+      setStatus("error", false);
+      if (terminalVisible) showShellPrompt("Connection error — select a shell to retry");
+    };
   }
 
   // Build a lightweight right-click menu offering Copy / Paste, since xterm
@@ -118,11 +186,6 @@
         '<button type="button" data-act="copy">Copy</button>' +
         '<button type="button" data-act="paste">Paste</button>';
       document.body.appendChild(menu);
-      document.addEventListener("mousedown", (e) => {
-        if (menu && !menu.contains(e.target)) hideMenu();
-      });
-      document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideMenu(); });
-      window.addEventListener("resize", hideMenu);
       menu.addEventListener("click", (e) => {
         const act = e.target.getAttribute("data-act");
         if (!act) return;
@@ -170,43 +233,72 @@
       try { document.execCommand("copy"); } catch {}
       document.body.removeChild(ta);
     }
-    container.addEventListener("contextmenu", (e) => {
+    // Always (re-)attach the global listeners; disconnect() removes them.
+    ctxMenuMousedownHandler = (e) => {
+      if (menu && !menu.contains(e.target)) hideMenu();
+    };
+    ctxMenuKeydownHandler = (e) => { if (e.key === "Escape") hideMenu(); };
+    ctxMenuResizeHandler = hideMenu;
+    document.addEventListener("mousedown", ctxMenuMousedownHandler);
+    document.addEventListener("keydown", ctxMenuKeydownHandler);
+    window.addEventListener("resize", ctxMenuResizeHandler);
+    ctxContainerContextMenuHandler = (e) => {
+      if (!term || !term.element) return;
+      if (!term.element.contains(e.target)) return;
       if (herdrDetected) return; // let Herdr's own right-click menu handle it
       e.preventDefault();
       showMenu(e.clientX, e.clientY);
-    });
+    };
+    ctxContainerScrollHandler = hideMenu;
+    // Listen at document level in capture phase so the menu shows even if
+    // xterm.js stops propagation of the contextmenu event.
+    document.addEventListener("contextmenu", ctxContainerContextMenuHandler, true);
     // Hide when the terminal scrolls, so the menu doesn't float detached.
-    container.addEventListener("scroll", hideMenu, true);
-  }
-
-  function copyText(text) {
-    if (!text) return false;
-    try { navigator.clipboard.writeText(text); return true; } catch { return false; }
-  }
-  function flashStatus(text, ok) {
-    setStatus(text, !!ok);
-    setTimeout(() => {
-      const live = ws && ws.readyState === WebSocket.OPEN;
-      setStatus(live ? "connected" : "disconnected", live);
-    }, 1500);
-  }
-
-  let cwdReqCb = null;
-  function requestCwd(cb) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) { flashStatus("not connected", false); return; }
-    cwdReqCb = cb;
-    ws.send(JSON.stringify({ type: "cwdReq" }));
+    container.addEventListener("scroll", ctxContainerScrollHandler, true);
   }
 
   function disconnect() {
-    if (ws) { try { ws.close(); } catch {} ws = null; }
+    if (ws) {
+      // Remove listeners so a stale close event from this socket doesn't
+      // clobber a new connection created right after this disconnect.
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      try { ws.close(); } catch {}
+      ws = null;
+    }
     if (term) { try { term.dispose(); } catch {} term = null; fit = null; }
+    // Tear down global listeners registered by ensureTerm/setupContextMenu so
+    // they don't accumulate across reconnects.
+    if (focusinHandler) { document.removeEventListener("focusin", focusinHandler); focusinHandler = null; }
+    if (focusoutHandler) { document.removeEventListener("focusout", focusoutHandler); focusoutHandler = null; }
+    if (resizeHandler) { window.removeEventListener("resize", resizeHandler); resizeHandler = null; }
+    if (ctxMenuMousedownHandler) { document.removeEventListener("mousedown", ctxMenuMousedownHandler); ctxMenuMousedownHandler = null; }
+    if (ctxMenuKeydownHandler) { document.removeEventListener("keydown", ctxMenuKeydownHandler); ctxMenuKeydownHandler = null; }
+    if (ctxMenuResizeHandler) { window.removeEventListener("resize", ctxMenuResizeHandler); ctxMenuResizeHandler = null; }
+    if (ctxContainerContextMenuHandler) { document.removeEventListener("contextmenu", ctxContainerContextMenuHandler, true); ctxContainerContextMenuHandler = null; }
+    if (ctxContainerScrollHandler && container) { container.removeEventListener("scroll", ctxContainerScrollHandler, true); ctxContainerScrollHandler = null; }
+    isConnected = false;
+    herdrDetected = false;
+    if (terminalVisible) showShellPrompt();
   }
 
   window.__terminalOnShow = function () {
     terminalVisible = true;
     if (!container) container = document.getElementById("terminal-mount");
-    connect();
+    // Only auto-connect if the user has previously chosen a shell; otherwise
+    // wait for an explicit Bash/Herdr selection.
+    if (!isConnected) {
+      const last = localStorage.getItem(LAST_SHELL_KEY);
+      if (last === "bash" || last === "herdr") {
+        selectedShell = last;
+        connect();
+      } else {
+        showShellPrompt();
+      }
+    }
+    updateShellButtons();
     // Report the actual DOM focus state now that the pane is visible. If the
     // user clicked the Terminal tab, xterm.js may already have focus; if not,
     // we stay unfocused and mirror Herdr.
@@ -224,17 +316,11 @@
   };
   window.addEventListener("beforeunload", disconnect);
 
-  (function wireCwdButton() {
-    const btn = document.getElementById("btn-cwd");
-    if (!btn) return;
-    btn.addEventListener("click", () => {
-      // Ask the server for the in-browser terminal's real cwd (where the user
-      // actually is), so it matches the directory inside the terminal.
-      requestCwd((m) => {
-        const cwd = (m && m.cwd) || "";
-        const ok = copyText(cwd);
-        flashStatus(ok ? "cwd copied" : "cwd unavailable", ok);
-      });
-    });
+  (function wireShellButtons() {
+    const bashBtn = document.getElementById("btn-bash");
+    const herdrBtn = document.getElementById("btn-herdr");
+    if (bashBtn) bashBtn.addEventListener("click", () => setShell("bash"));
+    if (herdrBtn) herdrBtn.addEventListener("click", () => setShell("herdr"));
+    updateShellButtons();
   })();
 })();

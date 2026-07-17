@@ -25,3 +25,4 @@ apps/scope-launcher/server-bundle/
 apps/scope-launcher/dist/
 apps/scope-launcher/node-portable/
 
+squashfs-root/

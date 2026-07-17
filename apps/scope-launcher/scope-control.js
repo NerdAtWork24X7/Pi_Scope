@@ -85,6 +85,12 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
       SCOPE_PORT: String(cfg.port),
       SCOPE_HOST: cfg.host,
       SCOPE_AUTH_TOKEN: cfg.token,
+      // Make sure the packaged server sees the user's real environment even when
+      // launched from a desktop session that may not inherit shell env vars.
+      HOME: process.env.HOME || os.homedir(),
+      USER: process.env.USER || (() => { try { return os.userInfo().username; } catch { return ""; } })(),
+      SHELL: process.env.SHELL || "/bin/bash",
+      PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
     };
     const launch = serverLaunch();
     const proc = spawn(launch.bin, launch.args, { cwd: launch.cwd, env, detached: true, stdio: "inherit" });
