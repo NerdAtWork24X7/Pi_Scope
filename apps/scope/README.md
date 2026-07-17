@@ -25,14 +25,26 @@ SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 | `SCOPE_AUTH_TOKEN` | dev_token | Bearer token for auth |
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
 
+## Herdr cwd integration
+
+The Terminal endpoint supports a **Herdr** multiplexer shell. When selected, the shared
+working directory (used by `/files/*` and `/checkpoints/*`) mirrors the focused Herdr
+pane's live cwd — queried over Herdr's Unix socket — instead of the frozen PTY directory.
+
+The server resolves the socket from `$HERDR_SOCKET_PATH` / `$HERDR_SOCK`, then the XDG
+paths `~/.config/herdr/herdr.sock`, `~/.local/share/herdr/herdr.sock`, and
+`$XDG_RUNTIME_DIR/herdr.sock`, with a 3-second discovery cache so a Herdr that starts
+after the server is also detected. If no socket is reachable it falls back to the PTY's
+`/proc/<pid>/cwd`.
+
 ## Smoke test
 
 ```bash
 # Terminal 1: start server
 SCOPE_AUTH_TOKEN=dev_token node server.ts
 
-# Terminal 2: run smoke tests
-SCOPE_AUTH_TOKEN=dev_token bash ../../scripts/smoke-server.sh
+# Terminal 2: check health (expect HTTP 200)
+curl -i http://127.0.0.1:43190/health
 ```
 
 ## API

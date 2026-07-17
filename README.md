@@ -138,6 +138,21 @@ the view and stays connected across view switches (it only closes when you leave
 
 ![Terminal](docs/shots/terminal.png)
 
+### Herdr terminal
+
+The Terminal shell picker offers two shells: **Bash** (a plain in-browser PTY) and
+**Herdr** (a terminal multiplexer). Pick **Herdr** to drive a Herdr session inside the
+pane instead of bash.
+
+When Herdr is selected, the shared working directory mirrors the **focused Herdr pane's**
+live cwd — so the Files and Checkpoints panes follow whatever Herdr pane you're actively
+driving, not the frozen PTY launch directory. The server discovers Herdr's Unix socket
+from `$HERDR_SOCKET_PATH` / `$HERDR_SOCK` or the well-known XDG path
+(`~/.config/herdr/herdr.sock`), re-checking every few seconds so a Herdr that starts after
+the server is also picked up; it falls back to the PTY's `/proc/<pid>/cwd` if the socket is
+unreachable. While Herdr is detected, the in-browser right-click menu is suppressed so
+Herdr's own context menu works.
+
 ## Files view
 
 Toolbar: `☰ files` toggle, cwd label, `☐ ignored` checkbox (show ignored files), `↻ refresh`.
