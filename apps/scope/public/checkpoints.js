@@ -52,6 +52,11 @@
         meta.className = "cp-meta";
         const t = window.SCOPE.fmtRel(it.ts);
         meta.innerHTML = `<span class="cp-sha">${window.SCOPE.escapeHtml(window.SCOPE.shortId(it.sha))}</span> · ${window.SCOPE.escapeHtml(t)}`;
+        const merge = document.createElement("button");
+        merge.className = "btn-sm cp-merge";
+        merge.textContent = "↘ merge";
+        merge.title = "Merge this checkpoint branch into another branch";
+        merge.onclick = () => mergeCheckpoint(it.ref);
         const restore = document.createElement("button");
         restore.className = "btn-sm cp-restore";
         restore.textContent = "↺ restore";
@@ -62,6 +67,7 @@
         del.onclick = () => deleteCheckpoint(it.ref);
         row.appendChild(msg);
         row.appendChild(meta);
+        row.appendChild(merge);
         row.appendChild(restore);
         row.appendChild(del);
         listEl.appendChild(row);
@@ -111,15 +117,115 @@
     }
   }
 
-  async function deleteCheckpoint(ref) {
-    const cwd = selectedCwd();
-    if (!cwd) { statusEl.textContent = "set a working directory first (Terminal pane)"; return; }
-    if (!confirm("Delete this checkpoint?\n\nThis removes the git ref (refs/checkpoints/...). The snapshot commit may linger until git gc but can no longer be restored.")) return;
+  const mergeModal = $("#cp-merge-modal");
+  const mergeSelect = $("#cp-merge-branch-select");
+  const mergeConfirm = $("#cp-merge-confirm");
+  const mergeCancel = $("#cp-merge-cancel");
+  const mergeSubtitle = $("#cp-merge-subtitle");
+  let pendingMergeRef = "";
+
+  function checkpointBranchName(ref) {
     const parts = ref.split("/");
     const id = parts.pop();
     const ns = parts[parts.length - 1];
-    const branchName = `checkpoints/${ns}/${id}`;
-    const deleteBranch = confirm(`Also delete the checkpoint branch ${branchName}?\n\nThis branch is unique to this checkpoint and safe to remove — it does not affect other checkpoints.`);
+    return `checkpoints/${ns}/${id}`;
+  }
+
+  function closeMergeModal() {
+    mergeModal.style.display = "none";
+    pendingMergeRef = "";
+    mergeSelect.innerHTML = "";
+    if (mergeSubtitle) mergeSubtitle.textContent = "";
+  }
+
+  async function openMergeModal(ref) {
+    const cwd = selectedCwd();
+    if (!cwd) { statusEl.textContent = "set a working directory first (Terminal pane)"; return; }
+    pendingMergeRef = ref;
+    statusEl.textContent = "loading branches…";
+    try {
+      const res = await fetch(window.apiUrl("/checkpoints/branches", { cwd, token: S.token }), { headers: window.authHeaders() });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        statusEl.textContent = "failed to load branches: " + window.SCOPE.escapeHtml(data.error || res.status);
+        return;
+      }
+      mergeSelect.innerHTML = "";
+      if (mergeSubtitle) mergeSubtitle.textContent = checkpointBranchName(ref);
+      const ownBranch = checkpointBranchName(ref);
+      const branches = (data.branches || []).filter((b) => b !== ownBranch);
+      for (const b of branches) {
+        const opt = document.createElement("option");
+        opt.value = b;
+        opt.textContent = b === data.current ? b + " (current)" : b;
+        if (b === data.current) opt.selected = true;
+        mergeSelect.appendChild(opt);
+      }
+      mergeConfirm.disabled = branches.length === 0;
+      if (branches.length === 0) {
+        const opt = document.createElement("option");
+        opt.textContent = "no other branches";
+        opt.disabled = true;
+        mergeSelect.appendChild(opt);
+      }
+      mergeModal.style.display = "flex";
+      statusEl.textContent = "";
+    } catch (e) {
+      statusEl.textContent = "error loading branches: " + window.SCOPE.escapeHtml(String(e));
+    }
+  }
+
+  async function doMerge() {
+    const target = (mergeSelect.value || "").trim();
+    if (!target || !pendingMergeRef) return;
+    const cpBranch = checkpointBranchName(pendingMergeRef);
+    if (!confirm(`Merge checkpoint branch ${cpBranch} into '${target}'?\n\nThis runs \`git merge --no-ff\` on the target branch.`)) return;
+    const cwd = selectedCwd();
+    const ref = pendingMergeRef;
+    closeMergeModal();
+    statusEl.textContent = "merging…";
+    try {
+      const res = await fetch(window.apiUrl("/checkpoints/merge", { token: S.token }), {
+        method: "POST",
+        headers: { ...window.authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ cwd, ref, target }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        statusEl.textContent = "merge failed: " + window.SCOPE.escapeHtml(data.error || res.status);
+        return;
+      }
+      statusEl.textContent = "merged into " + window.SCOPE.escapeHtml(target);
+      loadCheckpoints();
+      askDeleteAfterMerge(ref);
+    } catch (e) {
+      statusEl.textContent = "error: " + window.SCOPE.escapeHtml(String(e));
+    }
+  }
+
+  function askDeleteAfterMerge(ref) {
+    const branchName = checkpointBranchName(ref);
+    if (!confirm(`Delete the checkpoint branch ${branchName}?\n\nIt is no longer needed after the merge. Click OK to remove it, or Cancel to keep it.`)) return;
+    deleteCheckpoint(ref, true);
+  }
+
+  mergeCancel.onclick = closeMergeModal;
+  mergeConfirm.onclick = doMerge;
+  mergeModal.onclick = (e) => { if (e.target === mergeModal) closeMergeModal(); };
+
+  async function mergeCheckpoint(ref) {
+    await openMergeModal(ref);
+  }
+
+  async function deleteCheckpoint(ref, skipConfirm = false) {
+    const cwd = selectedCwd();
+    if (!cwd) { statusEl.textContent = "set a working directory first (Terminal pane)"; return; }
+    const branchName = checkpointBranchName(ref);
+    let deleteBranch = true;
+    if (!skipConfirm) {
+      if (!confirm("Delete this checkpoint?\n\nThis removes the git ref (refs/checkpoints/...). The snapshot commit may linger until git gc but can no longer be restored.")) return;
+      deleteBranch = confirm(`Also delete the checkpoint branch ${branchName}?\n\nThis branch is unique to this checkpoint and safe to remove — it does not affect other checkpoints.`);
+    }
     statusEl.textContent = "deleting…";
     try {
       const res = await fetch(window.apiUrl("/checkpoints/delete", { token: S.token }), {

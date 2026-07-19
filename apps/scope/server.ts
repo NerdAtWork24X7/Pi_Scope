@@ -763,6 +763,76 @@ async function handle(req: Request): Promise<Response> {
     }
   }
 
+  // ── GET /checkpoints/branches ───────────────────────────────────────────
+  if (pathname === "/checkpoints/branches" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    try {
+      git(absCwd, ["rev-parse", "--is-inside-work-tree"]);
+      const current = git(absCwd, ["branch", "--show-current"]).trim();
+      const out = git(absCwd, ["for-each-ref", "--format=%(refname:lstrip=2)", "--sort=-committerdate", "refs/heads"]);
+      const branches: string[] = [];
+      for (const line of out.split("\n")) {
+        const name = line.trim();
+        if (!name) continue;
+        branches.push(name);
+      }
+      return jsonResponse({ ok: true, branches, current });
+    } catch (err: any) {
+      return jsonResponse({ ok: false, error: String(err?.message ?? err).split("\n")[0] }, 500);
+    }
+  }
+
+  // ── POST /checkpoints/merge ─────────────────────────────────────────────
+  if (pathname === "/checkpoints/merge" && method === "POST") {
+    let bodyText: string;
+    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
+    let parsed: any;
+    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const ref = parsed.ref ?? "";
+    if (!ref.startsWith("refs/checkpoints/")) {
+      return jsonResponse({ error: "ref must be a checkpoint ref (refs/checkpoints/...)" }, 400);
+    }
+    const target = typeof parsed.target === "string" && parsed.target.trim() ? parsed.target.trim() : "";
+    if (!target) return jsonResponse({ error: "missing target branch" }, 400);
+    const cwd = parsed.cwd ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    try {
+      const parts = ref.split("/");
+      const id = parts.pop() ?? "";
+      const ns = parts.pop() ?? "";
+      const cpBranch = `checkpoints/${ns}/${id}`;
+      // Verify both the checkpoint ref and the target branch exist.
+      git(absCwd, ["rev-parse", "--verify", ref]);
+      try { git(absCwd, ["rev-parse", "--verify", `refs/heads/${target}`]); }
+      catch { return jsonResponse({ ok: false, git: true, error: `target branch '${target}' does not exist` }, 400); }
+      if (target === cpBranch) {
+        return jsonResponse({ ok: false, git: true, error: "cannot merge a checkpoint branch into itself" }, 400);
+      }
+      // Refuse to proceed if the working tree is dirty so we don't stash or lose changes.
+      const status = git(absCwd, ["status", "--porcelain"]);
+      if (status.trim().length > 0) {
+        return jsonResponse({ ok: false, git: true, error: "working tree has uncommitted changes — commit or stash them before merging" }, 409);
+      }
+      // Switch to target branch, then merge the checkpoint ref into it.
+      git(absCwd, ["switch", target]);
+      try {
+        git(absCwd, ["merge", "--no-ff", "-m", `Merge checkpoint ${id} into ${target}`, ref]);
+      } catch (mergeErr: any) {
+        const conflictMsg = String(mergeErr?.message ?? mergeErr).split("\n")[0];
+        return jsonResponse({ ok: false, git: true, conflict: true, error: `merge conflict: ${conflictMsg}. Resolve conflicts manually in your terminal.` }, 409);
+      }
+      const sha = git(absCwd, ["rev-parse", "HEAD"]).trim();
+      return jsonResponse({ ok: true, ref, target, sha, branch: cpBranch });
+    } catch (err: any) {
+      return jsonResponse({ ok: false, error: String(err?.message ?? err).split("\n")[0] }, 500);
+    }
+  }
+
   // ── POST /checkpoints/delete ────────────────────────────────────────────
   if (pathname === "/checkpoints/delete" && method === "POST") {
     let bodyText: string;
