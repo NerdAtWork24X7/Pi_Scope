@@ -927,7 +927,8 @@ const server = http.createServer(async (req, res) => {
   try {
     response = await handle(request);
   } catch (err) {
-    response = jsonResponse({ error: String(err) }, 500);
+    console.error("Request handling failed:", err);
+    response = jsonResponse({ error: "Internal server error" }, 500);
   }
   // Restrict CORS to loopback origins that match this server (see corsOrigin).
   response.headers.set("access-control-allow-origin", corsOrigin(request));
