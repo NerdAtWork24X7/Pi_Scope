@@ -236,7 +236,7 @@
       const data = await res.json();
       if (!res.ok || !data.ok) statusEl.textContent = "delete failed: " + window.SCOPE.escapeHtml(data.error || res.status);
       else {
-        let s = "deleted " + (id || ref) + (data.deleteBranch ? " (branch removed)" : "");
+        let s = "deleted " + window.SCOPE.escapeHtml(ref) + (data.deleteBranch ? " (branch removed)" : "");
         if (data.message) s += " — " + data.message;
         statusEl.textContent = s;
         loadCheckpoints();
