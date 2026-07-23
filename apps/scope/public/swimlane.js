@@ -128,14 +128,46 @@ function createLane(sid) {
   const header = document.createElement("div");
   header.className = "lane-header";
   const costStr = (STATE.sessionStats[sid]?.total_cost !== undefined) ? `$${STATE.sessionStats[sid].total_cost.toFixed(4)}` : "";
-  header.innerHTML = `
-    <span class="lane-dot off" id="lane-dot-${sid}"></span>
-    <span class="lane-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-    <span class="lane-model">${escapeHtml(sess?.model ?? "")}</span>
-    <span class="lane-cost" id="lane-cost-${sid}">${costStr}</span>
-    <span id="lane-age-${sid}" style="color:var(--muted);font-size:8px;margin-left:auto;"></span>
-    <button class="lane-close" title="Close lane" onclick="event.stopPropagation();window.__swimlaneToggle('${sid}')">×</button>
-  `;
+
+  const dot = document.createElement("span");
+  dot.className = "lane-dot off";
+  dot.id = `lane-dot-${sid}`;
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "lane-name";
+  nameEl.title = name;
+  nameEl.textContent = name;
+
+  const modelEl = document.createElement("span");
+  modelEl.className = "lane-model";
+  modelEl.textContent = sess?.model ?? "";
+
+  const costEl = document.createElement("span");
+  costEl.className = "lane-cost";
+  costEl.id = `lane-cost-${sid}`;
+  costEl.textContent = costStr;
+
+  const ageEl = document.createElement("span");
+  ageEl.id = `lane-age-${sid}`;
+  ageEl.style.color = "var(--muted)";
+  ageEl.style.fontSize = "8px";
+  ageEl.style.marginLeft = "auto";
+
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "lane-close";
+  closeBtn.title = "Close lane";
+  closeBtn.textContent = "×";
+  closeBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    window.__swimlaneToggle(sid);
+  });
+
+  header.appendChild(dot);
+  header.appendChild(nameEl);
+  header.appendChild(modelEl);
+  header.appendChild(costEl);
+  header.appendChild(ageEl);
+  header.appendChild(closeBtn);
 
   // Compressed metrics line under the main header: events · in · out · ctx %
   const header2 = document.createElement("div");
