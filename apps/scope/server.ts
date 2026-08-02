@@ -312,14 +312,28 @@ function validateCwd(cwd: string): string | null {
   return abs;
 }
 
-/** Run a git command in `cwd`; returns stdout string, throws on failure. */
-function git(cwd: string, args: string[]): string {
-  const out = execFileSync("git", ["-C", cwd, ...args], {
+/** Run a git command in `cwd`; returns stdout string, throws on failure.
+ * `config` is passed as inline `-c key=value` options so it never touches the
+ * user's global or local git config. */
+function git(cwd: string, args: string[], config: Record<string, string> = {}): string {
+  const configArgs = Object.entries(config).flatMap(([k, v]) => ["-c", `${k}=${v}`]);
+  const out = execFileSync("git", ["-C", cwd, ...configArgs, ...args], {
     encoding: "utf8",
     timeout: 20_000,
     maxBuffer: 32 * 1024 * 1024,
   });
   return typeof out === "string" ? out : out.toString();
+}
+
+/** Ensure `cwd` is a git repository; initialize it if needed. */
+function ensureGitRepo(cwd: string): { initialized: boolean } {
+  try {
+    git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+    return { initialized: false };
+  } catch {
+    git(cwd, ["init"]);
+    return { initialized: true };
+  }
 }
 
 // ─── Routing helpers ────────────────────────────────────────────────────────
@@ -678,7 +692,7 @@ async function handle(req: Request): Promise<Response> {
     if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     const label = typeof parsed.label === "string" && parsed.label.trim() ? parsed.label.trim().slice(0, 120) : "";
     try {
-      git(absCwd, ["rev-parse", "--is-inside-work-tree"]);
+      const { initialized } = ensureGitRepo(absCwd);
       const ns = cwdNs(absCwd);
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       const message = `chk: ${id}${label ? " · " + label : ""}`;
@@ -691,19 +705,26 @@ async function handle(req: Request): Promise<Response> {
       const tree = git(absCwd, ["write-tree"]).trim();
       // Parent: most recent existing checkpoint commit for this cwd (keeps a linear
       // history); fall back to current HEAD when this is the first checkpoint.
-      let parent = "HEAD";
+      let parent: string | null = null;
+      try {
+        git(absCwd, ["rev-parse", "--verify", "HEAD"]);
+        parent = "HEAD";
+      } catch {}
       try {
         const prev = git(absCwd, ["for-each-ref", "--format=%(objectname)", "--sort=-creatordate", `refs/checkpoints/${ns}/*`])
           .split("\n").map((l: string) => l.trim()).find((l: string) => l);
         if (prev) parent = prev;
       } catch {}
-      const sha = git(absCwd, ["commit-tree", tree, "-p", parent, "-m", message]).trim();
+      const gitConfig = { "user.name": "Pi Scope", "user.email": "scope@localhost" };
+      const commitArgs = ["commit-tree", tree, "-m", message];
+      if (parent) commitArgs.push("-p", parent);
+      const sha = git(absCwd, commitArgs, gitConfig).trim();
       git(absCwd, ["branch", "-f", cpBranch, sha]);
       git(absCwd, ["switch", cpBranch]); // move HEAD onto the new checkpoint branch (working tree unchanged)
       const ref = `refs/checkpoints/${ns}/${id}`;
       git(absCwd, ["update-ref", ref, sha]);
       git(absCwd, ["reset", "-q"]); // restore index to HEAD (now cpBranch); working tree unchanged
-      return jsonResponse({ ok: true, ref, sha, message, session: ns, ts: new Date().toISOString() });
+      return jsonResponse({ ok: true, ref, sha, message, session: ns, ts: new Date().toISOString(), initializedGit: initialized });
     } catch (err: any) {
       return jsonResponse({ git: true, ok: false, error: String(err?.message ?? err).split("\n")[0] }, 500);
     }

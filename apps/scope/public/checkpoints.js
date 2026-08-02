@@ -90,7 +90,7 @@
       });
       const data = await res.json();
       if (!res.ok || !data.ok) statusEl.textContent = "failed: " + window.SCOPE.escapeHtml(data.error || res.status);
-      else { statusEl.textContent = "created " + window.SCOPE.shortId(data.sha); labelInput.value = ""; loadCheckpoints(); }
+      else { statusEl.textContent = (data.initializedGit ? "initialized git and " : "") + "created " + window.SCOPE.shortId(data.sha); labelInput.value = ""; loadCheckpoints(); }
     } catch (e) {
       statusEl.textContent = "error: " + window.SCOPE.escapeHtml(String(e));
     } finally {
