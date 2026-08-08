@@ -79,7 +79,7 @@ the extension (above) to feed it. The server writes its per-run token to `tmp/sc
 
 Watch a quick tour of the 5.0.0 features:
 
-<video src="docs/video/Pi-Scope-5.0.0-features.mp4" controls width="640" alt="Pi Scope 5.0.0 feature tour"></video>
+![](docs/video/Pi-Scope-5.0.0-features.mp4)
 
 ## The layout
 
