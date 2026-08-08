@@ -77,6 +77,10 @@ the extension (above) to feed it. The server writes its per-run token to `tmp/sc
 
 ## Using the UI
 
+Watch a quick tour of the 5.0.0 features:
+
+<video src="docs/video/Pi-Scope-5.0.0-features.mp4" controls width="640" alt="Pi Scope 5.0.0 feature tour"></video>
+
 ## The layout
 
 - **Top bar** — view buttons: `Single` · `Swimlane` · `Race` · `Terminal` · `Files` · `Checkpoints`. A live dot is green when the live feed (SSE) is connected, red when off.
