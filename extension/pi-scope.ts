@@ -66,6 +66,7 @@ interface LLMRequestPayload {
   tools?: string[];
   model?: string;
   message_count?: number;
+  request_args?: Record<string, string>;
 }
 
 interface AgentEndPayload {
@@ -287,12 +288,12 @@ function sha256hex(s: string): string {
 // Anthropic keeps the system prompt in `payload.system` (string or array of
 // {type:"text",text}); OpenAI-style puts it as `payload.messages[0]` with role
 // "system"/"developer". Tools/message-count are normalized when present.
-function extractFinalSystemPrompt(payload: any): { text: string; tools: string[]; model?: string; messageCount?: number } {
+function extractFinalSystemPrompt(payload: any): { text: string; tools: string[]; model?: string; messageCount?: number; args: Record<string, string> } {
   let text = "";
   const tools: string[] = [];
   let model: string | undefined;
   let messageCount: number | undefined;
-  if (!payload || typeof payload !== "object") return { text, tools, model, messageCount };
+  if (!payload || typeof payload !== "object") return { text, tools, model, messageCount, args: {} };
 
   if (payload.system != null) {
     if (typeof payload.system === "string") {
@@ -320,7 +321,48 @@ function extractFinalSystemPrompt(payload: any): { text: string; tools: string[]
   }
   if (typeof payload.model === "string") model = payload.model;
   if (Array.isArray(payload.messages)) messageCount = payload.messages.length;
-  return { text, tools, model, messageCount };
+  const args = extractRequestArgs(payload);
+  return { text, tools, model, messageCount, args };
+}
+
+// Provider request parameters worth surfacing in the LLM-request inspector — the
+// "knobs" the request was sent with (thinking mode, sampling temperature, token
+// caps, etc.). event.payload is the EXACT body pi ships to the model (built by
+// the external provider SDK), so field names vary by provider. Rather than a
+// fixed whitelist (which misses provider-specific params), we surface every
+// top-level key EXCEPT the structural ones (system prompt / messages / tools /
+// model, which are captured separately) — so temperature, max_tokens, top_p,
+// thinking, reasoning_effort, stop, stream, … all show regardless of naming.
+const STRUCTURAL_PAYLOAD_KEYS = new Set(["system", "messages", "tools", "model"]);
+
+function normalizeArgValue(key: string, value: any): string {
+  if (value === undefined || value === null) return "null";
+  if (key === "thinking") {
+    if (typeof value === "object") {
+      const enabled = value.type === "enabled" || value.enabled === true;
+      if (!enabled) return "disabled";
+      const budget = value.budget_tokens ?? value.budgetTokens;
+      return budget != null ? `enabled (budget_tokens=${budget})` : "enabled";
+    }
+    return String(value);
+  }
+  if (Array.isArray(value)) return value.length ? JSON.stringify(value) : "[]";
+  if (typeof value === "object") {
+    try { return JSON.stringify(value); } catch { return String(value); }
+  }
+  return String(value);
+}
+
+function extractRequestArgs(payload: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!payload || typeof payload !== "object") return out;
+  for (const key of Object.keys(payload)) {
+    if (STRUCTURAL_PAYLOAD_KEYS.has(key)) continue;
+    const raw = (payload as any)[key];
+    if (raw === undefined || raw === null) continue;
+    out[key] = normalizeArgValue(key, raw);
+  }
+  return out;
 }
 
 function createEventEnvelope<T>(
@@ -685,7 +727,7 @@ export default function (pi: ExtensionAPI) {
   // distinct system prompt (gated on sha256) so overrides/compactions/retries don't spam events.
   pi.on("before_provider_request", async (event, _ctx) => {
     if (!queue || !sessionInfo) return;
-    const { text, tools, model, messageCount } = extractFinalSystemPrompt(event.payload);
+    const { text, tools, model, messageCount, args } = extractFinalSystemPrompt(event.payload);
     if (!text) return;
     const sig = sha256hex(text + "\u0000" + tools.join(",") + "\u0000" + (model ?? ""));
     if (sig === lastFinalSysSig) return;
@@ -694,6 +736,7 @@ export default function (pi: ExtensionAPI) {
     if (tools.length) payload.tools = tools;
     if (model) payload.model = model;
     if (messageCount != null) payload.message_count = messageCount;
+    if (Object.keys(args).length) payload.request_args = args;
     queue.push(createEventEnvelope("llm_request", payload, sessionInfo));
   });
 

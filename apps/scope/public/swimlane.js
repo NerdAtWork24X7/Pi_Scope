@@ -326,7 +326,13 @@ function appendLaneDOM(sid, evt, isLive = false) {
   const detail = document.createElement("div");
   detail.className = "lane-evt-detail";
   const cBtn = `<button class="copy-btn" onclick="event.stopPropagation();SCOPE.copyEvent('${evt.event_id}')">📋</button>`;
-  detail.innerHTML = `${cBtn}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+  let detailHTML;
+  if (evt.type === "llm_request" && typeof window.renderLLMRequestHTML === "function") {
+    detailHTML = window.renderLLMRequestHTML(evt.payload);
+  } else {
+    detailHTML = `<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+  }
+  detail.innerHTML = `${cBtn}${detailHTML}`;
 
   row.addEventListener("click", () => detail.classList.toggle("open"));
 

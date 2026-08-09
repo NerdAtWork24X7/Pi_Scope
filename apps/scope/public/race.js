@@ -458,6 +458,13 @@ function renderLLMRequestHTML(payload) {
   if (payload.model) parts.push(`<section class="race-llm-section"><h4>Model</h4><div class="race-llm-empty">${window.SCOPE.escapeHtml(payload.model)}</div></section>`);
   if (payload.message_count != null) parts.push(`<section class="race-llm-section"><h4>Messages</h4><div class="race-llm-empty">${payload.message_count}</div></section>`);
 
+  if (payload.request_args && Object.keys(payload.request_args).length) {
+    const rows = Object.entries(payload.request_args)
+      .map(([k, v]) => `<tr><th>${window.SCOPE.escapeHtml(k)}</th><td><code>${window.SCOPE.escapeHtml(String(v))}</code></td></tr>`)
+      .join("");
+    parts.push(`<section class="race-llm-section"><h4>Request args</h4><table class="race-llm-args">${rows}</table></section>`);
+  }
+
   return parts.join("");
 }
 
