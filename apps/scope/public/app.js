@@ -899,7 +899,13 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault(); searchBox.focus(); return;
   }
   if (STATE.view !== "single" || !STATE.selectedSessionId) return;
-  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  // While a form control (e.g. the search box opened with "/") holds focus,
+  // Space/j/k must not navigate. Escape blurs it so keyboard nav resumes —
+  // otherwise Space silently stops working until the field loses focus.
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA") {
+    if (e.key === "Escape") e.target.blur();
+    return;
+  }
 
   const evts = getFilteredEvents();
   switch (e.key) {
