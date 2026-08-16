@@ -66,12 +66,27 @@
     connect();
   }
 
+  // xterm palette tracks the app's DeepSeek theme tokens so the embedded
+  // terminal follows the Light/Dark toggle instead of staying GitHub-dark.
+  function terminalTheme() {
+    let bg = "#151517", fg = "#f9fafb";
+    try {
+      const cs = getComputedStyle(document.body);
+      bg = cs.getPropertyValue("--bg").trim() || bg;
+      fg = cs.getPropertyValue("--text").trim() || fg;
+    } catch {}
+    return { background: bg, foreground: fg, cursor: fg };
+  }
+  window.__terminalSetTheme = function () {
+    try { if (term) term.setOption("theme", terminalTheme()); } catch {}
+  };
+
   function ensureTerm() {
     if (term) return;
     term = new Terminal({
       cursorBlink: true, fontSize: 13, fontFamily: "'MesloLGS NFM', monospace",
       rightClickSelectsWord: false,
-      theme: { background: "#0d1117", foreground: "#c9d1d9" }, scrollback: 5000,
+      theme: terminalTheme(), scrollback: 5000,
     });
     fit = new FitAddon.FitAddon();
     term.loadAddon(fit);

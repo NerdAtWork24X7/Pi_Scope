@@ -50,7 +50,6 @@ CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
 export interface PreparedQueries {
   insertEvent: StatementSync;
   upsertSession: StatementSync;
-  upsertSessionNoBump: StatementSync;
   listSessions: StatementSync;
   listModels: StatementSync;
   getSessionEvents: StatementSync;
@@ -83,10 +82,12 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       ($event_id, $session_id, $seq, $ts, $type, $pool, $tags_json, $payload_json, $provider, $model)
   `);
 
-  // ── Upsert session (bumps event_count) ──────────────────────────────────
+  // ── Upsert session ───────────────────────────────────────────────────
   //
   // COALESCE logic: don't overwrite non-null existing fields with null
   // incoming values. Tags are merged via UNION to accumulate unique tags.
+  // `$bump` (0|1) increments event_count only for genuinely new events;
+  // duplicates refresh the row without inflating the count.
   const upsertSession = db.prepare(`
     INSERT INTO sessions
       (session_id, pool, agent_name, cwd, session_file, provider, model, first_ts, last_ts, event_count, tags_json)
@@ -101,36 +102,7 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       model        = COALESCE(excluded.model,        sessions.model),
       first_ts     = COALESCE(sessions.first_ts,     excluded.last_ts),
       last_ts      = MAX(excluded.last_ts,           sessions.last_ts),
-      event_count  = sessions.event_count + 1,
-      tags_json    = CASE
-        WHEN excluded.tags_json = '[]' THEN sessions.tags_json
-        WHEN excluded.tags_json = sessions.tags_json THEN sessions.tags_json
-        ELSE (
-          SELECT json_group_array(DISTINCT value)
-          FROM (
-            SELECT value FROM json_each(sessions.tags_json)
-            UNION
-            SELECT value FROM json_each(excluded.tags_json)
-          )
-        )
-      END
-  `);
-
-  // ── Upsert session without bumping event_count (duplicate events) ──────
-  const upsertSessionNoBump = db.prepare(`
-    INSERT INTO sessions
-      (session_id, pool, agent_name, cwd, session_file, provider, model, first_ts, last_ts, event_count, tags_json)
-    VALUES
-      ($session_id, $pool, $agent_name, $cwd, $session_file, $provider, $model, $ts, $ts, 1, $tags_json)
-    ON CONFLICT(session_id) DO UPDATE SET
-      pool         = COALESCE(excluded.pool,         sessions.pool),
-      agent_name   = COALESCE(excluded.agent_name,   sessions.agent_name),
-      cwd          = COALESCE(excluded.cwd,          sessions.cwd),
-      session_file = COALESCE(excluded.session_file, sessions.session_file),
-      provider     = COALESCE(excluded.provider,     sessions.provider),
-      model        = COALESCE(excluded.model,        sessions.model),
-      first_ts     = COALESCE(sessions.first_ts,     excluded.last_ts),
-      last_ts      = MAX(excluded.last_ts,           sessions.last_ts),
+      event_count  = sessions.event_count + $bump,
       tags_json    = CASE
         WHEN excluded.tags_json = '[]' THEN sessions.tags_json
         WHEN excluded.tags_json = sessions.tags_json THEN sessions.tags_json
@@ -277,7 +249,6 @@ export function prepare(db: DatabaseSync): PreparedQueries {
   return {
     insertEvent,
     upsertSession,
-    upsertSessionNoBump,
     listSessions,
     listModels,
     getSessionEvents,
@@ -308,7 +279,7 @@ export function toRow(e: ObsEvent): Record<string, unknown> {
   };
 }
 
-export function toSessionRow(e: ObsEvent): Record<string, unknown> {
+export function toSessionRow(e: ObsEvent, bump = false): Record<string, unknown> {
   return {
     $session_id: e.session_id,
     $pool: e.pool ?? "default",
@@ -319,6 +290,7 @@ export function toSessionRow(e: ObsEvent): Record<string, unknown> {
     $model: e.model ?? null,
     $ts: e.ts,
     $tags_json: JSON.stringify(e.tags ?? []),
+    $bump: bump ? 1 : 0,
   };
 }
 

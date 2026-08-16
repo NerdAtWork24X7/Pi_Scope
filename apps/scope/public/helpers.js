@@ -41,11 +41,12 @@
     const h = hashString(name);
     const hue = h % 360;
     const sat = 58 + ((h >>> 8) % 14);
-    return {
-      bg: `hsl(${hue} ${sat}% 22%)`,
-      border: `hsl(${hue} ${Math.min(86, sat + 12)}% 46%)`,
-      fg: `hsl(${hue} 92% 88%)`,
-    };
+    // Tool chips follow the active DeepSeek theme: light tint on the light
+    // theme, dark tint on the dark theme.
+    const dark = typeof document !== "undefined" && document.body.hasAttribute("data-ds-dark-theme");
+    return dark
+      ? { bg: `hsl(${hue} ${sat}% 22%)`, border: `hsl(${hue} ${Math.min(86, sat + 12)}% 46%)`, fg: `hsl(${hue} 92% 88%)` }
+      : { bg: `hsl(${hue} ${sat}% 92%)`, border: `hsl(${hue} ${Math.min(86, sat + 12)}% 74%)`, fg: `hsl(${hue} 55% 26%)` };
   }
 
   function toolNamePillHTML(evt) {
@@ -166,7 +167,10 @@
   }
 
   function renderDetailHTML(evt) {
-    const cBtn = `<button class="copy-btn" onclick="event.stopPropagation();SCOPE.copyEvent('${evt.event_id}')">📋</button>`;
+    // data attribute + a delegated handler in app.js (not an inline onclick),
+    // so a producer-supplied event_id can never inject script. Escaped for the
+    // attribute context; dataset returns the original value on read.
+    const cBtn = `<button class="copy-btn" type="button" data-copy-event="${escapeHtml(evt.event_id)}">📋</button>`;
     const wBtn = `<button class="wrap-btn" onclick="event.stopPropagation();let p=this.parentElement.querySelector('pre');p.style.whiteSpace=p.style.whiteSpace==='pre-wrap'?'pre':'pre-wrap';this.textContent=p.style.whiteSpace==='pre-wrap'?'↩':'→'">→</button>`;
 
     if (evt.type === "agent_end") {
@@ -255,17 +259,19 @@
   }
 
   // Live-event pulse color for the single view's `.evt-new` entry animation.
-  const PULSE_GREEN = "rgba(63,185,80,0.20)";
+  // Live-entry pulse tints use the DeepSeek palette (translucent so they read
+  // on both the light and dark themes).
+  const PULSE_GREEN = "rgba(34,197,94,0.20)";
   const PULSE_TYPE_COLORS = {
-    user_message:      "rgba(88,166,255,0.18)",
-    assistant_message: "rgba(88,166,255,0.18)",
-    tool_call:         "rgba(210,153,29,0.20)",
-    tool_result:       "rgba(227,179,65,0.20)",
-    thinking:          "rgba(163,113,247,0.20)",
-    error:             "rgba(248,81,73,0.22)",
-    model_change:      "rgba(57,197,207,0.20)",
-    compaction:        "rgba(210,164,46,0.22)",
-    branch_nav:        "rgba(57,197,207,0.20)",
+    user_message:      "rgba(86,134,254,0.16)",
+    assistant_message: "rgba(86,134,254,0.16)",
+    tool_call:         "rgba(245,158,11,0.18)",
+    tool_result:       "rgba(247,173,49,0.20)",
+    thinking:          "rgba(124,58,237,0.16)",
+    error:             "rgba(239,68,68,0.18)",
+    model_change:      "rgba(8,145,178,0.16)",
+    compaction:        "rgba(221,134,41,0.20)",
+    branch_nav:        "rgba(8,145,178,0.16)",
   };
   function pulseColorFor(type) {
     return PULSE_TYPE_COLORS[type] || PULSE_GREEN;

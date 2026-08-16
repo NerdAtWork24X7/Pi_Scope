@@ -5,8 +5,9 @@
  * Self-contained IIFE.
  */
 (function () {
-  const S = window.__SCOPE_STATE;
   const $ = (s) => document.querySelector(s);
+  const api = window.SCOPE.api;
+  const selectedCwd = window.SCOPE.currentCwd;
 
   const cwdLabel = $("#checkpoints-cwd-label");
   let lastCwd = "";
@@ -16,12 +17,8 @@
   const btnCreate = $("#btn-checkpoints-create");
   const btnRefresh = $("#btn-checkpoints-refresh");
 
-  function selectedCwd() {
-    return S.cwd || "";
-  }
-
   function refreshCwd() {
-    if (cwdLabel) cwdLabel.textContent = S.cwd ? S.cwd : "no directory set — choose one in the Terminal pane";
+    window.SCOPE.cwdLabel(cwdLabel);
   }
 
   async function loadCheckpoints() {
@@ -29,8 +26,7 @@
     listEl.innerHTML = '<div class="empty-state">loading…</div>';
     if (!cwd) { listEl.innerHTML = '<div class="empty-state">no working directory set — choose one in the Terminal pane</div>'; return; }
     try {
-      const res = await fetch(window.apiUrl("/checkpoints/list", { cwd, token: S.token }), { headers: window.authHeaders() });
-      const data = await res.json();
+      const { res, data } = await api("/checkpoints/list", { cwd });
       if (!data.git) {
         listEl.innerHTML = `<div class="empty-state">git unavailable in<br><code>${window.SCOPE.escapeHtml(cwd)}</code></div>`;
         return;
@@ -83,12 +79,7 @@
     btnCreate.disabled = true;
     statusEl.textContent = "creating…";
     try {
-      const res = await fetch(window.apiUrl("/checkpoints/create", { token: S.token }), {
-        method: "POST",
-        headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd, label: labelInput.value.trim() }),
-      });
-      const data = await res.json();
+      const { res, data } = await api("/checkpoints/create", {}, { cwd, label: labelInput.value.trim() });
       if (!res.ok || !data.ok) statusEl.textContent = "failed: " + window.SCOPE.escapeHtml(data.error || res.status);
       else { statusEl.textContent = (data.initializedGit ? "initialized git and " : "") + "created " + window.SCOPE.shortId(data.sha); labelInput.value = ""; loadCheckpoints(); }
     } catch (e) {
@@ -104,12 +95,7 @@
     if (!confirm("Restore working tree to this checkpoint?\n\nThis runs `git reset --hard` + `git clean -fd` — DESTRUCTIVE. Uncommitted changes and untracked files will be discarded.")) return;
     statusEl.textContent = "restoring…";
     try {
-      const res = await fetch(window.apiUrl("/checkpoints/restore", { token: S.token }), {
-        method: "POST",
-        headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd, ref }),
-      });
-      const data = await res.json();
+      const { res, data } = await api("/checkpoints/restore", {}, { cwd, ref });
       if (!res.ok || !data.ok) statusEl.textContent = "restore failed: " + window.SCOPE.escapeHtml(data.error || res.status);
       else { statusEl.textContent = "restored to " + window.SCOPE.shortId(data.sha); loadCheckpoints(); }
     } catch (e) {
@@ -144,8 +130,7 @@
     pendingMergeRef = ref;
     statusEl.textContent = "loading branches…";
     try {
-      const res = await fetch(window.apiUrl("/checkpoints/branches", { cwd, token: S.token }), { headers: window.authHeaders() });
-      const data = await res.json();
+      const { res, data } = await api("/checkpoints/branches", { cwd });
       if (!res.ok || !data.ok) {
         statusEl.textContent = "failed to load branches: " + window.SCOPE.escapeHtml(data.error || res.status);
         return;
@@ -185,12 +170,7 @@
     closeMergeModal();
     statusEl.textContent = "merging…";
     try {
-      const res = await fetch(window.apiUrl("/checkpoints/merge", { token: S.token }), {
-        method: "POST",
-        headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd, ref, target }),
-      });
-      const data = await res.json();
+      const { res, data } = await api("/checkpoints/merge", {}, { cwd, ref, target });
       if (!res.ok || !data.ok) {
         statusEl.textContent = "merge failed: " + window.SCOPE.escapeHtml(data.error || res.status);
         return;
@@ -228,12 +208,7 @@
     }
     statusEl.textContent = "deleting…";
     try {
-      const res = await fetch(window.apiUrl("/checkpoints/delete", { token: S.token }), {
-        method: "POST",
-        headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd, ref, deleteBranch }),
-      });
-      const data = await res.json();
+      const { res, data } = await api("/checkpoints/delete", {}, { cwd, ref, deleteBranch });
       if (!res.ok || !data.ok) statusEl.textContent = "delete failed: " + window.SCOPE.escapeHtml(data.error || res.status);
       else {
         let s = "deleted " + window.SCOPE.escapeHtml(ref) + (data.deleteBranch ? " (branch removed)" : "");

@@ -11,10 +11,11 @@ const STATE = {
   // V3 regression fix: token must come from ?token=… query param. The hash is
   // for shareable view-state only; we don't want the token in shared URLs.
   token: new URLSearchParams(location.search).get("token") ?? "",
-  view: "single", mode: "form", search: "", sort: "latest", showHidden: false,
+  view: "single", search: "", sort: "latest", showHidden: false,
   typeFilter: new Set(), autoScroll: true,
   selectedSessionId: null, cwd: "", sessions: [], events: [], sessionsLoaded: false, hiddenSessions: loadHiddenSessions(),
   sidebarCollapsed: loadSidebarCollapsed(),
+  theme: loadTheme(),
   focusedIdx: -1, lastEventTs: null,
   sseReconnectDelay: 1000, maxReconnectDelay: 10_000,
   renderDirty: true, seenIds: new Set(),
@@ -34,9 +35,7 @@ function loadURLState() {
   if (!h) return;
   const p = new URLSearchParams(h);
   if (p.has("view")) STATE.view = p.get("view");
-  if (!["single", "trajectory", "terminal", "files", "checkpoints"].includes(STATE.view)) STATE.view = "single";
-  if (p.has("mode")) STATE.mode = p.get("mode");
-  else { const stored = localStorage.getItem("scope-mode"); if (stored === "form" || stored === "function") STATE.mode = stored; }
+  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git"].includes(STATE.view)) STATE.view = "single";
   if (p.has("sort")) { STATE.sort = p.get("sort"); sortSelect.value = STATE.sort; }
   if (p.has("model")) { STATE.modelFilter = p.get("model") ?? ""; if (modelSelect) modelSelect.value = STATE.modelFilter; }
   if (p.has("show_hidden")) { STATE.showHidden = p.get("show_hidden") === "1"; showHiddenCB.checked = STATE.showHidden; }
@@ -46,7 +45,6 @@ function loadURLState() {
 function saveURLState() {
   const p = new URLSearchParams();
   p.set("view", STATE.view);
-  if (STATE.mode !== "form") p.set("mode", STATE.mode);
   if (STATE.sort !== "latest") p.set("sort", STATE.sort);
   if (STATE.modelFilter) p.set("model", STATE.modelFilter);
   if (STATE.showHidden) p.set("show_hidden", "1");
@@ -105,6 +103,32 @@ function apiUrl(path, params = {}) {
 }
 window.apiUrl = apiUrl;
 window.authHeaders = authHeaders;
+
+// Shared fetch helper used by the Files / Checkpoints / Git views (and any
+// future view). Combines auth headers + JSON body handling and returns
+// { res, data } so callers can branch on res.ok / data.ok. `body` implies a
+// JSON POST. The token travels via the Authorization header only — there is no
+// need to repeat it in the query string (the server accepts either).
+window.SCOPE.api = async function (path, params = {}, body) {
+  const headers = authHeaders();
+  const opts = { headers };
+  if (body !== undefined) {
+    opts.method = "POST";
+    headers["content-type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(apiUrl(path, params), opts);
+  let data = {};
+  try { data = await res.json(); } catch {}
+  return { res, data };
+};
+
+// Shared cwd access + label fallback (Files / Checkpoints / Git all render the
+// same "no directory set" message into their own label element).
+window.SCOPE.currentCwd = function () { return STATE.cwd || ""; };
+window.SCOPE.cwdLabel = function (el) {
+  if (el) el.textContent = STATE.cwd ? STATE.cwd : "no directory set — choose one in the Terminal pane";
+};
 
 // ─── Agent info computation ─────────────────────────────────────
 function computeAgentInfo(sid) {
@@ -192,6 +216,25 @@ function computeAgentInfo(sid) {
   };
 }
 
+// Debounce helper: coalesce bursts (e.g. a rapid run of SSE events, or the
+// boot fan-out of per-session stats) into a single trailing call so the agent
+// subnav and sidebar aren't rebuilt once per event. A pending call is dropped
+// when another arrives during the wait window.
+function debounce(fn, wait = 200) {
+  let t = null;
+  const wrapped = function (...args) {
+    if (t) return;
+    t = setTimeout(() => { t = null; fn.apply(null, args); }, wait);
+  };
+  wrapped.cancel = function () { if (t) { clearTimeout(t); t = null; } };
+  return wrapped;
+}
+
+// Live-stream hot paths: recompute the subnav and sidebar at most once per
+// wait period instead of on every appended event / stats response.
+const scheduleAgentSubnav = debounce(renderAgentSubnav, 200);
+const scheduleSidebarRender = debounce(() => { renderSessions(); renderModelSummary(); }, 200);
+
 function renderAgentSubnav() {
   if (!sessionSubnav) return;
   if (!STATE.selectedSessionId || STATE.view !== "single") {
@@ -255,29 +298,34 @@ function setSingleSessionControlsVisible(visible) {
 
 // ─── View toggle ────────────────────────────────────────────────────────────
 
-// Apply form/function mode: body class + persistence + scroll-anchor recovery.
-// Form = spacious dashboard feel (default). Function = dense/TUI feel.
-window.setMode = function(mode) {
-  if (mode !== "form" && mode !== "function") mode = "form";
-  STATE.mode = mode;
-  // obv-flash: skip redundant disk writes on boot / repeated clicks.
-  if (localStorage.getItem("scope-mode") !== mode) localStorage.setItem("scope-mode", mode);
-  document.body.classList.toggle("layout-form", mode === "form");
-  document.body.classList.toggle("layout-function", mode === "function");
-  const btnForm = $("#btn-form");
-  const btnFunc = $("#btn-function");
-  if (btnForm) btnForm.classList.toggle("active", mode === "form");
-  if (btnFunc) btnFunc.classList.toggle("active", mode === "function");
-  // obv-flash: row heights just changed under the user's feet, so re-anchor
-  // the single timeline back to the bottom it was riding.
-  requestAnimationFrame(() => {
-    if (STATE.autoScroll && eventView) eventView.scrollTop = eventView.scrollHeight;
-  });
-  saveURLState();
+// Apply light/dark theme: body attribute + persistence + terminal re-theme.
+// DeepSeek light is the default; dark swaps in the deepseek-harness dark tokens.
+window.setTheme = function(theme) {
+  if (theme !== "light" && theme !== "dark") theme = "light";
+  STATE.theme = theme;
+  if (theme === "dark") document.body.setAttribute("data-ds-dark-theme", "");
+  else document.body.removeAttribute("data-ds-dark-theme");
+  document.documentElement.style.colorScheme = theme === "dark" ? "dark" : "light";
+  const btnTheme = $("#btn-theme");
+  if (btnTheme) btnTheme.textContent = theme === "dark" ? "🌙" : "☀";
+  try { localStorage.setItem("scope-theme", theme); } catch {}
+  window.__terminalSetTheme?.();
+  // Tool-name pills and other per-row tints are theme-dependent — re-render
+  // the visible surfaces so their colors follow the new theme.
+  renderSessions();
+  if (STATE.view === "single" && STATE.selectedSessionId) {
+    renderAllEvents();
+    renderAgentSubnav();
+  }
+  if (STATE.view === "trajectory") window.__trajectoryOnView?.();
+};
+
+window.toggleTheme = function() {
+  setTheme(STATE.theme === "dark" ? "light" : "dark");
 };
 
 window.setView = function(mode) {
-  if (!["single", "trajectory", "terminal", "files", "checkpoints"].includes(mode)) mode = "single";
+  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git"].includes(mode)) mode = "single";
   STATE.view = mode;
   localStorage.setItem("scope-view", mode);
   $("#btn-single").classList.toggle("active", mode === "single");
@@ -294,6 +342,10 @@ window.setView = function(mode) {
   $("#btn-checkpoints")?.classList.toggle("active", mode === "checkpoints");
   if (checkpointsPane) checkpointsPane.style.display = mode === "checkpoints" ? "flex" : "none";
   if (mode === "checkpoints") window.__checkpointsOnView?.();
+  $("#btn-git")?.classList.toggle("active", mode === "git");
+  const gitPane = document.getElementById("git-pane");
+  if (gitPane) gitPane.style.display = mode === "git" ? "flex" : "none";
+  if (mode === "git") window.__gitOnView?.();
   if (mode === "trajectory") window.__trajectoryOnView?.();
   if (sessionSubnav) sessionSubnav.style.display = (mode === "single" && STATE.selectedSessionId) ? "flex" : "none";
   renderSessions();
@@ -385,6 +437,7 @@ async function fetchSessions() {
     if (sig !== STATE.sessionsSig) { STATE.sessionsSig = sig; renderSessions(); renderModelSummary(); }
     if (STATE.view === "files") window.__filesOnSessions?.();
     if (STATE.view === "checkpoints") window.__checkpointsOnSessions?.();
+    if (STATE.view === "git") window.__gitOnSessions?.();
     if (STATE.view === "trajectory") window.__trajectoryOnSessions?.();
     // Fetch stats for all visible sessions
     for (const s of sessions) {
@@ -401,9 +454,9 @@ async function fetchSessionStats(sid) {
     const stats = await res.json();
     STATE.sessionStats[sid] = stats;
     // Re-render sidebar if this session is visible
-    if (STATE.sessions.some(s => s.session_id === sid)) { renderSessions(); renderModelSummary(); }
+    if (STATE.sessions.some(s => s.session_id === sid)) scheduleSidebarRender();
     if (STATE.view === "trajectory") window.__trajectoryStatsUpdate?.(sid, stats);
-    if (sid === STATE.selectedSessionId) renderAgentSubnav();
+    if (sid === STATE.selectedSessionId) scheduleAgentSubnav();
   } catch { /* ignore */ }
 }
 
@@ -707,7 +760,7 @@ function appendEventSingle(evt) {
     if (STATE.autoScroll) scrollEventViewToBottom();
     updateAgeTicker();
   }
-  renderAgentSubnav();
+  scheduleAgentSubnav();
 }
 
 function matchesFilters(evt) {
@@ -724,7 +777,12 @@ function buildEventRow(evt, idx, isLive = false) {
   const row = document.createElement("div");
   row.className = "evt-row" + (idx === STATE.focusedIdx ? " focused" : "");
   row.dataset.idx = idx;
-  row.innerHTML = `<span class="evt-ts">${window.SCOPE.fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${window.SCOPE.toolNamePillHTML(evt)}</span><span class="evt-summary ${summaryClass(evt)}">${window.SCOPE.escapeHtml(summaryFor(evt))}</span>`;
+  // evt.type is producer-controlled (POST /events is unauthenticated), so it's
+  // escaped for display and the class token is restricted to a safe charset.
+  const typeStr = String(evt.type ?? "");
+  const typeLabel = window.SCOPE.escapeHtml(typeStr.replace(/_/g, " "));
+  const typeClass = /^[a-z0-9_-]+$/.test(typeStr) ? typeStr : "custom";
+  row.innerHTML = `<span class="evt-ts">${window.SCOPE.fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill ${typeClass}">${typeLabel}</span>${window.SCOPE.toolNamePillHTML(evt)}</span><span class="evt-summary ${summaryClass(evt)}">${window.SCOPE.escapeHtml(summaryFor(evt))}</span>`;
 
   if (isLive && typeof window.__pulseColorFor === "function") {
     row.style.setProperty("--pulse-color", window.__pulseColorFor(evt.type));
@@ -945,6 +1003,18 @@ window.SCOPE.copyEvent = function(eventId) {
   navigator.clipboard.writeText(JSON.stringify(evt.payload, null, 2)).catch(() => {});
 };
 
+// Delegated handler for the copy buttons rendered inside event details. Uses a
+// data attribute (set in helpers.js) instead of an inline onclick so a
+// producer-supplied event_id can never inject script.
+eventView.addEventListener("click", (e) => {
+  const t = e.target;
+  if (!(t instanceof Element)) return;
+  const btn = t.closest("[data-copy-event]");
+  if (!btn) return;
+  e.stopPropagation();
+  window.SCOPE.copyEvent(btn.dataset.copyEvent);
+});
+
 // ─── Age ticker & Re-anchoring ──────────────────────────────────────────────
 
 function updateAgeTicker() {
@@ -1043,6 +1113,10 @@ function loadSidebarCollapsed() {
   return localStorage.getItem("scope-sidebar-collapsed") === "1";
 }
 
+function loadTheme() {
+  return localStorage.getItem("scope-theme") === "dark" ? "dark" : "light";
+}
+
 // ─── Exports to window.SCOPE ──────────────────────────────────────────────────
 
 Object.assign(window.SCOPE, {
@@ -1055,7 +1129,7 @@ Object.assign(window.SCOPE, {
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
 loadURLState();
-setMode(STATE.mode);
+setTheme(STATE.theme);
 // Restore a user-overridden working directory; else fall back to the server cwd.
 STATE.cwd = localStorage.getItem("scope-cwd") || "";
 setView(STATE.view);
@@ -1077,6 +1151,7 @@ function setCwd(cwd) {
   if (inp && inp.value !== STATE.cwd) inp.value = STATE.cwd;
   if (STATE.view === "files") window.__filesOnView?.();
   else if (STATE.view === "checkpoints") window.__checkpointsOnView?.();
+  else if (STATE.view === "git") window.__gitOnView?.();
 }
 // Called by the terminal bridge when the live shell cwd changes, so the
 // shared session directory follows the terminal automatically.
@@ -1097,6 +1172,7 @@ async function initCwd() {
       if (inp) inp.value = STATE.cwd;
       if (STATE.view === "files") window.__filesOnView?.();
       else if (STATE.view === "checkpoints") window.__checkpointsOnView?.();
+      else if (STATE.view === "git") window.__gitOnView?.();
     }
   } catch {}
 }
