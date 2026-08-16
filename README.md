@@ -19,7 +19,7 @@ opens the dashboard in an embedded browser — no `npm`, no dev dependencies.
 
 ```bash
 chmod +x Pi-Scope-1.0.0.AppImage
-./Pi-Scope-1.0.0.AppImage
+./Pi-Scope-1.0.0.AppImage 
 ```
 
 - Data (SQLite DB + per-run auth token) lives in `~/.local/share/pi-scope/`, so it
