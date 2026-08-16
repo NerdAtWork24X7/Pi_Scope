@@ -1,6 +1,6 @@
 /**
- * app.js — Pi Scope v2→v3 UI: state, single-mode, SSE, keyboard nav.
- * Swimlane mode delegated to swimlane.js. IIFE-wrapped for scope isolation.
+ * app.js — Pi Scope UI: state, single-mode, SSE, keyboard nav.
+ * IIFE-wrapped for scope isolation.
  */
 (function() {
 
@@ -34,26 +34,13 @@ function loadURLState() {
   if (!h) return;
   const p = new URLSearchParams(h);
   if (p.has("view")) STATE.view = p.get("view");
-  if (!["single", "swimlane", "race", "terminal", "files", "checkpoints"].includes(STATE.view)) STATE.view = "single";
+  if (!["single", "trajectory", "terminal", "files", "checkpoints"].includes(STATE.view)) STATE.view = "single";
   if (p.has("mode")) STATE.mode = p.get("mode");
   else { const stored = localStorage.getItem("scope-mode"); if (stored === "form" || stored === "function") STATE.mode = stored; }
   if (p.has("sort")) { STATE.sort = p.get("sort"); sortSelect.value = STATE.sort; }
   if (p.has("model")) { STATE.modelFilter = p.get("model") ?? ""; if (modelSelect) modelSelect.value = STATE.modelFilter; }
   if (p.has("show_hidden")) { STATE.showHidden = p.get("show_hidden") === "1"; showHiddenCB.checked = STATE.showHidden; }
   if (p.has("sid")) { STATE.selectedSessionId = p.get("sid"); STATE.ackd.add(STATE.selectedSessionId); }
-  if (p.has("lanes")) {
-    const lanes = p.get("lanes").split(",").filter(Boolean);
-    window.__restoreLanes = lanes;
-  }
-  if (p.has("race_lanes")) {
-    const lanes = p.get("race_lanes").split(",").filter(Boolean);
-    window.__restoreRaceLanes = lanes;
-  }
-  if (p.has("eid")) window.__restoreRaceEventId = p.get("eid");
-  if (p.has("auto_add")) {
-    window.__restoreAutoAdd = p.get("auto_add") !== "0";
-    autoAddCB.checked = window.__restoreAutoAdd;
-  }
 }
 
 function saveURLState() {
@@ -63,19 +50,7 @@ function saveURLState() {
   if (STATE.sort !== "latest") p.set("sort", STATE.sort);
   if (STATE.modelFilter) p.set("model", STATE.modelFilter);
   if (STATE.showHidden) p.set("show_hidden", "1");
-  if (STATE.view === "single" && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
-  if (STATE.view === "swimlane") {
-    const lanes = window.__swimlaneGetLanes?.();
-    if (lanes && lanes.length) p.set("lanes", lanes.join(","));
-    if (!autoAddLanes()) p.set("auto_add", "0");
-  }
-  if (STATE.view === "race") {
-    const lanes = window.__raceGetLanes?.();
-    if (lanes && lanes.length) p.set("race_lanes", lanes.join(","));
-    const eid = window.__raceGetOpenEventId?.();
-    if (eid) p.set("eid", eid);
-    if (!autoAddLanes()) p.set("auto_add", "0");
-  }
+  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
   const newHash = "#" + p.toString();
   if (location.hash !== newHash) history.replaceState(null, "", newHash);
 }
@@ -95,12 +70,8 @@ const liveLabel = $("#live-label");
 const searchBox = $("#search-box");
 const filterChips = $("#filter-chips");
 const singlePane = $("#single-pane");
-const swimlaneContainer = $("#swimlane-container");
 const filesPane = $("#files-pane");
-  const checkpointsPane = document.getElementById("checkpoints-pane");
-const raceContainer = $("#race-container");
-const autoAddRow = $("#auto-add-row");
-const autoAddCB = $("#auto-add-lanes");
+const checkpointsPane = document.getElementById("checkpoints-pane");
 const headerBreadcrumb = $("#header-breadcrumb");
 const btnExpandAll = $("#btn-expand-all");
 const btnCollapseAll = $("#btn-collapse-all");
@@ -298,27 +269,23 @@ window.setMode = function(mode) {
   if (btnForm) btnForm.classList.toggle("active", mode === "form");
   if (btnFunc) btnFunc.classList.toggle("active", mode === "function");
   // obv-flash: row heights just changed under the user's feet, so re-anchor
-  // every scrollable surface that was riding the bottom. Without this the
-  // single timeline + sticky swimlane lanes briefly drift mid-page before the
-  // 250 ms sticky interval mops up.
+  // the single timeline back to the bottom it was riding.
   requestAnimationFrame(() => {
     if (STATE.autoScroll && eventView) eventView.scrollTop = eventView.scrollHeight;
-    window.__swimlaneReanchorAll?.();
   });
   saveURLState();
 };
 
 window.setView = function(mode) {
-  if (!["single", "swimlane", "race", "terminal", "files", "checkpoints"].includes(mode)) mode = "single";
+  if (!["single", "trajectory", "terminal", "files", "checkpoints"].includes(mode)) mode = "single";
   STATE.view = mode;
   localStorage.setItem("scope-view", mode);
   $("#btn-single").classList.toggle("active", mode === "single");
-  $("#btn-swimlane").classList.toggle("active", mode === "swimlane");
-  $("#btn-race")?.classList.toggle("active", mode === "race");
+  $("#btn-trajectory")?.classList.toggle("active", mode === "trajectory");
   $("#btn-terminal")?.classList.toggle("active", mode === "terminal");
   singlePane.style.display = mode === "single" ? "" : "none";
-  swimlaneContainer.classList.toggle("active", mode === "swimlane");
-  raceContainer?.classList.toggle("active", mode === "race");
+  const trajectoryPane = document.getElementById("trajectory-pane");
+  if (trajectoryPane) trajectoryPane.style.display = mode === "trajectory" ? "flex" : "none";
   const terminalPane = document.getElementById("terminal-pane");
   if (terminalPane) terminalPane.style.display = mode === "terminal" ? "" : "none";
   $("#btn-files")?.classList.toggle("active", mode === "files");
@@ -327,22 +294,9 @@ window.setView = function(mode) {
   $("#btn-checkpoints")?.classList.toggle("active", mode === "checkpoints");
   if (checkpointsPane) checkpointsPane.style.display = mode === "checkpoints" ? "flex" : "none";
   if (mode === "checkpoints") window.__checkpointsOnView?.();
-  if (mode !== "race") window.__raceCloseInspector?.();
+  if (mode === "trajectory") window.__trajectoryOnView?.();
   if (sessionSubnav) sessionSubnav.style.display = (mode === "single" && STATE.selectedSessionId) ? "flex" : "none";
-  autoAddRow.style.display = mode === "swimlane" || mode === "race" ? "" : "none";
   renderSessions();
-  if (mode === "swimlane") {
-    if ((window.__swimlaneGetLanes?.() ?? []).length === 0 && STATE.selectedSessionId) {
-      window.__swimlaneEnsureLane?.(STATE.selectedSessionId);
-    }
-    window.__swimlaneOnView?.();
-  }
-  if (mode === "race") {
-    if ((window.__raceGetLanes?.() ?? []).length === 0 && STATE.selectedSessionId) {
-      window.__raceEnsureLane?.(STATE.selectedSessionId);
-    }
-    window.__raceOnView?.();
-  }
   if (mode === "single" && STATE.selectedSessionId) {
     setSingleSessionControlsVisible(true);
     loadSession(STATE.selectedSessionId);
@@ -429,10 +383,9 @@ async function fetchSessions() {
     // (avoids a needless teardown/re-create on every 3s poll).
     const sig = sessions.map((s) => [s.session_id, s.event_count, s.last_ts, s.agent_name, s.model, s.cwd].join(":")).join("|") + "|model=" + STATE.modelFilter;
     if (sig !== STATE.sessionsSig) { STATE.sessionsSig = sig; renderSessions(); renderModelSummary(); }
-    if (STATE.view === "swimlane") window.__swimlaneOnSessions?.();
-    if (STATE.view === "race") window.__raceOnSessions?.();
     if (STATE.view === "files") window.__filesOnSessions?.();
     if (STATE.view === "checkpoints") window.__checkpointsOnSessions?.();
+    if (STATE.view === "trajectory") window.__trajectoryOnSessions?.();
     // Fetch stats for all visible sessions
     for (const s of sessions) {
       if (!STATE.sessionStats[s.session_id]) fetchSessionStats(s.session_id);
@@ -449,8 +402,7 @@ async function fetchSessionStats(sid) {
     STATE.sessionStats[sid] = stats;
     // Re-render sidebar if this session is visible
     if (STATE.sessions.some(s => s.session_id === sid)) { renderSessions(); renderModelSummary(); }
-    if (STATE.view === "swimlane") window.__swimlaneStatsUpdate?.(sid, stats);
-    if (STATE.view === "race") window.__raceStatsUpdate?.(sid, stats);
+    if (STATE.view === "trajectory") window.__trajectoryStatsUpdate?.(sid, stats);
     if (sid === STATE.selectedSessionId) renderAgentSubnav();
   } catch { /* ignore */ }
 }
@@ -474,11 +426,7 @@ function saveHiddenSessions() {
 function hideSessionFromSidebar(sid) {
   STATE.hiddenSessions.add(sid);
   saveHiddenSessions();
-  // Drop this session from any open swimlane / race lane so "hide" actually
-  // hides it everywhere, not just the sidebar.
-  if (window.__swimlaneIsSelected?.(sid)) window.__swimlaneToggle?.(sid);
-  if (window.__raceIsSelected?.(sid)) window.__raceToggle?.(sid);
-  if (STATE.view === "single" && STATE.selectedSessionId === sid && !STATE.showHidden) clearSelectedSession();
+  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId === sid && !STATE.showHidden) clearSelectedSession();
   else { renderSessions(); saveURLState(); }
 }
 
@@ -489,20 +437,16 @@ function unhideSessionFromSidebar(sid) {
   saveURLState();
 }
 
-// Bulk-hide every currently-visible agent and clear any open selections in
-// every view — single, swimlane, and race — so the main pane goes blank and
-// the user sees the real-estate gain immediately. The existing "show hidden"
-// toggle brings them back.
+// Bulk-hide every currently-visible agent and clear the open selection so the
+// main pane goes blank and the user sees the real-estate gain immediately.
+// The existing "show hidden" toggle brings them back.
 function hideAllVisibleSessions() {
   const visible = visibleSessions();
   if (!visible.length) return;
   for (const s of visible) STATE.hiddenSessions.add(s.session_id);
   saveHiddenSessions();
 
-  for (const sid of (window.__swimlaneGetLanes?.() ?? []).slice()) window.__swimlaneToggle?.(sid);
-  for (const sid of (window.__raceGetLanes?.() ?? []).slice()) window.__raceToggle?.(sid);
-
-  if (STATE.view === "single" && STATE.selectedSessionId) clearSelectedSession();
+  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId) clearSelectedSession();
   else { renderSessions(); saveURLState(); }
 }
 
@@ -517,8 +461,6 @@ function clearAllSessions() {
         STATE.sessions = [];
         STATE.hiddenSessions.clear();
         STATE.sessionStats = {};
-        for (const sid of (window.__swimlaneGetLanes?.() ?? []).slice()) window.__swimlaneToggle?.(sid);
-        for (const sid of (window.__raceGetLanes?.() ?? []).slice()) window.__raceToggle?.(sid);
         clearSelectedSession();
         renderSessions();
       } else {
@@ -537,6 +479,7 @@ function clearSelectedSession() {
   STATE.lastEventTs = null;
   paneLabel.textContent = "Select a session";
   eventView.innerHTML = '<div class="empty-state"><span class="icon">◈</span>Select a session from the sidebar</div>';
+  window.__trajectoryClear?.();
   setSingleSessionControlsVisible(false);
   renderSessions();
   updateAgeTicker();
@@ -563,11 +506,9 @@ function renderSessions() {
   }
   for (const s of filtered) {
     const el = document.createElement("div");
-    const isSel = STATE.view === "single"
+    const isSel = (STATE.view === "single" || STATE.view === "trajectory")
       ? s.session_id === STATE.selectedSessionId
-      : STATE.view === "swimlane"
-        ? window.__swimlaneIsSelected?.(s.session_id)
-        : window.__raceIsSelected?.(s.session_id);
+      : false;
     const hiddenByUser = STATE.hiddenSessions.has(s.session_id);
     el.className = "session-item" + (isSel ? " selected" : "") + (hiddenByUser ? " hidden-session" : "");
     const shortId = s.session_id.slice(0, 8);
@@ -589,24 +530,12 @@ function renderSessions() {
     const hiddenNote = hiddenByUser ? ' <span class="session-hidden-note">hidden</span>' : '';
     const relTime = window.SCOPE.fmtRel(s.last_ts);
 
-    if (STATE.view === "swimlane" || STATE.view === "race") {
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = STATE.view === "swimlane" ? (window.__swimlaneIsSelected?.(s.session_id) ?? false) : (window.__raceIsSelected?.(s.session_id) ?? false);
-      cb.addEventListener("change", () => STATE.view === "swimlane" ? window.__swimlaneToggle?.(s.session_id) : window.__raceToggle?.(s.session_id));
-      el.appendChild(cb);
-    }
-
     const info = document.createElement("div");
     info.className = "info";
     info.innerHTML = `<div class="name">${window.SCOPE.escapeHtml(name)}${errDotHtml}${hiddenNote}</div><div class="uuid">${shortId}${s.model ? " · " + window.SCOPE.escapeHtml(s.model) : ""}</div><div class="meta">${s.event_count} events · ${relTime}</div>${costStr ? `<div class="cost">${costStr}</div>` : ""}`;
 
-    if (STATE.view === "single") {
+    if (STATE.view === "single" || STATE.view === "trajectory") {
       el.addEventListener("click", () => selectSession(s.session_id));
-    } else if (STATE.view === "swimlane") {
-      info.addEventListener("click", () => window.__swimlaneToggle?.(s.session_id));
-    } else {
-      info.addEventListener("click", () => window.__raceToggle?.(s.session_id));
     }
 
     el.appendChild(info);
@@ -628,11 +557,9 @@ function renderSessions() {
 
 function buildMiniSessionItem(s) {
   const el = document.createElement("div");
-  const isSel = STATE.view === "single"
+  const isSel = (STATE.view === "single" || STATE.view === "trajectory")
     ? s.session_id === STATE.selectedSessionId
-    : STATE.view === "swimlane"
-      ? (window.__swimlaneIsSelected?.(s.session_id) ?? false)
-      : (window.__raceIsSelected?.(s.session_id) ?? false);
+    : false;
   el.className = "session-mini" + (isSel ? " selected" : "");
   el.dataset.sid = s.session_id;
   const name = s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id;
@@ -643,12 +570,8 @@ function buildMiniSessionItem(s) {
   const dot = document.createElement("span");
   dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
   el.appendChild(dot);
-  if (STATE.view === "single") {
+  if (STATE.view === "single" || STATE.view === "trajectory") {
     el.addEventListener("click", () => selectSession(s.session_id));
-  } else if (STATE.view === "swimlane") {
-    el.addEventListener("click", () => window.__swimlaneToggle?.(s.session_id));
-  } else {
-    el.addEventListener("click", () => window.__raceToggle?.(s.session_id));
   }
   return el;
 }
@@ -681,6 +604,13 @@ function selectSession(sid) {
   // Reset auto-scroll and hide pause toast on agent switch
   STATE.autoScroll = true;
   if (pauseToastSingle) pauseToastSingle.classList.remove("show");
+
+  if (STATE.view === "trajectory") {
+    window.__trajectoryOnView?.();
+    updateSSEFilter();
+    saveURLState();
+    return;
+  }
 
   setSingleSessionControlsVisible(true);
   loadSession(sid);
@@ -956,10 +886,10 @@ function openSysPrompt() {
   if (!STATE.selectedSessionId) return;
   const snap = findBootSnapshotSingle(STATE.selectedSessionId);
   const payload = snap ? snap.payload : null;
-  // renderLLMRequestHTML is defined globally in race.js (loaded on this page).
-  const html = (typeof renderLLMRequestHTML === "function")
-    ? renderLLMRequestHTML(payload)
-    : `<div class="race-llm-empty">render helper unavailable</div>`;
+  // renderLLMRequestHTML lives in helpers.js (window.SCOPE).
+  const html = (typeof window.SCOPE.renderLLMRequestHTML === "function")
+    ? window.SCOPE.renderLLMRequestHTML(payload)
+    : `<div class="llm-empty">render helper unavailable</div>`;
   spBody.innerHTML = html;
   spOverlay.classList.add("show");
 }
@@ -987,7 +917,7 @@ window.toggleHelp = function() {
 // ─── Sidebar collapse (mini icon mode) ─────────────────────────────────────
 // Collapses the left sidebar to a strip of single-letter agent chips with a
 // status dot. Hides filters/search/sort/hide-after entirely. Works the same
-// in single / swimlane / race views — only the click handler differs.
+// in single / trajectory views — only the click handler differs.
 window.toggleSidebar = function() {
   STATE.sidebarCollapsed = !STATE.sidebarCollapsed;
   localStorage.setItem("scope-sidebar-collapsed", STATE.sidebarCollapsed ? "1" : "0");
@@ -1010,22 +940,7 @@ function applySidebarCollapsed() {
 
 window.SCOPE = window.SCOPE || {};
 window.SCOPE.copyEvent = function(eventId) {
-  // Search single-mode events
-  let evt = STATE.events.find(e => e.event_id === eventId);
-  // Search swimlane lanes
-  if (!evt) {
-    for (const [, lane] of window.__swimlaneGetAll?.() ?? []) {
-      evt = lane.events.find(e => e.event_id === eventId);
-      if (evt) break;
-    }
-  }
-  // Search race tracks
-  if (!evt) {
-    for (const [, lane] of window.__raceGetAll?.() ?? []) {
-      evt = lane.events.find(e => e.event_id === eventId);
-      if (evt) break;
-    }
-  }
+  const evt = STATE.events.find(e => e.event_id === eventId);
   if (!evt) return;
   navigator.clipboard.writeText(JSON.stringify(evt.payload, null, 2)).catch(() => {});
 };
@@ -1055,7 +970,7 @@ function updateSSEFilter() {
 
 function connectSSE() {
   const params = {};
-  if (STATE.view === "single" && STATE.selectedSessionId) params.session_id = STATE.selectedSessionId;
+  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId) params.session_id = STATE.selectedSessionId;
   if (STATE.token) params.token = STATE.token;
   const url = apiUrl("/events/stream", params);
 
@@ -1063,8 +978,7 @@ function connectSSE() {
   es.addEventListener("hello", () => {
     setLive(true);
     STATE.sseReconnectDelay = 1000;
-    if (STATE.view === "swimlane") window.__swimlaneOnReconnect?.();
-    if (STATE.view === "race") window.__raceOnReconnect?.();
+    if (STATE.view === "trajectory") window.__trajectoryOnReconnect?.();
   });
   es.addEventListener("event", (msg) => {
     try {
@@ -1076,8 +990,7 @@ function connectSSE() {
         setCwd(evt.cwd);
       }
       if (STATE.view === "single") appendEventSingle(evt);
-      else if (STATE.view === "swimlane") window.__swimlaneOnEvent?.(evt);
-      else if (STATE.view === "race") window.__raceOnEvent?.(evt);
+      else if (STATE.view === "trajectory") window.__trajectoryOnEvent?.(evt);
     } catch { /* ignore */ }
   });
   es.onerror = () => {
@@ -1114,16 +1027,8 @@ showHiddenCB.addEventListener("change", () => {
   saveURLState();
 });
 
-autoAddCB.addEventListener("change", () => {
-  window.__swimlaneAutoAddChange?.(autoAddCB.checked);
-  window.__raceAutoAddChange?.(autoAddCB.checked);
-  saveURLState();
-});
-
 document.getElementById("btn-hide-all")?.addEventListener("click", hideAllVisibleSessions);
 document.getElementById("btn-clear-all")?.addEventListener("click", clearAllSessions);
-
-window.autoAddLanes = () => autoAddCB.checked;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1195,33 +1100,5 @@ async function initCwd() {
     }
   } catch {}
 }
-
-// Restore lanes from URL state (after swimlane.js loads)
-setTimeout(() => {
-  if (window.__restoreLanes && STATE.view === "swimlane") {
-    for (const sid of window.__restoreLanes) {
-      window.__swimlaneToggle?.(sid);
-      STATE.ackd.add(sid);
-    }
-    window.__restoreLanes = null;
-  }
-  if (window.__restoreRaceLanes && STATE.view === "race") {
-    const visibleIds = new Set(visibleSessions().map(s => s.session_id));
-    if (STATE.sessionsLoaded && !STATE.showHidden && window.__restoreRaceLanes.some(sid => !visibleIds.has(sid))) {
-      STATE.showHidden = true;
-      showHiddenCB.checked = true;
-    }
-    for (const sid of window.__restoreRaceLanes) {
-      window.__raceToggle?.(sid);
-      STATE.ackd.add(sid);
-    }
-    window.__restoreRaceLanes = null;
-  }
-  const restoredAutoAdd = window.__restoreAutoAdd !== undefined ? window.__restoreAutoAdd : autoAddCB.checked;
-  autoAddCB.checked = restoredAutoAdd;
-  window.__swimlaneAutoAddChange?.(restoredAutoAdd);
-  window.__raceAutoAddChange?.(restoredAutoAdd);
-  window.__restoreAutoAdd = undefined;
-}, 200);
 
 })();

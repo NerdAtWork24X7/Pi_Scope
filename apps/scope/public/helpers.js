@@ -92,7 +92,7 @@
   }
 
   // ─── Event rendering helpers ───────────────────────────────────────────────
-  // These are shared across single, swimlane, and race views.
+  // Shared by the single view (event rows, inline details, system-prompt modal).
 
   // Find the LLM's final text response for the turn closed by `turnEnd`.
   // Scans backward through `events` (session-ordered by seq) and returns the last
@@ -172,7 +172,7 @@
     if (evt.type === "agent_end") {
       const fr = evt.payload?.final_response
         ? `<pre>${escapeHtml(evt.payload.final_response)}</pre>`
-        : `<div class="race-llm-empty">no final response captured</div>`;
+        : `<div class="llm-empty">no final response captured</div>`;
       return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · ${evt.payload?.message_count ?? "?"} messages</div>${fr}`;
     }
 
@@ -180,7 +180,7 @@
       const fr = turnFinalResponse(evt, window.__SCOPE_STATE?.events);
       const frHTML = fr
         ? `<pre>${escapeHtml(fr)}</pre>`
-        : `<div class="race-llm-empty">no final response captured</div>`;
+        : `<div class="llm-empty">no final response captured</div>`;
       return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
     }
 
@@ -225,6 +225,53 @@
     return DEFAULT_CONTEXT_WINDOW;
   }
 
+  // Render the boot-snapshot LLM request (system prompt + tools + model +
+  // request args) for the single-view system-prompt modal.
+  function renderLLMRequestHTML(payload) {
+    if (!payload) {
+      return `<div class="llm-empty">No system prompt captured. It is recorded from the final LLM request (before_provider_request → llm_request) only.</div>`;
+    }
+    const parts = [];
+    parts.push(`
+      <section class="llm-section">
+        <h4>System prompt</h4>
+        ${payload.system_prompt ? `<pre class="llm-pre">${escapeHtml(payload.system_prompt)}</pre>` : `<div class="llm-empty">not captured</div>`}
+      </section>
+    `);
+    const tools = Array.isArray(payload.tools) ? payload.tools : [];
+    const toolsHTML = tools.length
+      ? `<ul class="llm-tools">` + tools.map((t) => `<li><code>${escapeHtml(t)}</code></li>`).join("") + `</ul>`
+      : `<div class="llm-empty">no tools captured</div>`;
+    parts.push(`<section class="llm-section"><h4>Tools (${tools.length}) sent to LLM</h4>${toolsHTML}</section>`);
+    if (payload.model) parts.push(`<section class="llm-section"><h4>Model</h4><div class="llm-empty">${escapeHtml(payload.model)}</div></section>`);
+    if (payload.message_count != null) parts.push(`<section class="llm-section"><h4>Messages</h4><div class="llm-empty">${payload.message_count}</div></section>`);
+    if (payload.request_args && Object.keys(payload.request_args).length) {
+      const rows = Object.entries(payload.request_args)
+        .map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td><code>${escapeHtml(String(v))}</code></td></tr>`)
+        .join("");
+      parts.push(`<section class="llm-section"><h4>Request args</h4><table class="llm-args">${rows}</table></section>`);
+    }
+    return parts.join("");
+  }
+
+  // Live-event pulse color for the single view's `.evt-new` entry animation.
+  const PULSE_GREEN = "rgba(63,185,80,0.20)";
+  const PULSE_TYPE_COLORS = {
+    user_message:      "rgba(88,166,255,0.18)",
+    assistant_message: "rgba(88,166,255,0.18)",
+    tool_call:         "rgba(210,153,29,0.20)",
+    tool_result:       "rgba(227,179,65,0.20)",
+    thinking:          "rgba(163,113,247,0.20)",
+    error:             "rgba(248,81,73,0.22)",
+    model_change:      "rgba(57,197,207,0.20)",
+    compaction:        "rgba(210,164,46,0.22)",
+    branch_nav:        "rgba(57,197,207,0.20)",
+  };
+  function pulseColorFor(type) {
+    return PULSE_TYPE_COLORS[type] || PULSE_GREEN;
+  }
+  window.__pulseColorFor = pulseColorFor;
+
   const HELPERS = {
     fmtTs,
     fmtRel,
@@ -244,6 +291,7 @@
     summaryFor,
     summaryClass,
     renderDetailHTML,
+    renderLLMRequestHTML,
   };
 
   // Expose helpers on window.SCOPE so every view can access them explicitly.
