@@ -11,9 +11,9 @@ const STATE = {
   // V3 regression fix: token must come from ?token=… query param. The hash is
   // for shareable view-state only; we don't want the token in shared URLs.
   token: new URLSearchParams(location.search).get("token") ?? "",
-  view: "single", search: "", sort: "latest", showHidden: false,
+  view: "single", search: "",
   typeFilter: new Set(), autoScroll: true,
-  selectedSessionId: null, cwd: "", sessions: [], events: [], sessionsLoaded: false, hiddenSessions: loadHiddenSessions(),
+  selectedSessionId: null, cwd: "", sessions: [], events: [], sessionsLoaded: false,
   sidebarCollapsed: loadSidebarCollapsed(),
   theme: loadTheme(),
   focusedIdx: -1, lastEventTs: null,
@@ -21,9 +21,8 @@ const STATE = {
   renderDirty: true, seenIds: new Set(),
   sessionStats: {}, // sid → {total_cost,total_tokens,error_count,models:[]}
   ackd: new Set(),
+  expandedGroups: new Set(), // cwd keys of currently-expanded session groups
   sessionsSig: "",
-  models: [], // list of model names from /models
-  modelFilter: "", // selected model filter
 };
 
 window.__SCOPE_STATE = STATE;
@@ -36,18 +35,12 @@ function loadURLState() {
   const p = new URLSearchParams(h);
   if (p.has("view")) STATE.view = p.get("view");
   if (!["single", "trajectory", "terminal", "files", "checkpoints", "git"].includes(STATE.view)) STATE.view = "single";
-  if (p.has("sort")) { STATE.sort = p.get("sort"); sortSelect.value = STATE.sort; }
-  if (p.has("model")) { STATE.modelFilter = p.get("model") ?? ""; if (modelSelect) modelSelect.value = STATE.modelFilter; }
-  if (p.has("show_hidden")) { STATE.showHidden = p.get("show_hidden") === "1"; showHiddenCB.checked = STATE.showHidden; }
   if (p.has("sid")) { STATE.selectedSessionId = p.get("sid"); STATE.ackd.add(STATE.selectedSessionId); }
 }
 
 function saveURLState() {
   const p = new URLSearchParams();
   p.set("view", STATE.view);
-  if (STATE.sort !== "latest") p.set("sort", STATE.sort);
-  if (STATE.modelFilter) p.set("model", STATE.modelFilter);
-  if (STATE.showHidden) p.set("show_hidden", "1");
   if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
   const newHash = "#" + p.toString();
   if (location.hash !== newHash) history.replaceState(null, "", newHash);
@@ -57,9 +50,6 @@ function saveURLState() {
 
 const $ = s => document.querySelector(s);
 const sessionSubnav = document.querySelector("#session-subnav");
-const sortSelect = $("#sort-select");
-const modelSelect = $("#model-select");
-const showHiddenCB = $("#show-hidden-sessions");
 const sessionList = $("#session-list");
 const eventView = $("#event-view");
 const paneLabel = $("#pane-label");
@@ -233,7 +223,6 @@ function debounce(fn, wait = 200) {
 // Live-stream hot paths: recompute the subnav and sidebar at most once per
 // wait period instead of on every appended event / stats response.
 const scheduleAgentSubnav = debounce(renderAgentSubnav, 200);
-const scheduleSidebarRender = debounce(() => { renderSessions(); renderModelSummary(); }, 200);
 
 function renderAgentSubnav() {
   if (!sessionSubnav) return;
@@ -362,79 +351,19 @@ window.setView = function(mode) {
 
 // ─── Sessions ───────────────────────────────────────────────────────────────
 
-async function fetchModels() {
-  try {
-    const res = await fetch(apiUrl("/models"), { headers: authHeaders() });
-    if (!res.ok) return;
-    const data = await res.json();
-    STATE.models = data.models ?? [];
-    renderModelSelect();
-  } catch { /* ignore */ }
-}
-
-function renderModelSelect() {
-  if (!modelSelect) return;
-  const current = STATE.modelFilter;
-  const sig = STATE.models.join("|");
-  if (modelSelect.dataset.sig === sig) return;
-  modelSelect.dataset.sig = sig;
-  modelSelect.innerHTML = '<option value="">All models</option>';
-  for (const m of STATE.models) {
-    const opt = document.createElement("option");
-    opt.value = m;
-    opt.textContent = m;
-    modelSelect.appendChild(opt);
-  }
-  modelSelect.value = current;
-}
-
-function renderModelSummary() {
-  const el = document.getElementById("model-summary");
-  if (!el) return;
-  if (!STATE.modelFilter) {
-    el.style.display = "none";
-    el.classList.remove("active");
-    el.innerHTML = "";
-    return;
-  }
-  let totalTokens = 0;
-  let totalCost = 0;
-  let sessionCount = 0;
-  for (const s of visibleSessions()) {
-    const stats = STATE.sessionStats[s.session_id];
-    if (!stats?.models?.length) continue;
-    const mstat = stats.models.find(m => m.model === STATE.modelFilter);
-    if (mstat) {
-      totalTokens += mstat.total_tokens || 0;
-      totalCost += mstat.cost_total || 0;
-      sessionCount += 1;
-    }
-  }
-  el.style.display = "block";
-  el.classList.add("active");
-  el.innerHTML = `<span class="ms-label">model total</span><span class="ms-model">${window.SCOPE.escapeHtml(STATE.modelFilter)}</span><span class="ms-tokens">${window.SCOPE.fmtTokens(totalTokens)} tk · $${totalCost.toFixed(4)}</span><span class="ms-sessions">across ${sessionCount} session${sessionCount === 1 ? "" : "s"}</span>`;
-}
-
 async function fetchSessions() {
   try {
     const url = apiUrl("/sessions", { limit: 100 });
     const res = await fetch(url, { headers: authHeaders() });
     if (!res.ok) return;
     const data = await res.json();
-    // Apply sort
-    let sessions = data.sessions ?? [];
-    if (STATE.sort === "errors") {
-      sessions = sessions.filter(s => (STATE.sessionStats[s.session_id]?.error_count ?? 0) > 0);
-    }
-    if (STATE.sort === "expensive") {
-      sessions.sort((a, b) => (STATE.sessionStats[b.session_id]?.total_cost ?? 0) - (STATE.sessionStats[a.session_id]?.total_cost ?? 0));
-    }
+    const sessions = data.sessions ?? [];
     STATE.sessions = sessions;
     STATE.sessionsLoaded = true;
     // Skip the full sidebar DOM rebuild when the session list is unchanged
     // (avoids a needless teardown/re-create on every 3s poll).
-    const sig = sessions.map((s) => [s.session_id, s.event_count, s.last_ts, s.agent_name, s.model, s.cwd].join(":")).join("|") + "|model=" + STATE.modelFilter;
-    if (sig !== STATE.sessionsSig) { STATE.sessionsSig = sig; renderSessions(); renderModelSummary(); }
+    const sig = sessions.map((s) => [s.session_id, s.event_count, s.last_ts, s.agent_name, s.model, s.cwd].join(":")).join("|");
+    if (sig !== STATE.sessionsSig) { STATE.sessionsSig = sig; renderSessions(); }
     if (STATE.view === "files") window.__filesOnSessions?.();
     if (STATE.view === "checkpoints") window.__checkpointsOnSessions?.();
     if (STATE.view === "git") window.__gitOnSessions?.();
@@ -453,54 +382,17 @@ async function fetchSessionStats(sid) {
     if (!res.ok) return;
     const stats = await res.json();
     STATE.sessionStats[sid] = stats;
-    // Re-render sidebar if this session is visible
-    if (STATE.sessions.some(s => s.session_id === sid)) scheduleSidebarRender();
+    // Patch just this session's row in place. The boot fan-out fetches stats
+    // for every session, so a full rebuild here would tear down and recreate the
+    // sidebar dozens of times; a tiny text/dot update is effectively free.
+    patchSessionStats(sid);
     if (STATE.view === "trajectory") window.__trajectoryStatsUpdate?.(sid, stats);
     if (sid === STATE.selectedSessionId) scheduleAgentSubnav();
   } catch { /* ignore */ }
 }
 
 function visibleSessions() {
-  let list = STATE.showHidden ? [...STATE.sessions] : STATE.sessions.filter(s => !STATE.hiddenSessions.has(s.session_id));
-  if (STATE.modelFilter) {
-    list = list.filter(s => {
-      const stats = STATE.sessionStats[s.session_id];
-      if (stats?.models?.length) return stats.models.some(m => m.model === STATE.modelFilter);
-      return (s.model || "unknown") === STATE.modelFilter;
-    });
-  }
-  return list;
-}
-
-function saveHiddenSessions() {
-  try { localStorage.setItem("scope-hidden-sessions", JSON.stringify([...STATE.hiddenSessions])); } catch {}
-}
-
-function hideSessionFromSidebar(sid) {
-  STATE.hiddenSessions.add(sid);
-  saveHiddenSessions();
-  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId === sid && !STATE.showHidden) clearSelectedSession();
-  else { renderSessions(); saveURLState(); }
-}
-
-function unhideSessionFromSidebar(sid) {
-  STATE.hiddenSessions.delete(sid);
-  saveHiddenSessions();
-  renderSessions();
-  saveURLState();
-}
-
-// Bulk-hide every currently-visible agent and clear the open selection so the
-// main pane goes blank and the user sees the real-estate gain immediately.
-// The existing "show hidden" toggle brings them back.
-function hideAllVisibleSessions() {
-  const visible = visibleSessions();
-  if (!visible.length) return;
-  for (const s of visible) STATE.hiddenSessions.add(s.session_id);
-  saveHiddenSessions();
-
-  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId) clearSelectedSession();
-  else { renderSessions(); saveURLState(); }
+  return [...STATE.sessions];
 }
 
 // Permanently delete every session and its events from the DB. Destructive —
@@ -512,8 +404,8 @@ function clearAllSessions() {
     .then(data => {
       if (data && data.ok) {
         STATE.sessions = [];
-        STATE.hiddenSessions.clear();
         STATE.sessionStats = {};
+        STATE.expandedGroups.clear();
         clearSelectedSession();
         renderSessions();
       } else {
@@ -557,54 +449,131 @@ function renderSessions() {
     for (const s of filtered) sessionList.appendChild(buildMiniSessionItem(s));
     return;
   }
-  for (const s of filtered) {
-    const el = document.createElement("div");
-    const isSel = (STATE.view === "single" || STATE.view === "trajectory")
-      ? s.session_id === STATE.selectedSessionId
-      : false;
-    const hiddenByUser = STATE.hiddenSessions.has(s.session_id);
-    el.className = "session-item" + (isSel ? " selected" : "") + (hiddenByUser ? " hidden-session" : "");
-    const shortId = s.session_id.slice(0, 8);
-    const stats = STATE.sessionStats[s.session_id];
-    let costStr = "";
-    if (stats) {
-      if (STATE.modelFilter) {
-        const mstat = stats.models?.find(m => m.model === STATE.modelFilter);
-        const tk = mstat ? mstat.total_tokens : 0;
-        costStr = `${window.SCOPE.fmtTokens(tk)} tk`;
-      } else {
-        costStr = `$${stats.total_cost.toFixed(4)} · ${window.SCOPE.fmtTokens(stats.total_tokens)} tk`;
-      }
-    }
+  for (const group of groupSessionsByCwd(filtered)) {
+    sessionList.appendChild(buildSessionGroup(group));
+  }
+}
+
+// Group sessions by working directory. Each group is one "session" (the shared
+// cwd) whose "subagents" are the individual agent sessions that ran there.
+function groupSessionsByCwd(sessions) {
+  const groups = new Map();
+  for (const s of sessions) {
+    const cwd = (s.cwd || "").trim();
+    if (!groups.has(cwd)) groups.set(cwd, []);
+    groups.get(cwd).push(s);
+  }
+  // Preserve the server's last_ts DESC ordering for both groups and members.
+  return [...groups.entries()].map(([cwd, subagents]) => ({ cwd, subagents }));
+}
+
+function buildSessionGroup(group) {
+  const wrap = document.createElement("div");
+  wrap.className = "session-group";
+
+  const expanded = STATE.expandedGroups.has(group.cwd);
+
+  const head = document.createElement("div");
+  head.className = "session-group-head" + (expanded ? "" : " collapsed");
+
+  const caret = document.createElement("span");
+  caret.className = "session-group-caret";
+  caret.textContent = expanded ? "▾" : "▸";
+
+  const title = document.createElement("span");
+  title.className = "session-group-title";
+  title.textContent = sessionGroupName(group.cwd);
+  title.title = group.cwd;
+
+  const count = document.createElement("span");
+  count.className = "session-group-count";
+  count.textContent = `${group.subagents.length} subagent${group.subagents.length === 1 ? "" : "s"}`;
+
+  head.append(caret, title, count);
+
+  const children = document.createElement("div");
+  children.className = "session-group-children";
+  children.style.display = expanded ? "" : "none";
+  for (const s of group.subagents) children.appendChild(buildSessionItem(s));
+
+  head.addEventListener("click", () => {
+    const collapsed = head.classList.toggle("collapsed");
+    caret.textContent = collapsed ? "▸" : "▾";
+    children.style.display = collapsed ? "none" : "";
+    if (collapsed) STATE.expandedGroups.delete(group.cwd);
+    else STATE.expandedGroups.add(group.cwd);
+  });
+
+  wrap.appendChild(head);
+  wrap.appendChild(children);
+  return wrap;
+}
+
+function sessionGroupName(cwd) {
+  if (!cwd) return "unknown cwd";
+  const parts = cwd.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : cwd;
+}
+
+function buildSessionItem(s) {
+  const el = document.createElement("div");
+  const isSel = (STATE.view === "single" || STATE.view === "trajectory")
+    ? s.session_id === STATE.selectedSessionId
+    : false;
+  el.className = "session-item" + (isSel ? " selected" : "");
+  el.dataset.sid = s.session_id;
+  const shortId = s.session_id.slice(0, 8);
+  const name = s.agent_name ?? s.cwd?.split("/").pop() ?? shortId;
+
+  const modelHtml = s.model ? ` <span class="name-model">- ${window.SCOPE.escapeHtml(s.model)}</span>` : "";
+  const info = document.createElement("div");
+  info.className = "info";
+  info.innerHTML = `<div class="name"><span class="name-text">${window.SCOPE.escapeHtml(name)}</span>${modelHtml}<span class="err-dot">●</span></div>`;
+
+  const cost = document.createElement("div");
+  cost.className = "cost";
+  info.appendChild(cost);
+
+  applySessionStatsToItem(el, STATE.sessionStats[s.session_id], s);
+
+  if (STATE.view === "single" || STATE.view === "trajectory") {
+    el.addEventListener("click", () => selectSession(s.session_id));
+  }
+
+  el.appendChild(info);
+
+  return el;
+}
+
+// Set a session item's cost text and error-dot state from its stats. Shared by
+// the initial build and the boot fan-out patch so both use one code path.
+function applySessionStatsToItem(el, stats, s) {
+  const cost = el.querySelector(".cost");
+  if (cost) {
+    cost.textContent = stats
+      ? `${window.SCOPE.fmtTokens(stats.total_tokens)} tk · $${stats.total_cost.toFixed(4)}`
+      : "";
+  }
+  const dot = el.querySelector(".err-dot");
+  if (dot) {
     const hasErr = stats && stats.error_count > 0;
-    const isAckd = STATE.ackd.has(s.session_id);
-    const errDotHtml = hasErr ? ` <span class="err-dot${isAckd ? ' ackd' : ''}">●</span>` : '';
-    const name = s.agent_name ?? s.cwd?.split("/").pop() ?? shortId;
-    const hiddenNote = hiddenByUser ? ' <span class="session-hidden-note">hidden</span>' : '';
-    const relTime = window.SCOPE.fmtRel(s.last_ts);
+    dot.classList.toggle("noerr", !hasErr);
+    dot.classList.toggle("ackd", STATE.ackd.has(s.session_id));
+  }
+}
 
-    const info = document.createElement("div");
-    info.className = "info";
-    info.innerHTML = `<div class="name">${window.SCOPE.escapeHtml(name)}${errDotHtml}${hiddenNote}</div><div class="uuid">${shortId}${s.model ? " · " + window.SCOPE.escapeHtml(s.model) : ""}</div><div class="meta">${s.event_count} events · ${relTime}</div>${costStr ? `<div class="cost">${costStr}</div>` : ""}`;
-
-    if (STATE.view === "single" || STATE.view === "trajectory") {
-      el.addEventListener("click", () => selectSession(s.session_id));
-    }
-
-    el.appendChild(info);
-
-    const hideBtn = document.createElement("button");
-    hideBtn.className = "session-hide-btn";
-    hideBtn.type = "button";
-    hideBtn.textContent = hiddenByUser ? "↺" : "×";
-    hideBtn.title = hiddenByUser ? "Unhide this agent in the sidebar" : "Hide this agent from the sidebar";
-    hideBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      hiddenByUser ? unhideSessionFromSidebar(s.session_id) : hideSessionFromSidebar(s.session_id);
-    });
-    el.appendChild(hideBtn);
-
-    sessionList.appendChild(el);
+// In-place update for one session after its stats arrive, avoiding a full
+// sidebar rebuild. Mirrors the cost into the collapsed mini-item tooltip too.
+function patchSessionStats(sid) {
+  const s = STATE.sessions.find(x => x.session_id === sid);
+  const stats = STATE.sessionStats[sid];
+  if (!s || !stats) return;
+  const item = sessionList.querySelector(`.session-item[data-sid="${CSS.escape(sid)}"]`);
+  if (item) applySessionStatsToItem(item, stats, s);
+  const mini = sessionList.querySelector(`.session-mini[data-sid="${CSS.escape(sid)}"]`);
+  if (mini) {
+    const name = s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id;
+    mini.title = `${name}\n${sid.slice(0, 8)} · ${s.event_count} events · ${window.SCOPE.fmtRel(s.last_ts)} · $${stats.total_cost.toFixed(4)}`;
   }
 }
 
@@ -994,6 +963,51 @@ function applySidebarCollapsed() {
   }
 }
 
+// ─── Resizable sidebar ─────────────────────────────────────────────────────
+// Drag the thin strip on the aside's right edge to resize. The width is stored
+// in the --sidebar-w CSS variable so the collapsed 52/56px rules still win by
+// specificity instead of being overridden by an inline width.
+(function initSidebarResizer() {
+  const aside = document.querySelector("aside");
+  const resizer = document.getElementById("sidebar-resizer");
+  if (!aside || !resizer) return;
+
+  const MIN = 180, MAX = 720, KEY = "scope-sidebar-width";
+
+  function setWidth(w) {
+    aside.style.setProperty("--sidebar-w", Math.round(w) + "px");
+  }
+
+  try {
+    const saved = parseInt(localStorage.getItem(KEY), 10);
+    if (saved >= MIN && saved <= MAX) setWidth(saved);
+  } catch {}
+
+  resizer.addEventListener("mousedown", (e) => {
+    if (STATE.sidebarCollapsed) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = aside.getBoundingClientRect().width;
+    resizer.classList.add("dragging");
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    const onMove = (ev) => {
+      setWidth(Math.min(MAX, Math.max(MIN, startW + (ev.clientX - startX))));
+    };
+    const onUp = () => {
+      resizer.classList.remove("dragging");
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      try { localStorage.setItem(KEY, Math.round(aside.getBoundingClientRect().width)); } catch {}
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+})();
+
 // ─── Copy JSON ─────────────────────────────────────────────────────────────
 
 window.SCOPE = window.SCOPE || {};
@@ -1073,41 +1087,11 @@ function connectSSE() {
 function disconnectSSE() { if (es) { es.close(); es = null; } setLive(false); }
 function setLive(on) { liveDot.className = on ? "green" : "red"; liveLabel.textContent = on ? "live" : "off"; }
 
-// ─── Sort / show hidden / auto-add ──────────────────────────────────────────
+// ─── Clear all ──────────────────────────────────────────────────────────────
 
-sortSelect.addEventListener("change", () => {
-  STATE.sort = sortSelect.value;
-  fetchSessions();
-  saveURLState();
-});
-
-if (modelSelect) {
-  modelSelect.addEventListener("change", () => {
-    STATE.modelFilter = modelSelect.value;
-    STATE.sessionsSig = ""; // force re-render on filter change
-    renderSessions();
-    renderModelSummary();
-    saveURLState();
-  });
-}
-
-showHiddenCB.addEventListener("change", () => {
-  STATE.showHidden = showHiddenCB.checked;
-  renderSessions();
-  saveURLState();
-});
-
-document.getElementById("btn-hide-all")?.addEventListener("click", hideAllVisibleSessions);
 document.getElementById("btn-clear-all")?.addEventListener("click", clearAllSessions);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-function loadHiddenSessions() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem("scope-hidden-sessions") || "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : []);
-  } catch { return new Set(); }
-}
 
 function loadSidebarCollapsed() {
   return localStorage.getItem("scope-sidebar-collapsed") === "1";
@@ -1134,10 +1118,9 @@ setTheme(STATE.theme);
 STATE.cwd = localStorage.getItem("scope-cwd") || "";
 setView(STATE.view);
 applySidebarCollapsed();
-fetchModels();
 fetchSessions();
 connectSSE();
-setInterval(() => { fetchModels(); fetchSessions(); }, 10000);
+setInterval(() => { fetchSessions(); }, 10000);
 updateBreadcrumb();
 initCwd();
 

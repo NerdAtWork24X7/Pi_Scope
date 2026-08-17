@@ -126,43 +126,43 @@
     #btn-theme{background:none;border:1px solid var(--border);color:var(--muted);cursor:pointer;font-size:16.5px;padding:1px 6px;border-radius:3px;line-height:1}
     #btn-theme:hover{color:var(--text);border-color:var(--accent)}
     main{display:flex;flex:1;overflow:hidden;min-height:0}
-    aside{width:260px;flex-shrink:0;border-right:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;overflow:hidden;min-height:0}
+    aside{width:var(--sidebar-w,260px);flex-shrink:0;border-right:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;overflow:hidden;min-height:0}
+    #sidebar-resizer{width:5px;flex-shrink:0;margin-left:-2px;cursor:col-resize;background:transparent;z-index:20;position:relative}
+    #sidebar-resizer:hover,#sidebar-resizer.dragging{background:var(--accent);opacity:0.5}
+    body.sidebar-collapsed #sidebar-resizer{display:none}
     .sidebar-filters{padding:8px 12px;border-bottom:1px solid var(--border)}
     .sidebar-filters label{display:block;font-size:15px;color:var(--muted);margin-bottom:1px;margin-top:5px}
     .sidebar-filters label:first-child{margin-top:0}
     .sidebar-filters input[type=text],.sidebar-filters select{width:100%;padding:4px 6px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);font-size:15px;font-family:monospace}
     .sidebar-filters input:focus,.sidebar-filters select:focus{outline:none;border-color:var(--accent)}
-    .sidebar-filters select#model-select{font-size:13.5px}
     .sidebar-filters .toggle-row{display:flex;align-items:center;gap:5px;margin-top:5px;font-size:15px;color:var(--muted)}
-    .model-summary{padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface-2);font-size:13px;color:var(--muted)}
-    .model-summary.active{display:block}
-    .model-summary .ms-label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);margin-bottom:2px}
-    .model-summary .ms-model{color:var(--text);font-weight:600;font-family:monospace}
-    .model-summary .ms-tokens{color:var(--green);font-family:monospace;font-size:14px}
-    .model-summary .ms-sessions{font-size:11px;color:var(--muted);margin-top:2px}
-    body.layout-form .model-summary{padding:10px 14px;font-size:14px}
-    body.layout-form .model-summary .ms-label{font-size:12px}
-    body.layout-form .model-summary .ms-tokens{font-size:15px}
     .toggle-row input[type=checkbox]{accent-color:var(--accent)}
     #session-list{flex:1;overflow-y:auto;padding:2px 0;min-height:0}
     #session-list::-webkit-scrollbar{width:4px}
     #session-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-    .session-item{padding:5px 10px;cursor:pointer;border-bottom:1px solid var(--hairline);font-size:15px;transition:background 0.1s;display:flex;align-items:flex-start;gap:5px;position:relative}
+    .session-item{padding:3px 10px;cursor:pointer;border-bottom:1px solid var(--hairline);font-size:12.5px;transition:background 0.1s;display:flex;align-items:flex-start;gap:5px;position:relative}
     .session-item:hover{background:var(--row-hover)}
     .session-item.selected{background:var(--accent-soft);border-left:2px solid var(--accent)}
-    .session-item.hidden-session{opacity:0.58}
     .session-item input[type=checkbox]{margin-top:2px;flex-shrink:0;accent-color:var(--accent)}
-    .session-item .info{flex:1;min-width:0;padding-right:18px}
-    .session-item .name{font-weight:600;color:var(--text);font-size:15px}
-    .session-item .uuid{font-family:monospace;color:var(--muted);font-size:13.5px}
-    .session-item .meta{color:var(--muted);font-size:13.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .session-item .cost{color:var(--green);font-size:13.5px}
-    .session-item .err-dot{color:var(--red);font-weight:bold;font-size:16.5px;margin-left:2px}
+    .session-item .info{flex:1;min-width:0}
+    .session-item .name{font-weight:600;color:var(--text);font-size:13px}
+    .session-item .uuid{font-family:monospace;color:var(--muted);font-size:11.5px}
+    .session-item .meta{color:var(--muted);font-size:11.5px;margin-top:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .session-item .cost{color:var(--green);font-size:12px}
+    .session-item .err-dot{color:var(--red);font-weight:bold;font-size:13px;margin-left:2px}
     .session-item .err-dot.ackd{opacity:0.25;transition:opacity 0.3s ease}
-    .session-hide-btn{position:absolute;top:4px;right:6px;width:17px;height:17px;border:none;background:transparent;color:var(--muted);font-size:16px;line-height:15px;border-radius:4px;cursor:pointer;opacity:0.45}
-    .session-item:hover .session-hide-btn,.session-hide-btn:focus{opacity:1;background:var(--pill-bg);color:var(--red);outline:none}
-    .session-item.hidden-session .session-hide-btn{color:var(--green)}
-    .session-hidden-note{color:var(--orange);font-size:11px;margin-left:4px}
+    .session-item .err-dot.noerr{display:none}
+    .session-item .name-model{color:var(--muted);font-weight:400;font-family:monospace;font-size:11.5px}
+    /* ─── Session → subagent tree ───────────────────────────────────── */
+    .session-group{border-bottom:1px solid var(--border);margin-bottom:6px}
+    .session-group-head{display:flex;align-items:center;gap:6px;padding:6px 10px;cursor:pointer;user-select:none;font-size:14px;background:var(--surface-2)}
+    .session-group-head:hover{background:var(--row-hover)}
+    .session-group-caret{color:var(--muted);font-size:12px;width:14px;flex-shrink:0;text-align:center}
+    .session-group-title{font-weight:700;color:var(--text);font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+    .session-group-count{color:var(--muted);font-size:11px;margin-left:auto;flex-shrink:0}
+    .session-group-children .session-item{padding-left:30px}
+    body.layout-form .session-group-head{padding:9px 14px;gap:6px;font-size:15px}
+    body.layout-form .session-group-children .session-item{padding-left:34px}
     section{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
     .pane-header{padding:5px 10px;border-bottom:1px solid var(--border);font-size:16.5px;color:var(--muted);background:var(--surface);flex-shrink:0;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
     .pane-header .ticker{margin-left:auto;font-size:13.5px;color:var(--muted)}
@@ -294,10 +294,12 @@
     /* session list reduces to single-letter agent chips with a tiny      */
     /* activity dot (green ≤10s, orange ≤20s, gray after). Frees up real  */
     /* estate for the main view without losing per-agent at-a-glance.     */
-    .sidebar-toggle-wrap{padding:5px 10px;border-bottom:1px solid var(--border);display:flex;justify-content:flex-end;flex-shrink:0}
+    .sidebar-toggle-wrap{padding:5px 10px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;flex-shrink:0}
     #sidebar-toggle{font-size:14px;padding:1px 8px;line-height:1.2;font-family:monospace}
+    #btn-clear-all{font-size:14px;padding:1px 8px;line-height:1.2;font-family:monospace;color:var(--muted)}
     body.sidebar-collapsed aside{width:52px}
     body.sidebar-collapsed .sidebar-filters{display:none}
+    body.sidebar-collapsed #btn-clear-all{display:none}
     body.sidebar-collapsed .sidebar-toggle-wrap{justify-content:center;padding:5px 4px}
     body.sidebar-collapsed #session-list{padding:6px 0;display:flex;flex-direction:column;align-items:center;gap:6px;overflow-x:hidden}
     body.sidebar-collapsed .session-item{display:none}
@@ -319,15 +321,15 @@
     body.layout-form .view-toggle button{padding:4px 12px}
     body.layout-form #btn-help{padding:3px 9px;border-radius:6px}
     body.layout-form #btn-theme{padding:3px 9px;border-radius:6px;font-size:15px}
-    body.layout-form aside{width:300px}
+    body.layout-form aside{width:var(--sidebar-w,300px)}
     body.layout-form.sidebar-collapsed aside{width:56px}
     body.layout-form .sidebar-filters{padding:12px 14px}
     body.layout-form .sidebar-filters label{margin-bottom:3px;margin-top:8px}
     body.layout-form .sidebar-filters input[type=text],
     body.layout-form .sidebar-filters select{padding:6px 8px}
-    body.layout-form .session-item{padding:9px 14px;gap:8px;border-bottom-color:var(--hairline-strong)}
+    body.layout-form .session-item{padding:4px 14px;gap:6px;border-bottom-color:var(--hairline-strong)}
     body.layout-form .session-item .name{font-weight:600}
-    body.layout-form .session-item .meta{margin-top:3px}
+    body.layout-form .session-item .meta{margin-top:0}
     body.layout-form .pane-header{padding:9px 16px;gap:10px}
     body.layout-form .filter-chips{gap:5px}
     body.layout-form .fchip{padding:3px 9px;border-radius:9px;font-size:12px;text-transform:lowercase;letter-spacing:0.15px}
@@ -685,11 +687,19 @@
 
   /* ─── Glassmorphism: subtle frosted surfaces ────────────────────────── */
   body { background:var(--bg-gradient); background-attachment:fixed; }
+  /* Frosted chrome (small / mostly-static surfaces): backdrop blur is cheap here. */
   header, aside, .pane-header, #session-subnav, #trajectory-overview,
   #trajectory-inspector, .diff-toolbar, .diff-col-head {
     background:var(--glass-bg);
     -webkit-backdrop-filter:blur(14px) saturate(1.4);
     backdrop-filter:blur(14px) saturate(1.4);
+  }
+  /* Content panes: skip backdrop-filter — blur over streaming content (esp. the
+     terminal) is recomputed every frame and makes the app laggy. A translucent
+     solid keeps the frosted tint at negligible cost. */
+  #trajectory-pane, #terminal-pane, #files-pane, #checkpoints-pane, #git-pane,
+  .files-list, .git-side {
+    background:var(--glass-bg);
   }
   header { border-bottom-color:var(--glass-border); box-shadow:0 10px 30px -18px rgba(15,17,21,0.35); }
   aside { border-right-color:var(--glass-border); box-shadow:10px 0 30px -22px rgba(15,17,21,0.35); }
@@ -738,29 +748,13 @@
 <main>
   <aside>
     <div class="sidebar-toggle-wrap">
+      <button id="btn-clear-all" class="btn-sm" type="button" title="Permanently delete ALL agents and their events from the database. Cannot be undone." aria-label="Clear all agents">🗑</button>
       <button id="sidebar-toggle" class="btn-sm" onclick="toggleSidebar()" title="Collapse sidebar (more room for the main view)">«</button>
     </div>
-    <div class="sidebar-filters">
-      <label for="sort-select">sort</label>
-      <select id="sort-select">
-        <option value="latest">Latest activity</option>
-        <option value="expensive">Most expensive</option>
-        <option value="errors">Errors only</option>
-      </select>
-      <label for="model-select">model</label>
-      <select id="model-select">
-        <option value="">All models</option>
-      </select>
-      <div class="toggle-row">
-        <input type="checkbox" id="show-hidden-sessions">
-        <label for="show-hidden-sessions">show hidden</label>
-      </div>
-      <button id="btn-hide-all" class="btn-sm" type="button" title="Hide every currently-visible agent from the sidebar. Toggle 'show hidden' to bring them back." style="margin-top:8px;width:100%">hide all agents</button>
-      <button id="btn-clear-all" class="btn-sm" type="button" title="Permanently delete ALL agents and their events from the database. Cannot be undone." style="margin-top:6px;width:100%">clear all agents</button>
-    </div>
-    <div id="model-summary" class="model-summary" style="display:none"></div>
     <div id="session-list"></div>
   </aside>
+
+  <div id="sidebar-resizer" title="Drag to resize sidebar"></div>
 
   <section id="single-pane">
     <div class="pane-header" id="pane-title">
@@ -872,18 +866,6 @@
       <span id="checkpoints-status" style="margin-left:auto;color:var(--muted);font-size:13.5px"></span>
     </div>
     <div id="checkpoints-list" class="checkpoints-body"></div>
-    <div id="cp-merge-modal" class="cp-modal" style="display:none">
-      <div class="cp-modal-box">
-        <div class="cp-modal-title">Merge checkpoint into branch</div>
-        <div id="cp-merge-subtitle" class="cp-modal-subtitle"></div>
-        <label for="cp-merge-branch-select">Choose target branch</label>
-        <select id="cp-merge-branch-select" class="cp-modal-select"></select>
-        <div class="cp-modal-actions">
-          <button id="cp-merge-cancel" class="btn-sm" type="button">Cancel</button>
-          <button id="cp-merge-confirm" class="btn-sm" type="button">Merge</button>
-        </div>
-      </div>
-    </div>
   </section>
 
   <section id="git-pane" style="display:none;flex-direction:column;flex:1;overflow:hidden">
@@ -956,6 +938,20 @@
   </section>
 
 </main>
+
+<!-- Checkpoint merge modal (body-level so its fixed positioning stays viewport-relative) -->
+<div id="cp-merge-modal" class="cp-modal" style="display:none">
+  <div class="cp-modal-box">
+    <div class="cp-modal-title">Merge checkpoint into branch</div>
+    <div id="cp-merge-subtitle" class="cp-modal-subtitle"></div>
+    <label for="cp-merge-branch-select">Choose target branch</label>
+    <select id="cp-merge-branch-select" class="cp-modal-select"></select>
+    <div class="cp-modal-actions">
+      <button id="cp-merge-cancel" class="btn-sm" type="button">Cancel</button>
+      <button id="cp-merge-confirm" class="btn-sm" type="button">Merge</button>
+    </div>
+  </div>
+</div>
 
 <!-- Help overlay -->
 <div id="help-overlay" onclick="if(event.target===this) toggleHelp()">
