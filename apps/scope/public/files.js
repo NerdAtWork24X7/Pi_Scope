@@ -26,6 +26,7 @@
   const btnWrap = $("#btn-diff-wrap");
   const diffGrid = $(".diff-grid");
   const diffResizer = $("#diff-resizer");
+  const filesResizer = $("#files-resizer");
 
   const LINE_CAP = 6000; // combined line count for highlighted diff; above this render plain
   const MAX_CELLS = 9_000_000; // m*n bound for the LCS table
@@ -101,6 +102,7 @@
     el.classList.add("active");
   }
   function renderTree(node, container, depth) {
+    const collapsed = !!(showIgnored && showIgnored.checked);
     const keys = Object.keys(node).sort((a, b) => {
       const da = node[a].__isDir, db = node[b].__isDir;
       if (da !== db) return da ? -1 : 1;
@@ -114,7 +116,7 @@
         dirRow.style.paddingLeft = (depth * 14 + 4) + "px";
         const caret = document.createElement("span");
         caret.className = "tree-caret";
-        caret.textContent = "▾";
+        caret.textContent = collapsed ? "▸" : "▾";
         const nm = document.createElement("span");
         nm.className = "tree-name";
         nm.textContent = k + "/";
@@ -122,6 +124,7 @@
         dirRow.appendChild(nm);
         const childWrap = document.createElement("div");
         childWrap.className = "tree-children";
+        childWrap.style.display = collapsed ? "none" : "";
         dirRow.onclick = () => {
           const hidden = childWrap.style.display === "none";
           childWrap.style.display = hidden ? "" : "none";
@@ -392,8 +395,35 @@
 
   if (btnHide) btnHide.onclick = () => {
     const hidden = filesList.classList.toggle("hidden");
-    btnHide.textContent = hidden ? "☰ show files" : "☰ files";
+    if (filesResizer) filesResizer.classList.toggle("hidden", hidden);
+    btnHide.textContent = hidden ? "☰ show files" : "☰ hide";
   };
+
+  if (filesResizer) {
+    const MIN = 140, MAX = 700;
+    filesResizer.addEventListener("mousedown", (e) => {
+      if (filesList.classList.contains("hidden")) return;
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = filesList.getBoundingClientRect().width;
+      filesResizer.classList.add("dragging");
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "col-resize";
+      const onMove = (ev) => {
+        const w = Math.min(MAX, Math.max(MIN, startW + (ev.clientX - startX)));
+        filesList.style.setProperty("--files-list-w", Math.round(w) + "px");
+      };
+      const onUp = () => {
+        filesResizer.classList.remove("dragging");
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
 
   if (diffResizer) {
     let dragging = false;

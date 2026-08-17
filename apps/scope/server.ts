@@ -1093,25 +1093,22 @@ async function handle(req: Request): Promise<Response> {
     const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "200", 10), 500);
     // `%P` yields space-separated parent SHAs (first parent first) so the UI
     // can draw a coloured lane graph. --topo-order keeps the first-parent
-    // (mainline) chain grouped. The `--graph` prefixes are kept for reference
-    // but the lanes are rebuilt client-side from the parent lists.
-    const fmt = "%x1f%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D%x1f%P";
-    const r = gitTry(absCwd, ["log", "--graph", "--topo-order", "--date=iso-strict", `--format=${fmt}`, "-n", String(limit), ...(all ? ["--all"] : [])]);
+    // (mainline) chain grouped; the lanes are rebuilt client-side from the
+    // parent lists, so we skip git's (expensive) `--graph` output entirely.
+    const fmt = "%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D%x1f%P";
+    const r = gitTry(absCwd, ["log", "--topo-order", "--date=iso-strict", `--format=${fmt}`, "-n", String(limit), ...(all ? ["--all"] : [])]);
     if (!r.ok) return jsonResponse({ ok: false, error: r.out }, 500);
     const commits: any[] = [];
     for (const line of r.out.split("\n")) {
       if (line.length === 0) continue;
-      const idx = line.indexOf("\x1f");
-      if (idx < 0) continue; // pure graph connector line — rebuilt client-side
-      const f = line.slice(idx + 1).split("\x1f");
+      const f = line.split("\x1f");
       commits.push({
-        graph: line.slice(0, idx),
         sha: f[0] ?? "", short: f[1] ?? "", author: f[2] ?? "",
         date: f[3] ?? "", subject: f[4] ?? "", refs: (f[5] ?? "").trim(),
         parents: (f[6] ?? "").split(" ").map((s: string) => s.trim()).filter(Boolean),
       });
     }
-    return jsonResponse({ ok: true, commits, entries: commits });
+    return jsonResponse({ ok: true, commits });
   }
 
   // ── GET /git/show (one commit: meta + files + unified diff) ─────────────
