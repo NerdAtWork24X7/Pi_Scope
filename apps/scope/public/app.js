@@ -1,6 +1,6 @@
 /**
- * app.js — Pi Scope v2→v3 UI: state, single-mode, SSE, keyboard nav.
- * Swimlane mode delegated to swimlane.js. IIFE-wrapped for scope isolation.
+ * app.js — Pi Scope UI: state, single-mode, SSE, keyboard nav.
+ * IIFE-wrapped for scope isolation.
  */
 (function() {
 
@@ -11,18 +11,18 @@ const STATE = {
   // V3 regression fix: token must come from ?token=… query param. The hash is
   // for shareable view-state only; we don't want the token in shared URLs.
   token: new URLSearchParams(location.search).get("token") ?? "",
-  view: "single", mode: "form", search: "", sort: "latest", showHidden: false,
+  view: "single", search: "",
   typeFilter: new Set(), autoScroll: true,
-  selectedSessionId: null, cwd: "", sessions: [], events: [], sessionsLoaded: false, hiddenSessions: loadHiddenSessions(),
+  selectedSessionId: null, cwd: "", sessions: [], events: [], sessionsLoaded: false,
   sidebarCollapsed: loadSidebarCollapsed(),
+  theme: loadTheme(),
   focusedIdx: -1, lastEventTs: null,
   sseReconnectDelay: 1000, maxReconnectDelay: 10_000,
   renderDirty: true, seenIds: new Set(),
   sessionStats: {}, // sid → {total_cost,total_tokens,error_count,models:[]}
   ackd: new Set(),
+  expandedGroups: new Set(), // cwd keys of currently-expanded session groups
   sessionsSig: "",
-  models: [], // list of model names from /models
-  modelFilter: "", // selected model filter
 };
 
 window.__SCOPE_STATE = STATE;
@@ -34,48 +34,14 @@ function loadURLState() {
   if (!h) return;
   const p = new URLSearchParams(h);
   if (p.has("view")) STATE.view = p.get("view");
-  if (!["single", "swimlane", "race", "terminal", "files", "checkpoints"].includes(STATE.view)) STATE.view = "single";
-  if (p.has("mode")) STATE.mode = p.get("mode");
-  else { const stored = localStorage.getItem("scope-mode"); if (stored === "form" || stored === "function") STATE.mode = stored; }
-  if (p.has("sort")) { STATE.sort = p.get("sort"); sortSelect.value = STATE.sort; }
-  if (p.has("model")) { STATE.modelFilter = p.get("model") ?? ""; if (modelSelect) modelSelect.value = STATE.modelFilter; }
-  if (p.has("show_hidden")) { STATE.showHidden = p.get("show_hidden") === "1"; showHiddenCB.checked = STATE.showHidden; }
+  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git"].includes(STATE.view)) STATE.view = "single";
   if (p.has("sid")) { STATE.selectedSessionId = p.get("sid"); STATE.ackd.add(STATE.selectedSessionId); }
-  if (p.has("lanes")) {
-    const lanes = p.get("lanes").split(",").filter(Boolean);
-    window.__restoreLanes = lanes;
-  }
-  if (p.has("race_lanes")) {
-    const lanes = p.get("race_lanes").split(",").filter(Boolean);
-    window.__restoreRaceLanes = lanes;
-  }
-  if (p.has("eid")) window.__restoreRaceEventId = p.get("eid");
-  if (p.has("auto_add")) {
-    window.__restoreAutoAdd = p.get("auto_add") !== "0";
-    autoAddCB.checked = window.__restoreAutoAdd;
-  }
 }
 
 function saveURLState() {
   const p = new URLSearchParams();
   p.set("view", STATE.view);
-  if (STATE.mode !== "form") p.set("mode", STATE.mode);
-  if (STATE.sort !== "latest") p.set("sort", STATE.sort);
-  if (STATE.modelFilter) p.set("model", STATE.modelFilter);
-  if (STATE.showHidden) p.set("show_hidden", "1");
-  if (STATE.view === "single" && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
-  if (STATE.view === "swimlane") {
-    const lanes = window.__swimlaneGetLanes?.();
-    if (lanes && lanes.length) p.set("lanes", lanes.join(","));
-    if (!autoAddLanes()) p.set("auto_add", "0");
-  }
-  if (STATE.view === "race") {
-    const lanes = window.__raceGetLanes?.();
-    if (lanes && lanes.length) p.set("race_lanes", lanes.join(","));
-    const eid = window.__raceGetOpenEventId?.();
-    if (eid) p.set("eid", eid);
-    if (!autoAddLanes()) p.set("auto_add", "0");
-  }
+  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
   const newHash = "#" + p.toString();
   if (location.hash !== newHash) history.replaceState(null, "", newHash);
 }
@@ -84,9 +50,6 @@ function saveURLState() {
 
 const $ = s => document.querySelector(s);
 const sessionSubnav = document.querySelector("#session-subnav");
-const sortSelect = $("#sort-select");
-const modelSelect = $("#model-select");
-const showHiddenCB = $("#show-hidden-sessions");
 const sessionList = $("#session-list");
 const eventView = $("#event-view");
 const paneLabel = $("#pane-label");
@@ -95,12 +58,8 @@ const liveLabel = $("#live-label");
 const searchBox = $("#search-box");
 const filterChips = $("#filter-chips");
 const singlePane = $("#single-pane");
-const swimlaneContainer = $("#swimlane-container");
 const filesPane = $("#files-pane");
-  const checkpointsPane = document.getElementById("checkpoints-pane");
-const raceContainer = $("#race-container");
-const autoAddRow = $("#auto-add-row");
-const autoAddCB = $("#auto-add-lanes");
+const checkpointsPane = document.getElementById("checkpoints-pane");
 const headerBreadcrumb = $("#header-breadcrumb");
 const btnExpandAll = $("#btn-expand-all");
 const btnCollapseAll = $("#btn-collapse-all");
@@ -134,6 +93,32 @@ function apiUrl(path, params = {}) {
 }
 window.apiUrl = apiUrl;
 window.authHeaders = authHeaders;
+
+// Shared fetch helper used by the Files / Checkpoints / Git views (and any
+// future view). Combines auth headers + JSON body handling and returns
+// { res, data } so callers can branch on res.ok / data.ok. `body` implies a
+// JSON POST. The token travels via the Authorization header only — there is no
+// need to repeat it in the query string (the server accepts either).
+window.SCOPE.api = async function (path, params = {}, body) {
+  const headers = authHeaders();
+  const opts = { headers };
+  if (body !== undefined) {
+    opts.method = "POST";
+    headers["content-type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(apiUrl(path, params), opts);
+  let data = {};
+  try { data = await res.json(); } catch {}
+  return { res, data };
+};
+
+// Shared cwd access + label fallback (Files / Checkpoints / Git all render the
+// same "no directory set" message into their own label element).
+window.SCOPE.currentCwd = function () { return STATE.cwd || ""; };
+window.SCOPE.cwdLabel = function (el) {
+  if (el) el.textContent = STATE.cwd ? STATE.cwd : "no directory set — choose one in the Terminal pane";
+};
 
 // ─── Agent info computation ─────────────────────────────────────
 function computeAgentInfo(sid) {
@@ -221,6 +206,24 @@ function computeAgentInfo(sid) {
   };
 }
 
+// Debounce helper: coalesce bursts (e.g. a rapid run of SSE events, or the
+// boot fan-out of per-session stats) into a single trailing call so the agent
+// subnav and sidebar aren't rebuilt once per event. A pending call is dropped
+// when another arrives during the wait window.
+function debounce(fn, wait = 200) {
+  let t = null;
+  const wrapped = function (...args) {
+    if (t) return;
+    t = setTimeout(() => { t = null; fn.apply(null, args); }, wait);
+  };
+  wrapped.cancel = function () { if (t) { clearTimeout(t); t = null; } };
+  return wrapped;
+}
+
+// Live-stream hot paths: recompute the subnav and sidebar at most once per
+// wait period instead of on every appended event / stats response.
+const scheduleAgentSubnav = debounce(renderAgentSubnav, 200);
+
 function renderAgentSubnav() {
   if (!sessionSubnav) return;
   if (!STATE.selectedSessionId || STATE.view !== "single") {
@@ -284,41 +287,42 @@ function setSingleSessionControlsVisible(visible) {
 
 // ─── View toggle ────────────────────────────────────────────────────────────
 
-// Apply form/function mode: body class + persistence + scroll-anchor recovery.
-// Form = spacious dashboard feel (default). Function = dense/TUI feel.
-window.setMode = function(mode) {
-  if (mode !== "form" && mode !== "function") mode = "form";
-  STATE.mode = mode;
-  // obv-flash: skip redundant disk writes on boot / repeated clicks.
-  if (localStorage.getItem("scope-mode") !== mode) localStorage.setItem("scope-mode", mode);
-  document.body.classList.toggle("layout-form", mode === "form");
-  document.body.classList.toggle("layout-function", mode === "function");
-  const btnForm = $("#btn-form");
-  const btnFunc = $("#btn-function");
-  if (btnForm) btnForm.classList.toggle("active", mode === "form");
-  if (btnFunc) btnFunc.classList.toggle("active", mode === "function");
-  // obv-flash: row heights just changed under the user's feet, so re-anchor
-  // every scrollable surface that was riding the bottom. Without this the
-  // single timeline + sticky swimlane lanes briefly drift mid-page before the
-  // 250 ms sticky interval mops up.
-  requestAnimationFrame(() => {
-    if (STATE.autoScroll && eventView) eventView.scrollTop = eventView.scrollHeight;
-    window.__swimlaneReanchorAll?.();
-  });
-  saveURLState();
+// Apply light/dark theme: body attribute + persistence + terminal re-theme.
+// DeepSeek light is the default; dark swaps in the deepseek-harness dark tokens.
+window.setTheme = function(theme) {
+  if (theme !== "light" && theme !== "dark") theme = "light";
+  STATE.theme = theme;
+  if (theme === "dark") document.body.setAttribute("data-ds-dark-theme", "");
+  else document.body.removeAttribute("data-ds-dark-theme");
+  document.documentElement.style.colorScheme = theme === "dark" ? "dark" : "light";
+  const btnTheme = $("#btn-theme");
+  if (btnTheme) btnTheme.textContent = theme === "dark" ? "🌙" : "☀";
+  try { localStorage.setItem("scope-theme", theme); } catch {}
+  window.__terminalSetTheme?.();
+  // Tool-name pills and other per-row tints are theme-dependent — re-render
+  // the visible surfaces so their colors follow the new theme.
+  renderSessions();
+  if (STATE.view === "single" && STATE.selectedSessionId) {
+    renderAllEvents();
+    renderAgentSubnav();
+  }
+  if (STATE.view === "trajectory") window.__trajectoryOnView?.();
+};
+
+window.toggleTheme = function() {
+  setTheme(STATE.theme === "dark" ? "light" : "dark");
 };
 
 window.setView = function(mode) {
-  if (!["single", "swimlane", "race", "terminal", "files", "checkpoints"].includes(mode)) mode = "single";
+  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git"].includes(mode)) mode = "single";
   STATE.view = mode;
   localStorage.setItem("scope-view", mode);
   $("#btn-single").classList.toggle("active", mode === "single");
-  $("#btn-swimlane").classList.toggle("active", mode === "swimlane");
-  $("#btn-race")?.classList.toggle("active", mode === "race");
+  $("#btn-trajectory")?.classList.toggle("active", mode === "trajectory");
   $("#btn-terminal")?.classList.toggle("active", mode === "terminal");
   singlePane.style.display = mode === "single" ? "" : "none";
-  swimlaneContainer.classList.toggle("active", mode === "swimlane");
-  raceContainer?.classList.toggle("active", mode === "race");
+  const trajectoryPane = document.getElementById("trajectory-pane");
+  if (trajectoryPane) trajectoryPane.style.display = mode === "trajectory" ? "flex" : "none";
   const terminalPane = document.getElementById("terminal-pane");
   if (terminalPane) terminalPane.style.display = mode === "terminal" ? "" : "none";
   $("#btn-files")?.classList.toggle("active", mode === "files");
@@ -327,22 +331,13 @@ window.setView = function(mode) {
   $("#btn-checkpoints")?.classList.toggle("active", mode === "checkpoints");
   if (checkpointsPane) checkpointsPane.style.display = mode === "checkpoints" ? "flex" : "none";
   if (mode === "checkpoints") window.__checkpointsOnView?.();
-  if (mode !== "race") window.__raceCloseInspector?.();
+  $("#btn-git")?.classList.toggle("active", mode === "git");
+  const gitPane = document.getElementById("git-pane");
+  if (gitPane) gitPane.style.display = mode === "git" ? "flex" : "none";
+  if (mode === "git") window.__gitOnView?.();
+  if (mode === "trajectory") window.__trajectoryOnView?.();
   if (sessionSubnav) sessionSubnav.style.display = (mode === "single" && STATE.selectedSessionId) ? "flex" : "none";
-  autoAddRow.style.display = mode === "swimlane" || mode === "race" ? "" : "none";
   renderSessions();
-  if (mode === "swimlane") {
-    if ((window.__swimlaneGetLanes?.() ?? []).length === 0 && STATE.selectedSessionId) {
-      window.__swimlaneEnsureLane?.(STATE.selectedSessionId);
-    }
-    window.__swimlaneOnView?.();
-  }
-  if (mode === "race") {
-    if ((window.__raceGetLanes?.() ?? []).length === 0 && STATE.selectedSessionId) {
-      window.__raceEnsureLane?.(STATE.selectedSessionId);
-    }
-    window.__raceOnView?.();
-  }
   if (mode === "single" && STATE.selectedSessionId) {
     setSingleSessionControlsVisible(true);
     loadSession(STATE.selectedSessionId);
@@ -356,83 +351,23 @@ window.setView = function(mode) {
 
 // ─── Sessions ───────────────────────────────────────────────────────────────
 
-async function fetchModels() {
-  try {
-    const res = await fetch(apiUrl("/models"), { headers: authHeaders() });
-    if (!res.ok) return;
-    const data = await res.json();
-    STATE.models = data.models ?? [];
-    renderModelSelect();
-  } catch { /* ignore */ }
-}
-
-function renderModelSelect() {
-  if (!modelSelect) return;
-  const current = STATE.modelFilter;
-  const sig = STATE.models.join("|");
-  if (modelSelect.dataset.sig === sig) return;
-  modelSelect.dataset.sig = sig;
-  modelSelect.innerHTML = '<option value="">All models</option>';
-  for (const m of STATE.models) {
-    const opt = document.createElement("option");
-    opt.value = m;
-    opt.textContent = m;
-    modelSelect.appendChild(opt);
-  }
-  modelSelect.value = current;
-}
-
-function renderModelSummary() {
-  const el = document.getElementById("model-summary");
-  if (!el) return;
-  if (!STATE.modelFilter) {
-    el.style.display = "none";
-    el.classList.remove("active");
-    el.innerHTML = "";
-    return;
-  }
-  let totalTokens = 0;
-  let totalCost = 0;
-  let sessionCount = 0;
-  for (const s of visibleSessions()) {
-    const stats = STATE.sessionStats[s.session_id];
-    if (!stats?.models?.length) continue;
-    const mstat = stats.models.find(m => m.model === STATE.modelFilter);
-    if (mstat) {
-      totalTokens += mstat.total_tokens || 0;
-      totalCost += mstat.cost_total || 0;
-      sessionCount += 1;
-    }
-  }
-  el.style.display = "block";
-  el.classList.add("active");
-  el.innerHTML = `<span class="ms-label">model total</span><span class="ms-model">${window.SCOPE.escapeHtml(STATE.modelFilter)}</span><span class="ms-tokens">${window.SCOPE.fmtTokens(totalTokens)} tk · $${totalCost.toFixed(4)}</span><span class="ms-sessions">across ${sessionCount} session${sessionCount === 1 ? "" : "s"}</span>`;
-}
-
 async function fetchSessions() {
   try {
     const url = apiUrl("/sessions", { limit: 100 });
     const res = await fetch(url, { headers: authHeaders() });
     if (!res.ok) return;
     const data = await res.json();
-    // Apply sort
-    let sessions = data.sessions ?? [];
-    if (STATE.sort === "errors") {
-      sessions = sessions.filter(s => (STATE.sessionStats[s.session_id]?.error_count ?? 0) > 0);
-    }
-    if (STATE.sort === "expensive") {
-      sessions.sort((a, b) => (STATE.sessionStats[b.session_id]?.total_cost ?? 0) - (STATE.sessionStats[a.session_id]?.total_cost ?? 0));
-    }
+    const sessions = data.sessions ?? [];
     STATE.sessions = sessions;
     STATE.sessionsLoaded = true;
     // Skip the full sidebar DOM rebuild when the session list is unchanged
     // (avoids a needless teardown/re-create on every 3s poll).
-    const sig = sessions.map((s) => [s.session_id, s.event_count, s.last_ts, s.agent_name, s.model, s.cwd].join(":")).join("|") + "|model=" + STATE.modelFilter;
-    if (sig !== STATE.sessionsSig) { STATE.sessionsSig = sig; renderSessions(); renderModelSummary(); }
-    if (STATE.view === "swimlane") window.__swimlaneOnSessions?.();
-    if (STATE.view === "race") window.__raceOnSessions?.();
+    const sig = sessions.map((s) => [s.session_id, s.event_count, s.last_ts, s.agent_name, s.model, s.cwd].join(":")).join("|");
+    if (sig !== STATE.sessionsSig) { STATE.sessionsSig = sig; renderSessions(); }
     if (STATE.view === "files") window.__filesOnSessions?.();
     if (STATE.view === "checkpoints") window.__checkpointsOnSessions?.();
+    if (STATE.view === "git") window.__gitOnSessions?.();
+    if (STATE.view === "trajectory") window.__trajectoryOnSessions?.();
     // Fetch stats for all visible sessions
     for (const s of sessions) {
       if (!STATE.sessionStats[s.session_id]) fetchSessionStats(s.session_id);
@@ -447,63 +382,17 @@ async function fetchSessionStats(sid) {
     if (!res.ok) return;
     const stats = await res.json();
     STATE.sessionStats[sid] = stats;
-    // Re-render sidebar if this session is visible
-    if (STATE.sessions.some(s => s.session_id === sid)) { renderSessions(); renderModelSummary(); }
-    if (STATE.view === "swimlane") window.__swimlaneStatsUpdate?.(sid, stats);
-    if (STATE.view === "race") window.__raceStatsUpdate?.(sid, stats);
-    if (sid === STATE.selectedSessionId) renderAgentSubnav();
+    // Patch just this session's row in place. The boot fan-out fetches stats
+    // for every session, so a full rebuild here would tear down and recreate the
+    // sidebar dozens of times; a tiny text/dot update is effectively free.
+    patchSessionStats(sid);
+    if (STATE.view === "trajectory") window.__trajectoryStatsUpdate?.(sid, stats);
+    if (sid === STATE.selectedSessionId) scheduleAgentSubnav();
   } catch { /* ignore */ }
 }
 
 function visibleSessions() {
-  let list = STATE.showHidden ? [...STATE.sessions] : STATE.sessions.filter(s => !STATE.hiddenSessions.has(s.session_id));
-  if (STATE.modelFilter) {
-    list = list.filter(s => {
-      const stats = STATE.sessionStats[s.session_id];
-      if (stats?.models?.length) return stats.models.some(m => m.model === STATE.modelFilter);
-      return (s.model || "unknown") === STATE.modelFilter;
-    });
-  }
-  return list;
-}
-
-function saveHiddenSessions() {
-  try { localStorage.setItem("scope-hidden-sessions", JSON.stringify([...STATE.hiddenSessions])); } catch {}
-}
-
-function hideSessionFromSidebar(sid) {
-  STATE.hiddenSessions.add(sid);
-  saveHiddenSessions();
-  // Drop this session from any open swimlane / race lane so "hide" actually
-  // hides it everywhere, not just the sidebar.
-  if (window.__swimlaneIsSelected?.(sid)) window.__swimlaneToggle?.(sid);
-  if (window.__raceIsSelected?.(sid)) window.__raceToggle?.(sid);
-  if (STATE.view === "single" && STATE.selectedSessionId === sid && !STATE.showHidden) clearSelectedSession();
-  else { renderSessions(); saveURLState(); }
-}
-
-function unhideSessionFromSidebar(sid) {
-  STATE.hiddenSessions.delete(sid);
-  saveHiddenSessions();
-  renderSessions();
-  saveURLState();
-}
-
-// Bulk-hide every currently-visible agent and clear any open selections in
-// every view — single, swimlane, and race — so the main pane goes blank and
-// the user sees the real-estate gain immediately. The existing "show hidden"
-// toggle brings them back.
-function hideAllVisibleSessions() {
-  const visible = visibleSessions();
-  if (!visible.length) return;
-  for (const s of visible) STATE.hiddenSessions.add(s.session_id);
-  saveHiddenSessions();
-
-  for (const sid of (window.__swimlaneGetLanes?.() ?? []).slice()) window.__swimlaneToggle?.(sid);
-  for (const sid of (window.__raceGetLanes?.() ?? []).slice()) window.__raceToggle?.(sid);
-
-  if (STATE.view === "single" && STATE.selectedSessionId) clearSelectedSession();
-  else { renderSessions(); saveURLState(); }
+  return [...STATE.sessions];
 }
 
 // Permanently delete every session and its events from the DB. Destructive —
@@ -515,10 +404,8 @@ function clearAllSessions() {
     .then(data => {
       if (data && data.ok) {
         STATE.sessions = [];
-        STATE.hiddenSessions.clear();
         STATE.sessionStats = {};
-        for (const sid of (window.__swimlaneGetLanes?.() ?? []).slice()) window.__swimlaneToggle?.(sid);
-        for (const sid of (window.__raceGetLanes?.() ?? []).slice()) window.__raceToggle?.(sid);
+        STATE.expandedGroups.clear();
         clearSelectedSession();
         renderSessions();
       } else {
@@ -537,6 +424,7 @@ function clearSelectedSession() {
   STATE.lastEventTs = null;
   paneLabel.textContent = "Select a session";
   eventView.innerHTML = '<div class="empty-state"><span class="icon">◈</span>Select a session from the sidebar</div>';
+  window.__trajectoryClear?.();
   setSingleSessionControlsVisible(false);
   renderSessions();
   updateAgeTicker();
@@ -561,78 +449,139 @@ function renderSessions() {
     for (const s of filtered) sessionList.appendChild(buildMiniSessionItem(s));
     return;
   }
-  for (const s of filtered) {
-    const el = document.createElement("div");
-    const isSel = STATE.view === "single"
-      ? s.session_id === STATE.selectedSessionId
-      : STATE.view === "swimlane"
-        ? window.__swimlaneIsSelected?.(s.session_id)
-        : window.__raceIsSelected?.(s.session_id);
-    const hiddenByUser = STATE.hiddenSessions.has(s.session_id);
-    el.className = "session-item" + (isSel ? " selected" : "") + (hiddenByUser ? " hidden-session" : "");
-    const shortId = s.session_id.slice(0, 8);
-    const stats = STATE.sessionStats[s.session_id];
-    let costStr = "";
-    if (stats) {
-      if (STATE.modelFilter) {
-        const mstat = stats.models?.find(m => m.model === STATE.modelFilter);
-        const tk = mstat ? mstat.total_tokens : 0;
-        costStr = `${window.SCOPE.fmtTokens(tk)} tk`;
-      } else {
-        costStr = `$${stats.total_cost.toFixed(4)} · ${window.SCOPE.fmtTokens(stats.total_tokens)} tk`;
-      }
-    }
+  for (const group of groupSessionsByCwd(filtered)) {
+    sessionList.appendChild(buildSessionGroup(group));
+  }
+}
+
+// Group sessions by working directory. Each group is one "session" (the shared
+// cwd) whose "subagents" are the individual agent sessions that ran there.
+function groupSessionsByCwd(sessions) {
+  const groups = new Map();
+  for (const s of sessions) {
+    const cwd = (s.cwd || "").trim();
+    if (!groups.has(cwd)) groups.set(cwd, []);
+    groups.get(cwd).push(s);
+  }
+  // Preserve the server's last_ts DESC ordering for both groups and members.
+  return [...groups.entries()].map(([cwd, subagents]) => ({ cwd, subagents }));
+}
+
+function buildSessionGroup(group) {
+  const wrap = document.createElement("div");
+  wrap.className = "session-group";
+
+  const expanded = STATE.expandedGroups.has(group.cwd);
+
+  const head = document.createElement("div");
+  head.className = "session-group-head" + (expanded ? "" : " collapsed");
+
+  const caret = document.createElement("span");
+  caret.className = "session-group-caret";
+  caret.textContent = expanded ? "▾" : "▸";
+
+  const title = document.createElement("span");
+  title.className = "session-group-title";
+  title.textContent = sessionGroupName(group.cwd);
+  title.title = group.cwd;
+
+  const count = document.createElement("span");
+  count.className = "session-group-count";
+  count.textContent = `${group.subagents.length} subagent${group.subagents.length === 1 ? "" : "s"}`;
+
+  head.append(caret, title, count);
+
+  const children = document.createElement("div");
+  children.className = "session-group-children";
+  children.style.display = expanded ? "" : "none";
+  for (const s of group.subagents) children.appendChild(buildSessionItem(s));
+
+  head.addEventListener("click", () => {
+    const collapsed = head.classList.toggle("collapsed");
+    caret.textContent = collapsed ? "▸" : "▾";
+    children.style.display = collapsed ? "none" : "";
+    if (collapsed) STATE.expandedGroups.delete(group.cwd);
+    else STATE.expandedGroups.add(group.cwd);
+  });
+
+  wrap.appendChild(head);
+  wrap.appendChild(children);
+  return wrap;
+}
+
+function sessionGroupName(cwd) {
+  if (!cwd) return "unknown cwd";
+  const parts = cwd.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : cwd;
+}
+
+function buildSessionItem(s) {
+  const el = document.createElement("div");
+  const isSel = (STATE.view === "single" || STATE.view === "trajectory")
+    ? s.session_id === STATE.selectedSessionId
+    : false;
+  el.className = "session-item" + (isSel ? " selected" : "");
+  el.dataset.sid = s.session_id;
+  const shortId = s.session_id.slice(0, 8);
+  const name = s.agent_name ?? s.cwd?.split("/").pop() ?? shortId;
+
+  const modelHtml = s.model ? ` <span class="name-model">- ${window.SCOPE.escapeHtml(s.model)}</span>` : "";
+  const info = document.createElement("div");
+  info.className = "info";
+  info.innerHTML = `<div class="name"><span class="name-text">${window.SCOPE.escapeHtml(name)}</span>${modelHtml}<span class="err-dot">●</span></div>`;
+
+  const cost = document.createElement("div");
+  cost.className = "cost";
+  info.appendChild(cost);
+
+  applySessionStatsToItem(el, STATE.sessionStats[s.session_id], s);
+
+  if (STATE.view === "single" || STATE.view === "trajectory") {
+    el.addEventListener("click", () => selectSession(s.session_id));
+  }
+
+  el.appendChild(info);
+
+  return el;
+}
+
+// Set a session item's cost text and error-dot state from its stats. Shared by
+// the initial build and the boot fan-out patch so both use one code path.
+function applySessionStatsToItem(el, stats, s) {
+  const cost = el.querySelector(".cost");
+  if (cost) {
+    cost.textContent = stats
+      ? `${window.SCOPE.fmtTokens(stats.total_tokens)} tk · $${stats.total_cost.toFixed(4)}`
+      : "";
+  }
+  const dot = el.querySelector(".err-dot");
+  if (dot) {
     const hasErr = stats && stats.error_count > 0;
-    const isAckd = STATE.ackd.has(s.session_id);
-    const errDotHtml = hasErr ? ` <span class="err-dot${isAckd ? ' ackd' : ''}">●</span>` : '';
-    const name = s.agent_name ?? s.cwd?.split("/").pop() ?? shortId;
-    const hiddenNote = hiddenByUser ? ' <span class="session-hidden-note">hidden</span>' : '';
-    const relTime = window.SCOPE.fmtRel(s.last_ts);
+    dot.classList.toggle("noerr", !hasErr);
+    dot.classList.toggle("ackd", STATE.ackd.has(s.session_id));
+  }
+}
 
-    if (STATE.view === "swimlane" || STATE.view === "race") {
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = STATE.view === "swimlane" ? (window.__swimlaneIsSelected?.(s.session_id) ?? false) : (window.__raceIsSelected?.(s.session_id) ?? false);
-      cb.addEventListener("change", () => STATE.view === "swimlane" ? window.__swimlaneToggle?.(s.session_id) : window.__raceToggle?.(s.session_id));
-      el.appendChild(cb);
-    }
-
-    const info = document.createElement("div");
-    info.className = "info";
-    info.innerHTML = `<div class="name">${window.SCOPE.escapeHtml(name)}${errDotHtml}${hiddenNote}</div><div class="uuid">${shortId}${s.model ? " · " + window.SCOPE.escapeHtml(s.model) : ""}</div><div class="meta">${s.event_count} events · ${relTime}</div>${costStr ? `<div class="cost">${costStr}</div>` : ""}`;
-
-    if (STATE.view === "single") {
-      el.addEventListener("click", () => selectSession(s.session_id));
-    } else if (STATE.view === "swimlane") {
-      info.addEventListener("click", () => window.__swimlaneToggle?.(s.session_id));
-    } else {
-      info.addEventListener("click", () => window.__raceToggle?.(s.session_id));
-    }
-
-    el.appendChild(info);
-
-    const hideBtn = document.createElement("button");
-    hideBtn.className = "session-hide-btn";
-    hideBtn.type = "button";
-    hideBtn.textContent = hiddenByUser ? "↺" : "×";
-    hideBtn.title = hiddenByUser ? "Unhide this agent in the sidebar" : "Hide this agent from the sidebar";
-    hideBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      hiddenByUser ? unhideSessionFromSidebar(s.session_id) : hideSessionFromSidebar(s.session_id);
-    });
-    el.appendChild(hideBtn);
-
-    sessionList.appendChild(el);
+// In-place update for one session after its stats arrive, avoiding a full
+// sidebar rebuild. Mirrors the cost into the collapsed mini-item tooltip too.
+function patchSessionStats(sid) {
+  const s = STATE.sessions.find(x => x.session_id === sid);
+  const stats = STATE.sessionStats[sid];
+  if (!s || !stats) return;
+  const item = sessionList.querySelector(`.session-item[data-sid="${CSS.escape(sid)}"]`);
+  if (item) applySessionStatsToItem(item, stats, s);
+  const mini = sessionList.querySelector(`.session-mini[data-sid="${CSS.escape(sid)}"]`);
+  if (mini) {
+    const name = s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id;
+    mini.title = `${name}\n${sid.slice(0, 8)} · ${s.event_count} events · ${window.SCOPE.fmtRel(s.last_ts)} · $${stats.total_cost.toFixed(4)}`;
   }
 }
 
 function buildMiniSessionItem(s) {
   const el = document.createElement("div");
-  const isSel = STATE.view === "single"
+  const isSel = (STATE.view === "single" || STATE.view === "trajectory")
     ? s.session_id === STATE.selectedSessionId
-    : STATE.view === "swimlane"
-      ? (window.__swimlaneIsSelected?.(s.session_id) ?? false)
-      : (window.__raceIsSelected?.(s.session_id) ?? false);
+    : false;
   el.className = "session-mini" + (isSel ? " selected" : "");
   el.dataset.sid = s.session_id;
   const name = s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id;
@@ -643,12 +592,8 @@ function buildMiniSessionItem(s) {
   const dot = document.createElement("span");
   dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
   el.appendChild(dot);
-  if (STATE.view === "single") {
+  if (STATE.view === "single" || STATE.view === "trajectory") {
     el.addEventListener("click", () => selectSession(s.session_id));
-  } else if (STATE.view === "swimlane") {
-    el.addEventListener("click", () => window.__swimlaneToggle?.(s.session_id));
-  } else {
-    el.addEventListener("click", () => window.__raceToggle?.(s.session_id));
   }
   return el;
 }
@@ -681,6 +626,13 @@ function selectSession(sid) {
   // Reset auto-scroll and hide pause toast on agent switch
   STATE.autoScroll = true;
   if (pauseToastSingle) pauseToastSingle.classList.remove("show");
+
+  if (STATE.view === "trajectory") {
+    window.__trajectoryOnView?.();
+    updateSSEFilter();
+    saveURLState();
+    return;
+  }
 
   setSingleSessionControlsVisible(true);
   loadSession(sid);
@@ -777,7 +729,7 @@ function appendEventSingle(evt) {
     if (STATE.autoScroll) scrollEventViewToBottom();
     updateAgeTicker();
   }
-  renderAgentSubnav();
+  scheduleAgentSubnav();
 }
 
 function matchesFilters(evt) {
@@ -794,7 +746,12 @@ function buildEventRow(evt, idx, isLive = false) {
   const row = document.createElement("div");
   row.className = "evt-row" + (idx === STATE.focusedIdx ? " focused" : "");
   row.dataset.idx = idx;
-  row.innerHTML = `<span class="evt-ts">${window.SCOPE.fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill ${evt.type}">${evt.type.replace(/_/g," ")}</span>${window.SCOPE.toolNamePillHTML(evt)}</span><span class="evt-summary ${summaryClass(evt)}">${window.SCOPE.escapeHtml(summaryFor(evt))}</span>`;
+  // evt.type is producer-controlled (POST /events is unauthenticated), so it's
+  // escaped for display and the class token is restricted to a safe charset.
+  const typeStr = String(evt.type ?? "");
+  const typeLabel = window.SCOPE.escapeHtml(typeStr.replace(/_/g, " "));
+  const typeClass = /^[a-z0-9_-]+$/.test(typeStr) ? typeStr : "custom";
+  row.innerHTML = `<span class="evt-ts">${window.SCOPE.fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill ${typeClass}">${typeLabel}</span>${window.SCOPE.toolNamePillHTML(evt)}</span><span class="evt-summary ${summaryClass(evt)}">${window.SCOPE.escapeHtml(summaryFor(evt))}</span>`;
 
   if (isLive && typeof window.__pulseColorFor === "function") {
     row.style.setProperty("--pulse-color", window.__pulseColorFor(evt.type));
@@ -956,10 +913,10 @@ function openSysPrompt() {
   if (!STATE.selectedSessionId) return;
   const snap = findBootSnapshotSingle(STATE.selectedSessionId);
   const payload = snap ? snap.payload : null;
-  // renderLLMRequestHTML is defined globally in race.js (loaded on this page).
-  const html = (typeof renderLLMRequestHTML === "function")
-    ? renderLLMRequestHTML(payload)
-    : `<div class="race-llm-empty">render helper unavailable</div>`;
+  // renderLLMRequestHTML lives in helpers.js (window.SCOPE).
+  const html = (typeof window.SCOPE.renderLLMRequestHTML === "function")
+    ? window.SCOPE.renderLLMRequestHTML(payload)
+    : `<div class="llm-empty">render helper unavailable</div>`;
   spBody.innerHTML = html;
   spOverlay.classList.add("show");
 }
@@ -987,7 +944,7 @@ window.toggleHelp = function() {
 // ─── Sidebar collapse (mini icon mode) ─────────────────────────────────────
 // Collapses the left sidebar to a strip of single-letter agent chips with a
 // status dot. Hides filters/search/sort/hide-after entirely. Works the same
-// in single / swimlane / race views — only the click handler differs.
+// in single / trajectory views — only the click handler differs.
 window.toggleSidebar = function() {
   STATE.sidebarCollapsed = !STATE.sidebarCollapsed;
   localStorage.setItem("scope-sidebar-collapsed", STATE.sidebarCollapsed ? "1" : "0");
@@ -1006,29 +963,71 @@ function applySidebarCollapsed() {
   }
 }
 
+// ─── Resizable sidebar ─────────────────────────────────────────────────────
+// Drag the thin strip on the aside's right edge to resize. The width is stored
+// in the --sidebar-w CSS variable so the collapsed 52/56px rules still win by
+// specificity instead of being overridden by an inline width.
+(function initSidebarResizer() {
+  const aside = document.querySelector("aside");
+  const resizer = document.getElementById("sidebar-resizer");
+  if (!aside || !resizer) return;
+
+  const MIN = 180, MAX = 720, KEY = "scope-sidebar-width";
+
+  function setWidth(w) {
+    aside.style.setProperty("--sidebar-w", Math.round(w) + "px");
+  }
+
+  try {
+    const saved = parseInt(localStorage.getItem(KEY), 10);
+    if (saved >= MIN && saved <= MAX) setWidth(saved);
+  } catch {}
+
+  resizer.addEventListener("mousedown", (e) => {
+    if (STATE.sidebarCollapsed) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = aside.getBoundingClientRect().width;
+    resizer.classList.add("dragging");
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    const onMove = (ev) => {
+      setWidth(Math.min(MAX, Math.max(MIN, startW + (ev.clientX - startX))));
+    };
+    const onUp = () => {
+      resizer.classList.remove("dragging");
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      try { localStorage.setItem(KEY, Math.round(aside.getBoundingClientRect().width)); } catch {}
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+})();
+
 // ─── Copy JSON ─────────────────────────────────────────────────────────────
 
 window.SCOPE = window.SCOPE || {};
 window.SCOPE.copyEvent = function(eventId) {
-  // Search single-mode events
-  let evt = STATE.events.find(e => e.event_id === eventId);
-  // Search swimlane lanes
-  if (!evt) {
-    for (const [, lane] of window.__swimlaneGetAll?.() ?? []) {
-      evt = lane.events.find(e => e.event_id === eventId);
-      if (evt) break;
-    }
-  }
-  // Search race tracks
-  if (!evt) {
-    for (const [, lane] of window.__raceGetAll?.() ?? []) {
-      evt = lane.events.find(e => e.event_id === eventId);
-      if (evt) break;
-    }
-  }
+  const evt = STATE.events.find(e => e.event_id === eventId);
   if (!evt) return;
   navigator.clipboard.writeText(JSON.stringify(evt.payload, null, 2)).catch(() => {});
 };
+
+// Delegated handler for the copy buttons rendered inside event details. Uses a
+// data attribute (set in helpers.js) instead of an inline onclick so a
+// producer-supplied event_id can never inject script.
+eventView.addEventListener("click", (e) => {
+  const t = e.target;
+  if (!(t instanceof Element)) return;
+  const btn = t.closest("[data-copy-event]");
+  if (!btn) return;
+  e.stopPropagation();
+  window.SCOPE.copyEvent(btn.dataset.copyEvent);
+});
 
 // ─── Age ticker & Re-anchoring ──────────────────────────────────────────────
 
@@ -1055,7 +1054,7 @@ function updateSSEFilter() {
 
 function connectSSE() {
   const params = {};
-  if (STATE.view === "single" && STATE.selectedSessionId) params.session_id = STATE.selectedSessionId;
+  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId) params.session_id = STATE.selectedSessionId;
   if (STATE.token) params.token = STATE.token;
   const url = apiUrl("/events/stream", params);
 
@@ -1063,8 +1062,7 @@ function connectSSE() {
   es.addEventListener("hello", () => {
     setLive(true);
     STATE.sseReconnectDelay = 1000;
-    if (STATE.view === "swimlane") window.__swimlaneOnReconnect?.();
-    if (STATE.view === "race") window.__raceOnReconnect?.();
+    if (STATE.view === "trajectory") window.__trajectoryOnReconnect?.();
   });
   es.addEventListener("event", (msg) => {
     try {
@@ -1076,8 +1074,7 @@ function connectSSE() {
         setCwd(evt.cwd);
       }
       if (STATE.view === "single") appendEventSingle(evt);
-      else if (STATE.view === "swimlane") window.__swimlaneOnEvent?.(evt);
-      else if (STATE.view === "race") window.__raceOnEvent?.(evt);
+      else if (STATE.view === "trajectory") window.__trajectoryOnEvent?.(evt);
     } catch { /* ignore */ }
   });
   es.onerror = () => {
@@ -1090,52 +1087,18 @@ function connectSSE() {
 function disconnectSSE() { if (es) { es.close(); es = null; } setLive(false); }
 function setLive(on) { liveDot.className = on ? "green" : "red"; liveLabel.textContent = on ? "live" : "off"; }
 
-// ─── Sort / show hidden / auto-add ──────────────────────────────────────────
+// ─── Clear all ──────────────────────────────────────────────────────────────
 
-sortSelect.addEventListener("change", () => {
-  STATE.sort = sortSelect.value;
-  fetchSessions();
-  saveURLState();
-});
-
-if (modelSelect) {
-  modelSelect.addEventListener("change", () => {
-    STATE.modelFilter = modelSelect.value;
-    STATE.sessionsSig = ""; // force re-render on filter change
-    renderSessions();
-    renderModelSummary();
-    saveURLState();
-  });
-}
-
-showHiddenCB.addEventListener("change", () => {
-  STATE.showHidden = showHiddenCB.checked;
-  renderSessions();
-  saveURLState();
-});
-
-autoAddCB.addEventListener("change", () => {
-  window.__swimlaneAutoAddChange?.(autoAddCB.checked);
-  window.__raceAutoAddChange?.(autoAddCB.checked);
-  saveURLState();
-});
-
-document.getElementById("btn-hide-all")?.addEventListener("click", hideAllVisibleSessions);
 document.getElementById("btn-clear-all")?.addEventListener("click", clearAllSessions);
-
-window.autoAddLanes = () => autoAddCB.checked;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function loadHiddenSessions() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem("scope-hidden-sessions") || "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : []);
-  } catch { return new Set(); }
-}
-
 function loadSidebarCollapsed() {
   return localStorage.getItem("scope-sidebar-collapsed") === "1";
+}
+
+function loadTheme() {
+  return localStorage.getItem("scope-theme") === "dark" ? "dark" : "light";
 }
 
 // ─── Exports to window.SCOPE ──────────────────────────────────────────────────
@@ -1150,15 +1113,14 @@ Object.assign(window.SCOPE, {
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
 loadURLState();
-setMode(STATE.mode);
+setTheme(STATE.theme);
 // Restore a user-overridden working directory; else fall back to the server cwd.
 STATE.cwd = localStorage.getItem("scope-cwd") || "";
 setView(STATE.view);
 applySidebarCollapsed();
-fetchModels();
 fetchSessions();
 connectSSE();
-setInterval(() => { fetchModels(); fetchSessions(); }, 10000);
+setInterval(() => { fetchSessions(); }, 10000);
 updateBreadcrumb();
 initCwd();
 
@@ -1172,6 +1134,7 @@ function setCwd(cwd) {
   if (inp && inp.value !== STATE.cwd) inp.value = STATE.cwd;
   if (STATE.view === "files") window.__filesOnView?.();
   else if (STATE.view === "checkpoints") window.__checkpointsOnView?.();
+  else if (STATE.view === "git") window.__gitOnView?.();
 }
 // Called by the terminal bridge when the live shell cwd changes, so the
 // shared session directory follows the terminal automatically.
@@ -1192,36 +1155,9 @@ async function initCwd() {
       if (inp) inp.value = STATE.cwd;
       if (STATE.view === "files") window.__filesOnView?.();
       else if (STATE.view === "checkpoints") window.__checkpointsOnView?.();
+      else if (STATE.view === "git") window.__gitOnView?.();
     }
   } catch {}
 }
-
-// Restore lanes from URL state (after swimlane.js loads)
-setTimeout(() => {
-  if (window.__restoreLanes && STATE.view === "swimlane") {
-    for (const sid of window.__restoreLanes) {
-      window.__swimlaneToggle?.(sid);
-      STATE.ackd.add(sid);
-    }
-    window.__restoreLanes = null;
-  }
-  if (window.__restoreRaceLanes && STATE.view === "race") {
-    const visibleIds = new Set(visibleSessions().map(s => s.session_id));
-    if (STATE.sessionsLoaded && !STATE.showHidden && window.__restoreRaceLanes.some(sid => !visibleIds.has(sid))) {
-      STATE.showHidden = true;
-      showHiddenCB.checked = true;
-    }
-    for (const sid of window.__restoreRaceLanes) {
-      window.__raceToggle?.(sid);
-      STATE.ackd.add(sid);
-    }
-    window.__restoreRaceLanes = null;
-  }
-  const restoredAutoAdd = window.__restoreAutoAdd !== undefined ? window.__restoreAutoAdd : autoAddCB.checked;
-  autoAddCB.checked = restoredAutoAdd;
-  window.__swimlaneAutoAddChange?.(restoredAutoAdd);
-  window.__raceAutoAddChange?.(restoredAutoAdd);
-  window.__restoreAutoAdd = undefined;
-}, 200);
 
 })();

@@ -19,7 +19,7 @@ opens the dashboard in an embedded browser — no `npm`, no dev dependencies.
 
 ```bash
 chmod +x Pi-Scope-1.0.0.AppImage
-./Pi-Scope-1.0.0.AppImage
+./Pi-Scope-1.0.0.AppImage 
 ```
 
 - Data (SQLite DB + per-run auth token) lives in `~/.local/share/pi-scope/`, so it
@@ -83,7 +83,7 @@ Watch a quick tour of the 5.0.0 features:
 
 ## The layout
 
-- **Top bar** — view buttons: `Single` · `Swimlane` · `Race` · `Terminal` · `Files` · `Checkpoints`. A live dot is green when the live feed (SSE) is connected, red when off.
+- **Top bar** — view buttons: `Single` · `Trajectory` · `Terminal` · `Files` · `Checkpoints`. A live dot is green when the live feed (SSE) is connected, red when off.
 - **Left sidebar** — the session list. Click a session name to open it in Single view. Collapse the sidebar with the `«` toggle (your choice is remembered).
 - **Session rows** show the agent name, model + short id (`abcd1234 · claude-…`), `pool · N events · relative time`, cost/tokens, and a **red error dot** when a tool error occurred (clicking the session acknowledges it). A `hidden`/`aged` note and a hide/unhide `×`/`↺` button appear per row.
 
@@ -108,27 +108,25 @@ Each event row is **time · type pill · summary**. Click a row to expand its fu
 - The session subnav shows stats: event count, duration, cost, input/output tokens, cache read/write, TPS, prefill, and a **context-usage bar** (`context used / total — N% remaining`; green <70%, orange 70–90%, red >90%).
 - Live events pulse in. Scroll up to pause auto-scroll — a `paused — click to resume` toast lets you re-enable it.
 
-## Swimlane view
+## Trajectory view
 
-In the sidebar, tick a session's checkbox (or click its name) to add it as a **lane**. The `☐ auto-add new lanes` checkbox (on by default) auto-adds lanes for new sessions.
+A turn-aware event ledger (ported from `@deepseek-ai/dsh-client-ui-trajectory`) for
+one selected session. Select a session in the sidebar to open its trajectory.
 
-- Each lane header shows name / model / cost / age and a green dot when live; `×` closes the lane.
-- Click any event row in a lane to expand its JSON; `📋` copies it.
-- Scrolling up shows a `↓ paused — click to resume` toast.
-
-![Swimlane view](docs/shots/swimlane.png)
-
-## Race view
-
-Same lane/track selection as Swimlane. Tracks render an agent's work as **turn groups**
-labeled `setup` / `turn N` — click a group to expand its prompt, events, and final response
-(or `no final response captured`).
-
-- Click any event card → an **Inspector** panel on the right with `📋` copy, `↩` wrap, `×` close (or `Esc`).
-- For `user_message` events only, tabs **`[payload]`** and **`[llm request]`** switch between raw JSON and the system-prompt/tools/model view.
-- A rollup bar shows aggregate `$cost · tokens` across all tracks.
-
-![Race view](docs/shots/race.png)
+- Events fold into **turns** (thick `Turn N` bars) split into **Message** / **Step N**
+  groups. Each row is a cell — **User** · **Message** · **Tool** · **System** ·
+  **Compacted** · **Context** — with an `#N` index, kind tag, and summary.
+- **Message** rows carry Input / Output token columns (usage) and an own-duration
+  **Time** (`+1.2s`, `+900ms`, or `—` when unknown). **Tool** rows pair
+  `tool_call` + `tool_result` by `tool_call_id` and show call→result wall time;
+  a running tool with no result yet shows `—`. Group headers show wall-span +
+  tool histogram (`1.5s · bash×6`).
+- A fixed **overview strip** above the ledger projects each record's start/duration
+  (assistant spans split prefill vs. decode); click a bar to jump to its row.
+- **Search box** filters rows live. Click a record to open it in the right-side
+  **record inspector** (tokens, duration, Input / Output / Thinking / Timing,
+  raw JSON with copy). Live rows stream in over SSE and the ledger auto-follows
+  the tail; scroll up to pause (a toast resumes it).
 
 ## Terminal view
 
@@ -197,7 +195,7 @@ Disabled while the Terminal view is open.
 
 ## Tips
 
-- **UI state lives in the URL hash** — view, filters, selected session, and swimlane/race lanes are all saved there, so you can bookmark or share a view. The auth token stays in the `?token=` query string, not the hash.
+- **UI state lives in the URL hash** — view, filters, and selected session are all saved there, so you can bookmark or share a view. The auth token stays in the `?token=` query string, not the hash.
 - Sessions **auto-refresh every 10s** and stream live over SSE, so new agents and events appear without reloading.
 
 ## Where data comes from

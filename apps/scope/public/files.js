@@ -4,8 +4,9 @@
  * copy arrows (← / →) and dual editable panes. Self-contained IIFE.
  */
 (function () {
-  const S = window.__SCOPE_STATE;
   const $ = (s) => document.querySelector(s);
+  const api = window.SCOPE.api;
+  const selectedCwd = window.SCOPE.currentCwd;
 
   const cwdLabel = $("#files-cwd-label");
   const filesList = $("#files-list");
@@ -34,12 +35,8 @@
   let activeSide = "new";
   let fullView = true;
 
-  function selectedCwd() {
-    return S.cwd || "";
-  }
-
   function refreshCwd() {
-    if (cwdLabel) cwdLabel.textContent = S.cwd ? S.cwd : "no directory set — choose one in the Terminal pane";
+    window.SCOPE.cwdLabel(cwdLabel);
   }
 
   function clearDiff() {
@@ -63,8 +60,7 @@
     }
     const ignored = showIgnored && showIgnored.checked ? 1 : 0;
     try {
-      const res = await fetch(window.apiUrl("/files/modified", { cwd, token: S.token, ignored }), { headers: window.authHeaders() });
-      const data = await res.json();
+      const { res, data } = await api("/files/modified", { cwd, ignored });
       if (!data.git) {
         filesList.innerHTML = `<div class="empty-state">git unavailable in<br><code>${window.SCOPE.escapeHtml(cwd)}</code><br><small>${window.SCOPE.escapeHtml(data.error || "")}</small></div>`;
         clearDiff();
@@ -164,8 +160,7 @@
     diffNew.innerHTML = "";
     exitEditMode();
     try {
-      const res = await fetch(window.apiUrl("/files/diff", { cwd, file, token: S.token }), { headers: window.authHeaders() });
-      const data = await res.json();
+      const { res, data } = await api("/files/diff", { cwd, file });
       if (data.binary) {
         current.binary = true;
         diffOld.innerHTML = '<div class="diff-binary">binary file — diff not shown</div>';
@@ -354,12 +349,7 @@
     const cwd = selectedCwd();
     const content = (activeSide === "old" ? current.oldBuf : current.newBuf).join("\n");
     try {
-      const res = await fetch(window.apiUrl("/files/save", { token: S.token }), {
-        method: "POST",
-        headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd, file: current.file, content }),
-      });
-      const data = await res.json();
+      const { res, data } = await api("/files/save", {}, { cwd, file: current.file, content });
       if (!res.ok) {
         diffStats.innerHTML = `<span class="del">save failed: ${window.SCOPE.escapeHtml(data.error || res.status)}</span>`;
         return;

@@ -41,11 +41,12 @@
     const h = hashString(name);
     const hue = h % 360;
     const sat = 58 + ((h >>> 8) % 14);
-    return {
-      bg: `hsl(${hue} ${sat}% 22%)`,
-      border: `hsl(${hue} ${Math.min(86, sat + 12)}% 46%)`,
-      fg: `hsl(${hue} 92% 88%)`,
-    };
+    // Tool chips follow the active DeepSeek theme: light tint on the light
+    // theme, dark tint on the dark theme.
+    const dark = typeof document !== "undefined" && document.body.hasAttribute("data-ds-dark-theme");
+    return dark
+      ? { bg: `hsl(${hue} ${sat}% 22%)`, border: `hsl(${hue} ${Math.min(86, sat + 12)}% 46%)`, fg: `hsl(${hue} 92% 88%)` }
+      : { bg: `hsl(${hue} ${sat}% 92%)`, border: `hsl(${hue} ${Math.min(86, sat + 12)}% 74%)`, fg: `hsl(${hue} 55% 26%)` };
   }
 
   function toolNamePillHTML(evt) {
@@ -92,7 +93,7 @@
   }
 
   // ─── Event rendering helpers ───────────────────────────────────────────────
-  // These are shared across single, swimlane, and race views.
+  // Shared by the single view (event rows, inline details, system-prompt modal).
 
   // Find the LLM's final text response for the turn closed by `turnEnd`.
   // Scans backward through `events` (session-ordered by seq) and returns the last
@@ -166,13 +167,16 @@
   }
 
   function renderDetailHTML(evt) {
-    const cBtn = `<button class="copy-btn" onclick="event.stopPropagation();SCOPE.copyEvent('${evt.event_id}')">📋</button>`;
+    // data attribute + a delegated handler in app.js (not an inline onclick),
+    // so a producer-supplied event_id can never inject script. Escaped for the
+    // attribute context; dataset returns the original value on read.
+    const cBtn = `<button class="copy-btn" type="button" data-copy-event="${escapeHtml(evt.event_id)}">📋</button>`;
     const wBtn = `<button class="wrap-btn" onclick="event.stopPropagation();let p=this.parentElement.querySelector('pre');p.style.whiteSpace=p.style.whiteSpace==='pre-wrap'?'pre':'pre-wrap';this.textContent=p.style.whiteSpace==='pre-wrap'?'↩':'→'">→</button>`;
 
     if (evt.type === "agent_end") {
       const fr = evt.payload?.final_response
         ? `<pre>${escapeHtml(evt.payload.final_response)}</pre>`
-        : `<div class="race-llm-empty">no final response captured</div>`;
+        : `<div class="llm-empty">no final response captured</div>`;
       return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · ${evt.payload?.message_count ?? "?"} messages</div>${fr}`;
     }
 
@@ -180,7 +184,7 @@
       const fr = turnFinalResponse(evt, window.__SCOPE_STATE?.events);
       const frHTML = fr
         ? `<pre>${escapeHtml(fr)}</pre>`
-        : `<div class="race-llm-empty">no final response captured</div>`;
+        : `<div class="llm-empty">no final response captured</div>`;
       return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
     }
 
@@ -225,6 +229,55 @@
     return DEFAULT_CONTEXT_WINDOW;
   }
 
+  // Render the boot-snapshot LLM request (system prompt + tools + model +
+  // request args) for the single-view system-prompt modal.
+  function renderLLMRequestHTML(payload) {
+    if (!payload) {
+      return `<div class="llm-empty">No system prompt captured. It is recorded from the final LLM request (before_provider_request → llm_request) only.</div>`;
+    }
+    const parts = [];
+    parts.push(`
+      <section class="llm-section">
+        <h4>System prompt</h4>
+        ${payload.system_prompt ? `<pre class="llm-pre">${escapeHtml(payload.system_prompt)}</pre>` : `<div class="llm-empty">not captured</div>`}
+      </section>
+    `);
+    const tools = Array.isArray(payload.tools) ? payload.tools : [];
+    const toolsHTML = tools.length
+      ? `<ul class="llm-tools">` + tools.map((t) => `<li><code>${escapeHtml(t)}</code></li>`).join("") + `</ul>`
+      : `<div class="llm-empty">no tools captured</div>`;
+    parts.push(`<section class="llm-section"><h4>Tools (${tools.length}) sent to LLM</h4>${toolsHTML}</section>`);
+    if (payload.model) parts.push(`<section class="llm-section"><h4>Model</h4><div class="llm-empty">${escapeHtml(payload.model)}</div></section>`);
+    if (payload.message_count != null) parts.push(`<section class="llm-section"><h4>Messages</h4><div class="llm-empty">${payload.message_count}</div></section>`);
+    if (payload.request_args && Object.keys(payload.request_args).length) {
+      const rows = Object.entries(payload.request_args)
+        .map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td><code>${escapeHtml(String(v))}</code></td></tr>`)
+        .join("");
+      parts.push(`<section class="llm-section"><h4>Request args</h4><table class="llm-args">${rows}</table></section>`);
+    }
+    return parts.join("");
+  }
+
+  // Live-event pulse color for the single view's `.evt-new` entry animation.
+  // Live-entry pulse tints use the DeepSeek palette (translucent so they read
+  // on both the light and dark themes).
+  const PULSE_GREEN = "rgba(34,197,94,0.20)";
+  const PULSE_TYPE_COLORS = {
+    user_message:      "rgba(86,134,254,0.16)",
+    assistant_message: "rgba(86,134,254,0.16)",
+    tool_call:         "rgba(245,158,11,0.18)",
+    tool_result:       "rgba(247,173,49,0.20)",
+    thinking:          "rgba(124,58,237,0.16)",
+    error:             "rgba(239,68,68,0.18)",
+    model_change:      "rgba(8,145,178,0.16)",
+    compaction:        "rgba(221,134,41,0.20)",
+    branch_nav:        "rgba(8,145,178,0.16)",
+  };
+  function pulseColorFor(type) {
+    return PULSE_TYPE_COLORS[type] || PULSE_GREEN;
+  }
+  window.__pulseColorFor = pulseColorFor;
+
   const HELPERS = {
     fmtTs,
     fmtRel,
@@ -244,6 +297,7 @@
     summaryFor,
     summaryClass,
     renderDetailHTML,
+    renderLLMRequestHTML,
   };
 
   // Expose helpers on window.SCOPE so every view can access them explicitly.

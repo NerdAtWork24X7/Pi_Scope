@@ -194,11 +194,9 @@ function ingestEvent(event: ObsEvent): string | null {
   const result = q.insertEvent.run(row);
   const isNew = result.changes > 0;
 
-  if (isNew) {
-    q.upsertSession.run(toSessionRow(event));
-  } else {
-    q.upsertSessionNoBump.run(toSessionRow(event));
-  }
+  // Bump event_count only for genuinely new events; duplicates (INSERT OR
+  // IGNORE no-op) just refresh the session row without inflating the count.
+  q.upsertSession.run(toSessionRow(event, isNew));
 
   if (isNew) {
     broadcastEvent(event);
@@ -312,17 +310,44 @@ function validateCwd(cwd: string): string | null {
   return abs;
 }
 
-/** Run a git command in `cwd`; returns stdout string, throws on failure.
- * `config` is passed as inline `-c key=value` options so it never touches the
+/** Build inline `-c key=value` config args so git commands never touch the
  * user's global or local git config. */
+function gitConfigArgs(config: Record<string, string>): string[] {
+  return Object.entries(config).flatMap(([k, v]) => ["-c", `${k}=${v}`]);
+}
+
+/**
+ * Run a git command without throwing — returns { ok, out } where `out` carries
+ * stdout on success and stdout+stderr on failure. Used by the Git GUI so a
+ * failed push/pull/merge surfaces its real message instead of a 500. Remote
+ * ops get GIT_TERMINAL_PROMPT=0 so a credential prompt can never hang the
+ * request (it fails fast with "could not read Username" instead).
+ */
+function gitTry(cwd: string, args: string[], config: Record<string, string> = {}, timeoutMs = 30_000): { ok: boolean; out: string } {
+  const configArgs = gitConfigArgs(config);
+  try {
+    const out = execFileSync("git", ["-C", cwd, ...configArgs, ...args], {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 32 * 1024 * 1024,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    return { ok: true, out: typeof out === "string" ? out : out.toString() };
+  } catch (err: any) {
+    const stdout = typeof err?.stdout === "string" ? err.stdout : (err?.stdout ? err.stdout.toString() : "");
+    const stderr = typeof err?.stderr === "string" ? err.stderr : (err?.stderr ? err.stderr.toString() : "");
+    const msg = [stdout, stderr].filter(Boolean).join("\n").trim();
+    return { ok: false, out: msg || String(err?.message ?? err).split("\n")[0] };
+  }
+}
+
+/** Run a git command and return stdout; throws on failure. For call sites that
+ * treat failure as exceptional (e.g. checkpoint create/restore). Local ops
+ * keep the shorter 20s timeout; remote ops should call gitTry directly. */
 function git(cwd: string, args: string[], config: Record<string, string> = {}): string {
-  const configArgs = Object.entries(config).flatMap(([k, v]) => ["-c", `${k}=${v}`]);
-  const out = execFileSync("git", ["-C", cwd, ...configArgs, ...args], {
-    encoding: "utf8",
-    timeout: 20_000,
-    maxBuffer: 32 * 1024 * 1024,
-  });
-  return typeof out === "string" ? out : out.toString();
+  const r = gitTry(cwd, args, config, 20_000);
+  if (!r.ok) throw new Error(r.out || "git command failed");
+  return r.out;
 }
 
 /** Ensure `cwd` is a git repository; initialize it if needed. */
@@ -334,6 +359,18 @@ function ensureGitRepo(cwd: string): { initialized: boolean } {
     git(cwd, ["init"]);
     return { initialized: true };
   }
+}
+
+/** Validate an array of caller-supplied file paths stay inside `cwd`. */
+function cleanPaths(absCwd: string, paths: unknown): string[] | null {
+  if (!Array.isArray(paths)) return null;
+  const out: string[] = [];
+  for (const p of paths) {
+    if (typeof p !== "string" || !p) return null;
+    if (!resolveWithinCwd(absCwd, p)) return null;
+    out.push(p);
+  }
+  return out;
 }
 
 // ─── Routing helpers ────────────────────────────────────────────────────────
@@ -902,6 +939,392 @@ async function handle(req: Request): Promise<Response> {
     } catch (err: any) {
       return jsonResponse({ ok: false, error: String(err?.message ?? err).split("\n")[0] }, 500);
     }
+  }
+
+  // ══ Git GUI endpoints ════════════════════════════════════════════════════
+  // A read/write git client for the shared working directory, exposed to the
+  // Git view. Every operation goes through validateCwd() + resolveWithinCwd(),
+  // the same sandbox as /files/* and /checkpoints/*.
+
+  async function gitPost(req: Request): Promise<{ cwd: string; parsed: any } | Response> {
+    let bodyText: string;
+    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
+    let parsed: any;
+    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    return { cwd: absCwd, parsed };
+  }
+
+  // ── GET /git/status ──────────────────────────────────────────────────────
+  if (pathname === "/git/status" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const isRepo = gitTry(absCwd, ["rev-parse", "--is-inside-work-tree"]);
+    if (!isRepo.ok) return jsonResponse({ git: false, error: "not a git repository" });
+    const branch = gitTry(absCwd, ["branch", "--show-current"]);
+    const head = gitTry(absCwd, ["rev-parse", "--short", "HEAD"]);
+    const upstream = gitTry(absCwd, ["rev-parse", "--abbrev-ref", "HEAD@{upstream}"]);
+    let ahead = 0, behind = 0;
+    if (upstream.ok && upstream.out.trim()) {
+      const ab = gitTry(absCwd, ["rev-list", "--left-right", "--count", `HEAD...${upstream.out.trim()}`]);
+      if (ab.ok) {
+        const parts = ab.out.trim().split(/\s+/);
+        ahead = parseInt(parts[0] ?? "0", 10) || 0;
+        behind = parseInt(parts[1] ?? "0", 10) || 0;
+      }
+    }
+    const remotesOut = gitTry(absCwd, ["remote"]);
+    const remotes = remotesOut.ok ? remotesOut.out.split("\n").map((s) => s.trim()).filter(Boolean) : [];
+    const porcelain = gitTry(absCwd, ["status", "--porcelain=v1", "-uall"]);
+    const files: any[] = [];
+    for (const raw of porcelain.out.split("\n")) {
+      if (!raw) continue;
+      const code = raw.slice(0, 2);
+      let p = raw.slice(3);
+      let renamed_from: string | null = null;
+      if (code.includes("R")) {
+        const mm = p.match(/^(.*?) -> (.*)$/);
+        if (mm) { renamed_from = mm[1]; p = mm[2]; }
+      }
+      if (code === "!!") continue; // ignored files are not part of the Git view
+      const x = code[0], y = code[1];
+      const conflict = x === "U" || y === "U" || code === "AA" || code === "DD" || code === "AU" || code === "UA" || code === "DU" || code === "UD";
+      const status = conflict ? "conflicted"
+        : code === "??" ? "untracked"
+        : (y === "D" || x === "D") ? "deleted"
+        : (x === "A" || y === "A") ? "added"
+        : code.includes("R") ? "renamed"
+        : "modified";
+      if (conflict) { files.push({ path: p, section: "conflicted", status, renamed_from }); continue; }
+      if (code === "??") { files.push({ path: p, section: "untracked", status, renamed_from }); continue; }
+      const staged = x !== " ";
+      const unstaged = y !== " ";
+      if (staged) files.push({ path: p, section: "staged", status, renamed_from, x, y });
+      if (unstaged) files.push({ path: p, section: "unstaged", status, renamed_from, x, y });
+    }
+    const order: Record<string, number> = { conflicted: 0, staged: 1, unstaged: 2, untracked: 3 };
+    files.sort((a, b) => (order[a.section] - order[b.section]) || a.path.localeCompare(b.path));
+    return jsonResponse({
+      git: true, cwd: absCwd,
+      branch: branch.ok && branch.out.trim() ? branch.out.trim() : null,
+      detached: !(branch.ok && branch.out.trim()),
+      head: head.ok ? head.out.trim() : null,
+      upstream: upstream.ok && upstream.out.trim() ? upstream.out.trim() : null,
+      ahead, behind, remotes, files,
+    });
+  }
+
+  // ── POST /git/stage ─────────────────────────────────────────────────────
+  if (pathname === "/git/stage" && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    let r;
+    if (parsed.all) r = gitTry(absCwd, ["add", "-A"]);
+    else {
+      const paths = cleanPaths(absCwd, parsed.paths);
+      if (!paths || !paths.length) return jsonResponse({ error: "missing paths" }, 400);
+      r = gitTry(absCwd, ["add", "--", ...paths]);
+    }
+    return r.ok ? jsonResponse({ ok: true }) : jsonResponse({ ok: false, error: r.out }, 500);
+  }
+
+  // ── POST /git/unstage ───────────────────────────────────────────────────
+  if (pathname === "/git/unstage" && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const paths = cleanPaths(absCwd, parsed.paths);
+    if (!paths || !paths.length) return jsonResponse({ error: "missing paths" }, 400);
+    let r = gitTry(absCwd, ["restore", "--staged", "--", ...paths]);
+    if (!r.ok) r = gitTry(absCwd, ["reset", "-q", "HEAD", "--", ...paths]);
+    return r.ok ? jsonResponse({ ok: true }) : jsonResponse({ ok: false, error: r.out }, 500);
+  }
+
+  // ── POST /git/discard (revert working-tree changes / delete untracked) ──
+  if (pathname === "/git/discard" && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const paths = cleanPaths(absCwd, parsed.paths);
+    if (!paths || !paths.length) return jsonResponse({ error: "missing paths" }, 400);
+    const r = parsed.untracked
+      ? gitTry(absCwd, ["clean", "-fd", "--", ...paths])
+      : gitTry(absCwd, ["restore", "--", ...paths]);
+    return r.ok ? jsonResponse({ ok: true }) : jsonResponse({ ok: false, error: r.out }, 500);
+  }
+
+  // ── GET /git/diff (unified diff: cached=1 → staged vs HEAD, else worktree) ──
+  if (pathname === "/git/diff" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    const file = url.searchParams.get("file") ?? "";
+    const cached = url.searchParams.get("cached") === "1";
+    if (!cwd || !file) return jsonResponse({ error: "missing cwd or file" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    if (!resolveWithinCwd(absCwd, file)) return jsonResponse({ error: "invalid file path" }, 400);
+    if (cached) {
+      const d = gitTry(absCwd, ["diff", "--cached", "--no-color", "--unified=3", "--", file]);
+      return jsonResponse({ cwd: absCwd, file, cached: true, untracked: false, diff: d.out });
+    }
+    const d = gitTry(absCwd, ["diff", "--no-color", "--unified=3", "--", file]);
+    if (!d.out.trim()) {
+      const tracked = gitTry(absCwd, ["ls-files", "--error-unmatch", "--", file]);
+      if (!tracked.ok) {
+        const ni = gitTry(absCwd, ["diff", "--no-index", "--no-color", "--unified=3", "--", "/dev/null", file]);
+        return jsonResponse({ cwd: absCwd, file, cached: false, untracked: true, diff: ni.out });
+      }
+    }
+    return jsonResponse({ cwd: absCwd, file, cached: false, untracked: false, diff: d.out });
+  }
+
+  // ── GET /git/log (commit history with parents for the lane graph) ───────
+  if (pathname === "/git/log" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const all = url.searchParams.get("all") === "1";
+    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "200", 10), 500);
+    // `%P` yields space-separated parent SHAs (first parent first) so the UI
+    // can draw a coloured lane graph. --topo-order keeps the first-parent
+    // (mainline) chain grouped. The `--graph` prefixes are kept for reference
+    // but the lanes are rebuilt client-side from the parent lists.
+    const fmt = "%x1f%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D%x1f%P";
+    const r = gitTry(absCwd, ["log", "--graph", "--topo-order", "--date=iso-strict", `--format=${fmt}`, "-n", String(limit), ...(all ? ["--all"] : [])]);
+    if (!r.ok) return jsonResponse({ ok: false, error: r.out }, 500);
+    const commits: any[] = [];
+    for (const line of r.out.split("\n")) {
+      if (line.length === 0) continue;
+      const idx = line.indexOf("\x1f");
+      if (idx < 0) continue; // pure graph connector line — rebuilt client-side
+      const f = line.slice(idx + 1).split("\x1f");
+      commits.push({
+        graph: line.slice(0, idx),
+        sha: f[0] ?? "", short: f[1] ?? "", author: f[2] ?? "",
+        date: f[3] ?? "", subject: f[4] ?? "", refs: (f[5] ?? "").trim(),
+        parents: (f[6] ?? "").split(" ").map((s: string) => s.trim()).filter(Boolean),
+      });
+    }
+    return jsonResponse({ ok: true, commits, entries: commits });
+  }
+
+  // ── GET /git/show (one commit: meta + files + unified diff) ─────────────
+  if (pathname === "/git/show" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    const sha = url.searchParams.get("sha") ?? "";
+    if (!cwd || !sha) return jsonResponse({ error: "missing cwd or sha" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const meta = gitTry(absCwd, ["show", "-s", "--date=iso-strict", "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b%x1f%cn%x1f%ce%x1f%cd%x1f%P", sha]);
+    const diff = gitTry(absCwd, ["show", "--no-color", "--unified=3", "--format=", sha]);
+    const names = gitTry(absCwd, ["show", "--name-only", "--format=", sha]);
+    const f = meta.out.split("\x1f");
+    return jsonResponse({
+      ok: meta.ok,
+      sha: f[0] ?? sha, author: f[1] ?? "", email: f[2] ?? "",
+      date: f[3] ?? "", subject: f[4] ?? "", body: (f[5] ?? "").trim(),
+      committer: f[6] ?? "", committerEmail: f[7] ?? "", committerDate: f[8] ?? "",
+      parents: (f[9] ?? "").split(" ").map((s: string) => s.trim()).filter(Boolean),
+      files: names.out.split("\n").map((s) => s.trim()).filter(Boolean),
+      diff: diff.out,
+    });
+  }
+
+  // ── POST /git/action (commit-graph context menu commands) ───────────────
+  if (pathname === "/git/action" && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const action = typeof parsed.action === "string" ? parsed.action : "";
+    const sha = typeof parsed.sha === "string" ? parsed.sha.trim() : "";
+    const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    let r: { ok: boolean; out: string };
+    switch (action) {
+      case "checkout":
+        if (!sha) return jsonResponse({ error: "missing sha" }, 400);
+        r = gitTry(absCwd, ["checkout", "--detach", sha]);
+        break;
+      case "cherry-pick":
+        if (!sha) return jsonResponse({ error: "missing sha" }, 400);
+        r = gitTry(absCwd, ["cherry-pick", "--no-edit", sha]);
+        break;
+      case "revert":
+        if (!sha) return jsonResponse({ error: "missing sha" }, 400);
+        r = gitTry(absCwd, ["revert", "--no-edit", sha]);
+        break;
+      case "rebase":
+        if (!sha) return jsonResponse({ error: "missing sha" }, 400);
+        r = gitTry(absCwd, ["rebase", sha]);
+        break;
+      case "reset":
+        if (!sha) return jsonResponse({ error: "missing sha" }, 400);
+        r = gitTry(absCwd, ["reset", "--mixed", sha]);
+        break;
+      case "branch":
+        if (!name || !sha) return jsonResponse({ error: "missing name or sha" }, 400);
+        r = gitTry(absCwd, ["checkout", "-b", name, sha]);
+        break;
+      case "tag":
+        if (!name || !sha) return jsonResponse({ error: "missing name or sha" }, 400);
+        r = gitTry(absCwd, ["tag", name, sha]);
+        break;
+      default:
+        return jsonResponse({ error: "unknown action" }, 400);
+    }
+    if (!r.ok) {
+      // Rebase/cherry-pick/etc. conflicts leave the repo mid-operation; flag it
+      // so the UI can surface the conflicted files and a clearer message.
+      const conflict = /\bconflict\b|would be overwritten|CONFLICT/i.test(r.out);
+      return jsonResponse({ ok: false, error: r.out, conflict }, 409);
+    }
+    return jsonResponse({ ok: true, out: r.out.trim() });
+  }
+
+  // ── POST /git/commit ────────────────────────────────────────────────────
+  if (pathname === "/git/commit" && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const message = typeof parsed.message === "string" ? parsed.message.trim() : "";
+    if (!message) return jsonResponse({ error: "missing commit message" }, 400);
+    const amend = parsed.amend === true;
+    // Fall back to a Pi Scope identity when the repo has none configured, so
+    // the GUI can still commit without failing on "who are you".
+    const cfg: Record<string, string> = {};
+    const uname = gitTry(absCwd, ["config", "user.name"]);
+    const uemail = gitTry(absCwd, ["config", "user.email"]);
+    if (!uname.ok || !uname.out.trim()) cfg["user.name"] = "Pi Scope";
+    if (!uemail.ok || !uemail.out.trim()) cfg["user.email"] = "scope@localhost";
+    const r = gitTry(absCwd, ["commit", ...(amend ? ["--amend"] : []), "-m", message], cfg);
+    if (!r.ok) return jsonResponse({ ok: false, error: r.out }, 409);
+    const sha = gitTry(absCwd, ["rev-parse", "--short", "HEAD"]);
+    return jsonResponse({ ok: true, sha: sha.out.trim(), amend });
+  }
+
+  // ── POST /git/branch (create+switch | switch | delete) ─────────────────
+  if (pathname === "/git/branch" && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const action = parsed.action ?? "";
+    const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    if (!name) return jsonResponse({ error: "missing branch name" }, 400);
+    let r;
+    if (action === "create") {
+      const startPoint = typeof parsed.startPoint === "string" && parsed.startPoint.trim() ? parsed.startPoint.trim() : "";
+      r = gitTry(absCwd, ["switch", "-c", name, ...(startPoint ? [startPoint] : [])]);
+    } else if (action === "delete") {
+      r = gitTry(absCwd, ["branch", "-D", name]);
+    } else {
+      r = gitTry(absCwd, ["switch", name]);
+    }
+    return r.ok ? jsonResponse({ ok: true, out: r.out.trim() }) : jsonResponse({ ok: false, error: r.out }, 409);
+  }
+
+  // ── GET /git/branches ───────────────────────────────────────────────────
+  if (pathname === "/git/branches" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const cur = gitTry(absCwd, ["branch", "--show-current"]);
+    // for-each-ref expands %00 (NUL) but not %x1f, so use NUL separators.
+    const r = gitTry(absCwd, ["for-each-ref", "--format=%(refname:lstrip=2)%00%(objectname:short)%00%(upstream:lstrip=2)%00%(creatordate:relative)", "--sort=-committerdate", "refs/heads"]);
+    const branches: any[] = [];
+    for (const line of r.out.split("\n")) {
+      if (!line.trim()) continue;
+      const [name, sha, upstream, date] = line.split("\0");
+      branches.push({ name: name ?? "", sha: sha ?? "", upstream: upstream ?? "", date: date ?? "" });
+    }
+    return jsonResponse({ ok: true, current: cur.ok ? cur.out.trim() : null, branches });
+  }
+
+  // ── GET /git/remotes ────────────────────────────────────────────────────
+  if (pathname === "/git/remotes" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const r = gitTry(absCwd, ["remote", "-v"]);
+    const map = new Map<string, { name: string; fetch: string; push: string }>();
+    for (const line of r.out.split("\n")) {
+      const m = line.match(/^(\S+)\s+(\S+)\s+\((fetch|push)\)$/);
+      if (!m) continue;
+      const entry = map.get(m[1]) ?? { name: m[1], fetch: "", push: "" };
+      if (m[3] === "fetch") entry.fetch = m[2]; else entry.push = m[2];
+      map.set(m[1], entry);
+    }
+    return jsonResponse({ ok: true, remotes: Array.from(map.values()) });
+  }
+
+  // ── POST /git/remote (add | remove) ─────────────────────────────────────
+  if (pathname === "/git/remote" && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    const urlStr = typeof parsed.url === "string" ? parsed.url.trim() : "";
+    if (!name) return jsonResponse({ error: "missing remote name" }, 400);
+    let r;
+    if (parsed.action === "remove") r = gitTry(absCwd, ["remote", "remove", name]);
+    else {
+      if (!urlStr) return jsonResponse({ error: "missing remote url" }, 400);
+      r = gitTry(absCwd, ["remote", "add", name, urlStr]);
+    }
+    return r.ok ? jsonResponse({ ok: true }) : jsonResponse({ ok: false, error: r.out }, 409);
+  }
+
+  // ── POST /git/push | /git/pull | /git/fetch ─────────────────────────────
+  if ((pathname === "/git/push" || pathname === "/git/pull" || pathname === "/git/fetch") && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const remote = typeof parsed.remote === "string" && parsed.remote.trim() ? parsed.remote.trim() : "";
+    const branch = typeof parsed.branch === "string" && parsed.branch.trim() ? parsed.branch.trim() : "";
+    let r;
+    if (pathname === "/git/push") r = gitTry(absCwd, ["push", ...(remote ? [remote, branch || "HEAD"] : [])]);
+    else if (pathname === "/git/pull") r = gitTry(absCwd, ["pull", ...(remote ? [remote, branch] : [])]);
+    else r = gitTry(absCwd, ["fetch", ...(remote ? [remote] : ["--all"])]);
+    return r.ok ? jsonResponse({ ok: true, out: r.out.trim() }) : jsonResponse({ ok: false, error: r.out }, 409);
+  }
+
+  // ── GET /git/stash (list) + POST /git/stash (push|pop|drop) ─────────────
+  if (pathname === "/git/stash" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    // No --date here: it turns %gd's selector into a date-based form instead
+    // of the stable stash@{0} handle used by pop/drop. %ad stays human-readable.
+    const r = gitTry(absCwd, ["stash", "list", "--format=%gd%x1f%H%x1f%ad%x1f%s"]);
+    const items: any[] = [];
+    for (const line of r.out.split("\n")) {
+      if (!line.trim()) continue;
+      const [ref, sha, date, subject] = line.split("\x1f");
+      items.push({ ref: ref ?? "", sha: sha ?? "", date: date ?? "", subject: subject ?? "" });
+    }
+    return jsonResponse({ ok: true, items });
+  }
+  if (pathname === "/git/stash" && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const action = parsed.action ?? "";
+    const ref = typeof parsed.ref === "string" && parsed.ref.trim() ? parsed.ref.trim() : "";
+    let r;
+    if (action === "pop") r = gitTry(absCwd, ["stash", "pop", ...(ref ? [ref] : [])]);
+    else if (action === "drop") r = gitTry(absCwd, ["stash", "drop", ...(ref ? [ref] : [])]);
+    else {
+      const message = typeof parsed.message === "string" && parsed.message.trim() ? parsed.message.trim() : "";
+      r = gitTry(absCwd, ["stash", "push", "-u", ...(message ? ["-m", message] : [])]);
+    }
+    return r.ok ? jsonResponse({ ok: true, out: r.out.trim() }) : jsonResponse({ ok: false, error: r.out }, 409);
   }
 
   // ── 404 ─────────────────────────────────────────────────────────────────
