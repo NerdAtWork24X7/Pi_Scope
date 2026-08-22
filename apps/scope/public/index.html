@@ -557,6 +557,8 @@
   .git-sync .ahead { color:var(--green); } .git-sync .behind { color:var(--orange); }
   .git-body { display:flex; flex:1; min-height:0; }
   .git-side { width:280px; flex-shrink:0; border-right:1px solid var(--border); display:flex; flex-direction:column; min-height:0; background:var(--surface); }
+  .git-side-resizer { width:5px; flex-shrink:0; margin-left:-2px; cursor:col-resize; background:transparent; z-index:20; position:relative; }
+  .git-side-resizer:hover, .git-side-resizer.dragging { background:var(--accent); opacity:0.5; }
   .git-side-title { padding:9px 12px; font-size:12px; font-weight:700; letter-spacing:0.3px; text-transform:uppercase; color:var(--text); border-bottom:1px solid var(--border); }
   .git-side-scroll { flex:1; overflow-y:auto; min-height:0; }
   .git-side-scroll::-webkit-scrollbar { width:4px; }
@@ -904,20 +906,21 @@
           </div>
         </div>
       </div>
+      <div id="git-side-resizer" class="git-side-resizer" title="Drag to resize sidebar"></div>
       <div class="git-main">
         <div class="git-tabs">
-          <button class="git-tab active" data-tab="changes">Changes</button>
-          <button class="git-tab" data-tab="history">History</button>
+          <button class="git-tab" data-tab="changes">Changes</button>
+          <button class="git-tab active" data-tab="history">History</button>
           <button class="git-tab" data-tab="branches">Branches</button>
           <button class="git-tab" data-tab="stashes">Stashes</button>
           <button class="git-tab" data-tab="remotes">Remotes</button>
         </div>
         <div class="git-main-content">
-          <div id="git-tab-changes" class="git-tabpane">
+          <div id="git-tab-changes" class="git-tabpane" hidden>
             <div id="git-diff-header" class="git-diff-header"></div>
             <div id="git-diff-body" class="git-diff-scroll"><div class="empty-state">Select a file on the left to view its diff</div></div>
           </div>
-          <div id="git-tab-history" class="git-tabpane" hidden>
+          <div id="git-tab-history" class="git-tabpane">
             <div id="git-history-list" class="git-history-list"></div>
             <div id="git-detail-pane" class="git-detail-pane" hidden>
               <div class="git-detail-tabs">

@@ -50,7 +50,7 @@
 
   let repo = { files: [], branch: null, head: null, detached: false, upstream: null, ahead: 0, behind: 0, remotes: [] };
   let selected = { path: "", cached: false, section: "" };
-  let activeTab = "changes";
+  let activeTab = "history";
   let lastCwd = "";
   let diffMode = "split"; // "split" | "unified"
   let currentDiff = { text: "", path: "", section: "", cached: false, add: 0, del: 0 };
@@ -855,6 +855,44 @@
   document.addEventListener("mousedown", (e) => { if (menuEl && !menuEl.contains(e.target)) closeMenu(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
   window.addEventListener("blur", closeMenu);
+
+  // ─── Resizable working-directory sidebar ────────────────────────────────
+  (function initGitSideResizer() {
+    const side = document.querySelector(".git-side");
+    const resizer = document.getElementById("git-side-resizer");
+    if (!side || !resizer) return;
+
+    const MIN = 160, MAX = 640, KEY = "scope-git-side-width";
+
+    function setWidth(w) { side.style.width = Math.round(w) + "px"; }
+    try {
+      const saved = parseInt(localStorage.getItem(KEY), 10);
+      if (saved >= MIN && saved <= MAX) setWidth(saved);
+    } catch {}
+
+    resizer.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = side.getBoundingClientRect().width;
+      resizer.classList.add("dragging");
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "col-resize";
+
+      const onMove = (ev) => {
+        setWidth(Math.min(MAX, Math.max(MIN, startW + (ev.clientX - startX))));
+      };
+      const onUp = () => {
+        resizer.classList.remove("dragging");
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        try { localStorage.setItem(KEY, Math.round(side.getBoundingClientRect().width)); } catch {}
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  })();
 
   window.__gitOnView = function () { refreshCwd(); loadStatus(); };
   window.__gitOnSessions = function () {
