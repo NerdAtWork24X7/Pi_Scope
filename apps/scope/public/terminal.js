@@ -78,7 +78,7 @@
     return { background: bg, foreground: fg, cursor: fg };
   }
   window.__terminalSetTheme = function () {
-    try { if (term) term.setOption("theme", terminalTheme()); } catch {}
+    try { if (term) term.options.theme = terminalTheme(); } catch {}
   };
 
   function ensureTerm() {
