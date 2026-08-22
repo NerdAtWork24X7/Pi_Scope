@@ -1282,12 +1282,35 @@ async function handle(req: Request): Promise<Response> {
     const body = await gitPost(req);
     if (body instanceof Response) return body;
     const { cwd: absCwd, parsed } = body;
-    const remote = typeof parsed.remote === "string" && parsed.remote.trim() ? parsed.remote.trim() : "";
-    const branch = typeof parsed.branch === "string" && parsed.branch.trim() ? parsed.branch.trim() : "";
+    let remote = typeof parsed.remote === "string" && parsed.remote.trim() ? parsed.remote.trim() : "";
+    let branch = typeof parsed.branch === "string" && parsed.branch.trim() ? parsed.branch.trim() : "";
+    // Resolve the current branch name when the client doesn't send one.
+    if (!branch) {
+      const cur = gitTry(absCwd, ["branch", "--show-current"]);
+      if (cur.ok && cur.out.trim()) branch = cur.out.trim();
+    }
     let r;
-    if (pathname === "/git/push") r = gitTry(absCwd, ["push", ...(remote ? [remote, branch || "HEAD"] : [])]);
-    else if (pathname === "/git/pull") r = gitTry(absCwd, ["pull", ...(remote ? [remote, branch] : [])]);
-    else r = gitTry(absCwd, ["fetch", ...(remote ? [remote] : ["--all"])]);
+    if (pathname === "/git/push") {
+      // When no remote/branch are specified and the branch lacks an upstream,
+      // git push fails with "no upstream branch". Auto-set upstream on origin.
+      if (!remote && branch) {
+        const up = gitTry(absCwd, ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]);
+        if (!up.ok || !up.out.trim()) {
+          // No upstream configured — find the default remote and push with --set-upstream.
+          const remotes = gitTry(absCwd, ["remote"]);
+          const defaultRemote = remotes.ok ? remotes.out.split("\n")[0]?.trim() || "origin" : "origin";
+          r = gitTry(absCwd, ["push", "--set-upstream", defaultRemote, branch]);
+        } else {
+          r = gitTry(absCwd, ["push"]);
+        }
+      } else {
+        r = gitTry(absCwd, ["push", ...(remote ? [remote, branch || "HEAD"] : [])]);
+      }
+    } else if (pathname === "/git/pull") {
+      r = gitTry(absCwd, ["pull", ...(remote ? [remote, branch] : [])]);
+    } else {
+      r = gitTry(absCwd, ["fetch", ...(remote ? [remote] : ["--all"])]);
+    }
     return r.ok ? jsonResponse({ ok: true, out: r.out.trim() }) : jsonResponse({ ok: false, error: r.out }, 409);
   }
 

@@ -364,7 +364,10 @@
   }
   async function remoteOp(kind) {
     const cwd = selectedCwd(); if (!cwd) return;
-    if (kind === "push" && !confirm("Push current branch to upstream?")) return;
+    if (kind === "push") {
+      const ok = await showGitModal({ title: "Push", message: "Push current branch to upstream?", confirmLabel: "Push" });
+      if (!ok) return;
+    }
     setStatus(kind + "…");
     const { res, data } = await api("/git/" + kind, {}, { cwd });
     if (!res.ok || !data.ok) { setStatus(kind + " failed: " + (data.error || res.status), true); return; }
@@ -643,6 +646,68 @@
     return wrap;
   }
 
+  // ─── Modal dialog (replaces browser prompt/confirm for Electron compat) ──
+  function showGitModal({ title, message, input, confirmLabel, danger }) {
+    return new Promise((resolve) => {
+      closeMenu();
+      const backdrop = document.createElement("div");
+      backdrop.className = "git-modal-backdrop";
+      const box = document.createElement("div");
+      box.className = "git-modal-box";
+
+      const hdr = document.createElement("div");
+      hdr.className = "git-modal-title";
+      hdr.textContent = title;
+      box.appendChild(hdr);
+
+      if (message) {
+        const m = document.createElement("div");
+        m.className = "git-modal-msg";
+        m.textContent = message;
+        box.appendChild(m);
+      }
+
+      let inputEl = null;
+      if (input) {
+        inputEl = document.createElement("input");
+        inputEl.className = "git-modal-input";
+        inputEl.placeholder = input.placeholder || "";
+        inputEl.value = input.value || "";
+        box.appendChild(inputEl);
+        setTimeout(() => inputEl.focus(), 60);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "git-modal-actions";
+      const cancel = document.createElement("button");
+      cancel.className = "git-modal-btn";
+      cancel.textContent = "Cancel";
+      cancel.onclick = () => { backdrop.remove(); resolve(input ? null : false); };
+      const ok = document.createElement("button");
+      ok.className = "git-modal-btn" + (danger ? " danger" : " primary");
+      ok.textContent = confirmLabel || "OK";
+      ok.onclick = () => { const v = inputEl ? inputEl.value : true; backdrop.remove(); resolve(v); };
+      actions.appendChild(cancel);
+      actions.appendChild(ok);
+
+      box.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") ok.click();
+        if (e.key === "Escape") cancel.click();
+      });
+      box.appendChild(actions);
+      backdrop.appendChild(box);
+      document.body.appendChild(backdrop);
+      // Ensure keyboard input works without clicking first
+      box.tabIndex = -1;
+      box.focus();
+      if (!inputEl) ok.focus(); // auto-focus OK on confirm-only dialogs
+
+      backdrop.addEventListener("mousedown", (e) => {
+        if (e.target === backdrop) cancel.click();
+      });
+    });
+  }
+
   // ─── Commit context menu (right-click) ───────────────────────────────────
   function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
 
@@ -660,15 +725,39 @@
     };
     const sep = () => { const d = document.createElement("div"); d.className = "git-menu-sep"; menuEl.appendChild(d); };
 
-    add("Checkout this commit", () => gitAction("checkout", sha, "Checkout this commit as a detached HEAD?"));
-    add("Checkout branch…", () => { const n = prompt("Branch name to check out:"); if (n && n.trim()) branchOp("switch", n.trim()); });
-    add("Create branch…", () => { const n = prompt("New branch name:"); if (n && n.trim()) gitAction("branch", sha, "", n.trim()); });
-    add("Create tag here…", () => { const n = prompt("New tag name at this commit:"); if (n && n.trim()) gitAction("tag", sha, "", n.trim()); });
-    add("Cherry-pick this commit", () => gitAction("cherry-pick", sha, "Cherry-pick this commit?"));
-    add("Revert this commit", () => gitAction("revert", sha, "Revert this commit (creates a revert commit)?"));
-    add("Rebase current branch onto this commit", () => gitAction("rebase", sha, "Rebase the current branch onto this commit?"), true);
+    add("Checkout this commit", async () => {
+      const ok = await showGitModal({ title: "Checkout Commit", message: "Checkout this commit as a detached HEAD?", confirmLabel: "Checkout" });
+      if (ok) gitAction("checkout", sha);
+    });
+    add("Checkout branch…", async () => {
+      const n = await showGitModal({ title: "Checkout Branch", input: { placeholder: "Branch name to check out…" }, confirmLabel: "Checkout" });
+      if (n && n.trim()) branchOp("switch", n.trim());
+    });
+    add("Create branch…", async () => {
+      const n = await showGitModal({ title: "Create Branch", input: { placeholder: "New branch name…" }, confirmLabel: "Create" });
+      if (n && n.trim()) gitAction("branch", sha, n.trim());
+    });
+    add("Create tag here…", async () => {
+      const n = await showGitModal({ title: "Create Tag", input: { placeholder: "New tag name…" }, confirmLabel: "Create" });
+      if (n && n.trim()) gitAction("tag", sha, n.trim());
+    });
+    add("Cherry-pick this commit", async () => {
+      const ok = await showGitModal({ title: "Cherry-pick", message: "Cherry-pick this commit?", confirmLabel: "Cherry-pick" });
+      if (ok) gitAction("cherry-pick", sha);
+    });
+    add("Revert this commit", async () => {
+      const ok = await showGitModal({ title: "Revert", message: "Revert this commit (creates a revert commit)?", confirmLabel: "Revert" });
+      if (ok) gitAction("revert", sha);
+    });
+    add("Rebase current branch onto this commit", async () => {
+      const ok = await showGitModal({ title: "Rebase", message: "Rebase the current branch onto this commit?", confirmLabel: "Rebase", danger: true });
+      if (ok) gitAction("rebase", sha);
+    }, true);
     sep();
-    add("Reset current branch to here (mixed)", () => gitAction("reset", sha, "Reset the current branch to this commit (--mixed)? Uncommitted changes stay in the working tree."), true);
+    add("Reset current branch to here (mixed)", async () => {
+      const ok = await showGitModal({ title: "Reset", message: "Reset the current branch to this commit (--mixed)? Uncommitted changes stay in the working tree.", confirmLabel: "Reset", danger: true });
+      if (ok) gitAction("reset", sha);
+    }, true);
     sep();
     add("Copy full hash", () => { navigator.clipboard.writeText(sha).catch(() => {}); setStatus("copied " + sha.slice(0, 8)); });
 
@@ -678,9 +767,8 @@
     menuEl.style.top = Math.min(y, window.innerHeight - rect.height - 8) + "px";
   }
 
-  async function gitAction(action, sha, confirmMsg, name) {
+  async function gitAction(action, sha, name) {
     const cwd = selectedCwd(); if (!cwd) return;
-    if (confirmMsg && !confirm(confirmMsg)) return;
     setStatus(action + "…");
     const { res, data } = await api("/git/action", {}, { cwd, action, sha, name });
     if (!res.ok || !data.ok) {

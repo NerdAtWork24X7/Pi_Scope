@@ -675,6 +675,20 @@
   .git-menu-item:hover { background:var(--accent-hover); }
   .git-menu-item.danger { color:var(--red); }
   .git-menu-sep { height:1px; background:var(--hairline); margin:4px 6px; }
+  /* ─── Git modal dialog ────────────────────────────────────────────── */
+  .git-modal-backdrop { position:fixed; inset:0; z-index:2000; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; }
+  .git-modal-box { background:var(--glass-bg-strong); border:1px solid var(--border); border-radius:10px; box-shadow:var(--glass-shadow); padding:16px 20px; min-width:340px; max-width:480px; backdrop-filter:blur(18px); }
+  .git-modal-title { font-size:14px; font-weight:700; color:var(--text); margin-bottom:6px; }
+  .git-modal-msg { font-size:13px; color:var(--muted); margin-bottom:12px; line-height:1.5; }
+  .git-modal-input { width:100%; box-sizing:border-box; padding:7px 10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:13px; font-family:monospace; margin-bottom:14px; }
+  .git-modal-input:focus { outline:none; border-color:var(--accent); }
+  .git-modal-actions { display:flex; gap:8px; justify-content:flex-end; }
+  .git-modal-btn { padding:6px 16px; font-size:13px; border-radius:6px; cursor:pointer; border:1px solid var(--border); background:var(--bg); color:var(--text); }
+  .git-modal-btn:hover { background:var(--row-hover); }
+  .git-modal-btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .git-modal-btn.primary:hover { opacity:0.9; }
+  .git-modal-btn.danger { background:var(--red); color:#fff; border-color:var(--red); }
+  .git-modal-btn.danger:hover { opacity:0.9; }
   .git-branch-item { display:flex; align-items:center; gap:8px; padding:6px 12px; border-bottom:1px solid var(--hairline); font-family:monospace; font-size:13px; }
   .git-branch-item:hover { background:var(--row-hover); }
   .git-branch-item .gb-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
