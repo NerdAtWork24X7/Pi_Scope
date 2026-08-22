@@ -34,4 +34,5 @@ export interface SessionSummary {
   last_ts: string;
   event_count: number;
   tags: string[];
+  has_shutdown?: boolean;
 }

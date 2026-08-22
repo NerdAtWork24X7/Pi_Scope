@@ -86,6 +86,15 @@
     return "gray";
   }
 
+  // Subagent status for the expanded session list: red=stopped, orange=waiting, green=running.
+  function subagentStatus(s) {
+    if (s?.has_shutdown) return "red";
+    if (!s?.last_ts) return "orange";
+    const ageS = (Date.now() - new Date(s.last_ts).getTime()) / 1000;
+    if (ageS <= 10) return "green";
+    return "orange";
+  }
+
   function agentLetter(s) {
     const name = s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id ?? "?";
     const ch = String(name).trim().charAt(0).toUpperCase();
@@ -291,6 +300,7 @@
     parseDuration,
     fmtDuration,
     activityStatus,
+    subagentStatus,
     agentLetter,
     getContextWindow,
     turnFinalResponse,

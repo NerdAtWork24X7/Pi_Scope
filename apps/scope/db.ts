@@ -43,6 +43,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, s
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_pool ON events(pool);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, type);
 `;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -127,7 +128,8 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       COALESCE(provider, '') AS provider,
       COALESCE(model, '') AS model,
       first_ts, last_ts, event_count,
-      tags_json
+      tags_json,
+      EXISTS (SELECT 1 FROM events WHERE events.session_id = sessions.session_id AND events.type = 'session_shutdown') AS has_shutdown
     FROM sessions
     WHERE ($pool = '' OR pool = $pool)
       AND ($tag = '' OR EXISTS (
@@ -313,6 +315,7 @@ export function rowToSession(row: any): SessionSummary {
     last_ts: row.last_ts,
     event_count: row.event_count,
     tags,
+    has_shutdown: !!row.has_shutdown,
   };
 }
 

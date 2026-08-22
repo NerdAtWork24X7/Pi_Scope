@@ -528,7 +528,7 @@ function buildSessionItem(s) {
   const modelHtml = s.model ? ` <span class="name-model">- ${window.SCOPE.escapeHtml(s.model)}</span>` : "";
   const info = document.createElement("div");
   info.className = "info";
-  info.innerHTML = `<div class="name"><span class="name-text">${window.SCOPE.escapeHtml(name)}</span>${modelHtml}<span class="err-dot">●</span></div>`;
+  info.innerHTML = `<div class="name"><span class="status-dot ${window.SCOPE.subagentStatus(s)}"></span><span class="name-text">${window.SCOPE.escapeHtml(name)}</span>${modelHtml}<span class="err-dot">●</span></div>`;
 
   const cost = document.createElement("div");
   cost.className = "cost";
@@ -608,6 +608,19 @@ setInterval(() => {
     if (!s) return;
     const dot = el.querySelector(".mini-dot");
     if (dot) dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
+  });
+}, 2000);
+
+// 2 s tick to refresh subagent status dots in the expanded session list.
+// Same pattern as mini-dots — cheap DOM patch without full re-render.
+setInterval(() => {
+  if (STATE.sidebarCollapsed) return;
+  document.querySelectorAll(".session-item .status-dot").forEach(el => {
+    const sid = el.closest(".session-item")?.dataset.sid;
+    if (!sid) return;
+    const s = STATE.sessions.find(x => x.session_id === sid);
+    if (!s) return;
+    el.className = "status-dot " + window.SCOPE.subagentStatus(s);
   });
 }, 2000);
 
