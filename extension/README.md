@@ -60,6 +60,7 @@ The extension maps agent events directly into the canonical `ObsEvent` envelopes
 
 - **`session_start`** & **`session_shutdown`**: Tracks session boundaries.
 - **`agent_start`** & **`agent_end`**: Fired per user prompt cycle.
+- **`llm_request`**: Captures each provider request (model, request args, prompt size) for the LLM-request inspector; fired on every provider call.
 - **`turn_start`** & **`turn_end`**: Tracks individual assistant model calls and usage/cost.
 - **`user_message`**: Captures user prompts.
 - **`assistant_message`**: Captures model completions (text, tools called, token usage).

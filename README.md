@@ -79,13 +79,13 @@ the extension (above) to feed it. The server writes its per-run token to `tmp/sc
 
 Watch a quick tour of the 5.0.0 features:
 
-![](docs/video/Pi-Scope-5.0.0-features.mp4)
+<video src="docs/video/Pi-Scope-5.0.0-features.mp4" controls width="640">Your browser does not support the video tag. <a href="docs/video/Pi-Scope-5.0.0-features.mp4">Download the tour (mp4)</a>.</video>
 
 ## The layout
 
-- **Top bar** — view buttons: `Single` · `Trajectory` · `Terminal` · `Files` · `Checkpoints`. A live dot is green when the live feed (SSE) is connected, red when off.
+- **Top bar** — view buttons: `Single` · `Trajectory` · `Terminal` · `Review` · `Checkpoints` · `Git`. A live dot is green when the live feed (SSE) is connected, red when off.
 - **Left sidebar** — the session list. Click a session name to open it in Single view. Collapse the sidebar with the `«` toggle (your choice is remembered).
-- **Session rows** show the agent name, model + short id (`abcd1234 · claude-…`), `pool · N events · relative time`, cost/tokens, and a **red error dot** when a tool error occurred (clicking the session acknowledges it). A `hidden`/`aged` note and a hide/unhide `×`/`↺` button appear per row.
+- **Session rows** show the agent name, model + short id (`abcd1234 · claude-…`), `pool · N events · relative time`, cost/tokens, and a **red error dot** when a tool error occurred (clicking the session acknowledges it). A `hidden`/`aged` note and a hide/unhide `×`/`↺` button appear per row. In the expanded list each subagent carries a **status dot** — red stopped, orange waiting, green running.
 
 ![Session timeline](docs/shots/single.png)
 
@@ -155,7 +155,7 @@ the server is also picked up; it falls back to the PTY's `/proc/<pid>/cwd` if th
 unreachable. While Herdr is detected, the in-browser right-click menu is suppressed so
 Herdr's own context menu works.
 
-## Files view
+## Files view (top-bar button labeled **Review**)
 
 Toolbar: `☰ files` toggle, cwd label, `☐ ignored` checkbox (show ignored files), `↻ refresh`.
 
@@ -177,6 +177,17 @@ Type an optional label, then click **`＋ Checkpoint now`** to snapshot the work
 - Needs a working directory (set in the Terminal pane) and git available. Empty states: `no working directory set — choose one in the Terminal pane`, `no checkpoints yet — click "Checkpoint now"`, `git unavailable in <cwd>`.
 
 ![Checkpoints](docs/shots/checkpoints.png)
+
+## Git view
+
+A full git client (the top-bar **Git** button) for the working directory set in the Terminal pane. Tabs across the top: **Changes** · **History** · **Branches** · **Stashes** · **Remotes** · **Submodules**.
+
+- **Changes** — staged/unstaged file list with a side-by-side diff; stage, unstage, discard, and commit (with amend). A fullscreen diff mode is available.
+- **History** — commit log rendered as a colored lane graph (vscode-git-graph style) with commit detail, diff, and graph context actions (checkout / cherry-pick / revert / rebase / reset / branch / tag).
+- **Branches** — list, create, switch, and delete branches.
+- **Stashes** — list, push, pop, and drop stashes.
+- **Remotes** — list, add, and remove remotes; push / pull / fetch.
+- **Submodules** — list and add / remove / update / init / deinit / sync submodules.
 
 ## Keyboard shortcuts (Single view)
 
