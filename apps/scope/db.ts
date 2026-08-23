@@ -60,6 +60,9 @@ export interface PreparedQueries {
   countTotals: StatementSync;
   clearSessions: StatementSync;
   clearEvents: StatementSync;
+  deleteSessionEvents: StatementSync;
+  deleteSessionRow: StatementSync;
+  getBatchStats: StatementSync;
 }
 
 // ─── Init ───────────────────────────────────────────────────────────────────
@@ -244,9 +247,28 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       (SELECT COUNT(*) FROM sessions) AS sessions_total
   `);
 
+  // ── Batch stats for multiple sessions (one query, not N) ──────────
+  // Returns one row per session with all stats except per-model breakdown.
+  const getBatchStats = db.prepare(`
+    SELECT
+      e.session_id,
+      COALESCE(SUM(CASE WHEN e.type = 'assistant_message' THEN json_extract(e.payload_json, '$.usage.total_tokens') ELSE 0 END), 0) AS total_tokens,
+      COALESCE(SUM(CASE WHEN e.type = 'assistant_message' THEN json_extract(e.payload_json, '$.usage.input') ELSE 0 END), 0)        AS input_tokens,
+      COALESCE(SUM(CASE WHEN e.type = 'assistant_message' THEN json_extract(e.payload_json, '$.usage.output') ELSE 0 END), 0)       AS output_tokens,
+      COALESCE(SUM(CASE WHEN e.type = 'assistant_message' THEN json_extract(e.payload_json, '$.usage.cost_total') ELSE 0 END), 0)   AS total_cost,
+      COALESCE(SUM(CASE WHEN e.type = 'error' OR (e.type = 'tool_result' AND (json_extract(e.payload_json, '$.is_error') = 1 OR (json_extract(e.payload_json, '$.details_summary.exit_code') IS NOT NULL AND json_extract(e.payload_json, '$.details_summary.exit_code') != 0))) THEN 1 ELSE 0 END), 0) AS error_count
+    FROM events e
+    WHERE e.session_id IN (SELECT value FROM json_each($session_ids))
+    GROUP BY e.session_id
+  `);
+
   // ── Clear all data (destructive) ──────────────────────────────────────
   const clearSessions = db.prepare(`DELETE FROM sessions`);
   const clearEvents = db.prepare(`DELETE FROM events`);
+
+  // ── Delete a single session + its events ──────────────────────────────
+  const deleteSessionEvents = db.prepare(`DELETE FROM events WHERE session_id = $session_id`);
+  const deleteSessionRow = db.prepare(`DELETE FROM sessions WHERE session_id = $session_id`);
 
   return {
     insertEvent,
@@ -261,6 +283,9 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     countTotals,
     clearSessions,
     clearEvents,
+    deleteSessionEvents,
+    deleteSessionRow,
+    getBatchStats,
   };
 }
 

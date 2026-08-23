@@ -31,6 +31,7 @@
   const overview = document.getElementById("trajectory-overview");
   const label = document.getElementById("trajectory-label");
   const searchBox = document.getElementById("trajectory-search");
+  const filterChips = document.getElementById("trajectory-filters");
   const statsEl = document.getElementById("trajectory-stats");
   const pauseToast = document.getElementById("trajectory-pause-toast");
   const inspector = document.getElementById("trajectory-inspector");
@@ -46,6 +47,7 @@
   let lastSeq = -1;
   let selectedSid = null;
   let search = "";
+  let hideKinds = new Set(); // kinds to hide: "request", "context", "system"
   let stickToBottom = true;
   let session = null; // session summary object
   let costStr = "";
@@ -81,6 +83,7 @@
       case "message": return "Message";
       case "tool": return "Tool";
       case "system": return "System";
+      case "request": return "Request";
       case "compacted": return "Compacted";
       case "context": return "Context";
       default: return kind;
@@ -174,15 +177,19 @@
           break;
         }
         case "llm_request": {
+          const turnLabel = p.turn_index != null ? `turn #${p.turn_index}` : "";
+          const modelStr = p.model || "";
+          const msgPreview = p.user_msg_preview ? trunc(p.user_msg_preview, 60) : "";
+          const parts = [modelStr, turnLabel, msgPreview].filter(Boolean);
           push({
             absTime: tsMs(evt),
             cell: {
-              index: ++ctx.index, kind: "system",
-              text: ctx.systemCount === 0 ? "Initial System Prompt" : "System Prompt Updated",
-              preview: p.system_prompt || "", inputDetail: p.system_prompt || "",
+              index: ++ctx.index, kind: "request",
+              text: parts.join(" · ") || p.system_prompt?.slice(0, 80) || "",
+              preview: "", inputDetail: p.system_prompt || "",
               timeSeconds: 0, startedAt: tsMs(evt), sourceEvt: evt,
             },
-          }, "Message");
+          }, "Context");
           ctx.systemCount++;
           break;
         }
@@ -268,15 +275,31 @@
           break;
         }
         // Boundary / lifecycle markers and standalone thinking events render no
-        // cell — turn boundaries drive grouping, agent_start/agent_end duplicate
-        // user_message/assistant_message, and thinking is folded into the
-        // assistant_message cell above.
+        // cell — turn boundaries drive grouping, and thinking is folded into the
+        // assistant_message cell above.  agent_end is included only when it
+        // carries a final_response that the assistant_message cells missed
+        // (common for subagents whose last assistant message has no text, only
+        // tool-call blocks).  agent_start is fully redundant with user_message.
         case "turn_start":
         case "turn_end":
         case "agent_start":
-        case "agent_end":
         case "thinking":
           break;
+        case "agent_end": {
+          if (!p.final_response) break; // nothing to add
+          step++;
+          curTitle = step === 1 ? "Message" : "Step " + step;
+          push({
+            absTime: tsMs(evt),
+            cell: {
+              index: ++ctx.index, kind: "message",
+              text: trunc(p.final_response || "", 240),
+              preview: p.final_response || "",
+              timeSeconds: null, startedAt: tsMs(evt), sourceEvt: evt,
+            },
+          }, curTitle);
+          break;
+        }
         default: {
           // session_start / session_shutdown / model_change / branch_nav /
           // error / custom — rendered as dim Context cells so nothing is lost.
@@ -355,6 +378,7 @@
       <span class="traj-col-kind">kind</span>
       <span class="traj-col-content">event</span>
       <span class="traj-col-time">time</span>
+      <span class="traj-col-cost">cost</span>
       <span class="traj-col-in">in</span>
       <span class="traj-col-out">out</span>
     `;
@@ -405,7 +429,7 @@
         return escapeHtml(t || "");
       }
       case "message": {
-        const t = trunc(cell.preview || cell.text, 240);
+        const t = trunc(cell.preview || cell.text, 500);
         return t ? escapeHtml(t) : `<span class="dim">tool call only</span>`;
       }
       case "tool": {
@@ -416,12 +440,16 @@
         const result = cell.resultPreview && !cell.isError ? ` <span class="dim">← ${escapeHtml(trunc(cell.resultPreview, 120))}</span>` : "";
         return name + argSpan + err + result;
       }
+      case "request": {
+        const t = trunc(cell.text || "", 160);
+        return t ? `<span class="dim">🡅 ${escapeHtml(t)}</span>` : "";
+      }
       case "system":
       case "compacted":
       case "context":
       default: {
         const t = trunc(cell.text || "", 240);
-        return t ? escapeHtml(t) : "";
+        return t ? `<span class="dim">${escapeHtml(t)}</span>` : "";
       }
     }
   }
@@ -431,17 +459,29 @@
     return "";
   }
 
+  function cellRowClass(cell) {
+    const cls = ["traj-row", "traj-" + cell.kind];
+    if (cell.isError) cls.push("is-error");
+    if (cell.kind === "request") cls.push("dim");
+    if (cell.index === selectedIndex) cls.push("selected");
+    return cls.join(" ");
+  }
+
   function buildRow(cell) {
+    let cost = "";
+    if (cell.kind === "message" && cell.sourceEvt?.payload?.usage?.cost_total != null) {
+      cost = "$" + cell.sourceEvt.payload.usage.cost_total.toFixed(5);
+    }
     const row = document.createElement("div");
-    row.className = "traj-row traj-" + cell.kind
-      + (cell.isError ? " is-error" : "")
-      + (cell.index === selectedIndex ? " selected" : "");
+    row.className = cellRowClass(cell);
     row.dataset.index = cell.index;
+    const title = escapeHtml(trunc(cell.preview || cell.text || "", 400));
     row.innerHTML = `
       <span class="traj-col-idx">#${cell.index}</span>
       <span class="traj-col-kind">${escapeHtml(kindLabel(cell.kind))}</span>
-      <span class="traj-col-content" title="${escapeHtml(trunc(cell.preview || cell.text || "", 400))}">${cellContent(cell)}</span>
+      <span class="traj-col-content" title="${title}">${cellContent(cell)}</span>
       <span class="traj-col-time">${timeCell(cell)}</span>
+      <span class="traj-col-cost">${escapeHtml(cost)}</span>
       <span class="traj-col-in">${cell.kind === "message" && cell.input != null ? fmtTokens(cell.input) : ""}</span>
       <span class="traj-col-out">${cell.kind === "message" && cell.output != null ? fmtTokens(cell.output) : ""}</span>
     `;
@@ -587,7 +627,7 @@
     frag.appendChild(buildColumnHeader());
     for (const turn of layout) {
       const matchingGroups = turn.groups
-        .map((g) => ({ group: g, cells: g.cells.filter((c) => matchesSearch(c, q)) }))
+        .map((g) => ({ group: g, cells: g.cells.filter((c) => matchesSearch(c, q) && !hideKinds.has(c.kind)) }))
         .filter((x) => x.cells.length);
       if (!matchingGroups.length) continue;
       frag.appendChild(buildTurnHead(turn));
@@ -799,6 +839,30 @@
       }
     });
   }
+
+  function buildTrajectoryFilterChips() {
+    if (!filterChips) return;
+    filterChips.innerHTML = "";
+    const kinds = [
+      { label: "requests", kind: "request", title: "Hide LLM request rows" },
+      { label: "context", kind: "context", title: "Hide context/lifecycle rows" },
+      { label: "system", kind: "system", title: "Hide system/compaction rows" },
+    ];
+    for (const k of kinds) {
+      const chip = document.createElement("span");
+      const on = hideKinds.has(k.kind);
+      chip.className = "fchip" + (on ? " on" : "");
+      chip.textContent = on ? "no " + k.label : k.label;
+      chip.title = k.title;
+      chip.addEventListener("click", () => {
+        if (on) hideKinds.delete(k.kind); else hideKinds.add(k.kind);
+        buildTrajectoryFilterChips();
+        render();
+      });
+      filterChips.appendChild(chip);
+    }
+  }
+  buildTrajectoryFilterChips();
 
   if (inspectorClose) inspectorClose.addEventListener("click", closeInspector);
 

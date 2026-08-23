@@ -59,6 +59,7 @@ interface AgentStartPayload {
   images_count: number;
   session_id: string;
   session_file?: string;
+  turn_index?: number;
 }
 
 interface LLMRequestPayload {
@@ -67,6 +68,9 @@ interface LLMRequestPayload {
   model?: string;
   message_count?: number;
   request_args?: Record<string, string>;
+  turn_index?: number;
+  /** First 400 chars of the first user message in this request, for quick identification. */
+  user_msg_preview?: string;
 }
 
 interface AgentEndPayload {
@@ -156,6 +160,19 @@ interface BranchNavPayload {
 
 // ━━ Module-scope state ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 let seqCounter = 0;
+
+// Last text captured from a message_end → assistant_message event.  Used as a
+// definitive fallback in agent_end when scanning event.messages yields nothing
+// (common for subagents whose chronological last assistant message contains
+// only tool-call blocks).  Reset every session_start.
+let lastAssistantText: string | null = null;
+
+// Last tool-result text captured across the session.  Used as a last-resort
+// fallback in agent_end when neither assistant text nor thinking exists in the
+// message array — subagents that end with a tool-call-only message often have
+// their real answer only in the final tool_result content.  Reset every
+// session_start.
+let lastToolResultText: string | null = null;
 
 // Per-run server token is persisted to tmp/scope_token by the server; reuse it
 // so the extension and server agree on auth without a hardcoded constant.
@@ -277,10 +294,6 @@ function extractUserMessage(content: any): { text: string; images_count: number 
     }
   }
   return { text: text.trim(), images_count };
-}
-
-function sha256hex(s: string): string {
-  return crypto.createHash("sha256").update(s, "utf8").digest("hex");
 }
 
 // Extract the FINAL system prompt (and a few request-shape facts) from the raw
@@ -575,7 +588,6 @@ export default function (pi: ExtensionAPI) {
   } | null = null;
 
   let activeTurnIndex = 0;
-  let lastFinalSysSig: string | null = null;
   const turnStartTimes = new Map<number, number>();
   // turnIndex → ts of first text/thinking delta (per-turn TTFT marker).
   // Cleared alongside turnStartTimes at message_end.
@@ -639,7 +651,8 @@ export default function (pi: ExtensionAPI) {
 
     // 3. Reset seq counter + boot-snapshot gate
     seqCounter = 0;
-    lastFinalSysSig = null;
+    lastAssistantText = null;
+    lastToolResultText = null;
 
     // 4. Initialize Queue Manager
     queue = new EventQueue(
@@ -714,29 +727,50 @@ export default function (pi: ExtensionAPI) {
       images_count: event.images ? event.images.length : 0,
       session_id: sessionInfo.sessionId,
       session_file: sessionInfo.sessionFile,
+      turn_index: activeTurnIndex ?? undefined,
     };
     queue.push(createEventEnvelope("agent_start", payload, sessionInfo));
   });
 
 
   // ━━ before_provider_request (final LLM request) ━━━━━━━━━━━━━━━━━━━━━━━━━
-  // Captures the FINAL system prompt exactly as sent to the LLM — the real
-  // provider request payload (event.payload), not the intermediate assembly
-  // available on before_agent_start. This is the SOLE system-prompt record: it
-  // carries the full final prompt verbatim (no truncation). Fires once per
-  // distinct system prompt (gated on sha256) so overrides/compactions/retries don't spam events.
+  // Emitted on EVERY provider call.  Each call costs money — we capture every
+  // single one, with turn_index, system prompt, tools, model, message count,
+  // request args, and a preview of the first user message (the real content
+  // being sent).  No dedup — every request gets its own event.
   pi.on("before_provider_request", async (event, _ctx) => {
     if (!queue || !sessionInfo) return;
     const { text, tools, model, messageCount, args } = extractFinalSystemPrompt(event.payload);
-    if (!text) return;
-    const sig = sha256hex(text + "\u0000" + tools.join(",") + "\u0000" + (model ?? ""));
-    if (sig === lastFinalSysSig) return;
-    lastFinalSysSig = sig;
-    const payload: LLMRequestPayload = { system_prompt: text };
+
+    // Extract a preview of the LAST user message in the request payload
+    // (the most recent user prompt, not the first one from history).
+    let userMsgPreview: string | undefined;
+    const messages = Array.isArray(event.payload?.messages) ? event.payload.messages : [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (!m || m.role !== "user") continue;
+      if (typeof m.content === "string") {
+        userMsgPreview = m.content.slice(0, 400).trim();
+      } else if (Array.isArray(m.content)) {
+        for (const b of m.content) {
+          if (b && b.type === "text") {
+            userMsgPreview = (b.text || "").slice(0, 400).trim();
+            break;
+          }
+        }
+      }
+      if (userMsgPreview) break;
+    }
+
+    const payload: LLMRequestPayload = {
+      system_prompt: text || "(no system prompt)",
+      turn_index: activeTurnIndex ?? undefined,
+    };
     if (tools.length) payload.tools = tools;
     if (model) payload.model = model;
     if (messageCount != null) payload.message_count = messageCount;
     if (Object.keys(args).length) payload.request_args = args;
+    if (userMsgPreview) payload.user_msg_preview = userMsgPreview;
     queue.push(createEventEnvelope("llm_request", payload, sessionInfo));
   });
 
@@ -746,23 +780,79 @@ export default function (pi: ExtensionAPI) {
     const messages = Array.isArray(event.messages) ? event.messages : [];
     let final_response: string | undefined;
     let final_response_truncated = false;
+
+    // Scan messages in reverse for the last assistant text (or thinking
+    // block as a fallback).  Subagents / team members sometimes have a
+    // content structure where the answer only lives in a thinking block,
+    // and the chronologically-last assistant message may have only tool
+    // calls — so continue scanning earlier messages until we find text.
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (m && m.role === "assistant") {
         let text = "";
+        let thinkingFallback = "";
         if (typeof m.content === "string") {
           text = m.content;
         } else if (Array.isArray(m.content)) {
           for (const b of m.content) {
-            if (b && b.type === "text") text += (b.text || "") + "\n";
+            if (!b) continue;
+            if (b.type === "text") {
+              text += (b.text || "") + "\n";
+            } else if (b.type === "thinking") {
+              thinkingFallback += (b.thinking || b.text || "") + "\n";
+            }
           }
         }
-        const tr = truncateToBytes(text.trim(), MAX_TEXT_FIELD);
-        final_response = tr.text || undefined;
-        final_response_truncated = tr.truncated;
-        break;
+        // Prefer the explicit text response; fall back to thinking content.
+        const candidate = text.trim() || thinkingFallback.trim();
+        if (candidate) {
+          const tr = truncateToBytes(candidate, MAX_TEXT_FIELD);
+          final_response = tr.text || undefined;
+          final_response_truncated = tr.truncated;
+          break; // found real content
+        }
+        // This assistant message had no text/thinking — keep scanning
+        // earlier messages (common for subagents whose last message
+        // only contains a tool-call block).
       }
     }
+
+    // If no assistant message was found in the array, try the last user
+    // message as a rough proxy (some API shapes include the task there).
+    if (!final_response) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m && m.role === "user") {
+          if (typeof m.content === "string") {
+            const tr = truncateToBytes(m.content.trim(), MAX_TEXT_FIELD);
+            final_response = tr.text || undefined;
+            final_response_truncated = tr.truncated;
+          }
+          break;
+        }
+      }
+    }
+
+    // Last-resort fallback: live-captured text from message_end → assistant_message.
+    // Subagents that end with a tool-call-only message will have no text in their
+    // final assistant entry, but lastAssistantText holds the most recent text
+    // that was actually streamed to the user.
+    if (!final_response && lastAssistantText) {
+      const tr = truncateToBytes(lastAssistantText, MAX_TEXT_FIELD);
+      final_response = tr.text || undefined;
+      final_response_truncated = tr.truncated;
+    }
+
+    // Final fallback: last tool_result content.  Subagents whose last assistant
+    // message is a bare tool call (no text / no thinking) produce their real
+    // answer inside the tool_result.  Capturing it here makes the subagent's
+    // output visible in agent_end.final_response and turn_end summaries.
+    if (!final_response && lastToolResultText) {
+      const tr = truncateToBytes(lastToolResultText, MAX_TEXT_FIELD);
+      final_response = tr.text || undefined;
+      final_response_truncated = tr.truncated;
+    }
+
     const payload: AgentEndPayload = {
       message_count: messages.length,
       final_response,
@@ -858,6 +948,11 @@ export default function (pi: ExtensionAPI) {
     text = truncateToBytes(text.trim(), MAX_TEXT_FIELD).text;
     thinking = truncateToBytes(thinking.trim(), MAX_TEXT_FIELD).text;
 
+    // Stash the latest assistant text so agent_end can use it as a fallback
+    // when scanning event.messages produces nothing (subagent edge-case).
+    if (text) lastAssistantText = text;
+    else if (thinking && !lastAssistantText) lastAssistantText = thinking;
+
     let usage: UsageSummary = {
       input: 0,
       output: 0,
@@ -948,6 +1043,11 @@ export default function (pi: ExtensionAPI) {
     }
 
     const tr = truncateToBytes(content_text.trim(), MAX_RESULT_BYTES);
+
+    // Stash the last tool result text so agent_end can use it as a fallback
+    // when the subagent's final assistant message is tool-call-only.
+    const trimmed = content_text.trim();
+    if (trimmed) lastToolResultText = trimmed;
 
     let details_summary: Record<string, any> | undefined = undefined;
     if (event.details && typeof event.details === "object") {

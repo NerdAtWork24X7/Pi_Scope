@@ -113,7 +113,7 @@ function herdrFocusedCwd(): Promise<string | null> {
   });
 }
 
-export function attachTerminal(server: Server, cfg: TerminalConfig): void {
+export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketServer {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -219,6 +219,8 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): void {
     ws.on("close", () => { try { clearInterval(cwdTimer); } catch {} try { term.kill(); } catch {} cfg.onClose?.(ws); });
     ws.on("error", () => { try { clearInterval(cwdTimer); } catch {} try { term.kill(); } catch {} cfg.onClose?.(ws); });
   });
+
+  return wss;
 }
 
 // Resolve an executable name to a full path so node-pty doesn't fail with

@@ -107,20 +107,77 @@
   // Find the LLM's final text response for the turn closed by `turnEnd`.
   // Scans backward through `events` (session-ordered by seq) and returns the last
   // assistant_message text (or agent_end.final_response) seen before the turn
-  // ended. Empty string when nothing was captured.
+  // ended. Tries text first, then thinking, then falls back to tool_result
+  // content (subagents often have tool-call-only assistant messages).  Returns
+  // empty string when nothing was captured.
   function turnFinalResponse(turnEnd, events) {
     if (!events || !events.length) return "";
     const sid = turnEnd.session_id;
     const ti = turnEnd.payload?.turn_index;
+
+    // agent_end fires *after* all turns and thus has a higher seq than any
+    // turn_end — check it first (outside the seq-bound scan).
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.session_id !== sid) continue;
+      if (e.type === "agent_end" && e.payload?.final_response) return e.payload.final_response;
+    }
+
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       if (e.seq > turnEnd.seq) continue;
       if (e.session_id !== sid) continue;
       if (ti != null && e.payload?.turn_index != null && e.payload.turn_index !== ti) continue;
-      if (e.type === "agent_end" && e.payload?.final_response) return e.payload.final_response;
       if (e.type === "assistant_message") {
         const t = e.payload?.text ?? e.payload?.content ?? "";
         if (t) return t;
+        // tool-call-only message — try thinking as fallback
+        const th = e.payload?.thinking ?? "";
+        if (th) return th;
+      }
+    }
+    // No assistant text found — fall back to last tool_result content in this
+    // turn (subagents whose final message is all tool calls).
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.seq > turnEnd.seq) continue;
+      if (e.session_id !== sid) continue;
+      if (ti != null && e.payload?.turn_index != null && e.payload.turn_index !== ti) continue;
+      if (e.type === "tool_result") {
+        const ct = e.payload?.content_text ?? "";
+        if (ct) return ct;
+      }
+    }
+    return "";
+  }
+
+  // Fallback for agent_end when its own final_response field is missing.
+  // Scans backward through events for the last assistant_message before
+  // this agent_end (same session).  Mirrors turnFinalResponse but without
+  // the turn_index filter.
+  function agentFinalResponse(agentEnd, events) {
+    if (!events || !events.length) return "";
+    const sid = agentEnd.session_id;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.seq > agentEnd.seq) continue;
+      if (e.session_id !== sid) continue;
+      if (e.type === "assistant_message") {
+        const t = e.payload?.text ?? e.payload?.content ?? "";
+        if (t) return t;
+        // tool-call-only message — try thinking as fallback
+        const th = e.payload?.thinking ?? "";
+        if (th) return th;
+      }
+    }
+    // No assistant text found — fall back to last tool_result content.
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.seq > agentEnd.seq) continue;
+      if (e.session_id !== sid) continue;
+      if (e.type === "tool_result") {
+        const ct = e.payload?.content_text ?? "";
+        if (ct) return ct;
       }
     }
     return "";
@@ -134,16 +191,16 @@
       case "session_shutdown": return `shutdown · ${p.reason ?? "?"}`;
       case "agent_start": return `▶ ${trunc(p.prompt, 80)}`;
       case "llm_request": {
-        const parts = [`System prompt`];
-        const tools = p.tools?.length ?? 0;
-        if (tools) parts.push(`${tools} tools`);
-        if (p.model) parts.push(p.model);
-        if (p.message_count != null) parts.push(`${p.message_count} msgs`);
+        const turn = p.turn_index != null ? `turn #${p.turn_index}` : "";
+        const model = p.model || "";
+        const preview = p.user_msg_preview ? trunc(p.user_msg_preview, 100) : "";
+        const parts = ["🡅", turn, model, preview].filter(Boolean);
         return parts.join(" · ");
       }
       case "agent_end": {
         const base = `■ ${p.message_count ?? "?"} messages`;
-        return p.final_response ? `${base} · ${trunc(p.final_response, 220)}` : base;
+        const fr = p.final_response || agentFinalResponse(evt, events);
+        return fr ? `${base} · ${trunc(fr, 220)}` : base;
       }
       case "turn_start": return `turn #${p.turn_index ?? "?"}`;
       case "turn_end": {
@@ -153,7 +210,15 @@
         return fr ? `${base}${usage} · ${trunc(fr, 200)}` : `${base}${usage}`;
       }
       case "user_message": return `you: ${trunc(p.text, 100)}`;
-      case "assistant_message": return `ai: ${trunc(p.text, 100)} · ${p.usage?.total_tokens ?? 0}tk · $${(p.usage?.cost_total ?? 0).toFixed(4)}${p.latency_ms ? " · " + p.latency_ms + "ms" : ""}`;
+      case "assistant_message": {
+        const preview = p.text ? trunc(p.text, 200) : (p.thinking ? "💭 " + trunc(p.thinking, 100) : "tool call only");
+        const cost = p.usage?.cost_total != null ? `$${p.usage.cost_total.toFixed(5)}` : "";
+        const tk = p.usage?.total_tokens ? `${p.usage.total_tokens}tk` : "";
+        const lat = p.latency_ms ? `${p.latency_ms}ms` : "";
+        const tps = p.output_tps ? `~${p.output_tps}t/s` : "";
+        const badges = [cost, tk, lat, tps].filter(Boolean).join(" ");
+        return `ai · ${preview}${badges ? "  [" + badges + "]" : ""}`;
+      }
       case "thinking": return `〽 ${trunc(p.text, 100)}`;
       case "tool_call": return `→ ${p.tool_name}(${trunc(JSON.stringify(p.args ?? {}), 60)})`;
       case "tool_result": return `← ${p.tool_name} · ${isToolResultError(p) ? "✗" : "✓"} · ${trunc(p.content_text, 80)}`;
@@ -169,33 +234,79 @@
   function summaryClass(evt, events) {
     events = events || window.__SCOPE_STATE?.events;
     if (evt.type === "thinking") return "italic dim";
-    if (evt.type === "agent_end") return evt.payload?.final_response ? "" : "dim";
+    if (evt.type === "agent_end") return (evt.payload?.final_response || agentFinalResponse(evt, events)) ? "" : "dim";
     if (evt.type === "turn_end") return turnFinalResponse(evt, events) ? "" : "dim";
     if (["session_shutdown","turn_start"].includes(evt.type)) return "dim";
     return "";
   }
 
   function renderDetailHTML(evt) {
-    // data attribute + a delegated handler in app.js (not an inline onclick),
-    // so a producer-supplied event_id can never inject script. Escaped for the
-    // attribute context; dataset returns the original value on read.
     const cBtn = `<button class="copy-btn" type="button" data-copy-event="${escapeHtml(evt.event_id)}">📋</button>`;
     const wBtn = `<button class="wrap-btn" onclick="event.stopPropagation();let p=this.parentElement.querySelector('pre');p.style.whiteSpace=p.style.whiteSpace==='pre-wrap'?'pre':'pre-wrap';this.textContent=p.style.whiteSpace==='pre-wrap'?'↩':'→'">→</button>`;
 
-    if (evt.type === "tool_result" && isToolResultError(evt.payload)) {
-      const summary = [];
-      if (evt.payload?.is_error === true) summary.push(`is_error: true`);
-      const ec = evt.payload?.details_summary?.exit_code;
-      if (ec != null && ec !== 0) summary.push(`exit code ${ec}`);
-      const errBanner = `<div class="llm-error-banner">⚠ ${escapeHtml(summary.join(", "))}</div>`;
-      return `${cBtn}${wBtn}${errBanner}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+    // ── llm_request: show system prompt, tools, request args ────────────
+    if (evt.type === "llm_request") {
+      const p = evt.payload ?? {};
+      let html = `${cBtn}${wBtn}`;
+      if (p.system_prompt) html += `<details><summary style="color:var(--accent);cursor:pointer;font-size:12px">system prompt (${p.system_prompt.length} chars)</summary><pre style="max-height:300px;overflow:auto;margin-top:4px;white-space:pre-wrap">${escapeHtml(p.system_prompt)}</pre></details>`;
+      if (p.tools?.length) html += `<div style="margin:2px 0;color:var(--muted);font-size:11px">${p.tools.length} tools: ${escapeHtml(p.tools.join(", "))}</div>`;
+      if (p.request_args && Object.keys(p.request_args).length) html += `<div style="margin:2px 0;color:var(--muted);font-size:11px">args: ${escapeHtml(JSON.stringify(p.request_args))}</div>`;
+      html += `<pre style="margin-top:4px">${escapeHtml(JSON.stringify(p, null, 2))}</pre>`;
+      return html;
+    }
+
+    // ── assistant_message: text inline, thinking collapsible, stats ──────────
+    if (evt.type === "assistant_message") {
+      const p = evt.payload ?? {};
+      const text = p.text ? escapeHtml(p.text) : "";
+      const thinking = p.thinking ? `<details style="margin:4px 0"><summary style="color:var(--orange);cursor:pointer;font-size:12px">💭 thinking (${p.thinking.length} chars)</summary><pre style="border-left:3px solid var(--orange);padding-left:8px;margin-top:4px;white-space:pre-wrap;max-height:400px;overflow:auto">${escapeHtml(p.thinking)}</pre></details>` : "";
+      const u = p.usage ?? {};
+      const stats = [];
+      if (u.total_tokens != null) stats.push(`${u.total_tokens} tokens`);
+      if (u.cost_total != null) stats.push(`$${u.cost_total.toFixed(5)}`);
+      if (u.input != null) stats.push(`${u.input} in / ${u.output ?? "?"} out`);
+      if (u.cache_read) stats.push(`${u.cache_read} cache r`);
+      if (u.cache_write) stats.push(`${u.cache_write} cache w`);
+      if (p.latency_ms != null) stats.push(`${p.latency_ms}ms`);
+      if (p.prefill_ms != null) stats.push(`prefill ${p.prefill_ms}ms`);
+      if (p.output_tps != null) stats.push(`~${p.output_tps} t/s`);
+      let html = `${cBtn}${wBtn}`;
+      if (stats.length) html += `<div style="display:flex;flex-wrap:wrap;gap:3px 6px;margin-bottom:4px">${stats.map(s => `<span class="exit-chip ok">${escapeHtml(s)}</span>`).join("")}</div>`;
+      if (text) html += `<pre style="white-space:pre-wrap;margin:0;line-height:1.5">${text}</pre>`;
+      else if (!thinking) html += `<div class="llm-empty">tool call only</div>`;
+      html += thinking;
+      html += `<pre style="margin-top:6px">${escapeHtml(JSON.stringify(p, null, 2))}</pre>`;
+      return html;
+    }
+
+    // ── tool_result: collapsible + scrollable content_text ──────────
+    if (evt.type === "tool_result") {
+      const p = evt.payload ?? {};
+      const isErr = isToolResultError(p);
+      let html = `${cBtn}${wBtn}`;
+      if (isErr) {
+        const summary = [];
+        if (p.is_error === true) summary.push("is_error: true");
+        const ec = p.details_summary?.exit_code;
+        if (ec != null && ec !== 0) summary.push(`exit code ${ec}`);
+        html += `<div class="llm-error-banner">⚠ ${escapeHtml(summary.join(", "))}</div>`;
+      }
+      const text = p.content_text || "";
+      if (text) {
+        const icon = isErr ? "✗" : "✓";
+        const color = isErr ? "var(--red)" : "var(--green)";
+        html += `<details open><summary style="cursor:pointer;font-size:12px;color:${color}">${escapeHtml(icon)} result (${text.length} chars)</summary><pre style="max-height:500px;overflow:auto;margin-top:4px;white-space:pre-wrap;border-left:2px solid ${color};padding:4px 8px;font-size:12px;line-height:1.4">${escapeHtml(text)}</pre></details>`;
+      }
+      html += `<pre style="margin-top:4px">${escapeHtml(JSON.stringify(p, null, 2))}</pre>`;
+      return html;
     }
 
     if (evt.type === "agent_end") {
-      const fr = evt.payload?.final_response
-        ? `<pre>${escapeHtml(evt.payload.final_response)}</pre>`
+      const fr = evt.payload?.final_response || agentFinalResponse(evt, window.__SCOPE_STATE?.events);
+      const frHTML = fr
+        ? `<pre>${escapeHtml(fr)}</pre>`
         : `<div class="llm-empty">no final response captured</div>`;
-      return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · ${evt.payload?.message_count ?? "?"} messages</div>${fr}`;
+      return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · ${evt.payload?.message_count ?? "?"} messages</div>${frHTML}`;
     }
 
     if (evt.type === "turn_end") {
@@ -203,7 +314,30 @@
       const frHTML = fr
         ? `<pre>${escapeHtml(fr)}</pre>`
         : `<div class="llm-empty">no final response captured</div>`;
-      return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+
+      // Also find the agent_end event for this session — its final_response is
+      // what gets sent back to the orchestrator.  Show it as a separate section
+      // so the operator can distinguish the turn-level response from the
+      // subagent's actual return value.
+      let agentEndHTML = "";
+      const events = window.__SCOPE_STATE?.events;
+      if (events) {
+        for (let i = events.length - 1; i >= 0; i--) {
+          const e = events[i];
+          if (e.session_id !== evt.session_id) continue;
+          if (e.type === "agent_end" && e.payload?.final_response) {
+            const agentFr = e.payload.final_response;
+            // Only show a separate section if it differs from the turn-level
+            // response (avoid showing the same text twice).
+            if (agentFr !== fr) {
+              agentEndHTML = `<div style="margin:8px 0 4px;color:var(--accent);font-size:12px;font-weight:600">sent to orchestrator · ${e.payload?.message_count ?? "?"} messages</div><pre style="border-left:3px solid var(--accent);padding-left:10px">${escapeHtml(agentFr)}</pre>`;
+            }
+            break;
+          }
+        }
+      }
+
+      return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}${agentEndHTML}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
     }
 
     const chips = [];
@@ -217,6 +351,13 @@
       if (evt.payload?.stop_reason) chips.push(`<span class="exit-chip ok">${escapeHtml(evt.payload.stop_reason)}</span>`);
       if (evt.payload?.latency_ms) chips.push(`<span class="exit-chip ok">${evt.payload.latency_ms}ms</span>`);
       if (evt.payload?.turn_index !== undefined) chips.push(`<span class="exit-chip ok">turn ${evt.payload.turn_index}</span>`);
+    }
+    if (evt.type === "llm_request") {
+      if (evt.payload?.model) chips.push(`<span class="exit-chip ok">${escapeHtml(evt.payload.model)}</span>`);
+      if (evt.payload?.turn_index != null) chips.push(`<span class="exit-chip ok">turn ${evt.payload.turn_index}</span>`);
+      if (evt.payload?.message_count != null) chips.push(`<span class="exit-chip ok">${evt.payload.message_count} msgs</span>`);
+      const tools = evt.payload?.tools?.length ?? 0;
+      if (tools) chips.push(`<span class="exit-chip ok">${tools} tools</span>`);
     }
     return `${cBtn}${wBtn}${chips.join(" ")}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
   }
@@ -268,7 +409,9 @@
       : `<div class="llm-empty">no tools captured</div>`;
     parts.push(`<section class="llm-section"><h4>Tools (${tools.length}) sent to LLM</h4>${toolsHTML}</section>`);
     if (payload.model) parts.push(`<section class="llm-section"><h4>Model</h4><div class="llm-empty">${escapeHtml(payload.model)}</div></section>`);
+    if (payload.turn_index != null) parts.push(`<section class="llm-section"><h4>Turn</h4><div class="llm-empty">#${payload.turn_index}</div></section>`);
     if (payload.message_count != null) parts.push(`<section class="llm-section"><h4>Messages</h4><div class="llm-empty">${payload.message_count}</div></section>`);
+    if (payload.user_msg_preview) parts.push(`<section class="llm-section"><h4>User message (preview)</h4><pre class="llm-pre">${escapeHtml(payload.user_msg_preview)}</pre></section>`);
     if (payload.request_args && Object.keys(payload.request_args).length) {
       const rows = Object.entries(payload.request_args)
         .map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td><code>${escapeHtml(String(v))}</code></td></tr>`)
@@ -310,8 +453,6 @@
     if (ec != null && ec !== 0) return true;
     return false;
   }
-  window.SCOPE.isToolResultError = isToolResultError;
-
   const HELPERS = {
     fmtTs,
     fmtRel,
@@ -329,6 +470,7 @@
     agentLetter,
     getContextWindow,
     turnFinalResponse,
+    agentFinalResponse,
     summaryFor,
     summaryClass,
     renderDetailHTML,
@@ -338,4 +480,5 @@
   // Expose helpers on window.SCOPE so every view can access them explicitly.
   window.SCOPE = window.SCOPE || {};
   Object.assign(window.SCOPE, HELPERS);
+  window.SCOPE.isToolResultError = isToolResultError;
 })();

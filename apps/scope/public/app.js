@@ -27,6 +27,11 @@ const STATE = {
 
 window.__SCOPE_STATE = STATE;
 
+// Per-session request navigation for the system prompt overlay.
+// SP._requests[] holds all llm_request events for the selected session;
+// SP._reqIdx is the currently viewed position in that array.
+const SP = { _requests: [], _reqIdx: -1 };
+
 // ─── URL state ──────────────────────────────────────────────────────────────
 
 function loadURLState() {
@@ -75,7 +80,7 @@ const spCloseBtn = $("#sp-close");
 // Shared implementations live in helpers.js (window.SCOPE). Keep local aliases
 // so the rest of app.js can call them without the window.SCOPE prefix.
 
-const CHIP_TYPES = ["user_message","assistant_message","thinking","tool_call","tool_result","model_change","compaction","branch_nav","error"];
+const CHIP_TYPES = ["user_message","assistant_message","tool_call","tool_result","thinking","model_change","compaction","branch_nav","error"];
 const { summaryFor, summaryClass, turnFinalResponse, renderDetailHTML } = window.SCOPE;
 if (typeof summaryFor !== "function" || typeof summaryClass !== "function" || typeof turnFinalResponse !== "function" || typeof renderDetailHTML !== "function") {
   throw new Error("Rendering helpers missing from window.SCOPE; check helpers.js exports.");
@@ -368,11 +373,31 @@ async function fetchSessions() {
     if (STATE.view === "checkpoints") window.__checkpointsOnSessions?.();
     if (STATE.view === "git") window.__gitOnSessions?.();
     if (STATE.view === "trajectory") window.__trajectoryOnSessions?.();
-    // Fetch stats for all visible sessions
-    for (const s of sessions) {
-      if (!STATE.sessionStats[s.session_id]) fetchSessionStats(s.session_id);
+    // Batch-fetch stats for all visible sessions (one request, not N)
+    var newSids = sessions.map(function(s){return s.session_id}).filter(function(id){return !STATE.sessionStats[id]});
+    if (newSids.length) {
+      fetchBatchSessionStats(newSids);
     }
   } catch { /* poll retries */ }
+}
+
+
+// Batch fetch stats for multiple sessions in one HTTP request (avoids N requests).
+async function fetchBatchSessionStats(sids) {
+  if (!sids || !sids.length) return;
+  try {
+    var url = apiUrl("/sessions/stats", { ids: sids.join(",") });
+    var res = await fetch(url, { headers: authHeaders() });
+    if (!res.ok) return;
+    var data = await res.json();
+    var stats = data.stats || {};
+    for (var sid in stats) {
+      STATE.sessionStats[sid] = stats[sid];
+      patchSessionStats(sid);
+      if (STATE.view === "trajectory") window.__trajectoryStatsUpdate?.(sid, stats[sid]);
+      if (sid === STATE.selectedSessionId) scheduleAgentSubnav();
+    }
+  } catch { /* ignore */ }
 }
 
 async function fetchSessionStats(sid) {
@@ -415,6 +440,25 @@ function clearAllSessions() {
     .catch(err => alert("Failed to clear agents: " + err));
 }
 
+// Permanently delete a single session and its events from the DB.
+function deleteSession(sid) {
+  if (!confirm(`Delete this session and all its events?\n\n${sid.slice(0, 8)}…`)) return;
+  fetch(apiUrl(`/sessions/${sid}`), { method: "DELETE", headers: authHeaders() })
+    .then(r => r.json())
+    .then(data => {
+      if (data && data.ok) {
+        // Remove from in-memory state
+        STATE.sessions = STATE.sessions.filter(s => s.session_id !== sid);
+        delete STATE.sessionStats[sid];
+        if (STATE.selectedSessionId === sid) clearSelectedSession();
+        renderSessions();
+      } else {
+        alert("Failed to delete session: " + (data?.error ?? "unknown error"));
+      }
+    })
+    .catch(err => alert("Failed to delete session: " + err));
+}
+
 function clearSelectedSession() {
   STATE.selectedSessionId = null;
   STATE.events = [];
@@ -427,7 +471,6 @@ function clearSelectedSession() {
   window.__trajectoryClear?.();
   setSingleSessionControlsVisible(false);
   renderSessions();
-  updateAgeTicker();
   updateSSEFilter();
   saveURLState();
 }
@@ -540,6 +583,14 @@ function buildSessionItem(s) {
     el.addEventListener("click", () => selectSession(s.session_id));
   }
 
+  // Per-session delete cross icon
+  const delBtn = document.createElement("span");
+  delBtn.className = "sess-delete";
+  delBtn.textContent = "✕";
+  delBtn.title = `Delete this session (${shortId}…)`;
+  delBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteSession(s.session_id); });
+  el.appendChild(delBtn);
+
   el.appendChild(info);
 
   return el;
@@ -595,6 +646,13 @@ function buildMiniSessionItem(s) {
   if (STATE.view === "single" || STATE.view === "trajectory") {
     el.addEventListener("click", () => selectSession(s.session_id));
   }
+
+  // Right-click (or long-press) to delete in collapsed mode
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    deleteSession(s.session_id);
+  });
+
   return el;
 }
 
@@ -662,7 +720,6 @@ async function loadSession(sid) {
   STATE.renderDirty = true;
   for (const e of STATE.events) STATE.seenIds.add(e.event_id);
   renderAllEvents();
-  updateAgeTicker();
   if (s?.last_ts) STATE.lastEventTs = s.last_ts;
   fetchSessionStats(sid);
   renderAgentSubnav();
@@ -701,20 +758,142 @@ function getFilteredEvents() {
 }
 
 function renderAllEvents() {
-  eventView.innerHTML = "";
   const evts = getFilteredEvents();
   if (!evts.length) {
     eventView.innerHTML = '<div class="empty-state" style="font-size:12px">no matching events</div>';
     return;
   }
-  for (let i = 0; i < evts.length; i++) {
-    eventView.appendChild(buildEventRow(evts[i], i));
+
+  // Build into a fragment for a SINGLE DOM append (avoids repeated reflows)
+
+  let currentTurnIdx = null;
+  let turnCost = 0;
+  let turnTokens = 0;
+  let rowIdx = 0;
+  let inSetup = true;
+  let _sawAgentEnd = false;   // true after agent_end — next agent_start opens a new turn
+  let _cycleFromAgent = false; // true when this turn header was opened by agent_start
+  let _lastHeader = null; // last header element (for cost retro-fit)
+
+  var frag = document.createDocumentFragment();
+
+  // Collect first llm_request per turn for header embedding
+  const turnPrompts = {};
+  const turnRequests = {}; // ti -> { model, msgs, preview }
+  for (const e of evts) {
+    const ti = e.payload?.turn_index;
+    if (ti == null) continue;
+    if (e.type === "user_message") {
+      turnPrompts[ti] = e.payload.text || "";
+    } else if (e.type === "llm_request" && !turnRequests[ti]) {
+      turnRequests[ti] = {
+        model: e.payload.model || "",
+        msgs: e.payload.message_count != null ? `${e.payload.message_count} msgs` : "",
+        preview: e.payload.user_msg_preview || "",
+      };
+    }
   }
+
+  function finishTurnHeader() {
+    if (!_lastHeader) return;
+    if (turnCost > 0 || turnTokens > 0) {
+      var span = _lastHeader.querySelector(".turn-cost");
+      if (span) span.textContent = " · $" + turnCost.toFixed(5) + " · " + window.SCOPE.fmtTokens(turnTokens);
+    }
+  }
+
+  function openTurnHeader(ti, prompt) {
+    finishTurnHeader();
+    currentTurnIdx = ti;
+    turnCost = 0;
+    turnTokens = 0;
+    var hdr = document.createElement("div");
+    hdr.className = "turn-header";
+    hdr.dataset.turn = ti;
+    var req = turnRequests[ti] || {};
+    var reqStr = req.model || req.msgs
+      ? " · 🛅 " + [req.model, req.msgs].filter(Boolean).join(" · ") + (req.preview ? " · " + window.SCOPE.trunc(req.preview, 80) : "")
+      : "";
+    hdr.innerHTML = '<span class="turn-label">Turn #' + ti + '</span><span class="turn-cost"></span><span class="turn-request"></span>';
+    // Set dynamic parts
+    if (reqStr) hdr.querySelector(".turn-request").textContent = reqStr;
+    if (prompt && !req.model && !req.msgs) {
+      var tp = document.createElement("span");
+      tp.className = "turn-prompt";
+      tp.textContent = prompt.slice(0, 120);
+      hdr.appendChild(tp);
+    }
+    _lastHeader = hdr;
+    frag.appendChild(hdr);
+  }
+
+  for (var i = 0; i < evts.length; i++) {
+    var evt = evts[i];
+    var ti = evt.payload?.turn_index;
+
+    // Fold turn_start and llm_request into the turn header.
+    if (evt.type === "turn_start") {
+      if (_cycleFromAgent) {
+        // agent_start already opened the header for this cycle —
+        // don't create another, just clear the flag.
+        _cycleFromAgent = false;
+      } else if (ti != null && ti !== currentTurnIdx) {
+        openTurnHeader(ti, turnPrompts[ti] || "");
+        inSetup = false;
+      }
+      _sawAgentEnd = false;
+      continue;
+    }
+    if (evt.type === "llm_request") continue;
+
+    // agent_start after agent_end is a cycle boundary — open a new turn even
+    // if turn_index hasn't changed (pi may reuse the same index across cycles).
+    if (evt.type === "agent_start" && _sawAgentEnd) {
+      var prompt = evt.payload?.text || evt.payload?.prompt || turnPrompts[ti] || "";
+      var nextTi = (typeof currentTurnIdx === "number" && currentTurnIdx != null) ? currentTurnIdx + 1 : (ti || 0);
+      openTurnHeader(nextTi, prompt);
+      inSetup = false;
+      _sawAgentEnd = false;
+      _cycleFromAgent = true;
+    }
+
+    // agent_end marks that we're at the end of a cycle.
+    if (evt.type === "agent_end") {
+      _sawAgentEnd = true;
+    }
+
+    // Any event with a new turn_index opens a turn header (fallback).
+    if (ti != null && ti !== currentTurnIdx) {
+      openTurnHeader(ti, turnPrompts[ti] || "");
+      inSetup = false;
+    } else if (inSetup && currentTurnIdx == null) {
+      currentTurnIdx = "setup";
+      var hdr = document.createElement("div");
+      hdr.className = "turn-header";
+      hdr.dataset.turn = "setup";
+      hdr.innerHTML = '<span class="turn-label">Setup</span><span class="turn-cost"></span>';
+      _lastHeader = hdr;
+    frag.appendChild(hdr);
+    }
+
+    if (evt.type === "assistant_message") {
+      var u = evt.payload?.usage || {};
+      if (u.cost_total) turnCost += u.cost_total;
+      if (u.total_tokens) turnTokens += u.total_tokens;
+    }
+
+    frag.appendChild(buildEventRow(evt, rowIdx++));
+  }
+
+  finishTurnHeader();
+
+  // Single append of the full fragment
+  eventView.innerHTML = "";
+  eventView.appendChild(frag);
+
   if (STATE.autoScroll) scrollEventViewToBottom();
   STATE.renderDirty = false;
-  updateAgeTicker();
 }
-
 const MAX_EVENTS_IN_MEMORY = 6000;
 const MAX_SEEN_IDS = MAX_EVENTS_IN_MEMORY * 2;
 function appendEventSingle(evt) {
@@ -733,6 +912,11 @@ function appendEventSingle(evt) {
   }
   if (evt.ts) STATE.lastEventTs = evt.ts;
 
+  // Keep the session's last_ts live so status dots reflect real-time activity
+  // instead of lagging behind by up to 10s (the fetchSessions poll interval).
+  const session = STATE.sessions.find(s => s.session_id === evt.session_id);
+  if (session && evt.ts) session.last_ts = evt.ts;
+
   if (STATE.renderDirty || !matchesFilters(evt)) {
     // Filters active or dirty — rebuild
     renderAllEvents();
@@ -740,7 +924,6 @@ function appendEventSingle(evt) {
     const idx = STATE.events.length - 1;
     eventView.appendChild(buildEventRow(evt, idx, true));
     if (STATE.autoScroll) scrollEventViewToBottom();
-    updateAgeTicker();
   }
   scheduleAgentSubnav();
 }
@@ -756,15 +939,36 @@ function matchesFilters(evt) {
 
 function buildEventRow(evt, idx, isLive = false) {
   const frag = document.createDocumentFragment();
+  const typeStr = String(evt.type ?? "");
+
+  // ── agent_end: prominent highlighted bar, collapsible ───────────────────
+  if (typeStr === "agent_end") {
+    const p = evt.payload ?? {};
+    const fr = p.final_response || window.SCOPE.agentFinalResponse(evt, window.__SCOPE_STATE?.events);
+    const row = document.createElement("div");
+    row.className = "evt-row evt-agent-end" + (idx === STATE.focusedIdx ? " focused" : "");
+    row.dataset.idx = idx;
+    row.innerHTML = `<span class="evt-ts">${window.SCOPE.fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill agent_end">agent end</span></span><span class="evt-summary">${p.message_count ?? "?"} messages · ${fr ? window.SCOPE.escapeHtml(fr.slice(0, 160)) : "no final response"}</span>`;
+    const detail = document.createElement("div");
+    detail.className = "evt-detail";
+    detail.innerHTML = fr
+      ? `<pre style="white-space:pre-wrap;margin:0;font-size:13px;line-height:1.5">${window.SCOPE.escapeHtml(fr)}</pre>`
+      : `<div class="llm-empty">no final response captured</div>`;
+    row.addEventListener("click", () => { detail.classList.toggle("open"); STATE.focusedIdx = idx; refreshFocus(); });
+    frag.appendChild(row);
+    frag.appendChild(detail);
+    return frag;
+  }
+
+  // ── Every row is collapsible (click to toggle detail) ───────────────────
+
   const row = document.createElement("div");
   row.className = "evt-row" + (idx === STATE.focusedIdx ? " focused" : "");
   row.dataset.idx = idx;
   // evt.type is producer-controlled (POST /events is unauthenticated), so it's
   // escaped for display and the class token is restricted to a safe charset.
-  const typeStr = String(evt.type ?? "");
   const typeLabel = window.SCOPE.escapeHtml(typeStr.replace(/_/g, " "));
   const typeClass = /^[a-z0-9_-]+$/.test(typeStr) ? typeStr : "custom";
-  // Use the error pill for failed tool_results so they stand out visually.
   const pillClass = typeStr === "tool_result" && window.SCOPE.isToolResultError(evt.payload) ? "error" : typeClass;
   row.innerHTML = `<span class="evt-ts">${window.SCOPE.fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill ${pillClass}">${typeLabel}</span>${window.SCOPE.toolNamePillHTML(evt)}</span><span class="evt-summary ${summaryClass(evt)}">${window.SCOPE.escapeHtml(summaryFor(evt))}</span>`;
 
@@ -831,6 +1035,31 @@ window.resumeSingleScroll = function() {
 
 function buildFilterChips() {
   filterChips.innerHTML = "";
+  // Quick-toggle buttons
+  const quickBtns = [
+    { label: "errors", type: "error", title: "Only show errors & failed tools" },
+    { label: "lifecycle", types: ["session_start","session_shutdown","turn_end","agent_start","agent_end","model_change","branch_nav"], title: "Show/hide lifecycle events" },
+  ];
+  for (const btn of quickBtns) {
+    const chip = document.createElement("span");
+    const types = btn.types || [btn.type];
+    const on = types.some(t => STATE.typeFilter.has(t));
+    chip.className = "fchip qbtn" + (on ? " on" : "");
+    chip.textContent = btn.label;
+    chip.title = btn.title;
+    chip.addEventListener("click", () => {
+      if (on) types.forEach(t => STATE.typeFilter.delete(t));
+      else types.forEach(t => STATE.typeFilter.add(t));
+      buildFilterChips();
+      applyFilters();
+    });
+    filterChips.appendChild(chip);
+  }
+  const sep = document.createElement("span");
+  sep.textContent = "|";
+  sep.style.cssText = "color:var(--muted);margin:0 2px";
+  filterChips.appendChild(sep);
+  // Standard type chips
   for (const t of CHIP_TYPES) {
     const chip = document.createElement("span");
     chip.className = "fchip" + (STATE.typeFilter.has(t) ? " on" : "");
@@ -910,30 +1139,47 @@ function collapseAll() {
 
 // ─── System prompt modal (single view) ───────────────────────────────────
 
-// Boot snapshot = the llm_request carrying the final system prompt, emitted
-// solely from before_provider_request → llm_request. agent_start no longer
-// carries any system-prompt data, so findBootSnapshotSingle degrades to finalReq.
-function findBootSnapshotSingle(sid) {
-  let finalReq = null, finalSeq = -1;
-  for (const e of STATE.events) {
-    if (e.session_id !== sid) continue;
-    if (e.type === "llm_request" && e.payload?.system_prompt) {
-      if (e.seq >= finalSeq) { finalReq = e; finalSeq = e.seq; }
-    }
-  }
-  return finalReq;
-}
-
 function openSysPrompt() {
   if (!STATE.selectedSessionId) return;
-  const snap = findBootSnapshotSingle(STATE.selectedSessionId);
+  const sid = STATE.selectedSessionId;
+  // Collect all llm_request events for this session in seq order.
+  SP._requests = STATE.events
+    .filter(e => e.session_id === sid && e.type === "llm_request")
+    .sort((a, b) => a.seq - b.seq);
+  SP._reqIdx = SP._requests.length > 0 ? SP._requests.length - 1 : -1; // start at latest
+  showCurrentRequest();
+  spOverlay.classList.add("show");
+}
+
+function showCurrentRequest() {
+  const total = SP._requests?.length ?? 0;
+  if (!total) {
+    spBody.innerHTML = `<div class="llm-empty">No LLM requests captured for this session.</div>`;
+    document.getElementById("sp-nav").style.display = "none";
+    return;
+  }
+  const idx = SP._reqIdx;
+  const snap = SP._requests[idx];
   const payload = snap ? snap.payload : null;
   // renderLLMRequestHTML lives in helpers.js (window.SCOPE).
+  const nav = document.getElementById("sp-nav");
+  if (nav) {
+    nav.style.display = "flex";
+    nav.innerHTML =
+      `<button id="sp-prev" ${idx <= 0 ? "disabled" : ""}>◀</button>` +
+      `<span style="flex:1;text-align:center;font-size:12px;color:var(--muted)">Request ${idx + 1} of ${total}</span>` +
+      `<button id="sp-next" ${idx >= total - 1 ? "disabled" : ""}>▶</button>`;
+    document.getElementById("sp-prev")?.addEventListener("click", () => {
+      if (SP._reqIdx > 0) { SP._reqIdx--; showCurrentRequest(); }
+    });
+    document.getElementById("sp-next")?.addEventListener("click", () => {
+      if (SP._reqIdx < total - 1) { SP._reqIdx++; showCurrentRequest(); }
+    });
+  }
   const html = (typeof window.SCOPE.renderLLMRequestHTML === "function")
     ? window.SCOPE.renderLLMRequestHTML(payload)
     : `<div class="llm-empty">render helper unavailable</div>`;
   spBody.innerHTML = html;
-  spOverlay.classList.add("show");
 }
 
 window.toggleSysPrompt = function(force) {
@@ -942,8 +1188,8 @@ window.toggleSysPrompt = function(force) {
 };
 
 spCopyBtn?.addEventListener("click", () => {
-  const snap = STATE.selectedSessionId ? findBootSnapshotSingle(STATE.selectedSessionId) : null;
-  const text = snap?.payload?.system_prompt || "";
+  const req = SP._requests?.[SP._reqIdx];
+  const text = req?.payload?.system_prompt || "";
   if (text) navigator.clipboard.writeText(text).catch(() => {});
 });
 spCloseBtn?.addEventListener("click", () => toggleSysPrompt(false));
@@ -1044,19 +1290,6 @@ eventView.addEventListener("click", (e) => {
   window.SCOPE.copyEvent(btn.dataset.copyEvent);
 });
 
-// ─── Age ticker & Re-anchoring ──────────────────────────────────────────────
-
-function updateAgeTicker() {
-  // no-op, age-ticker removed from header
-}
-
-// (auto-scroll re-anchor is handled per-append inside appendEventSingle)
-
-// ─── Breadcrumb ─────────────────────────────────────────────────────────────
-
-function updateBreadcrumb() {
-  headerBreadcrumb.textContent = "";
-}
 
 // ─── SSE ────────────────────────────────────────────────────────────────────
 
@@ -1088,6 +1321,9 @@ function connectSSE() {
       if (evt.type === "session_start" && evt.pool === "terminal-agent" && evt.cwd) {
         setCwd(evt.cwd);
       }
+      // Keep session list live: patch last_ts (and has_shutdown on lifecycle
+      // events) so the sidebar status dots reflect real-time activity.
+      patchSessionFromSSE(evt);
       if (STATE.view === "single") appendEventSingle(evt);
       else if (STATE.view === "trajectory") window.__trajectoryOnEvent?.(evt);
     } catch { /* ignore */ }
@@ -1101,6 +1337,38 @@ function connectSSE() {
 
 function disconnectSSE() { if (es) { es.close(); es = null; } setLive(false); }
 function setLive(on) { liveDot.className = on ? "green" : "red"; liveLabel.textContent = on ? "live" : "off"; }
+
+// Immediately patch STATE.sessions with live SSE data so the sidebar status
+// dots (green→orange→red) and the 2 s ticker reflect real-time activity
+// instead of lagging behind the 10 s fetchSessions poll.
+function patchSessionFromSSE(evt) {
+  if (!evt?.session_id) return;
+  let session = STATE.sessions.find(s => s.session_id === evt.session_id);
+  // New session (session_start from an agent we haven't polled yet) —
+  // create a minimal placeholder so the sidebar doesn't miss it entirely.
+  if (!session && evt.type === "session_start") {
+    session = {
+      session_id: evt.session_id,
+      cwd: evt.cwd || "",
+      agent_name: evt.agent_name || null,
+      model: evt.model || null,
+      last_ts: evt.ts || new Date().toISOString(),
+      first_ts: evt.ts || new Date().toISOString(),
+      has_shutdown: false,
+      event_count: 1,
+      tags: [],
+    };
+    STATE.sessions.unshift(session);
+    STATE.sessionsSig = ""; // force sidebar rebuild
+    debounce(renderSessions, 200)();
+  }
+  if (!session) return;
+  // Lifecycle events update has_shutdown.
+  if (evt.type === "session_start") session.has_shutdown = false;
+  if (evt.type === "session_shutdown") session.has_shutdown = true;
+  // Advance last_ts so the subagentStatus() green window stays current.
+  if (evt.ts) session.last_ts = evt.ts;
+}
 
 // ─── Clear all ──────────────────────────────────────────────────────────────
 
@@ -1121,7 +1389,7 @@ function loadTheme() {
 Object.assign(window.SCOPE, {
   getState: () => STATE,
   fetchSessionEvents, renderSessions, apiUrl, authHeaders,
-  saveURLState, updateBreadcrumb,
+  saveURLState,
   computeAgentInfo,
 });
 
@@ -1136,7 +1404,6 @@ applySidebarCollapsed();
 fetchSessions();
 connectSSE();
 setInterval(() => { fetchSessions(); }, 10000);
-updateBreadcrumb();
 initCwd();
 
 const cwdInput = document.getElementById("terminal-cwd");

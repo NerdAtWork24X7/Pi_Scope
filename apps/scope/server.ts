@@ -15,6 +15,7 @@ import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { attachTerminal } from "./terminal.ts";
 import { execFileSync } from "node:child_process";
+import * as crypto from "node:crypto";
 import { WebSocket } from "ws";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -32,8 +33,7 @@ const DB_PATH = process.env.SCOPE_DB_PATH ?? DEFAULT_DB_PATH;
 
 // Ensure parent folder exists (e.g. "db/" directory) before initializing SQLite
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const DEFAULT_AUTH_TOKEN = "dev_token";
-const AUTH_TOKEN = process.env.SCOPE_AUTH_TOKEN ?? DEFAULT_AUTH_TOKEN;
+const AUTH_TOKEN = process.env.SCOPE_AUTH_TOKEN ?? crypto.randomUUID();
 const VERSION = "0.1.0";
 const MAX_SSE_SUBSCRIBERS = 256;
 // Browser-openable UI URL with the token baked in. The UI's API + SSE calls are
@@ -78,13 +78,8 @@ const startTime = Date.now();
 
 const tokenMasked = AUTH_TOKEN.length > 8 ? `${AUTH_TOKEN.slice(0,4)}…${AUTH_TOKEN.slice(-4)}` : "****";
 console.log(`\n  pi-scope server v${VERSION}`);
-if (process.env.SCOPE_VERBOSE) {
-  console.log(`  UI:    ${OPEN_URL}`);
-  console.log(`  Token: ${AUTH_TOKEN}`);
-} else {
-  console.log(`  UI:    http://${HOST}:${PORT}/?token=<hidden — set SCOPE_VERBOSE=1 to print>`);
-  console.log(`  Token: ${tokenMasked}`);
-}
+console.log(`  UI:    ${OPEN_URL}`);
+console.log(`  Token: ${tokenMasked}`);
 console.log(`  DB:    ${DB_PATH}\n`);
 
 // ─── SSE subscriber registry ────────────────────────────────────────────────
@@ -387,6 +382,51 @@ function matchSessionStats(pathname: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Match /sessions/<session_id> (for single-session DELETE) */
+function matchSession(pathname: string): string | null {
+  const m = pathname.match(/^\/sessions\/([^/]+)$/);
+  return m ? m[1] : null;
+}
+
+// ─── Graceful shutdown ──────────────────────────────────────────────────────
+
+let shuttingDown = false;
+let wssRef: import("ws").WebSocketServer | null = null;
+
+function gracefulShutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log("\n  Shutting down gracefully…");
+
+  // Close all WebSocket terminal connections so PTY processes are killed.
+  if (wssRef) {
+    for (const client of wssRef.clients) {
+      try { client.close(); } catch {}
+    }
+    try { wssRef.close(); } catch {}
+  }
+
+  // Checkpoint and close the SQLite database.
+  try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
+  try { db.close(); } catch {}
+
+  // Remove the token file on clean exit.
+  try { fs.unlinkSync(TOKEN_FILE); } catch {}
+
+  // Stop accepting new connections, then exit.
+  server.close(() => {
+    console.log("  Server stopped.");
+    process.exit(0);
+  });
+
+  // Force exit after 5s if graceful close hangs.
+  setTimeout(() => { console.error("  Forcing exit after timeout."); process.exit(1); }, 5_000).unref();
+}
+
+// Handle OS-level termination signals for graceful shutdown.
+process.on("SIGTERM", () => gracefulShutdown());
+process.on("SIGINT", () => gracefulShutdown());
+
 // ─── Main handler ───────────────────────────────────────────────────────────
 
 async function handle(req: Request): Promise<Response> {
@@ -394,13 +434,13 @@ async function handle(req: Request): Promise<Response> {
   const pathname = url.pathname;
   const method = req.method.toUpperCase();
 
-  // OPTIONS — CORS preflight
+  // OPTIONS — CORS preflight (uses same restricted origin as normal responses)
   if (method === "OPTIONS") {
     return new Response(null, {
       status: 204,
       headers: {
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, POST, OPTIONS",
+        "access-control-allow-origin": corsOrigin(req),
+        "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
         "access-control-allow-headers": "Authorization, Content-Type",
       },
     });
@@ -422,6 +462,14 @@ async function handle(req: Request): Promise<Response> {
     } catch (err: any) {
       return jsonResponse({ ok: false, error: err.message }, 500);
     }
+  }
+
+  // ── POST /shutdown (graceful, loopback-only) ───────────────────────
+  if (pathname === "/shutdown" && method === "POST") {
+    const response = jsonResponse({ ok: true, message: "shutting down" });
+    // Defer shutdown so the caller receives the response before we close.
+    setImmediate(() => gracefulShutdown());
+    return response;
   }
 
   if (pathname === "/favicon.ico") {
@@ -533,6 +581,18 @@ async function handle(req: Request): Promise<Response> {
     }
   }
 
+  // ── DELETE /sessions/:session_id (delete single session) ──────────────
+  const sidDelete = matchSession(pathname);
+  if (sidDelete && method === "DELETE") {
+    try {
+      q.deleteSessionEvents.run({ $session_id: sidDelete });
+      q.deleteSessionRow.run({ $session_id: sidDelete });
+      return jsonResponse({ ok: true, session_id: sidDelete });
+    } catch (err: any) {
+      return jsonResponse({ error: err.message }, 500);
+    }
+  }
+
   // ── GET /sessions/:session_id/events ───────────────────────────────────
   const sidEvents = matchSessionEvents(pathname);
   if (sidEvents && method === "GET") {
@@ -592,6 +652,30 @@ async function handle(req: Request): Promise<Response> {
           cost_total: m.cost_total ?? 0,
         })),
       });
+    } catch (err: any) {
+      return jsonResponse({ error: err.message }, 500);
+    }
+  }
+
+  // ── GET /sessions/stats?ids=a,b,c (batch stats) ──────────────────────
+  if (pathname === "/sessions/stats" && method === "GET") {
+    const idsParam = url.searchParams.get("ids") ?? "";
+    const ids = idsParam.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!ids.length) return jsonResponse({ stats: {} });
+    try {
+      const sessionIdsJson = JSON.stringify(ids);
+      const rows = q.getBatchStats.all({ $session_ids: sessionIdsJson }) as any[];
+      const stats = {};
+      for (const r of rows) {
+        stats[r.session_id] = {
+          total_tokens: r.total_tokens ?? 0,
+          input_tokens: r.input_tokens ?? 0,
+          output_tokens: r.output_tokens ?? 0,
+          total_cost: r.total_cost ?? 0,
+          error_count: r.error_count ?? 0,
+        };
+      }
+      return jsonResponse({ stats });
     } catch (err: any) {
       return jsonResponse({ error: err.message }, 500);
     }
@@ -1532,7 +1616,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 // WebSocket terminal bridge (xterm.js in the browser ↔ node-pty shell on the server)
-attachTerminal(server, {
+wssRef = attachTerminal(server, {
   port: PORT,
   host: HOST,
   token: AUTH_TOKEN,
