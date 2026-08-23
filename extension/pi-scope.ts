@@ -478,6 +478,30 @@ class EventQueue {
     }, this.backoffMs);
   }
 
+  /** Scan the queue in reverse for the most recent content-bearing event.
+   *  Returns text from the last assistant_message (text or thinking) or
+   *  tool_result (content_text).  Used as a last-resort fallback in agent_end
+   *  when event.messages + module-level variables produce nothing — common
+   *  for subagents whose agent_end fires before message_end / tool_result
+   *  handlers have run (RPC mode event-ordering race). */
+  public lastContentText(): string | undefined {
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      const e = this.queue[i];
+      if (!e || e.session_id !== this.queue[this.queue.length - 1]?.session_id) continue;
+      if (e.type === "assistant_message") {
+        const t = e.payload?.text ?? e.payload?.content ?? "";
+        if (t.trim()) return t.trim();
+        const th = e.payload?.thinking ?? "";
+        if (th.trim()) return th.trim();
+      }
+      if (e.type === "tool_result") {
+        const ct = e.payload?.content_text ?? "";
+        if (ct.trim()) return ct.trim();
+      }
+    }
+    return undefined;
+  }
+
   public async flush() {
     if (this.isFlushing || this.queue.length === 0) return;
     this.isFlushing = true;
@@ -853,12 +877,41 @@ export default function (pi: ExtensionAPI) {
       final_response_truncated = tr.truncated;
     }
 
+    // Last-resort: scan the queue for content from this session.  Covers the
+    // RPC-mode race where agent_end fires before the message_end / tool_result
+    // handlers have updated the module-level fallback variables.
+    if (!final_response) {
+      const qtext = queue.lastContentText();
+      if (qtext) {
+        const tr = truncateToBytes(qtext, MAX_TEXT_FIELD);
+        final_response = tr.text || undefined;
+        final_response_truncated = tr.truncated;
+      }
+    }
+
+    // Sentinel: if every fallback is exhausted, emit a placeholder so the
+    // trajectory view doesn't silently drop this turn.
+    if (!final_response) {
+      final_response = "(pending)";
+    }
+
     const payload: AgentEndPayload = {
       message_count: messages.length,
       final_response,
       final_response_truncated,
     };
     queue.push(createEventEnvelope("agent_end", payload, sessionInfo));
+
+    // Wait for the HTTP POST to complete before the subprocess is killed.
+    // The agent's event loop awaits extension handlers before writing agent_end
+    // to stdout, and agent-team kills the subprocess as soon as it reads
+    // agent_end from stdout.  Without this await, SIGKILL tears down the
+    // in-flight fetch and the events never reach the observability server.
+    // A 5 s cap prevents a dead server from hanging the subagent.
+    await Promise.race([
+      queue.flush(),
+      new Promise<void>(r => setTimeout(r, 5_000)),
+    ]);
   });
 
   // ━━ turn_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

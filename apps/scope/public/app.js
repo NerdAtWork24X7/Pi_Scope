@@ -667,9 +667,9 @@ setInterval(() => {
     const dot = el.querySelector(".mini-dot");
     if (dot) dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
   });
-}, 2000);
+}, 500);
 
-// 2 s tick to refresh subagent status dots in the expanded session list.
+// 500 ms tick to refresh subagent status dots in the expanded session list.
 // Same pattern as mini-dots — cheap DOM patch without full re-render.
 setInterval(() => {
   if (STATE.sidebarCollapsed) return;
@@ -680,7 +680,7 @@ setInterval(() => {
     if (!s) return;
     el.className = "status-dot " + window.SCOPE.subagentStatus(s);
   });
-}, 2000);
+}, 500);
 
 function selectSession(sid) {
   STATE.ackd.add(sid);
