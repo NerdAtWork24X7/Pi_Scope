@@ -230,11 +230,12 @@
           const callId = p.tool_call_id;
           const prior = callId ? pendingTools.get(callId) : undefined;
           const callTs = prior ? prior.cell.startedAt : null;
+          const isErr = window.SCOPE.isToolResultError ? window.SCOPE.isToolResultError(p) : (!!p.is_error || (p.details_summary?.exit_code != null && p.details_summary.exit_code !== 0));
           if (prior) {
             prior.cell.resultEvt = evt;
-            prior.cell.isError = !!p.is_error;
+            prior.cell.isError = isErr;
             prior.cell.outputDetail = p.content_text || "";
-            prior.cell.resultPreview = p.is_error ? "✗ error" : trunc(p.content_text || "", 160);
+            prior.cell.resultPreview = isErr ? "✗ error" : trunc(p.content_text || "", 160);
             prior.cell.timeSeconds =
               callTs != null && tsMs(evt) != null ? Math.max(0, (tsMs(evt) - callTs) / 1000) : null;
           } else {
@@ -243,10 +244,10 @@
               absTime: tsMs(evt), toolName: p.tool_name, callId,
               cell: {
                 index: ++ctx.index, kind: "tool", text: p.tool_name || "tool",
-                preview: p.is_error ? "✗ error" : trunc(p.content_text || "", 160),
+                preview: isErr ? "✗ error" : trunc(p.content_text || "", 160),
                 outputDetail: p.content_text || "", resultEvt: evt,
                 timeSeconds: null, startedAt: tsMs(evt),
-                callId, toolName: p.tool_name, isError: !!p.is_error,
+                callId, toolName: p.tool_name, isError: isErr,
                 sourceEvt: evt,
               },
             }, curTitle);

@@ -1133,6 +1133,45 @@ async function handle(req: Request): Promise<Response> {
     });
   }
 
+  // ── GET /git/compare (diff between two commits, or commit vs working tree) ─
+  if (pathname === "/git/compare" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    let sha1 = url.searchParams.get("sha1") ?? "";
+    let sha2 = url.searchParams.get("sha2") ?? "";
+    if (!cwd || !sha1) return jsonResponse({ error: "missing cwd or sha1" }, 400);
+    if (sha1.startsWith("-") || sha2.startsWith("-")) return jsonResponse({ error: "invalid sha" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const args = ["diff", "--no-color", "--unified=3", sha1];
+    if (sha2) args.push(sha2);
+    const diff = gitTry(absCwd, args);
+    const statArgs = ["diff", "--stat", sha1];
+    if (sha2) statArgs.push(sha2);
+    const stat = gitTry(absCwd, statArgs);
+    return jsonResponse({
+      ok: diff.ok,
+      diff: diff.out,
+      stat: stat.out.split("\n").filter(Boolean).pop() || "",
+      sha1, sha2: sha2 || "WORKTREE",
+    });
+  }
+
+  // ── GET /git/cat (file content at a specific commit) ────────────────────
+  if (pathname === "/git/cat" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    const sha = url.searchParams.get("sha") ?? "";
+    const fp = url.searchParams.get("path") ?? "";
+    if (!cwd || !sha || !fp) return jsonResponse({ error: "missing cwd, sha, or path" }, 400);
+    if (sha.startsWith("-") || fp.startsWith("-")) return jsonResponse({ error: "invalid sha or path" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const r = gitTry(absCwd, ["show", `${sha}:${fp}`]);
+    if (!r.ok) return jsonResponse({ ok: false, error: r.out || "file not found or binary" }, 404);
+    // Refuse binary content (null bytes in first 8KB)
+    if (r.out.includes("\u0000")) return jsonResponse({ ok: false, error: "binary file — cannot display" }, 415);
+    return jsonResponse({ ok: true, content: r.out, path: fp, sha });
+  }
+
   // ── POST /git/action (commit-graph context menu commands) ───────────────
   if (pathname === "/git/action" && method === "POST") {
     const body = await gitPost(req);
@@ -1343,6 +1382,93 @@ async function handle(req: Request): Promise<Response> {
     else {
       const message = typeof parsed.message === "string" && parsed.message.trim() ? parsed.message.trim() : "";
       r = gitTry(absCwd, ["stash", "push", "-u", ...(message ? ["-m", message] : [])]);
+    }
+    return r.ok ? jsonResponse({ ok: true, out: r.out.trim() }) : jsonResponse({ ok: false, error: r.out }, 409);
+  }
+
+  // ── GET /git/submodules ──────────────────────────────────────────────
+  if (pathname === "/git/submodules" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const r = gitTry(absCwd, ["submodule", "status", "--recursive"]);
+    // Not a failure if there are no submodules or no .gitmodules
+    const items: any[] = [];
+    const urls: Record<string, string> = {};
+    const cfgR = gitTry(absCwd, ["config", "--file", ".gitmodules", "--get-regexp", "submodule\\..*\\.url"]);
+    if (cfgR.ok) {
+      for (const line of cfgR.out.split("\n")) {
+        const m = line.match(/^submodule\.(.+)\.url\s+(.+)$/);
+        if (m) urls[m[1]] = m[2];
+      }
+    }
+    if (r.ok) {
+      for (const line of r.out.split("\n")) {
+        if (!line.trim()) continue;
+        // Format: [ ][-|+|U]sha path (ref)
+        const m = line.match(/^[ ]?([-+U ]?)([0-9a-f]{40})\s+(.+?)(?:\s+\((.+)\))?$/);
+        if (!m) continue;
+        const flag = m[1].trim();
+        const sha = m[2];
+        const subPath = m[3];
+        const ref = m[4] || "";
+        let status = "ok";
+        if (flag === "-") status = "uninitialized";
+        else if (flag === "+") status = "dirty";
+        else if (flag === "U") status = "merge-conflict";
+        items.push({ path: subPath, sha, ref, status, url: urls[subPath] || "" });
+      }
+    }
+    // Include submodules from .gitmodules that may not be in the working tree yet
+    for (const [p, u] of Object.entries(urls)) {
+      if (!items.some((it) => it.path === p)) {
+        items.push({ path: p, sha: "", ref: "", status: "uninitialized", url: u });
+      }
+    }
+    return jsonResponse({ ok: true, items });
+  }
+
+  // ── POST /git/submodule (add|remove|update|init|deinit|sync) ─────────
+  if (pathname === "/git/submodule" && method === "POST") {
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const action = parsed.action ?? "";
+    const subPath = typeof parsed.path === "string" ? parsed.path.trim() : "";
+    const url = typeof parsed.url === "string" ? parsed.url.trim() : "";
+    // Validate submodule path to prevent traversal outside the repo
+    if (subPath && !resolveWithinCwd(absCwd, subPath)) return jsonResponse({ error: "invalid submodule path" }, 400);
+    let r: { ok: boolean; out: string };
+    switch (action) {
+      case "add":
+        if (!url || !subPath) return jsonResponse({ error: "missing url or path" }, 400);
+        r = gitTry(absCwd, ["submodule", "add", url, subPath]);
+        break;
+      case "remove":
+        if (!subPath) return jsonResponse({ error: "missing path" }, 400);
+        r = gitTry(absCwd, ["submodule", "deinit", "-f", "--", subPath]);
+        if (r.ok) {
+          gitTry(absCwd, ["rm", "-f", "--", subPath]);
+          const modPath = path.join(absCwd, ".git", "modules", subPath);
+          try { fs.rmSync(modPath, { recursive: true, force: true }); } catch {}
+        }
+        break;
+      case "update":
+        r = gitTry(absCwd, ["submodule", "update", "--init", "--recursive", ...(subPath ? ["--", subPath] : [])]);
+        break;
+      case "init":
+        r = gitTry(absCwd, ["submodule", "init", ...(subPath ? [subPath] : [])]);
+        break;
+      case "deinit":
+        if (!subPath) return jsonResponse({ error: "missing path" }, 400);
+        r = gitTry(absCwd, ["submodule", "deinit", "-f", "--", subPath]);
+        break;
+      case "sync":
+        r = gitTry(absCwd, ["submodule", "sync", ...(subPath ? ["--", subPath] : [])]);
+        break;
+      default:
+        return jsonResponse({ error: "unknown action" }, 400);
     }
     return r.ok ? jsonResponse({ ok: true, out: r.out.trim() }) : jsonResponse({ ok: false, error: r.out }, 409);
   }

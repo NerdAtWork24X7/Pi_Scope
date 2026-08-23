@@ -41,6 +41,7 @@
     branches: $("#git-tab-branches"),
     stashes: $("#git-tab-stashes"),
     remotes: $("#git-tab-remotes"),
+    submodules: $("#git-tab-submodules"),
   };
   const historyList = $("#git-history-list");
   const detailPane = $("#git-detail-pane");
@@ -54,9 +55,13 @@
   let lastCwd = "";
   let diffMode = "split"; // "split" | "unified"
   let currentDiff = { text: "", path: "", section: "", cached: false, add: 0, del: 0 };
-  let detailMode = "commit"; // "commit" | "changes" | "files"
+  let detailMode = "commit"; // "commit" | "changes" | "files" | "compare"
   let currentDetail = null;
   let menuEl = null;
+  let compareBase = null; // SHA of first commit selected for diff comparison
+  let fullscreen = false; // whether the detail pane is in fullscreen mode
+  let changesFs = false; // whether the changes diff view is fullscreen
+  let editFile = { path: "", content: "", original: "", sha: "" };
 
   const selectedCwd = window.SCOPE.currentCwd;
 
@@ -218,6 +223,14 @@
         `<span style="color:var(--muted);font-size:11px">${esc(d.section)}${d.cached ? " · staged" : ""}</span>` +
         `<span class="gdh-stat"><span class="a">+${d.add}</span> <span class="d">−${d.del}</span></span>`;
       diffHeader.appendChild(modeToggle(renderChangesDiff));
+      const fsBtn = document.createElement("button");
+      fsBtn.type = "button";
+      fsBtn.className = "btn-sm";
+      fsBtn.style.cssText = "font-size:14px;padding:2px 8px";
+      fsBtn.textContent = changesFs ? "⛶ exit" : "⛶";
+      fsBtn.title = changesFs ? "Exit fullscreen" : "Fullscreen diff (Esc to exit)";
+      fsBtn.onclick = toggleChangesFullscreen;
+      diffHeader.appendChild(fsBtn);
     }
     diffBody.innerHTML = "";
     if (!d.text || !d.text.trim()) {
@@ -495,6 +508,8 @@
 
   // ─── Tabs ─────────────────────────────────────────────────────────────────
   function setTab(name) {
+    if (fullscreen) exitFullscreen();
+    if (changesFs) exitChangesFullscreen();
     activeTab = name;
     document.querySelectorAll(".git-tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
     for (const k of Object.keys(panes)) if (panes[k]) panes[k].hidden = k !== name;
@@ -502,6 +517,7 @@
     else if (name === "branches") loadBranches();
     else if (name === "stashes") loadStashes();
     else if (name === "remotes") loadRemotes();
+    else if (name === "submodules") loadSubmodules();
   }
 
   function commitRow(row, colors) {
@@ -546,7 +562,20 @@
     date.title = c.date;
     root.appendChild(date);
 
-    root.onclick = () => {
+    root.onclick = (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        if (compareBase === c.sha) { compareBase = null; } else { compareBase = c.sha; }
+        refreshCompareSelection();
+        return;
+      }
+      if (compareBase && compareBase !== c.sha) {
+        // Second commit selected — show compare diff
+        document.querySelectorAll(".git-commit-row.active").forEach((x) => x.classList.remove("active"));
+        root.classList.add("active");
+        showCompareDiff(compareBase, c.sha);
+        return;
+      }
       document.querySelectorAll(".git-commit-row.active").forEach((x) => x.classList.remove("active"));
       root.classList.add("active");
       showCommitDetail(c.sha);
@@ -566,40 +595,308 @@
     const graph = buildGraph(commits);
     historyList.innerHTML = "";
     for (const row of graph.rows) historyList.appendChild(commitRow(row, graph.colors));
+    if (compareBase) refreshCompareSelection();
   }
 
   function setDetailTab(mode) {
+    // redirect legacy "files" tab to "changes" (file tree is now a sidebar)
+    if (mode === "files") mode = "changes";
     detailMode = mode;
     document.querySelectorAll(".git-detail-tab").forEach((t) => t.classList.toggle("active", t.dataset.dtab === mode));
     if (currentDetail) renderDetail(mode, currentDetail);
   }
 
+  // ─── Compare two commits ──────────────────────────────────────────────────
+  function refreshCompareSelection() {
+    document.querySelectorAll(".git-commit-row.compare-selected").forEach((x) => x.classList.remove("compare-selected"));
+    if (compareBase) {
+      const row = document.querySelector(`.git-commit-row[data-sha="${CSS.escape(compareBase)}"]`);
+      if (row) row.classList.add("compare-selected");
+    }
+    const bar = $("#git-compare-bar");
+    if (compareBase) {
+      if (!bar) {
+        const b = document.createElement("div");
+        b.id = "git-compare-bar";
+        b.className = "git-compare-bar";
+        b.innerHTML = `<span>Diff base: <code></code></span><button class="btn-sm" id="btn-clear-compare">✕ clear</button>`;
+        b.querySelector("code").textContent = compareBase.slice(0, 8);
+        b.querySelector("#btn-clear-compare").onclick = () => { compareBase = null; refreshCompareSelection(); };
+        const pane = $("#git-tab-history");
+        pane.insertBefore(b, pane.firstChild);
+      } else {
+        bar.querySelector("code").textContent = compareBase.slice(0, 8);
+        bar.hidden = false;
+      }
+    } else if (bar) {
+      bar.hidden = true;
+    }
+  }
+
+  async function showCompareDiff(sha1, sha2) {
+    detailPane.hidden = false;
+    detailBody.innerHTML = '<div class="empty-state">loading diff…</div>';
+    if (!fullscreen) enterFullscreen();
+    document.querySelectorAll(".git-detail-tab").forEach((t) => t.classList.remove("active"));
+    const cwd = selectedCwd();
+    const params = { cwd, sha1 };
+    if (sha2 !== "WORKTREE") params.sha2 = sha2;
+    const { res, data } = await api("/git/compare", params);
+    if (!res.ok) { detailBody.innerHTML = `<div class="git-diff-empty">error: ${esc(data.error || res.status)}</div>`; return; }
+    currentDetail = { _compare: true, sha1, sha2, diff: data.diff, stat: data.stat };
+    detailMode = "compare";
+    compareBase = null;
+    refreshCompareSelection();
+    renderCompare(data);
+  }
+
+  function renderCompare(data) {
+    detailBody.innerHTML = "";
+    const hdr = document.createElement("div");
+    hdr.className = "git-compare-header";
+    hdr.innerHTML = `<span class="git-detail-hash">${esc(data.sha1.slice(0,8))}</span> ↔ <span class="git-detail-hash">${esc(data.sha2.slice(0,8))}</span>` +
+      (data.stat ? `<span class="git-detail-sub">${esc(data.stat)}</span>` : "");
+    detailBody.appendChild(hdr);
+
+    const modeBar = document.createElement("div");
+    modeBar.className = "git-diff-mode";
+    const render = () => {
+      const existing = modeBar.querySelector("button");
+      if (existing) existing.remove();
+      modeBar.appendChild(modeToggle(render));
+    };
+    render();
+    detailBody.appendChild(modeBar);
+    detailBody.appendChild(renderDiffContent(data.diff || ""));
+  }
+
+  // ─── Fullscreen detail pane ────────────────────────────────────────────────
+  function enterFullscreen() {
+    fullscreen = true;
+    detailPane.classList.add("fs");
+    const btn = $("#git-fs-toggle");
+    if (btn) btn.textContent = "⛶ exit";
+    document.body.style.overflow = "hidden";
+  }
+
+  function exitFullscreen() {
+    fullscreen = false;
+    detailPane.classList.remove("fs");
+    const btn = $("#git-fs-toggle");
+    if (btn) btn.textContent = "⛶";
+    document.body.style.overflow = "";
+    editFile = { path: "", content: "", original: "", sha: "" };
+    if (detailMode === "compare" || (currentDetail && currentDetail._compare)) {
+      detailPane.hidden = true;
+      detailMode = "commit";
+      currentDetail = null;
+      ensureFsToggle();
+      return;
+    }
+    if (currentDetail) renderDetail(detailMode, currentDetail);
+  }
+
+  function toggleFullscreen() {
+    if (fullscreen) exitFullscreen(); else enterFullscreen();
+    if (!fullscreen && currentDetail) renderDetail(detailMode, currentDetail);
+  }
+
+  // ─── Changes tab fullscreen ───────────────────────────────────────────────
+  function toggleChangesFullscreen() {
+    changesFs = !changesFs;
+    const pane = $("#git-tab-changes");
+    if (changesFs) {
+      pane.classList.add("fs");
+      document.body.style.overflow = "hidden";
+    } else {
+      pane.classList.remove("fs");
+      document.body.style.overflow = "";
+    }
+    renderChangesDiff();
+  }
+
+  function exitChangesFullscreen() {
+    if (!changesFs) return;
+    changesFs = false;
+    const pane = $("#git-tab-changes");
+    if (pane) pane.classList.remove("fs");
+    document.body.style.overflow = "";
+    renderChangesDiff();
+  }
+
+  function ensureFsToggle() {
+    let btn = $("#git-fs-toggle");
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.id = "git-fs-toggle";
+      btn.className = "git-detail-tab";
+      btn.style.cssText = "margin-left:auto;font-size:14px";
+      btn.textContent = "⛶";
+      btn.title = "Toggle fullscreen (Esc to exit)";
+      btn.onclick = toggleFullscreen;
+      const tabs = document.querySelector(".git-detail-tabs");
+      if (tabs) tabs.appendChild(btn);
+    }
+    btn.style.display = (currentDetail && !currentDetail._compare) ? "" : "none";
+  }
+
+  // ─── File editing from history (fullscreen mode) ───────────────────────────
+  async function openFileFromHistory(sha, filePath) {
+    if (!fullscreen) enterFullscreen();
+    detailBody.innerHTML = '<div class="empty-state">loading file…</div>';
+    const cwd = selectedCwd();
+    const { res, data } = await api("/git/cat", { cwd, sha, path: filePath });
+    if (!res.ok) { detailBody.innerHTML = `<div class="git-diff-empty">error: ${esc(data.error || res.status)}</div>`; return; }
+    editFile = { path: filePath, content: data.content, original: data.content, sha };
+    renderFileEditor();
+  }
+
+  function renderFileEditor() {
+    detailBody.innerHTML = "";
+    const hdr = document.createElement("div");
+    hdr.className = "git-edit-header";
+    hdr.innerHTML = `<span class="git-edit-path">📄 ${esc(editFile.path)}</span><span class="git-detail-sub">at ${esc(editFile.sha.slice(0,8))}</span>`;
+    detailBody.appendChild(hdr);
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "git-edit-toolbar";
+    const saveBtn = document.createElement("button");
+    saveBtn.className = "btn-sm";
+    saveBtn.style.cssText = "background:var(--accent);color:#fff;border-color:var(--accent)";
+    saveBtn.textContent = "Save to working tree";
+    saveBtn.onclick = saveFileFromHistory;
+    const discardBtn = document.createElement("button");
+    discardBtn.className = "btn-sm";
+    discardBtn.textContent = "Discard";
+    discardBtn.onclick = () => { editFile.content = editFile.original; renderFileEditor(); };
+    const backBtn = document.createElement("button");
+    backBtn.className = "btn-sm";
+    backBtn.textContent = "← back";
+    backBtn.onclick = () => { renderDetail(detailMode, currentDetail); };
+    toolbar.appendChild(backBtn);
+    toolbar.appendChild(discardBtn);
+    toolbar.appendChild(saveBtn);
+    detailBody.appendChild(toolbar);
+
+    const ta = document.createElement("textarea");
+    ta.className = "git-edit-textarea";
+    ta.spellcheck = false;
+    ta.value = editFile.content;
+    ta.addEventListener("input", () => { editFile.content = ta.value; });
+    detailBody.appendChild(ta);
+  }
+
+  async function saveFileFromHistory() {
+    const cwd = selectedCwd();
+    if (!confirm(`Overwrite working-tree file "${editFile.path}"?\n\nUncommitted changes to this file will be lost.`)) return;
+    setStatus("saving…");
+    const { res, data } = await api("/files/save", {}, { cwd, file: editFile.path, content: editFile.content });
+    if (!res.ok) { setStatus("save failed: " + (data.error || res.status), true); return; }
+    editFile.original = editFile.content;
+    setStatus(`saved ${editFile.path} (${data.bytes ?? 0} bytes)`);
+  }
+
   async function showCommitDetail(sha) {
     detailPane.hidden = false;
     detailBody.innerHTML = '<div class="empty-state">loading…</div>';
+    if (fullscreen) exitFullscreen();
     const cwd = selectedCwd();
     const { res, data } = await api("/git/show", { cwd, sha });
     if (!res.ok) { detailBody.innerHTML = `<div class="git-diff-empty">error: ${esc(data.error || res.status)}</div>`; return; }
     currentDetail = data;
-    setDetailTab(detailMode);
+    setDetailTab(detailMode === "compare" ? "commit" : detailMode);
+    ensureFsToggle();
+  }
+
+  // ── Parse unified diff into per-file sections ─────────────────────────────
+  function parseDiffSections(diffText) {
+    const sections = [];
+    const lines = diffText.split("\n");
+    let currentPath = null;
+    let start = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^diff --git a\/(.+) b\/(.+)$/);
+      if (m) {
+        if (currentPath && start >= 0) {
+          sections.push({ path: currentPath, diff: lines.slice(start, i).join("\n") });
+        }
+        currentPath = m[2]; // use b/ path
+        start = i;
+      }
+    }
+    if (currentPath && start >= 0) {
+      sections.push({ path: currentPath, diff: lines.slice(start).join("\n") });
+    }
+    return sections;
   }
 
   function renderDetail(mode, data) {
     detailBody.innerHTML = "";
-    if (mode === "changes") {
-      const wrap = document.createElement("div");
-      const render = () => {
-        wrap.innerHTML = "";
+    if (mode === "compare") {
+      if (data._compare) renderCompare(data);
+      else detailBody.innerHTML = '<div class="git-diff-empty">no comparison data</div>';
+      return;
+    }
+    if (mode === "changes" || mode === "files") {
+      const fullDiff = data.diff || "";
+      const sections = parseDiffSections(fullDiff);
+
+      const layout = document.createElement("div");
+      layout.className = "git-changes-layout";
+
+      // Sidebar
+      const sidebar = document.createElement("div");
+      sidebar.className = "git-changes-sidebar";
+
+      let activeFile = null; // null = "all files"
+
+      const renderSidebar = () => {
+        sidebar.innerHTML = "";
+
+        // "All files" entry
+        const allEntry = document.createElement("div");
+        allEntry.className = "git-changes-sidebar-file" + (activeFile === null ? " active" : "");
+        allEntry.innerHTML = '<span class="git-file-icon">📁</span><span>All files</span>';
+        allEntry.onclick = () => { activeFile = null; renderSidebar(); renderMain(); };
+        sidebar.appendChild(allEntry);
+
+        // Individual file entries
+        for (const s of sections) {
+          const entry = document.createElement("div");
+          entry.className = "git-changes-sidebar-file" + (activeFile === s.path ? " active" : "");
+          entry.innerHTML = `<span class="git-file-icon">📄</span><span>${esc(s.path)}</span>`;
+          entry.title = s.path;
+          entry.onclick = () => { activeFile = s.path; renderSidebar(); renderMain(); };
+          sidebar.appendChild(entry);
+        }
+      };
+
+      // Main content
+      const main = document.createElement("div");
+      main.className = "git-changes-main";
+
+      const renderMain = () => {
+        main.innerHTML = "";
         const bar = document.createElement("div");
         bar.className = "git-diff-mode";
-        bar.appendChild(modeToggle(render));
-        wrap.appendChild(bar);
-        wrap.appendChild(renderDiffContent(data.diff || ""));
+        bar.appendChild(modeToggle(renderMain));
+        main.appendChild(bar);
+
+        let diffToShow;
+        if (activeFile === null) {
+          diffToShow = fullDiff;
+        } else {
+          const section = sections.find(s => s.path === activeFile);
+          diffToShow = section ? section.diff : "";
+        }
+        main.appendChild(renderDiffContent(diffToShow));
       };
-      render();
-      detailBody.appendChild(wrap);
-    } else if (mode === "files") {
-      detailBody.appendChild(renderFileTree(data.files || []));
+
+      renderSidebar();
+      renderMain();
+      layout.appendChild(sidebar);
+      layout.appendChild(main);
+      detailBody.appendChild(layout);
     } else {
       detailBody.appendChild(renderCommitInfo(data));
     }
@@ -642,7 +939,18 @@
   function renderFileTree(files) {
     const wrap = document.createElement("div");
     if (!files.length) { wrap.innerHTML = '<div class="git-diff-empty">no files</div>'; return wrap; }
-    wrap.innerHTML = files.map((f) => `<div class="git-detail-file"><span class="git-file-icon">📄</span><span>${esc(f)}</span></div>`).join("");
+    const sha = currentDetail && currentDetail.sha ? currentDetail.sha : "";
+    wrap.innerHTML = files.map((f) =>
+      `<div class="git-detail-file${sha ? ' git-detail-file-link' : ''}" data-file="${esc(f)}" title="${fullscreen ? 'Click to view & edit' : 'Enter fullscreen (⛶) to edit'}"><span class="git-file-icon">📄</span><span>${esc(f)}</span></div>`
+    ).join("");
+    if (sha) {
+      wrap.querySelectorAll(".git-detail-file-link").forEach((el) => {
+        el.onclick = () => {
+          if (!fullscreen) { enterFullscreen(); }
+          openFileFromHistory(sha, el.dataset.file);
+        };
+      });
+    }
     return wrap;
   }
 
@@ -760,6 +1068,21 @@
     }, true);
     sep();
     add("Copy full hash", () => { navigator.clipboard.writeText(sha).catch(() => {}); setStatus("copied " + sha.slice(0, 8)); });
+    sep();
+    if (compareBase === sha) {
+      add("✕ Clear diff selection", () => { compareBase = null; refreshCompareSelection(); });
+    } else {
+      add(compareBase ? `Compare ${compareBase.slice(0,8)} ↔ this commit` : "Select for diff", () => {
+        compareBase = sha;
+        refreshCompareSelection();
+        setStatus("selected for diff — ⌘/Ctrl+click another commit, or right-click → Compare");
+      });
+    }
+    add("Compare with working tree", async () => {
+      compareBase = null;
+      refreshCompareSelection();
+      showCompareDiff(sha, "WORKTREE");
+    });
 
     document.body.appendChild(menuEl);
     const rect = menuEl.getBoundingClientRect();
@@ -849,6 +1172,79 @@
     }
   }
 
+  async function submoduleOp(action, path, url) {
+    const cwd = selectedCwd(); if (!cwd) return;
+    if (action === "remove" && !confirm(`Remove submodule '${path}'?\n\nThis deinitializes and removes it from the working tree.`)) return;
+    setStatus("submodule " + action + "…");
+    const body = { cwd, action, path };
+    if (url) body.url = url;
+    const { res, data } = await api("/git/submodule", {}, body);
+    if (!res.ok || !data.ok) { setStatus("submodule " + action + " failed: " + (data.error || res.status), true); return; }
+    setStatus("submodule " + action + " ok");
+    await loadStatus();
+    loadSubmodules();
+  }
+
+  async function loadSubmodules() {
+    panes.submodules.innerHTML = '<div class="empty-state">loading…</div>';
+    const cwd = selectedCwd();
+    if (!cwd) { panes.submodules.innerHTML = '<div class="empty-state">no directory set</div>'; return; }
+    const { res, data } = await api("/git/submodules", { cwd });
+    if (!res.ok) { panes.submodules.innerHTML = `<div class="git-diff-empty">error: ${esc(data.error || res.status)}</div>`; return; }
+    const items = data.items || [];
+    panes.submodules.innerHTML = "";
+
+    // Add submodule form
+    const form = el('<div class="git-remote-form"></div>');
+    const urlInp = document.createElement("input");
+    urlInp.placeholder = "URL (git@github.com:…)";
+    urlInp.style.flex = "1";
+    const pathInp = document.createElement("input");
+    pathInp.placeholder = "path (lib/foo)";
+    const addBtn = listBtn("＋ add", async () => {
+      const u = urlInp.value.trim();
+      const p = pathInp.value.trim();
+      if (u && p) await submoduleOp("add", p, u);
+    });
+    form.appendChild(urlInp);
+    form.appendChild(pathInp);
+    form.appendChild(addBtn);
+    panes.submodules.appendChild(form);
+
+    // Bulk actions
+    if (items.length) {
+      const bulk = el('<div class="git-submodule-bulk"></div>');
+      bulk.appendChild(listBtn("Init all", () => submoduleOp("init", "")));
+      bulk.appendChild(listBtn("Update all", () => submoduleOp("update", "")));
+      bulk.appendChild(listBtn("Sync all", () => submoduleOp("sync", "")));
+      panes.submodules.appendChild(bulk);
+    }
+
+    if (!items.length) {
+      panes.submodules.appendChild(el('<div class="git-diff-empty">no submodules configured</div>'));
+      return;
+    }
+
+    const STATUS_LABELS = { ok: "✓", uninitialized: "—", dirty: "±", "merge-conflict": "✕" };
+    for (const sm of items) {
+      const row = el(`<div class="git-branch-item submodule-item">
+        <span class="gsm-status ${sm.status}" title="${esc(sm.status)}">${STATUS_LABELS[sm.status] || "?"}</span>
+        <span class="gb-name" title="${esc(sm.url)}">${esc(sm.path)}</span>
+        <span class="gb-meta">${sm.sha ? esc(sm.sha.slice(0, 8)) : ""} ${sm.ref ? esc(sm.ref) : ""}</span>
+      </div>`);
+      if (sm.status === "uninitialized") {
+        row.appendChild(listBtn("init", () => submoduleOp("init", sm.path)));
+        row.appendChild(listBtn("update", () => submoduleOp("update", sm.path)));
+      } else {
+        row.appendChild(listBtn("update", () => submoduleOp("update", sm.path)));
+        row.appendChild(listBtn("deinit", () => submoduleOp("deinit", sm.path)));
+      }
+      row.appendChild(listBtn("sync", () => submoduleOp("sync", sm.path)));
+      row.appendChild(listBtn("remove", () => submoduleOp("remove", sm.path), true));
+      panes.submodules.appendChild(row);
+    }
+  }
+
   async function loadStashes() {
     panes.stashes.innerHTML = '<div class="empty-state">loading…</div>';
     const cwd = selectedCwd();
@@ -913,6 +1309,7 @@
     else if (activeTab === "branches") loadBranches();
     else if (activeTab === "stashes") loadStashes();
     else if (activeTab === "remotes") loadRemotes();
+    else if (activeTab === "submodules") loadSubmodules();
     else {
       const files = data.files || [];
       const stillThere = selected.path && files.some((f) => f.path === selected.path && f.section === selected.section);
@@ -941,7 +1338,7 @@
   document.querySelectorAll(".git-tab").forEach((t) => { t.onclick = () => setTab(t.dataset.tab); });
   document.querySelectorAll(".git-detail-tab").forEach((t) => { t.onclick = () => setDetailTab(t.dataset.dtab); });
   document.addEventListener("mousedown", (e) => { if (menuEl && !menuEl.contains(e.target)) closeMenu(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (fullscreen) exitFullscreen(); else if (changesFs) exitChangesFullscreen(); else closeMenu(); } });
   window.addEventListener("blur", closeMenu);
 
   // ─── Resizable working-directory sidebar ────────────────────────────────

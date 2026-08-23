@@ -682,11 +682,11 @@ async function fetchSessionEvents(sid, sinceSeq) {
 
 // ─── Event rendering (single mode, append-only) ────────────────────────────
 
-// A failed tool call is recorded as a `tool_result` with payload.is_error,
-// not as a standalone `error` event — so the "error" filter chip must match both.
+// A failed tool call is recorded as a `tool_result` with payload.is_error
+// or a non-zero details_summary.exit_code.
 function evtTypeInFilter(e) {
   if (STATE.typeFilter.has(e.type)) return true;
-  if (STATE.typeFilter.has("error") && e.type === "tool_result" && e.payload?.is_error) return true;
+  if (STATE.typeFilter.has("error") && e.type === "tool_result" && window.SCOPE.isToolResultError(e.payload)) return true;
   return false;
 }
 
@@ -764,10 +764,12 @@ function buildEventRow(evt, idx, isLive = false) {
   const typeStr = String(evt.type ?? "");
   const typeLabel = window.SCOPE.escapeHtml(typeStr.replace(/_/g, " "));
   const typeClass = /^[a-z0-9_-]+$/.test(typeStr) ? typeStr : "custom";
-  row.innerHTML = `<span class="evt-ts">${window.SCOPE.fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill ${typeClass}">${typeLabel}</span>${window.SCOPE.toolNamePillHTML(evt)}</span><span class="evt-summary ${summaryClass(evt)}">${window.SCOPE.escapeHtml(summaryFor(evt))}</span>`;
+  // Use the error pill for failed tool_results so they stand out visually.
+  const pillClass = typeStr === "tool_result" && window.SCOPE.isToolResultError(evt.payload) ? "error" : typeClass;
+  row.innerHTML = `<span class="evt-ts">${window.SCOPE.fmtTs(evt.ts)}</span><span class="evt-type"><span class="pill ${pillClass}">${typeLabel}</span>${window.SCOPE.toolNamePillHTML(evt)}</span><span class="evt-summary ${summaryClass(evt)}">${window.SCOPE.escapeHtml(summaryFor(evt))}</span>`;
 
   if (isLive && typeof window.__pulseColorFor === "function") {
-    row.style.setProperty("--pulse-color", window.__pulseColorFor(evt.type));
+    row.style.setProperty("--pulse-color", evt.type === "tool_result" && window.SCOPE.isToolResultError(evt.payload) ? "rgba(239,68,68,0.22)" : window.__pulseColorFor(evt.type));
     row.classList.add("evt-new");
     setTimeout(() => row.classList.remove("evt-new"), 1300);
   }

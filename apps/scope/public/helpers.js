@@ -156,7 +156,7 @@
       case "assistant_message": return `ai: ${trunc(p.text, 100)} · ${p.usage?.total_tokens ?? 0}tk · $${(p.usage?.cost_total ?? 0).toFixed(4)}${p.latency_ms ? " · " + p.latency_ms + "ms" : ""}`;
       case "thinking": return `〽 ${trunc(p.text, 100)}`;
       case "tool_call": return `→ ${p.tool_name}(${trunc(JSON.stringify(p.args ?? {}), 60)})`;
-      case "tool_result": return `← ${p.tool_name} · ${p.is_error ? "✗" : "✓"} · ${trunc(p.content_text, 80)}`;
+      case "tool_result": return `← ${p.tool_name} · ${isToolResultError(p) ? "✗" : "✓"} · ${trunc(p.content_text, 80)}`;
       case "model_change": return `model: ${p.previous_model ?? "?"} → ${p.provider}/${p.model}`;
       case "compaction": return `📦 compact · ${p.tokens_before ?? "?"} tk → "${trunc(p.summary_preview, 60)}"`;
       case "branch_nav": return `🌿 branch · ${shortId(p.from_id)} → ${shortId(p.to_id)}`;
@@ -182,6 +182,15 @@
     const cBtn = `<button class="copy-btn" type="button" data-copy-event="${escapeHtml(evt.event_id)}">📋</button>`;
     const wBtn = `<button class="wrap-btn" onclick="event.stopPropagation();let p=this.parentElement.querySelector('pre');p.style.whiteSpace=p.style.whiteSpace==='pre-wrap'?'pre':'pre-wrap';this.textContent=p.style.whiteSpace==='pre-wrap'?'↩':'→'">→</button>`;
 
+    if (evt.type === "tool_result" && isToolResultError(evt.payload)) {
+      const summary = [];
+      if (evt.payload?.is_error === true) summary.push(`is_error: true`);
+      const ec = evt.payload?.details_summary?.exit_code;
+      if (ec != null && ec !== 0) summary.push(`exit code ${ec}`);
+      const errBanner = `<div class="llm-error-banner">⚠ ${escapeHtml(summary.join(", "))}</div>`;
+      return `${cBtn}${wBtn}${errBanner}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+    }
+
     if (evt.type === "agent_end") {
       const fr = evt.payload?.final_response
         ? `<pre>${escapeHtml(evt.payload.final_response)}</pre>`
@@ -200,7 +209,9 @@
     const chips = [];
     if (evt.type === "tool_result" && evt.payload?.details_summary?.exit_code !== undefined) {
       const ec = evt.payload.details_summary.exit_code;
-      chips.push(`<span class="exit-chip ${ec !== 0 ? 'err' : 'ok'}">exit ${ec}</span>`);
+      chips.push(`<span class="exit-chip ${ec !== 0 || isToolResultError(evt.payload) ? 'err' : 'ok'}">exit ${ec}</span>`);
+    } else if (evt.type === "tool_result" && isToolResultError(evt.payload)) {
+      chips.push(`<span class="exit-chip err">failed</span>`);
     }
     if (evt.type === "assistant_message") {
       if (evt.payload?.stop_reason) chips.push(`<span class="exit-chip ok">${escapeHtml(evt.payload.stop_reason)}</span>`);
@@ -286,6 +297,20 @@
     return PULSE_TYPE_COLORS[type] || PULSE_GREEN;
   }
   window.__pulseColorFor = pulseColorFor;
+
+  /**
+   * A tool_result is an error if payload.is_error is true *or* the exit code is
+   * non-zero. Many tools report failure via exit code without setting is_error.
+   */
+  function isToolResultError(payload) {
+    if (!payload) return false;
+    if (payload.is_error === true) return true;
+    const ec = payload.details_summary?.exit_code;
+    // Treat any non-null, non-zero exit code as an error (0 = success).
+    if (ec != null && ec !== 0) return true;
+    return false;
+  }
+  window.SCOPE.isToolResultError = isToolResultError;
 
   const HELPERS = {
     fmtTs,
