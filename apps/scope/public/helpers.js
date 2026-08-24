@@ -251,7 +251,7 @@
       if (p.system_prompt) html += `<details><summary style="color:var(--accent);cursor:pointer;font-size:12px">system prompt (${p.system_prompt.length} chars)</summary><pre style="max-height:300px;overflow:auto;margin-top:4px;white-space:pre-wrap">${escapeHtml(p.system_prompt)}</pre></details>`;
       if (p.tools?.length) html += `<div style="margin:2px 0;color:var(--muted);font-size:11px">${p.tools.length} tools: ${escapeHtml(p.tools.join(", "))}</div>`;
       if (p.request_args && Object.keys(p.request_args).length) html += `<div style="margin:2px 0;color:var(--muted);font-size:11px">args: ${escapeHtml(JSON.stringify(p.request_args))}</div>`;
-      html += `<pre style="margin-top:4px">${escapeHtml(JSON.stringify(p, null, 2))}</pre>`;
+      html += `<details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">📄 raw JSON</summary><pre style="margin-top:4px">${escapeHtml(JSON.stringify(p, null, 2))}</pre></details>`;
       return html;
     }
 
@@ -275,7 +275,7 @@
       if (text) html += `<pre style="white-space:pre-wrap;margin:0;line-height:1.5">${text}</pre>`;
       else if (!thinking) html += `<div class="llm-empty">tool call only</div>`;
       html += thinking;
-      html += `<pre style="margin-top:6px">${escapeHtml(JSON.stringify(p, null, 2))}</pre>`;
+      html += `<details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">📄 raw JSON</summary><pre style="margin-top:6px">${escapeHtml(JSON.stringify(p, null, 2))}</pre></details>`;
       return html;
     }
 
@@ -297,7 +297,7 @@
         const color = isErr ? "var(--red)" : "var(--green)";
         html += `<details open><summary style="cursor:pointer;font-size:12px;color:${color}">${escapeHtml(icon)} result (${text.length} chars)</summary><pre style="max-height:500px;overflow:auto;margin-top:4px;white-space:pre-wrap;border-left:2px solid ${color};padding:4px 8px;font-size:12px;line-height:1.4">${escapeHtml(text)}</pre></details>`;
       }
-      html += `<pre style="margin-top:4px">${escapeHtml(JSON.stringify(p, null, 2))}</pre>`;
+      html += `<details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">📄 raw JSON</summary><pre style="margin-top:4px">${escapeHtml(JSON.stringify(p, null, 2))}</pre></details>`;
       return html;
     }
 
@@ -337,7 +337,7 @@
         }
       }
 
-      return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}${agentEndHTML}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+      return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}${agentEndHTML}<details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">📄 raw JSON</summary><pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre></details>`;
     }
 
     const chips = [];
@@ -359,7 +359,7 @@
       const tools = evt.payload?.tools?.length ?? 0;
       if (tools) chips.push(`<span class="exit-chip ok">${tools} tools</span>`);
     }
-    return `${cBtn}${wBtn}${chips.join(" ")}<pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre>`;
+    return `${cBtn}${wBtn}${chips.join(" ")}<details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">📄 raw JSON</summary><pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre></details>`;
   }
 
   // Approximate model context windows used for the context-bar percentage.

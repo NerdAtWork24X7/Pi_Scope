@@ -116,8 +116,11 @@
 
     for (const evt of events) {
       if (evt.type === "user_message") {
-        if (current && current.events.length && !current.closed && current.turnStarted) current.closed = true;
-        current = newBucket(evt);
+        // Append to the existing turn_start bucket instead of closing it
+        // and creating a new one. The previous logic split turn_start
+        // into its own bucket (dropped — zero visible cells) from
+        // its content (lost the turnIndex), breaking turn boundaries.
+        if (!current || current.closed) current = newBucket(evt);
         current.events.push(evt);
         continue;
       }

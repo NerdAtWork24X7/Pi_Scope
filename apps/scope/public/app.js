@@ -917,7 +917,11 @@ function appendEventSingle(evt) {
   const session = STATE.sessions.find(s => s.session_id === evt.session_id);
   if (session && evt.ts) session.last_ts = evt.ts;
 
-  if (STATE.renderDirty || !matchesFilters(evt)) {
+  if (STATE.renderDirty || !matchesFilters(evt) || evt.type === "turn_start") {
+    // turn_start events trigger a full rebuild so they are folded into a
+    // turn header (openTurnHeader) instead of rendered as a generic event
+    // row.  The SSE hot-path (else branch) calls buildEventRow directly,
+    // which has no turn-header logic — only renderAllEvents handles it.
     // Filters active or dirty — rebuild
     renderAllEvents();
   } else {

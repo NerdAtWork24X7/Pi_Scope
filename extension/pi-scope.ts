@@ -1,3 +1,19 @@
+/**
+ * pi-scope.ts — Pi Scope extension for Pi agents (DEPRECATED)
+ *
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║  DEPRECATED: Use the capture endpoints instead —                    ║
+ * ║  POST /capture/llm-request and POST /capture/llm-response           ║
+ * ║                                                                     ║
+ * ║  Any harness (Pi, other agents, scripts) can POST the raw           ║
+ * ║  provider-format request/response bodies to the scope server.       ║
+ * ║  No Pi-specific extension needed. See server.ts capture routes.     ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ *
+ * This extension hooks the Pi agent lifecycle and streams events to
+ * the scope server. It still works but the capture endpoint approach
+ * is recommended for new integrations.
+ */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -732,28 +748,14 @@ export default function (pi: ExtensionAPI) {
     // 6. Log boot
     logObs("obs boot", { serverUrl, pool, tags, agentName: name });
 
-    // 7. Emit session_start event
-    const startPayload: SessionStartPayload = {
-      reason: event.reason,
-      pi_version: (pi as any).version || undefined,
-      previous_session_file: event.previousSessionFile,
-    };
-    queue.push(createEventEnvelope("session_start", startPayload, sessionInfo));
+
   });
 
   // ━━ before_agent_start (agent_start) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // Emits only the turn's prompt + images_count (+ session ids). llm_request is
   // the sole system-prompt record, so agent_start carries no system-prompt data.
-  pi.on("before_agent_start", async (event, _ctx) => {
-    if (!queue || !sessionInfo) return;
-    const payload: AgentStartPayload = {
-      prompt: event.prompt ?? "",
-      images_count: event.images ? event.images.length : 0,
-      session_id: sessionInfo.sessionId,
-      session_file: sessionInfo.sessionFile,
-      turn_index: activeTurnIndex ?? undefined,
-    };
-    queue.push(createEventEnvelope("agent_start", payload, sessionInfo));
+  pi.on("before_agent_start", async (_event, _ctx) => {
+    // Suppressed — not logged to scope server.
   });
 
 
@@ -1166,14 +1168,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ━━ session_shutdown ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  pi.on("session_shutdown", async (event, _ctx) => {
-    if (!queue || !sessionInfo) return;
-
-    const shutdownPayload: SessionShutdownPayload = {
-      reason: event.reason,
-    };
-    queue.push(createEventEnvelope("session_shutdown", shutdownPayload, sessionInfo));
-
+  pi.on("session_shutdown", async (_event, _ctx) => {
+    // Suppressed — not logged to scope server.
+    if (!queue) return;
     await queue.stop();
   });
 }

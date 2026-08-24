@@ -14,6 +14,7 @@ import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent } from
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { attachTerminal } from "./terminal.ts";
+import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import { WebSocket } from "ws";
@@ -490,7 +491,7 @@ async function handle(req: Request): Promise<Response> {
   // process. Skipping the token check here removes the token-file race that
   // otherwise 401s every POST across server restarts / source-vs-packaged
   // builds. All reads (sessions, SSE, files, checkpoints) stay token-gated.
-  const isLocalProducer = pathname === "/events" && method === "POST";
+  const isLocalProducer = (pathname === "/events" && method === "POST") || pathname === "/capture/llm-request" || pathname === "/capture/llm-response";
   if (!isLocalProducer && !checkAuth(req)) {
     return jsonResponse({ error: "unauthorized" }, 401);
   }
@@ -535,6 +536,269 @@ async function handle(req: Request): Promise<Response> {
     }
 
     return jsonResponse({ ingested: ingested.length, rejected });
+  }
+
+  // ── POST /capture/llm-request ─────────────────────────────────────────
+  // Raw LLM provider request body, posted by any harness (not just the Pi extension).
+  // The server parses provider-format bodies (Anthropic, OpenAI, etc.), creates the
+  // appropriate scope events, and stores/broadcasts them.
+  //
+  // {
+  //   "session_id": "...",      // required — unique session identifier
+  //   "request_body": { ... },  // required — exact JSON body sent to the LLM provider
+  //   "client": "pi|...",      // optional — harness name
+  //   "agent_name": "...",     // optional — friendly agent label
+  //   "pool": "default",       // optional
+  //   "tags": ["tag1"],        // optional
+  //   "cwd": "/path",         // optional
+  //   "timestamp": "ISO",      // optional — defaults to now
+  // }
+  if (pathname === "/capture/llm-request" && method === "POST") {
+    let bodyText: string;
+    try {
+      bodyText = await readBody(req);
+    } catch (err: any) {
+      return jsonResponse({ error: err.message }, 413);
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch {
+      return jsonResponse({ error: "invalid JSON" }, 400);
+    }
+
+    const sessionId = typeof parsed.session_id === "string" && parsed.session_id.trim()
+      ? parsed.session_id.trim() : "";
+    if (!sessionId) return jsonResponse({ error: "session_id is required" }, 400);
+    if (!parsed.request_body || typeof parsed.request_body !== "object") {
+      return jsonResponse({ error: "request_body is required and must be an object" }, 400);
+    }
+
+    const ts = typeof parsed.timestamp === "string" ? parsed.timestamp : new Date().toISOString();
+    const pool = typeof parsed.pool === "string" ? parsed.pool : "default";
+    const tags: string[] = Array.isArray(parsed.tags) ? parsed.tags.map(String).filter(Boolean) : [];
+    const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
+    const agentName = typeof parsed.agent_name === "string" ? parsed.agent_name : (parsed.client ?? undefined);
+
+    // Parse the provider-format request body into scope fields
+    const requestInfo = parseLLMRequestBody(parsed.request_body);
+    const userMsgPreview = extractUserMsgPreview(parsed.request_body);
+
+    const llmRequestPayload: any = {
+      system_prompt: requestInfo.system_prompt || "(no system prompt)",
+    };
+    if (requestInfo.tools.length) llmRequestPayload.tools = requestInfo.tools;
+    if (requestInfo.model) llmRequestPayload.model = requestInfo.model;
+    if (requestInfo.messages.length) llmRequestPayload.message_count = requestInfo.messages.length;
+    if (Object.keys(requestInfo.args).length) llmRequestPayload.request_args = requestInfo.args;
+    if (userMsgPreview) llmRequestPayload.user_msg_preview = userMsgPreview;
+
+    // Generate event_id and sequence
+    let seq = Date.now();
+    const eventId = crypto.randomUUID();
+
+    const requestEvent: ObsEvent = {
+      event_id: eventId,
+      session_id: sessionId,
+      seq,
+      ts,
+      type: "llm_request",
+      pool,
+      tags,
+      payload: llmRequestPayload,
+      provider: parsed.request_body?.provider ?? requestInfo.model ?? undefined,
+      model: requestInfo.model ?? undefined,
+      agent_name: agentName,
+      cwd,
+    };
+
+    ingestEvent(requestEvent);
+
+    // Also create user_message events from each user message in the request
+    for (const msg of requestInfo.messages) {
+      if (msg.role !== "user") continue;
+      let text = "";
+      let imagesCount = 0;
+      if (typeof msg.content === "string") {
+        text = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        for (const b of msg.content) {
+          if (b.type === "text") text += (b.text || "") + "\n";
+          else if (b.type === "image") imagesCount++;
+        }
+        text = text.trim();
+      }
+      if (text || imagesCount) {
+        const userEvent: ObsEvent = {
+          event_id: crypto.randomUUID(),
+          session_id: sessionId,
+          seq: ++seq,
+          ts,
+          type: "user_message",
+          pool,
+          tags,
+          payload: { text, images_count: imagesCount },
+          agent_name: agentName,
+          cwd,
+        };
+        ingestEvent(userEvent);
+      }
+    }
+
+    return jsonResponse({
+      ok: true,
+      session_id: sessionId,
+      event_id: eventId,
+      type: "llm_request",
+    });
+  }
+
+  // ── POST /capture/llm-response ────────────────────────────────────────
+  // Raw LLM provider response body, posted by any harness.
+  // The server parses provider-format responses (Anthropic, OpenAI, etc.), creates
+  // the appropriate scope events (assistant_message, tool_call, thinking), and
+  // updates session stats.
+  //
+  // {
+  //   "session_id": "...",            // required
+  //   "response_body": { ... },       // required — exact JSON response from the LLM provider
+  //   "request_event_id": "...",      // optional — links back to the llm_request event
+  //   "timing": {                     // optional — wall-clock timing
+  //     "started_at": "ISO",
+  //     "finished_at": "ISO",
+  //     "latency_ms": 12345
+  //   },
+  //   "pool": "default",
+  //   "tags": ["tag1"],
+  // }
+  if (pathname === "/capture/llm-response" && method === "POST") {
+    let bodyText: string;
+    try {
+      bodyText = await readBody(req);
+    } catch (err: any) {
+      return jsonResponse({ error: err.message }, 413);
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch {
+      return jsonResponse({ error: "invalid JSON" }, 400);
+    }
+
+    const sessionId = typeof parsed.session_id === "string" && parsed.session_id.trim()
+      ? parsed.session_id.trim() : "";
+    if (!sessionId) return jsonResponse({ error: "session_id is required" }, 400);
+    if (!parsed.response_body || typeof parsed.response_body !== "object") {
+      return jsonResponse({ error: "response_body is required and must be an object" }, 400);
+    }
+
+    const ts = typeof parsed.timestamp === "string" ? parsed.timestamp : new Date().toISOString();
+    const pool = typeof parsed.pool === "string" ? parsed.pool : "default";
+    const tags: string[] = Array.isArray(parsed.tags) ? parsed.tags.map(String).filter(Boolean) : [];
+
+    // Parse the provider-format response body into scope fields
+    const responseInfo = parseLLMResponseBody(parsed.response_body);
+
+    // Calculate timing
+    const timing = parsed.timing || {};
+    const startedAt = timing.started_at ? new Date(timing.started_at).getTime() : undefined;
+    const finishedAt = timing.finished_at ? new Date(timing.finished_at).getTime() : Date.now();
+    const latencyMs = timing.latency_ms ?? (startedAt ? finishedAt - startedAt : undefined);
+    const prefillMs = timing.prefill_ms ?? undefined;
+    const generationMs = timing.generation_ms ?? undefined;
+    const outputTps = timing.output_tps ?? (
+      generationMs && generationMs >= 50 && responseInfo.usage.output > 0
+        ? Math.round((responseInfo.usage.output / generationMs) * 1000)
+        : undefined
+    );
+
+    const assistantPayload: any = {
+      text: responseInfo.text,
+      thinking: responseInfo.thinking,
+      tool_call_ids: responseInfo.tool_calls.map((tc) => tc.id),
+      stop_reason: responseInfo.stop_reason,
+      usage: {
+        input: responseInfo.usage.input,
+        output: responseInfo.usage.output,
+        cache_read: responseInfo.usage.cache_read,
+        cache_write: responseInfo.usage.cache_write,
+        total_tokens: responseInfo.usage.input + responseInfo.usage.output,
+        cost_total: timing.cost_total ?? 0,
+      },
+      turn_index: parsed.turn_index ?? undefined,
+    };
+    if (latencyMs != null) assistantPayload.latency_ms = latencyMs;
+    if (prefillMs != null) assistantPayload.prefill_ms = prefillMs;
+    if (generationMs != null) assistantPayload.generation_ms = generationMs;
+    if (outputTps != null) assistantPayload.output_tps = outputTps;
+
+    let seq = Date.now() + 1;
+    const eventId = crypto.randomUUID();
+
+    const assistantEvent: ObsEvent = {
+      event_id: eventId,
+      session_id: sessionId,
+      seq,
+      ts,
+      type: "assistant_message",
+      pool,
+      tags,
+      payload: assistantPayload,
+      provider: responseInfo.model ?? parsed.response_body?.provider ?? undefined,
+      model: responseInfo.model ?? parsed.response_body?.model ?? undefined,
+    };
+
+    ingestEvent(assistantEvent);
+
+    // Create tool_call events for each tool call in the response
+    for (const tc of responseInfo.tool_calls) {
+      const toolEvent: ObsEvent = {
+        event_id: crypto.randomUUID(),
+        session_id: sessionId,
+        seq: ++seq,
+        ts,
+        type: "tool_call",
+        pool,
+        tags,
+        payload: {
+          tool_call_id: tc.id,
+          tool_name: tc.name,
+          args: tc.args,
+          args_truncated: false,
+        },
+        provider: assistantEvent.provider,
+        model: assistantEvent.model,
+      };
+      ingestEvent(toolEvent);
+    }
+
+    // Create thinking event if thinking content exists
+    if (responseInfo.thinking) {
+      const thinkingEvent: ObsEvent = {
+        event_id: crypto.randomUUID(),
+        session_id: sessionId,
+        seq: ++seq,
+        ts,
+        type: "thinking",
+        pool,
+        tags,
+        payload: { text: responseInfo.thinking },
+        provider: assistantEvent.provider,
+        model: assistantEvent.model,
+      };
+      ingestEvent(thinkingEvent);
+    }
+
+    return jsonResponse({
+      ok: true,
+      session_id: sessionId,
+      event_id: eventId,
+      type: "assistant_message",
+      tool_calls: responseInfo.tool_calls.length,
+      total_tokens: assistantPayload.usage.total_tokens,
+    });
   }
 
   // ── GET /models ────────────────────────────────────────────────────────
