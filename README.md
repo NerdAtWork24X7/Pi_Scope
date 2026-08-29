@@ -1,39 +1,162 @@
 # Pi Scope
-<img src="docs/shots/logo.png" alt="Pi Scope" width="512" align="center" />
 
+<p align="center">
+  <img src="docs/shots/logo.png" alt="Pi Scope" width="512" />
+</p>
 
-Pi Scope is a live dashboard for watching an AI coding agent work — every message, tool
-call, shell command, and file edit, rendered in a browser UI you can watch or replay.
+<p align="center">
+  <b>Watch an AI coding agent think, type, and act — live, locally, and replayable.</b>
+</p>
 
-## Getting started
+**Pi Scope** is a local-first observability dashboard for AI coding agents. It streams
+everything an agent does — every message, tool call, shell command, and file edit — into a
+browser UI you can watch in real time or replay later.
 
-Pi Scope is two pieces: a **server + dashboard** that you open, and a **pi extension**
-that feeds it agent telemetry. Get the server running first, then point a `pi` agent at
-it so the dashboard has something to show.
+Unlike cloud LLM tracers, it is **private by default** (runs on your machine, no account,
+no upload). Unlike a plain terminal log, it lets you **act**: open a real shell, diff and
+edit files, take git checkpoints, and run a full git client — all from the same screen.
 
-### Run the AppImage (no build — end users)
+> Pi Scope observes the [`pi`](https://github.com/disler/pi-agent-observability) coding
+> agent through a small extension, but **any** tool that POSTs events to its `/events`
+> endpoint can feed it. This project is an actively extended, locally-focused fork of
+> [disler/pi-agent-observability](https://github.com/disler/pi-agent-observability).
+
+---
+
+## Why Pi Scope is different
+
+Most "agent observability" tooling falls into two buckets: **cloud LLM tracers**
+(LangSmith, Langfuse, Helicone, AgentOps) that record model calls for debugging, and
+**chat/terminal logs** that just print what happened. Pi Scope sits in a different
+category — a **live control-room for coding agents**:
+
+- **It watches the whole loop, not just the model.** Messages, tool calls, shell
+  commands, file edits, compactions, model switches, and branch navigation — captured and
+  time-ordered, not just token traces.
+- **Local-first and private by design.** No cloud, no account, no telemetry leaving your
+  machine. Events land in a local SQLite database; the self-contained AppImage bundles its
+  own Node 24, so there is nothing to install and nothing to upload.
+- **Watch *and* act from one screen.** Pi Scope is not read-only. It embeds a real shell
+  on the agent's host, a side-by-side file diff/editing view, git-backed checkpoints, and
+  a complete git client. See a bad edit? Revert it, checkpoint, or `git reset` without
+  leaving the dashboard.
+- **Built for coding agents specifically.** It understands tool calls, shell output,
+  working-directory context, context-window usage, per-turn cost/tokens, and throughput
+  (TPS) — the things that actually matter when an agent is writing code.
+- **Deep LLM request inspection.** The exact request arguments (`temperature`,
+  `max_tokens`, `top_p`, `thinking`, `reasoning_effort`, `stop`, `stream`,
+  `response_format`, …) are captured regardless of provider naming, alongside the system
+  prompt — so you can see *exactly* what was sent to the model.
+- **Replay and audit.** Every session is persisted and fully replayable, with live
+  streaming over SSE while it runs.
+- **Herdr-aware.** The terminal mirrors a Herdr terminal-multiplexer session's focused-pane
+  working directory, so the Files and Checkpoints panes follow whatever you are actually
+  driving.
+
+---
+
+## Advantages at a glance
+
+| Capability | Pi Scope | Cloud LLM tracers (LangSmith / Helicone / AgentOps) | Plain terminal / chat logs |
+|---|:---:|:---:|:---:|
+| Runs locally, no account | ✅ | ❌ (cloud / SaaS) | ✅ |
+| Privacy — nothing leaves your machine | ✅ | ❌ (data uploaded) | ✅ |
+| Live watching of agent actions | ✅ | ⚠️ traces only | ⚠️ scrolling text |
+| Replay past sessions | ✅ | ✅ | ❌ |
+| **Control surface** (shell, file edit, git) | ✅ | ❌ | ⚠️ manual, separate |
+| Coding-agent awareness (tool calls, cwd, context %) | ✅ | ⚠️ LLM-centric | ❌ |
+| Exact LLM request args captured | ✅ | ⚠️ varies | ❌ |
+| Zero-install (AppImage w/ bundled Node) | ✅ | n/a | n/a |
+| Open source | ✅ | ⚠️ varies | ✅ |
+
+**Who it's for:** developers and teams running autonomous coding agents who want to *see
+what the agent is doing, understand why, and step in* — without shipping their code or
+prompts to a third-party cloud.
+
+---
+
+## Feature tour
+
+<p align="center">
+  <a href="docs/video/Pi-Scope-5.0.0-features_1.mp4">▶ Watch the feature tour — Part 1 (mp4)</a>
+</p>
+<p align="center">
+  <a href="docs/video/Pi-Scope-5.0.0-features_2.mp4">▶ Watch the feature tour — Part 2 (mp4)</a>
+</p>
+<p align="center">
+  <a href="docs/video/Pi-Scope-5.0.0-features_3.mp4">▶ Watch the feature tour — Part 3 (mp4)</a>
+</p>
+
+- **Pi Coding agent** - ![Pi Coding Agent](docs/shots/pi.png)
+ 
+
+- **Single (timeline)** — a live, time-ordered feed of every event: messages, thinking,
+  tool calls, tool results, errors. Click any row to expand its full JSON. A context-usage
+  bar (`context used / total — N% remaining`), cost/token stats, latency, and an estimated
+  tokens/sec for the latest turn are shown up top. The **system prompt** button opens the
+  exact request args sent to the model.
+  ![Single timeline](docs/shots/single.png)
+
+- **Trajectory** — a turn-aware ledger that folds events into **Turns**, with Message and
+  Tool rows showing time, cost, and in/out token columns. An overview strip visualizes each
+  record's start and duration, and a Record Inspector on the right shows full payloads.
+  Great for understanding *flow* and *where time went*.
+  ![Trajectory](docs/shots/trajectory.png)
+
+- **Terminal** — a **real shell on the agent's host** (over WebSocket, via xterm.js). Pick
+  **Bash** or **Herdr** (a terminal multiplexer). The shell's working directory is shown in
+  the header and is shared with the Files and Checkpoints panes; with Herdr it follows the
+  pane you are actively driving.
+  ![Terminal](docs/shots/terminal.png)
+
+- **Review (Files)** — a file tree with a side-by-side diff of the selected file (left =
+  git HEAD / OLD, right = working tree / NEW, editable). Added/changed lines are green,
+  removed lines red, and the right pane is editable so you can fix an agent's change in
+  place.
+  ![Review / Files diff](docs/shots/review.png)
+
+- **Checkpoints** — git-backed snapshots of the working tree. Label a moment, restore it
+  later with one click, or branch off it.
+  ![Checkpoints](docs/shots/checkpoints.png)
+
+- **Git** — a full in-browser git client: **Changes**, **History** (commit lane graph),
+  **Branches**, **Stashes**, **Remotes**, and **Submodules**. Stage/unstage/discard,
+  commit (with amend), and push/pull/fetch without leaving the dashboard.
+  ![Git client](docs/shots/git.png)
+
+The top bar shows a live dot (green when the SSE feed is connected) and a session sidebar
+with search, filters (pool / tag / sort / hide-after), and per-session error indicators.
+
+---
+
+## Quick start
+
+Pi Scope is two pieces: a **server + dashboard** you open, and a **`pi` extension** that
+feeds it agent telemetry. Get the server running first, then point an agent at it.
+
+### Option A — Run the AppImage (end users, no build)
 
 The release is a self-contained Linux AppImage that bundles its own Node 24 plus the
-server and WebUI. Double-click it (or run it from a shell) and it boots the server and
-opens the dashboard in an embedded browser — no `npm`, no dev dependencies.
+server and WebUI. Double-click it (or run it from a shell) — no `npm`, no dev
+dependencies.
 
 ```bash
 chmod +x Pi-Scope-1.0.0.AppImage
-./Pi-Scope-1.0.0.AppImage 
+./Pi-Scope-1.0.0.AppImage
 ```
 
-- Data (SQLite DB + per-run auth token) lives in `~/.local/share/pi-scope/`, so it
-  survives relaunch and never writes into the read-only AppImage mount.
-- Closing the window stops the server it started. If a server is already listening on
-  the port, the AppImage reuses it instead of starting a second one.
-- Built with `./build-release.sh` → `apps/scope-launcher/dist/Pi-Scope-<version>.AppImage`.
-  An extracted `linux-unpacked/` directory is also produced if you prefer that over a
-  single file.
+- Data (SQLite DB + per-run auth token) lives in `~/.local/share/pi-scope/`, so it survives
+  relaunch and never writes into the read-only AppImage mount.
+- Closing the window stops the server it started. If a server is already listening on the
+  port, the AppImage reuses it instead of starting a second one.
+- Build it yourself with `./build-release.sh` →
+  `apps/scope-launcher/dist/Pi-Scope-<version>.AppImage` (an extracted `linux-unpacked/`
+  directory is also produced).
 
-### Install the pi extension (`extension/pi-scope.ts`)
+### Option B — Install the `pi` extension (`extension/pi-scope.ts`)
 
-The dashboard is empty until a `pi` agent feeds it. This extension hooks the agent
-lifecycle and streams events to the server, auto-discovering its auth token.
+The dashboard is empty until an agent feeds it. This extension hooks the agent lifecycle
+and streams events to the server, auto-discovering its auth token.
 
 **One session** — pass the path when you launch `pi`:
 
@@ -41,7 +164,7 @@ lifecycle and streams events to the server, auto-discovering its auth token.
 pi -e /path/to/Pi_Scope/extension/pi-scope.ts
 ```
 
-**Every session** — add it to your pi agent config so it loads automatically:
+**Every session** — add it to your `pi` agent config so it loads automatically:
 
 ```json
 // ~/.pi/agent/settings.json
@@ -59,161 +182,69 @@ The extension finds the token in dev from `tmp/scope_token`, and from
 `~/.local/share/pi-scope/scope_token` when running the AppImage, so you usually set
 nothing else. If your server isn't on the default port, point the extension at it with
 `--obs-server-url` (flag) or `OBS_SERVER_URL` (env); both default to
-`http://127.0.0.1:43190`.
+`http://127.0.0.1:43190`. See [`extension/README.md`](extension/README.md) for the full
+flag/env and event reference.
 
-### Run from the git repo (developers)
+### Option C — Run from the git repo (developers)
 
 ```bash
 git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
 apps/scope-launcher/run.sh                 # requires Node.js 24+ (uses node:sqlite)
 ```
 
-Open the URL it prints (`http://127.0.0.1:43190/?token=<uuid>`), then launch `pi` with
-the extension (above) to feed it. The server writes its per-run token to `tmp/scope_token`
+Open the URL it prints (`http://127.0.0.1:43190/?token=<uuid>`), then launch `pi` with the
+extension (Option B) to feed it. The server writes its per-run token to `tmp/scope_token`
 (mode `0600`) for the extension to pick up.
 
 > `npm run dev` adds `--watch`. The DB defaults to `db/scope.db`. Override with the
 > `SCOPE_PORT`, `SCOPE_HOST`, and `SCOPE_AUTH_TOKEN` environment variables.
 
-## Using the UI
+---
 
-Watch a quick tour of the 5.0.0 features:
+## Tips & FAQ
 
-<video src="docs/video/Pi-Scope-5.0.0-features.mp4" controls width="640">Your browser does not support the video tag. <a href="docs/video/Pi-Scope-5.0.0-features.mp4">Download the tour (mp4)</a>.</video>
+- **UI state lives in the URL hash** — view, filters, and selected session are all saved
+  there, so you can bookmark or share a view. The auth token stays in the `?token=` query
+  string, not the hash.
+- **Sessions auto-refresh every 10s** and stream live over SSE, so new agents and events
+  appear without reloading.
+- **Keyboard shortcuts** (Single view; disabled while Terminal is open):
 
-## The layout
+  | Key | Action |
+  |-----|--------|
+  | `?` | Toggle help overlay |
+  | `/` | Focus the search box |
+  | `j` / `↓` | Move focus down one event |
+  | `k` / `↑` | Move focus up one event |
+  | `Enter` / `Space` | Toggle the focused event's detail |
+  | `Esc` | Collapse all open details (or close the system-prompt overlay) |
+  | `g` / `G` | Jump to first / last event |
 
-- **Top bar** — view buttons: `Single` · `Trajectory` · `Terminal` · `Review` · `Checkpoints` · `Git`. A live dot is green when the live feed (SSE) is connected, red when off.
-- **Left sidebar** — the session list. Click a session name to open it in Single view. Collapse the sidebar with the `«` toggle (your choice is remembered).
-- **Session rows** show the agent name, model + short id (`abcd1234 · claude-…`), `pool · N events · relative time`, cost/tokens, and a **red error dot** when a tool error occurred (clicking the session acknowledges it). A `hidden`/`aged` note and a hide/unhide `×`/`↺` button appear per row. In the expanded list each subagent carries a **status dot** — red stopped, orange waiting, green running.
+---
 
-![Session timeline](docs/shots/single.png)
-
-## Filters & search (top of sidebar)
-
-- **Pool** and **Tag** text boxes narrow the list and reconnect the live feed.
-- **Sort** select: `latest` / `errors` / `expensive`.
-- **Hide after** select: `30m` / `1h` / `never` — auto-hide quiet sessions.
-- **Show hidden** checkbox — reveal hidden sessions.
-- **Search box** (Single view only, after selecting a session) — live-filters events by text or JSON. Press `/` to focus it.
-- **Type filter chips** (Single view) — toggle which event types show: `user_message`, `assistant_message`, `thinking`, `tool_call`, `tool_result`, `model_change`, `compaction`, `branch_nav`, `error`.
-
-## Single view (timeline)
-
-Each event row is **time · type pill · summary**. Click a row to expand its full JSON detail.
-
-- In the expanded detail: `📋` copies the event, `→`/`↩` toggles word wrap. A `tool_result` shows an exit-code chip (`exit N`, ok/err); an `assistant_message` shows latency/turn chips.
-- `Expand all` / `Collapse all` buttons.
-- The system-prompt button (`📋`) opens an overlay with the agent's system prompt (copy/close).
-- The session subnav shows stats: event count, duration, cost, input/output tokens, cache read/write, TPS, prefill, and a **context-usage bar** (`context used / total — N% remaining`; green <70%, orange 70–90%, red >90%).
-- Live events pulse in. Scroll up to pause auto-scroll — a `paused — click to resume` toast lets you re-enable it.
-
-## Trajectory view
-
-A turn-aware event ledger (ported from `@deepseek-ai/dsh-client-ui-trajectory`) for
-one selected session. Select a session in the sidebar to open its trajectory.
-
-- Events fold into **turns** (thick `Turn N` bars) split into **Message** / **Step N**
-  groups. Each row is a cell — **User** · **Message** · **Tool** · **System** ·
-  **Compacted** · **Context** — with an `#N` index, kind tag, and summary.
-- **Message** rows carry Input / Output token columns (usage) and an own-duration
-  **Time** (`+1.2s`, `+900ms`, or `—` when unknown). **Tool** rows pair
-  `tool_call` + `tool_result` by `tool_call_id` and show call→result wall time;
-  a running tool with no result yet shows `—`. Group headers show wall-span +
-  tool histogram (`1.5s · bash×6`).
-- A fixed **overview strip** above the ledger projects each record's start/duration
-  (assistant spans split prefill vs. decode); click a bar to jump to its row.
-- **Search box** filters rows live. Click a record to open it in the right-side
-  **record inspector** (tokens, duration, Input / Output / Thinking / Timing,
-  raw JSON with copy). Live rows stream in over SSE and the ledger auto-follows
-  the tail; scroll up to pause (a toast resumes it).
-
-## Terminal view
-
-Opens a **real shell on the server host** (via WebSocket). It auto-connects when you open
-the view and stays connected across view switches (it only closes when you leave the page).
-
-- Just type — keystrokes forward to the shell.
-- **Right-click** for a context menu with `[Copy]` and `[Paste]` (Copy is disabled when nothing is selected).
-- The shell's working directory is shared with the Files and Checkpoints panes — the cwd label updates live as you `cd`.
-- The terminal auto-fits when shown and on window resize.
-
-![Terminal](docs/shots/terminal.png)
-
-### Herdr terminal
-
-The Terminal shell picker offers two shells: **Bash** (a plain in-browser PTY) and
-**Herdr** (a terminal multiplexer). Pick **Herdr** to drive a Herdr session inside the
-pane instead of bash.
-
-When Herdr is selected, the shared working directory mirrors the **focused Herdr pane's**
-live cwd — so the Files and Checkpoints panes follow whatever Herdr pane you're actively
-driving, not the frozen PTY launch directory. The server discovers Herdr's Unix socket
-from `$HERDR_SOCKET_PATH` / `$HERDR_SOCK` or the well-known XDG path
-(`~/.config/herdr/herdr.sock`), re-checking every few seconds so a Herdr that starts after
-the server is also picked up; it falls back to the PTY's `/proc/<pid>/cwd` if the socket is
-unreachable. While Herdr is detected, the in-browser right-click menu is suppressed so
-Herdr's own context menu works.
-
-## Files view (top-bar button labeled **Review**)
-
-Toolbar: `☰ files` toggle, cwd label, `☐ ignored` checkbox (show ignored files), `↻ refresh`.
-
-- **File tree**: click a file to open a side-by-side diff (left = HEAD/old, right = working tree/new); click a folder to expand/collapse.
-- **Diff toolbar**: filename; `full file` / `changes only` toggle; stats (`+N −M`, `changes only`, `● unsaved` when dirty); `💾 save` and `✕ cancel` (shown when you edit); `↩ wrap` toggle.
-- The right pane is editable — type to change the working tree. Per-line `→` / `←` buttons copy a line across panes. Drag the divider to resize; scrolling one pane syncs the other. Lines are colored eq / del / add / change.
-
-![File diffs](docs/shots/files.png)
-
-## Checkpoints view
-
-Type an optional label, then click **`＋ Checkpoint now`** to snapshot the working tree
-(git-backed).
-
-- Each checkpoint shows its message, short SHA, and timestamp, with `↺ restore` and `✕ delete` buttons.
-- **Create** also switches the repo's current branch (HEAD) to the new `checkpoints/<ns>/<id>` branch. **Delete** of a checked-out checkpoint branch first switches HEAD to the previous checkpoint branch (or the base branch) before removing it; uncommitted changes stay in the working tree — merge them elsewhere first.
-- **Restore** confirms, then runs `git reset --hard` + `git clean -fd` — destructive; uncommitted and untracked changes are discarded.
-- **Delete** confirms, then removes the git ref.
-- Needs a working directory (set in the Terminal pane) and git available. Empty states: `no working directory set — choose one in the Terminal pane`, `no checkpoints yet — click "Checkpoint now"`, `git unavailable in <cwd>`.
-
-![Checkpoints](docs/shots/checkpoints.png)
-
-## Git view
-
-A full git client (the top-bar **Git** button) for the working directory set in the Terminal pane. Tabs across the top: **Changes** · **History** · **Branches** · **Stashes** · **Remotes** · **Submodules**.
-
-- **Changes** — staged/unstaged file list with a side-by-side diff; stage, unstage, discard, and commit (with amend). A fullscreen diff mode is available.
-- **History** — commit log rendered as a colored lane graph (vscode-git-graph style) with commit detail, diff, and graph context actions (checkout / cherry-pick / revert / rebase / reset / branch / tag).
-- **Branches** — list, create, switch, and delete branches.
-- **Stashes** — list, push, pop, and drop stashes.
-- **Remotes** — list, add, and remove remotes; push / pull / fetch.
-- **Submodules** — list and add / remove / update / init / deinit / sync submodules.
-
-## Keyboard shortcuts (Single view)
-
-Disabled while the Terminal view is open.
-
-| Key | Action |
-|-----|--------|
-| `?` | Toggle help overlay |
-| `/` | Focus the search box |
-| `j` / `↓` | Move focus down one event |
-| `k` / `↑` | Move focus up one event |
-| `Enter` / `Space` | Toggle the focused event's detail |
-| `Esc` | Collapse all open details (or close the system-prompt overlay) |
-| `g` | Jump to first event |
-| `G` | Jump to last event |
-
-## Tips
-
-- **UI state lives in the URL hash** — view, filters, and selected session are all saved there, so you can bookmark or share a view. The auth token stays in the `?token=` query string, not the hash.
-- Sessions **auto-refresh every 10s** and stream live over SSE, so new agents and events appear without reloading.
-
-## Where data comes from
+## Where the data comes from
 
 The UI is empty until something feeds it. Fastest options:
 
-- Attach the extension to a `pi` agent — see **Install the pi extension** above (it auto-discovers the token).
+- Attach the extension to a `pi` agent — see **Option B** above (it auto-discovers the
+  token).
 - Or POST events directly to `POST /events` (needs `event_id`, `type`, `session_id`).
 
-This is fork of https://github.com/disler/pi-agent-observability
+Server API, environment variables, and the full endpoint list are documented in
+[`apps/scope/README.md`](apps/scope/README.md).
+
+---
+
+## For AI agents & contributors
+
+This repository is structured so an AI coding agent can onboard quickly. Start with
+[`AGENTS.md`](AGENTS.md) for a concise map of the layout, how to run/build, key files, and
+gotchas. Detailed references live in [`apps/scope/README.md`](apps/scope/README.md) and
+[`extension/README.md`](extension/README.md).
+
+---
+
+## License
+
+See [`LICENSE`](LICENSE). Pi Scope is an extended fork of
+[disler/pi-agent-observability](https://github.com/disler/pi-agent-observability).

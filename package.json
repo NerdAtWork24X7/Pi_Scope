@@ -1,1 +1,12 @@
-{"name":"pi-scope","private":true,"type":"module"}
+{
+  "name": "pi-scope",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first observability dashboard for AI coding agents: watch and replay every message, tool call, shell command, and file edit live in a private, self-hosted browser UI.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NerdAtWork24X7/Pi_Scope.git"
+  },
+  "license": "MIT"
+}
