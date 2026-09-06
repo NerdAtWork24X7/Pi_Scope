@@ -37,7 +37,7 @@
   function showShellPrompt(error) {
     const el = shellPromptEl();
     if (el) el.style.display = "flex";
-    if (container) container.style.background = "var(--bg)";
+    if (container) container.style.background = "var(--glass-bg)";
     const sub = document.getElementById("terminal-prompt-sub");
     if (sub) sub.textContent = error || "Click Bash or Herdr above";
   }
@@ -66,13 +66,16 @@
     connect();
   }
 
-  // xterm palette tracks the app's DeepSeek theme tokens so the embedded
-  // terminal follows the Light/Dark toggle instead of staying GitHub-dark.
+  // xterm palette tracks the app's theme tokens so the embedded terminal
+  // follows the Light/Dark toggle instead of staying GitHub-dark. The
+  // background uses the translucent --glass-bg token (NOT --bg) so the fixed
+  // body gradient shows through the terminal surface like every other page —
+  // and stays cheap because there is no backdrop blur to recompute per frame.
   function terminalTheme() {
-    let bg = "#151517", fg = "#f9fafb";
+    let bg = "rgba(255, 255, 255, 0.50)", fg = "#f9fafb";
     try {
       const cs = getComputedStyle(document.body);
-      bg = cs.getPropertyValue("--bg").trim() || bg;
+      bg = cs.getPropertyValue("--glass-bg").trim() || bg;
       fg = cs.getPropertyValue("--text").trim() || fg;
     } catch {}
     return { background: bg, foreground: fg, cursor: fg };

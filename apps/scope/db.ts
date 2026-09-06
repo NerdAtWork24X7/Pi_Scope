@@ -291,6 +291,18 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     GROUP BY e.session_id
   `);
 
+  // ── Provider cost since a timestamp (rolling usage windows, e.g. the
+  //  opencode-go $ limits shown in the chat composer footer). `ts` is stored
+  // as ISO-8601 UTC, so a lexicographic comparison against an ISO cutoff is
+  // a correct time comparison. ───────────────────────────────────────────
+  const getProviderCostSince = db.prepare(`
+    SELECT COALESCE(SUM(json_extract(payload_json, '$.usage.cost_total')), 0) AS cost
+    FROM events
+    WHERE provider = $provider
+      AND type = 'assistant_message'
+      AND ts >= $since
+  `);
+
   // ── Clear all data (destructive) ──────────────────────────────────────
   const clearSessions = db.prepare(`DELETE FROM sessions`);
   const clearEvents = db.prepare(`DELETE FROM events`);
@@ -311,6 +323,7 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     getSessionStats,
     getSessionModelTokens,
     getSessionContext,
+    getProviderCostSince,
     countTotals,
     clearSessions,
     clearEvents,

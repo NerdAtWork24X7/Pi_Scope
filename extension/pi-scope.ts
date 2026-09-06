@@ -23,9 +23,9 @@ import * as os from "node:os";
 // ━━ Truncation constants & helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // These were previously (erroneously) imported from "./pi-scope.ts" — a
 // self-import that resolves to `undefined` at runtime. They live here instead.
-const MAX_TEXT_FIELD = 16 * 1024;   // 16 KiB cap for free-text fields
-const MAX_ARGS_BYTES = 4 * 1024;    // 4 KiB cap per tool-call argument
-const MAX_RESULT_BYTES = 16 * 1024; // 16 KiB cap for tool-result text
+const MAX_TEXT_FIELD = 1024 * 1024;   // 1 MB cap for free-text fields
+const MAX_ARGS_BYTES = 16 * 1024;    // 16 KiB cap per tool-call argument
+const MAX_RESULT_BYTES = 1024 * 1024; // 1 MB cap for tool-result text
 
 interface TruncateResult {
   text: string;
@@ -681,8 +681,20 @@ export default function (pi: ExtensionAPI) {
 
   // ━━ session_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   pi.on("session_start", async (event, ctx) => {
+    // Context snapshot taken NOW. pi invalidates the ctx when the session is
+    // replaced (ctx.newSession()/ctx.switchSession()/ctx.reload()), and the
+    // runner fires session_start again for the new session. Work that survives
+    // past this handler must use only these captured values — touching ctx after
+    // an await (e.g. the probe below) would throw the stale-ctx error and crash
+    // the whole agent process mid-turn.
+    const notify = (() => { try { return ctx.ui?.notify?.bind(ctx.ui); } catch { return undefined; } })();
+    const cwd = (() => { try { return ctx.cwd; } catch { return undefined; } })();
+    const sessId = (() => { try { return ctx.sessionManager.getSessionId(); } catch { return undefined; } })();
+    const sessFile = (() => { try { return ctx.sessionManager.getSessionFile(); } catch { return undefined; } })();
+    const sessModel = (() => { try { return ctx.model; } catch { return undefined; } })();
+
     // 1. Load env files from CWD
-    loadEnv(ctx.cwd);
+    if (cwd) loadEnv(cwd);
 
     // 2. Resolve parameters
     const serverUrl = (pi.getFlag("obs-server-url") as string) || process.env.OBS_SERVER_URL || "http://127.0.0.1:43190";
@@ -746,41 +758,44 @@ export default function (pi: ExtensionAPI) {
     if (!token) {
       // Loud, single-line warning. Server will 401 every POST otherwise.
       try {
-        ctx.ui?.notify?.(
-          `📡 Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`,
-          "warning",
-        );
+        notify?.(`📡 Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`, "warning");
       } catch { /* hasUI may be false */ }
       logObs("no_token_configured", { server_url: serverUrl });
     }
 
     // 4b. Simple connectivity check — tell the operator whether the obs server
     // is reachable. Fire-and-forget with a short timeout so boot never blocks.
+    // The ctx may be invalidated (switch_session/new_session) while the probe is
+    // in flight — only captured notify is used, and the whole block is guarded so
+    // a stale snapshot can never crash the agent mid-turn.
     void (async () => {
-      const connected = await probeServer(serverUrl);
       try {
-        if (connected) {
-          ctx.ui?.notify?.(`📡 Pi Scope: connected to ${serverUrl}`, "info");
-        } else {
-          ctx.ui?.notify?.(
-            `📡 Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,
-            "warning",
-          );
-        }
-      } catch { /* hasUI may be false */ }
-      logObs(connected ? "server_connected" : "server_unreachable", { server_url: serverUrl });
+        const connected = await probeServer(serverUrl);
+        try {
+          if (connected) {
+            notify?.(`📡 Pi Scope: connected to ${serverUrl}`, "info");
+          } else {
+            notify?.(`📡 Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,
+              "warning");
+          }
+        } catch { /* hasUI may be false */ }
+        logObs(connected ? "server_connected" : "server_unreachable", { server_url: serverUrl });
+      } catch {
+        // Session was replaced while probing — nothing to report, and the new
+        // session_start already took over. Never throw into the runner.
+      }
     })();
 
     // 5. Initialize session info
     sessionInfo = {
-      sessionId: ctx.sessionManager.getSessionId(),
-      sessionFile: ctx.sessionManager.getSessionFile(),
-      cwd: ctx.cwd,
+      sessionId: sessId,
+      sessionFile: sessFile,
+      cwd,
       agentName: name,
       pool,
       tags,
-      provider: ctx.model?.provider,
-      model: ctx.model?.id,
+      provider: sessModel?.provider,
+      model: sessModel?.id,
     };
 
     // 5b. If this process resumed an existing pi session, continue its event

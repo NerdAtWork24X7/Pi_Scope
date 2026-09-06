@@ -14,7 +14,7 @@ import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent } from
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { attachTerminal } from "./terminal.ts";
-import { startChat, startChatSession, shutdownChatSessions } from "./chat.ts";
+import { startChat, startChatSession, killChatSession, shutdownChatSessions } from "./chat.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -314,6 +314,134 @@ function updateSettingsJson(mutate: (cfg: any) => void): void {
   try { cfg = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8")); } catch { /* absent */ }
   mutate(cfg);
   fs.writeFileSync(SETTINGS_JSON, JSON.stringify(cfg, null, 2) + "\n");
+}
+
+// ─── Chat footer (pi custom-footer port) ───────────────────────────────────
+// Mirrors the pi terminal's custom-footer extension in the Chat composer:
+// model/thinking, token stats, cost, context bar, elapsed, cwd, git branch,
+// provider pricing, and opencode-go rolling $ usage. The go-usage values come
+// from the same live endpoint the pi footer uses, refreshed at most once a
+// minute, with local DB $ sums as fallback until the fetch lands.
+const MODELS_STORE = process.env.SCOPE_MODELS_STORE ?? path.join(AGENT_DIR, "models-store.json");
+const AUTH_JSON = process.env.SCOPE_AUTH_JSON ?? path.join(AGENT_DIR, "auth.json");
+const GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
+const GO_USAGE_TTL = 60_000;
+const GO_LIMITS: Record<"h5" | "wk" | "mo", number> = { h5: 12, wk: 30, mo: 60 };
+
+let modelsStoreCache: { mtimeMs: number; data: Record<string, any> } | null = null;
+
+/** Read the pi model store (~/.pi/agent/models-store.json), cached by mtime. */
+function loadModelsStore(): Record<string, any> {
+  try {
+    const st = fs.statSync(MODELS_STORE);
+    if (modelsStoreCache && modelsStoreCache.mtimeMs === st.mtimeMs) return modelsStoreCache.data;
+    const data = JSON.parse(fs.readFileSync(MODELS_STORE, "utf8"));
+    modelsStoreCache = { mtimeMs: st.mtimeMs, data };
+    return data;
+  } catch {
+    return {};
+  }
+}
+
+/** Thinking levels a model supports, from its thinkingLevelMap (array form, or
+ *  object map whose non-null values are supported). null → use pi's default. */
+function thinkingLevelsFor(m: any): string[] | null {
+  const map = m?.thinkingLevelMap;
+  if (Array.isArray(map)) return map;
+  if (map && typeof map === "object") {
+    const keys = Object.keys(map).filter((k) => map[k] !== null && map[k] !== undefined);
+    return keys.length ? keys : null;
+  }
+  return null;
+}
+
+/** Flatten the store into { "<provider>/<id>": { provider, contextWindow, maxTokens, cost, thinkingLevels } }. */
+function buildModelMeta(): Record<string, any> {
+  const out: Record<string, any> = {};
+  const store = loadModelsStore();
+  for (const [provider, entry] of Object.entries(store) as [string, any][]) {
+    for (const m of entry?.models ?? []) {
+      if (!m?.id) continue;
+      out[`${provider}/${m.id}`] = {
+        provider,
+        contextWindow: m.contextWindow ?? 0,
+        maxTokens: m.maxTokens ?? 0,
+        cost: m.cost ?? {},
+        thinkingLevels: thinkingLevelsFor(m),
+      };
+    }
+  }
+  return out;
+}
+
+/** opencode-go $ usage in the 5h/7d/30d rolling windows from the DB (fallback). */
+function goUsageFromDb(now: number): { h5: number; wk: number; mo: number } {
+  const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
+  const sum = (msAgo: number): number => {
+    try {
+      const row = q.getProviderCostSince.get({ $provider: "opencode-go", $since: iso(msAgo) }) as any;
+      return row?.cost ?? 0;
+    } catch { return 0; }
+  };
+  return { h5: sum(5 * 3600 * 1000), wk: sum(7 * 24 * 3600 * 1000), mo: sum(30 * 24 * 3600 * 1000) };
+}
+
+/** Seconds until a usage window resets; -1 when unknown (countdown omitted). */
+function goResetSeconds(w: any): number {
+  const dump = w?.resetsAt ?? w?.resetAt;
+  if (typeof dump === "string") {
+    const t = Date.parse(dump);
+    if (!Number.isNaN(t)) return Math.max(0, Math.floor((t - Date.now()) / 1000));
+  }
+  const raw = w?.resetInSec ?? w?.resetSec ?? w?.resetsIn ?? w?.secondsUntilReset;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : -1;
+}
+
+let goApiUsage: { h5: { pct: number; resetSec: number }; wk: { pct: number; resetSec: number }; mo: { pct: number; resetSec: number } } | null = null;
+let goApiFetchedAt = 0;
+
+/** Live /zen/go/v1/usage refresh (Bearer opencode-go key). Best-effort. */
+async function refreshGoApiUsage(): Promise<void> {
+  const now = Date.now();
+  if (now - goApiFetchedAt < GO_USAGE_TTL) return;
+  goApiFetchedAt = now; // re-attempt after the TTL even on failure
+  try {
+    let key = "";
+    try {
+      key = JSON.parse(fs.readFileSync(AUTH_JSON, "utf8"))?.["opencode-go"]?.key ?? "";
+    } catch { /* auth absent */ }
+    if (!key) return;
+    const res = await fetch(GO_USAGE_URL, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const u = data?.usage;
+    if (!u) return;
+    goApiUsage = {
+      h5: { pct: Number(u.rolling?.percent ?? -1), resetSec: goResetSeconds(u.rolling) },
+      wk: { pct: Number(u.weekly?.percent ?? -1), resetSec: goResetSeconds(u.weekly) },
+      mo: { pct: Number(u.monthly?.percent ?? -1), resetSec: goResetSeconds(u.monthly) },
+    };
+  } catch { /* keep last known values; retry after the TTL */ }
+}
+
+/** Percent of the rolling $ limit per window (live endpoint, else DB sums). */
+function computeGoUsage(): Record<string, { pct: number; resetSec: number }> {
+  const now = Date.now();
+  const fallback = goUsageFromDb(now);
+  const pctFor = (key: "h5" | "wk" | "mo"): number => {
+    if (goApiUsage && goApiUsage[key].pct >= 0) return goApiUsage[key].pct;
+    return fallback[key] > 0 ? Math.min(100, (fallback[key] / GO_LIMITS[key]) * 100) : 0;
+  };
+  const resetFor = (key: "h5" | "wk" | "mo"): number => (goApiUsage ? goApiUsage[key].resetSec : -1);
+  return {
+    h5: { pct: pctFor("h5"), resetSec: resetFor("h5") },
+    wk: { pct: pctFor("wk"), resetSec: resetFor("wk") },
+    mo: { pct: pctFor("mo"), resetSec: resetFor("mo") },
+  };
 }
 
 // ─── Init ───────────────────────────────────────────────────────────────────
@@ -1110,6 +1238,25 @@ async function handle(req: Request): Promise<Response> {
     }
   }
 
+  // ── GET /chat/footer (composer footer: git branch, thinking level, model
+  // metadata for pricing/context, opencode-go rolling usage) ─────────────
+  if (pathname === "/chat/footer" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    let branch: string | null = null;
+    const b = gitTry(absCwd, ["branch", "--show-current"]);
+    if (b.ok && b.out.trim()) branch = b.out.trim();
+    let thinking = "high";
+    try {
+      const settings = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8"));
+      if (typeof settings.defaultThinkingLevel === "string" && settings.defaultThinkingLevel) thinking = settings.defaultThinkingLevel;
+    } catch { /* settings absent */ }
+    void refreshGoApiUsage();
+    return jsonResponse({ branch, thinking, modelMeta: buildModelMeta(), goUsage: computeGoUsage() });
+  }
+
   // ── GET /agent-team (snapshot of the agent-team sidebar state) ──────────
   if (pathname === "/agent-team" && method === "GET") {
     return jsonResponse(loadAgentTeam());
@@ -1135,6 +1282,17 @@ async function handle(req: Request): Promise<Response> {
             p.memoryActive = on ? !!p.memoryModel : false;
           });
           break;
+        case "setThinkingLevel": {
+          const level = String(body.level || "").trim();
+          const VALID = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+          if (!VALID.includes(level)) return jsonResponse({ error: `invalid thinking level: ${level}` }, 400);
+          // pi resolves the thinking level at agent start and clamps it to the
+          // model's capabilities; the running rpc process cached its level at
+          // boot, so the re-arm (kill + respawn) after this toggle is what makes
+          // the new level take effect on the next prompt.
+          updateSettingsJson((cfg) => { cfg.defaultThinkingLevel = level; });
+          break;
+        }
         case "toggleAgent": {
           const key = String(body.agent || "").toLowerCase();
           const disabled = !!body.disabled;
@@ -1264,6 +1422,20 @@ async function handle(req: Request): Promise<Response> {
       sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
       sessionFile: typeof parsed.sessionFile === "string" ? parsed.sessionFile : "",
     });
+  }
+
+  // ── POST /chat/kill (stop a chat subprocess by session id) ─────────────
+  // Called when the user starts a brand-new conversation: the old pi subprocess
+  // holds the previous conversation's context, so it is killed and its entry
+  // removed rather than left idle to be picked up again.
+  if (pathname === "/chat/kill" && method === "POST") {
+    let bodyText: string;
+    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
+    let parsed: any;
+    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
+    if (sessionId) killChatSession(sessionId);
+    return jsonResponse({ ok: true });
   }
 
   // ── GET /sessions ──────────────────────────────────────────────────────

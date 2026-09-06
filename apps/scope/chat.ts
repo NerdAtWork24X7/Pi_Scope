@@ -180,8 +180,14 @@ function handleLine(sess: ChatSession, line: string) {
 }
 
 function spawnChat(id: string, cwd: string, model: string): ChatSession {
+  // PI_OFFLINE=1 tells pi (and its pi-updater extension) to skip startup network
+  // operations. Without it, pi-updater fires async version checks on
+  // session_start; when the user resumes a recorded session and the scope server
+  // issues switch_session mid-flight, pi invalidates the extension ctx and the
+  // in-flight check throws a stale-ctx error that kills the whole subprocess.
   const proc = spawn(PI_BIN, ["--mode", "rpc", "--model", model], {
     cwd,
+    env: { ...process.env, PI_OFFLINE: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, resumedFile: null, resumeCallback: null };

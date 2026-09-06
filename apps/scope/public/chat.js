@@ -65,6 +65,9 @@
     lastOpenCount: null, // event_count of the open session at last load — refetch when it grows
     expandedWs: new Set(loadExpandedWs()),
     collapsedSecs: new Set(loadCollapsedSecs()),
+    footer: null,          // /chat/footer snapshot { branch, thinking, modelMeta, goUsage }
+    footerFetchedAt: 0,
+    thinkingLevel: null,   // selected thinking level (defaults to footer.thinking)
   };
 
   const el = {};
@@ -84,7 +87,6 @@
     el.input = $("#chat-input");
     el.send = $("#chat-send");
     el.hint = $("#chat-composer-hint");
-    el.composerStatus = $("#chat-composer-status");
     el.agentCount = $("#chat-agent-count");
     el.headerModel = $("#chat-header-model");
     el.liveDot = $("#chat-live-dot");
@@ -94,9 +96,18 @@
     el.toggleLeft = $("#chat-toggle-left");
     el.toggleRight = $("#chat-toggle-right");
     el.composer = $("#chat-composer");
+    el.footer = $("#chat-composer-footer");
+    el.thinking = $("#chat-thinking");
   }
 
   // ─── Selectors / data ─────────────────────────────────────────────────────
+  // pi's background memory summarizer spawns a fresh session for every
+  // orchestrator turn; it isn't a user conversation, so keep it out of the
+  // workspace session list and agent rails.
+  function isChatSession(s) {
+    return (s.agent_name || "").toLowerCase() !== "memory-summarizer";
+  }
+
   function workspaces() {
     const map = {};
     for (const s of CH.sessions) {
@@ -131,7 +142,7 @@
   }
 
   function onSessions() {
-    CH.sessions = state.sessions || [];
+    CH.sessions = (state.sessions || []).filter(isChatSession);
     loadAgentTeam();
     renderComposerModel();
     // Rebuild the workspace + agent rails only when their data actually changed
@@ -148,7 +159,6 @@
       // on polls; the message list itself only changes through explicit actions
       // (send / load session / new session), which re-render on their own.
       updateHeader();
-      renderComposerStatus();
       updateScrollDown();
     }
     if (!CH.workspace) {
@@ -160,7 +170,7 @@
   }
 
   function onView() {
-    CH.sessions = state.sessions || [];
+    CH.sessions = (state.sessions || []).filter(isChatSession);
     loadAgentTeam();
     if (!CH.workspace) {
       const ws = workspaces();
@@ -355,7 +365,7 @@
         CH.resumeFile = null;
         renderChat();
       }
-      CH.sessions = state.sessions || [];
+      CH.sessions = (state.sessions || []).filter(isChatSession);
       railSig = chatRailSig();
       renderWorkspaces();
       renderAgents();
@@ -420,11 +430,38 @@
 
   // Persist a sidebar toggle via POST /agent-team, then reload the snapshot.
   async function postTeam(body) {
+    let ok = false;
     try {
       const { res, data } = await window.SCOPE.api("/agent-team", {}, body);
-      if (res.ok && data) CH.teamData = data;
+      if (res.ok && data) {
+        CH.teamData = data;
+        ok = true;
+      }
     } catch { /* server unreachable — keep last snapshot */ }
     renderAgents();
+    if (ok) rearmChatAfterConfigChange();
+  }
+
+  // Team/mode/memory/skills toggles only affect a pi subprocess that boots
+  // AFTER the change — a running `pi --mode rpc` read the agent-team config at
+  // startup and never re-reads it. So a successful toggle re-arms the chat
+  // session the same way the model dropdown does:
+  //   • idle pre-spawn (no conversation yet): kill it and re-pre-spawn so the
+  //     very next prompt runs under the freshly written config;
+  //   • live conversation in progress: leave the subprocess alone (killing it
+  //     would silently drop the thread) and tell the user the setting lands on
+  //     the next new session.
+  function rearmChatAfterConfigChange() {
+    if (!CH.workspace) return;
+    if (CH.chatBusy || CH.chatHistory.length) {
+      if (el.hint) setHint("⚙ team settings apply to a new chat session", "");
+      return;
+    }
+    if (!CH.chatSessionId) return; // nothing pre-spawned — next send spawns fresh anyway
+    void (async () => {
+      await killCurrentChatSession();
+      ensureChatSession();
+    })();
   }
 
   function atSection(key, title, bodyHtml, opts) {
@@ -473,10 +510,25 @@
     let html = "";
 
     const orchSt = orch ? S.subagentStatus(orch) : "gray";
+
+    // Skills are divided into orchestrator vs subagent groups; membership is
+    // persisted in agent-team-config.json (orchestratorSkills / subagentSkills).
+    // Each group section lists all discovered skills with per-group on/off, so
+    // a skill can be enabled for the orchestrator, subagents, both, or neither.
+    const skills = td.skills || [];
+    const skillItem = (sk, group, on) =>
+      `<div class="at-item${on ? " on" : ""}" data-dir="${esc(sk.dir)}" data-group="${group}" title="${esc(sk.name)}${sk.description ? " — " + esc(sk.description) : ""}">` +
+      `<span class="at-item-mark">${on ? "●" : "○"}</span>` +
+      `<span class="at-item-name">${esc(sk.name)}</span>` +
+      `</div>`;
+    const groupSkillBody = (group) =>
+      skills.map((sk) => skillItem(sk, group, group === "orchestrator" ? !!sk.orchestrator : !!sk.subagent)).join("");
+
     html += atSection("orch", "Agent Team",
       `<div class="at-orch">` +
       `<span class="status-dot ${orchSt}"></span>` +
-      `<span class="at-orch-name">Orchestrator</span></div>`
+      `<span class="at-orch-name">Orchestrator</span></div>` +
+      groupSkillBody("orchestrator")
     );
 
     html += atSection("mode", "Mode & Memory",
@@ -521,24 +573,10 @@
           `</div></div>`;
       }
     }
+    // Subagent skills follow the members, separated by a thin divider (mirrors
+    // the pi agent-team sidebar layout).
+    if (skills.length) subBody += `<div class="at-sep"></div>` + groupSkillBody("subagent");
     html += atSection("subagents", "Subagents", subBody, { count: members.length });
-
-    const skills = td.skills || [];
-    let skillBody = "";
-    if (!skills.length) skillBody = `<div class="at-dim">no skills found</div>`;
-    else {
-      for (const sk of skills) {
-        const on = sk.settingsEnabled;
-        const sub = sk.subagent ? `<span class="at-sub">S</span>` : "";
-        const orchTag = sk.orchestrator ? `<span class="at-sub">O</span>` : "";
-        skillBody +=
-          `<div class="at-item${on ? " on" : ""}" data-dir="${esc(sk.dir)}" title="${esc(sk.name)}${sk.description ? " — " + esc(sk.description) : ""}">` +
-          `<span class="at-item-mark">${on ? "●" : "○"}</span>` +
-          `<span class="at-item-name">${esc(sk.name)}</span>${orchTag}${sub}` +
-          `</div>`;
-      }
-    }
-    html += atSection("skills", "Skills", skillBody, { count: skills.length });
 
     const exts = td.extensions || [];
     let extBody = "";
@@ -576,7 +614,7 @@
       })
     );
     el.agents.querySelectorAll(".at-item[data-dir]").forEach((n) =>
-      n.addEventListener("click", () => postTeam({ action: "toggleSkillSetting", dir: n.dataset.dir }))
+      n.addEventListener("click", () => postTeam({ action: "toggleSkill", group: n.dataset.group, dir: n.dataset.dir }))
     );
     el.agents.querySelectorAll(".at-item[data-path]").forEach((n) =>
       n.addEventListener("click", () => postTeam({ action: "toggleExtension", path: n.dataset.path }))
@@ -620,6 +658,10 @@
     renderWorkspaces();
     renderAgents();
     persistWorkspace();
+    CH.footer = null;
+    CH.footerFetchedAt = 0;
+    CH.footerGoRetry = false;
+    fetchChatFooter(true);
     // NB: no clearSnapshot() here — attemptRestore() (called right after boot
     // auto-select) validates the stored snapshot's workspace and restores the
     // conversation, so wiping it here would defeat reload persistence.
@@ -759,7 +801,7 @@
   }
 
   function resetChat() {
-    CH.chatSessionId = null;
+    killCurrentChatSession();
     CH.resumeFile = null;
     CH.chatBusy = false;
     CH.chatHistory = [];
@@ -779,7 +821,7 @@
       const { res, data } = await window.SCOPE.api("/chat/start", {}, { cwd: CH.workspace, model: CH.chatModel || defaultChatModel() });
       if (res.ok && data?.sessionId) {
         CH.chatSessionId = data.sessionId;
-        if (el.hint && !CH.chatHistory.length) setHint(`session ready · model ${CH.chatModel}`, "");
+        if (el.hint && !CH.chatHistory.length) setHint("session ready", "");
       } else if (el.hint && !CH.chatHistory.length) {
         setHint(`⚠ ${data?.error || `HTTP ${res.status}`}`, "err");
       }
@@ -788,6 +830,7 @@
       if (el.hint && !CH.chatHistory.length) setHint("server offline — retry on your next message", "err");
     }
     updateHeader();
+    renderChatFooter();
   }
 
   // ─── Rendering helpers: markdown-lite ─────────────────────────────────────
@@ -1020,7 +1063,6 @@
     if (!el.msg) return;
     updateHeader();
     setComposerEnabled(!!CH.workspace);
-    renderComposerStatus();
     // Preserve the user's reading position across re-renders (session polls
     // call renderChat every few seconds). When pinned near the bottom we stay
     // stuck to the newest message; otherwise we keep the relative offset.
@@ -1247,6 +1289,9 @@
         break;
     }
     if (nearBottom()) scrollToBottom();
+    // Keep the composer footer in lockstep with the live turn — the usage / final
+    // snapshots are exactly what its token + cost numbers are derived from.
+    if (ev.type === "usage" || ev.type === "final") renderChatFooter();
   }
 
   function setHint(text, kind) {
@@ -1260,6 +1305,7 @@
     if (!el.input || !el.send || !el.model) return;
     el.input.disabled = !on;
     el.model.disabled = !on;
+    if (el.thinking) el.thinking.disabled = !on;
     el.send.disabled = !on || CH.chatBusy;
     if (el.input) el.input.placeholder = "Message the pi coding agent…";
   }
@@ -1306,42 +1352,6 @@
   }
 
   // ─── Composer / model chooser ─────────────────────────────────────────────
-  // Status line under the input: the model, token usage and time that used to
-  // sit on the session rows now live here, describing the conversation that's
-  // on screen (an opened session transcript, or the live chat thread).
-  function renderComposerStatus() {
-    if (!el.composerStatus) return;
-    const parts = [];
-    if (CH.openSid) {
-      const s = CH.sessions.find((x) => x.session_id === CH.openSid);
-      if (s) {
-        const stats = state.sessionStats?.[s.session_id];
-        if (s.model) parts.push(s.model);
-        if (stats?.total_tokens != null) parts.push(S.fmtTokens(stats.total_tokens) + " tokens");
-        if (s.last_ts) parts.push(S.fmtRel(s.last_ts));
-      }
-    } else if (CH.chatHistory.length) {
-      let tokens = 0;
-      let lastTs = 0;
-      for (const m of CH.chatHistory) {
-        if (m.role === "assistant") {
-          const u = m.usage || {};
-          const t = u.totalTokens ?? u.total_tokens;
-          if (t != null) tokens += t;
-        }
-        if (m.ts) lastTs = Math.max(lastTs, m.ts);
-      }
-      if (CH.chatModel) parts.push(CH.chatModel);
-      if (tokens) parts.push(S.fmtTokens(tokens) + " tokens");
-      if (lastTs) parts.push(S.fmtRel(lastTs));
-    } else if (CH.chatModel) {
-      parts.push(CH.chatModel);
-    }
-    const txt = parts.join(" · ");
-    el.composerStatus.textContent = txt;
-    el.composerStatus.title = txt;
-  }
-
   function renderComposerModel() {
     if (!el.model) return;
     const enabled = CH.teamData?.enabledModels || [];
@@ -1355,10 +1365,310 @@
     let html = "";
     for (const m of ordered) {
       const fromSettings = enabled.includes(m);
+      // Full model ids are shown verbatim; the closed select is sized
+      // dynamically to its selected option (fitComposerSelects), so the pill
+      // grows to fit the text instead of clipping it.
       const label = fromSettings ? m : `${m} · (session)`;
-      html += `<option value="${esc(m)}"${m === CH.chatModel ? " selected" : ""} title="${fromSettings ? "enabled in pi settings" : "seen in this workspace's sessions"}">${esc(label)}</option>`;
+      html += `<option value="${esc(m)}"${m === CH.chatModel ? " selected" : ""} title="${esc(m)}">${esc(label)}</option>`;
     }
     el.model.innerHTML = html;
+    fitComposerSelects();
+    renderComposerThinking();
+  }
+
+  // Size the model/thinking pills to the text currently selected rather than
+  // letting the native <select> balloon to its widest option (or clip). Text is
+  // measured exactly (hidden probe in the select's own font) and the pill
+  // reserves room for the native dropdown chevron, so nothing is ever cut off
+  // at the right edge. The bar wraps instead of overflowing when a full model
+  // id is unusually long.
+  let fitProbe = null; // reused hidden span used for text measurement
+  function fitComposerSelects() {
+    if (!el.model || !el.thinking) return;
+    const box = el.composer ? el.composer.querySelector(".chat-composer-box") : null;
+    const maxW = box ? Math.max(150, box.clientWidth - 32) : 560;
+    for (const sel of [el.model, el.thinking]) {
+      if (!sel) continue;
+      const o = sel.options[sel.selectedIndex];
+      if (!o) { sel.style.width = ""; continue; }
+      const cs = getComputedStyle(sel);
+      if (!fitProbe) {
+        fitProbe = document.createElement("span");
+        fitProbe.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;pointer-events:none;left:-9999px;top:0";
+        document.body.appendChild(fitProbe);
+      }
+      fitProbe.style.fontFamily = cs.fontFamily;
+      fitProbe.style.fontSize = cs.fontSize;
+      fitProbe.style.fontWeight = cs.fontWeight;
+      fitProbe.style.letterSpacing = cs.letterSpacing;
+      fitProbe.textContent = o.text;
+      const textW = fitProbe.getBoundingClientRect().width;
+      const padL = parseFloat(cs.paddingLeft) || 10;
+      const padR = parseFloat(cs.paddingRight) || 10;
+      // Native selects draw their chevron inside the right padding area; keep
+      // that space explicit plus a small breather so the label never kisses
+      // the pill's rounded right edge.
+      const want = Math.ceil(textW + padL + padR + 6);
+      sel.style.width = Math.min(maxW, want) + "px";
+    }
+  }
+
+  // Populate the thinking-level dropdown next to the model. Options come from
+  // the current model's supported levels (thinkingLevelMap in the model store)
+  // with the default set as fallback; the currently selected level is always
+  // present. Persisting the choice (POST /agent-team setThinkingLevel) is wired
+  // in the change handler; pi resolves the level at agent start, so the re-arm
+  // after the toggle makes it take effect on the next prompt.
+  function renderComposerThinking() {
+    if (!el.thinking) return;
+    const meta = CH.chatModel ? footerModelMeta(CH.chatModel) : null;
+    const current = CH.thinkingLevel || CH.footer?.thinking || "high";
+    const opts = (meta?.thinkingLevels && meta.thinkingLevels.length ? meta.thinkingLevels : ["off", "low", "medium", "high"]).slice();
+    if (!opts.includes(current)) opts.push(current);
+    let html = "";
+    for (const lvl of opts) {
+      html += `<option value="${esc(lvl)}"${lvl === current ? " selected" : ""}>${esc(lvl)}</option>`;
+    }
+    el.thinking.innerHTML = html;
+  }
+
+  // ─── Composer footer (pi custom-footer port) ────────────────────────────
+  // Two status lines under the input mirroring the pi terminal's custom-footer
+  // extension: model/thinking, token stats, cost, context bar, elapsed, cwd,
+  // git branch (line 1); provider pricing + opencode-go rolling $ usage (line
+  // 2). Model metadata (context window, max tokens, $/M) and branch/thinking
+  // come from the server's /chat/footer endpoint; token/cost/context numbers
+  // from the visible session's /stats.
+  function cfFmt(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return `${n}`;
+    if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+    return `${(n / 1_000_000).toFixed(1)}M`;
+  }
+
+  function cfElapsed(firstTs) {
+    if (!firstTs) return "";
+    const t = typeof firstTs === "number" ? firstTs : Date.parse(firstTs);
+    if (Number.isNaN(t)) return "";
+    const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const rs = s % 60;
+    if (m < 60) return `${m}m${rs ? rs + "s" : ""}`;
+    const h = Math.floor(m / 60);
+    return `${h}h${m % 60 ? (m % 60) + "m" : ""}`;
+  }
+
+  function cfReset(sec) {
+    const s = Math.max(0, Math.floor(sec));
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    if (d > 0) return h > 0 ? `${d}d${h}h` : `${d}d`;
+    if (h > 0) return m > 0 ? `${h}h${m}m` : `${h}h`;
+    if (m > 0) return `${m}m`;
+    return `${s}s`;
+  }
+
+  function footerModelMeta(model) {
+    return CH.footer?.modelMeta?.[model] || null;
+  }
+
+  // Fetch the static footer data (branch, thinking, model metadata, go usage).
+  // Throttled to once per 30s; `force` skips the throttle (workspace switch).
+  async function fetchChatFooter(force) {
+    if (!CH.workspace) return;
+    const now = Date.now();
+    if (!force && CH.footerFetchedAt && now - CH.footerFetchedAt < 30000) return;
+    CH.footerFetchedAt = now;
+    try {
+      const { res, data } = await window.SCOPE.api("/chat/footer", { cwd: CH.workspace });
+      if (res.ok && data) {
+        CH.footer = data;
+        renderComposerThinking();
+        renderChatFooter();
+        // The server's live go-usage fetch lands ~2s after the first request;
+        // the first response carries DB fallback values (resetSec -1). Re-fetch
+        // once shortly after so the real rolling percentages show up quickly.
+        if (!CH.footerGoRetry && CH.footer?.goUsage && goUsageIsStale(CH.footer.goUsage)) {
+          CH.footerGoRetry = true;
+          setTimeout(() => { CH.footerGoRetry = false; fetchChatFooter(true); }, 5000);
+        }
+      }
+    } catch { /* server unreachable — keep last snapshot */ }
+  }
+
+  // True while none of the windows carries a live reset boundary yet (the
+  // server falls back to local $ sums until its API refresh completes).
+  function goUsageIsStale(go) {
+    return ["h5", "wk", "mo"].every((k) => !go[k] || (go[k].resetSec ?? -1) < 0);
+  }
+
+  // Aggregate the usage carried by the assistant messages currently on screen
+  // (the same snapshots that feed each bubble's badges). Deriving the footer
+  // numbers from the visible thread — instead of a server /stats round-trip —
+  // means they always match what the user is looking at: they can't lag the DB
+  // flush, point at the wrong session, or show stray zeros while a recorded
+  // session is still being written to.
+  function convUsage() {
+    const agg = { input: 0, output: 0, cost: 0, count: 0, ctx: 0, model: "", firstTs: 0 };
+    for (const m of CH.chatHistory) {
+      const u = m.usage;
+      if (m.role !== "assistant" || !u) continue;
+      const n = (a, b) => Number(a ?? b ?? 0) || 0;
+      agg.input += n(u.input);
+      agg.output += n(u.output);
+      agg.cost += n(u.cost_total, u.cost?.total);
+      agg.count++;
+      if (m.model) agg.model = m.model;
+      if (!agg.firstTs) agg.firstTs = m.ts || 0;
+      // Last-message context ≈ the full prefix sent this turn — input plus any
+      // cache reads/writes — mirroring pi's terminal context bar.
+      if (u.input != null || u.cache_read != null || u.cacheRead != null) {
+        agg.ctx = n(u.input) + n(u.cache_read, u.cacheRead) + n(u.cache_write, u.cacheWrite);
+      }
+    }
+    return agg;
+  }
+
+  // Footer line icons — inline stroke SVGs from the same lucide-style family
+  // used across the chat canvas, so they render crisply on every platform
+  // instead of fallback unicode glyphs.
+  const CF_ICON = {
+    up: `<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>`,
+    down: `<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>`,
+    clock: `<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>`,
+    folder: `<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>`,
+    branch: `<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>`,
+    dollar: `<line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>`,
+    gauge: `<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>`,
+    wallet: `<path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/>`,
+    repeat: `<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>`,
+    activity: `<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>`,
+  };
+  function cfIco(name, size) {
+    return `<svg viewBox="0 0 24 24" width="${size || 11}" height="${size || 11}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${CF_ICON[name] || ""}</svg>`;
+  }
+
+  // Slim rounded gauge bar used for the context window and the rolling usage
+  // windows. Fill colour shifts green → amber → red as utilization climbs.
+  function cfBar(pct, size) {
+    const w = Math.max(0, Math.min(100, Number(pct) || 0));
+    const cls = w > 90 ? "cf-err" : w > 70 ? "cf-warn" : "cf-success";
+    return `<span class="cf-bar cf-bar-${size || "md"}"><span class="cf-fill ${cls}" style="width:${w.toFixed(2)}%"></span></span>`;
+  }
+
+  // Cost with precision that survives sub-cent spends (footer rounds up only
+  // once the total is meaningful, instead of snapping tiny amounts to $0.00).
+  function cfCost(n) {
+    n = Number(n) || 0;
+    if (n === 0) return "$0";
+    if (n >= 0.01) return `$${n.toFixed(2)}`;
+    return `$${n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+  }
+
+  function renderChatFooter() {
+    if (!el.footer) return;
+    if (!CH.workspace) { el.footer.innerHTML = ""; return; }
+    const sep = `<span class="cf-sep">·</span>`;
+    const sid = CH.openSid || CH.chatSessionId;
+    const s = CH.sessions.find((x) => x.session_id === sid);
+    const conv = convUsage();
+
+    // Two model scopes drive the footer:
+    //  • the model that produced the visible thread (when a conversation is on
+    //    screen) sets the context-window denominator — tokens can only be
+    //    gauged against the window they actually ran in;
+    //  • the composer-selected model drives the provider/pricing row, so
+    //    changing the Model dropdown updates that UI immediately.
+    const chatModel = CH.chatModel || "";
+    const threadModel = conv.model || (s ? qualifiedModel(s) : "") || "";
+    const winModel = threadModel || chatModel;
+    const winMeta = winModel ? footerModelMeta(winModel) : null;
+    const ctxWin = winMeta?.contextWindow || 0;
+    const selModel = chatModel || threadModel;
+    const selMeta = selModel ? footerModelMeta(selModel) : null;
+    const provider = selMeta?.provider || (selModel ? selModel.split("/")[0] : "");
+
+    // ── Row 1: conversation telemetry chips · right-aligned session meta ──
+    const chips = [];
+    if (conv.count && (conv.input || conv.output)) {
+      chips.push(
+        `<span class="cf-chip" title="${esc(`${cfFmt(conv.input)} input tokens · ${cfFmt(conv.output)} output tokens across the conversation shown`)}">` +
+        `<span class="cf-in">${cfIco("up", 9)}${cfFmt(conv.input)}</span>` +
+        `<span class="cf-out">${cfIco("down", 9)}${cfFmt(conv.output)}</span>` +
+        `</span>`
+      );
+    }
+    if (conv.count) {
+      // The dollar glyph is already the chip's icon, so the amount itself is
+      // rendered without a second currency symbol.
+      chips.push(`<span class="cf-chip cf-cost" title="Total spent on this conversation">${cfIco("dollar", 10)}<span>${esc(cfCost(conv.cost).replace(/^\$/, ""))}</span></span>`);
+    }
+    if (ctxWin > 0 && conv.ctx > 0) {
+      const pct = Math.min(100, (conv.ctx / ctxWin) * 100);
+      chips.push(
+        `<span class="cf-ctx" title="${esc(`context ${pct.toFixed(1)}% of the ${cfFmt(ctxWin)} window${winMeta?.maxTokens ? ` (max output ${cfFmt(winMeta.maxTokens)})` : ""}`)}">` +
+        cfIco("gauge", 10) +
+        `<span class="cf-ctx-l">ctx</span>` +
+        cfBar(pct, "ctx") +
+        `<span class="cf-ctx-p">${pct.toFixed(0)}%</span>` +
+        `<span class="cf-ctx-cap">/${cfFmt(ctxWin)}</span>` +
+        `</span>`
+      );
+    }
+
+    const metaParts = [];
+    const startTs = (s && s.first_ts) || conv.firstTs || 0;
+    const elapsed = startTs ? cfElapsed(startTs) : "";
+    if (elapsed) metaParts.push(`<span class="cf-meta-it cf-dim">${cfIco("clock", 10)}${esc(elapsed)}</span>`);
+    const cwdShort = CH.workspace.split("/").filter(Boolean).slice(-2).join("/") || CH.workspace;
+    metaParts.push(`<span class="cf-meta-it cf-muted">${cfIco("folder", 10)}${esc(cwdShort)}</span>`);
+    if (CH.footer?.branch) metaParts.push(`<span class="cf-meta-it cf-accent">${cfIco("branch", 10)}${esc(CH.footer.branch)}</span>`);
+
+    // ── Row 2: provider pricing · rolling go usage ──
+    const sub = [];
+    if (provider) {
+      const mCost = selMeta?.cost || {};
+      const hasPrice = mCost.input != null || mCost.output != null;
+      const px = (v) => (Number(v) === 0 ? "free" : v == null ? null : `$${Number(v).toFixed(2)}/M`);
+      let s2 = `${cfIco("wallet", 10)}<b>${esc(provider)}</b>`;
+      if (hasPrice) {
+        const pi = px(mCost.input);
+        const po = px(mCost.output);
+        if (pi != null) s2 += `<span class="cf-sub-dim">in ${pi}</span>`;
+        if (po != null) s2 += `<span class="cf-sub-text">out ${po}</span>`;
+        if (mCost.cacheRead) s2 += `<span class="cf-sub-cache">${cfIco("repeat", 9)}$${Number(mCost.cacheRead).toFixed(2)}/M read</span>`;
+      }
+      sub.push(`<span class="cf-pay">${s2}</span>`);
+    }
+    if (provider === "opencode-go" && CH.footer?.goUsage) {
+      const go = CH.footer.goUsage;
+      const win = (label, key) => {
+        const w = go[key] || {};
+        const pct = Number(w.pct) || 0;
+        let h =
+          `<span class="cf-go" title="${esc(`go ${label} window — ${pct.toFixed(0)}% of the rolling limit`)}">` +
+          `<span class="cf-go-l">${label}</span>` +
+          cfBar(pct, "go") +
+          `<span class="cf-go-p cf-${pct > 75 ? "err" : pct > 50 ? "warn" : "success"}">${pct.toFixed(0)}%</span></span>`;
+        if (w.resetSec != null && w.resetSec >= 0) {
+          h += `<span class="cf-reset" title="resets in ${esc(cfReset(w.resetSec))}">${cfIco("clock", 9)}${esc(cfReset(w.resetSec))}</span>`;
+        }
+        return h;
+      };
+      sub.push(
+        `<span class="cf-go-all">` +
+        `<span class="cf-go-title">${cfIco("activity", 10)}go usage</span>` +
+        win("5h", "h5") + win("wk", "wk") + win("mo", "mo") +
+        `</span>`
+      );
+    }
+
+    el.footer.innerHTML =
+      `<div class="cf-row cf-main">` +
+      `<span class="cf-chips">${chips.join("")}</span>` +
+      (metaParts.length ? `<span class="cf-meta">${metaParts.join(sep)}</span>` : "") +
+      `</div>` +
+      (sub.length ? `<div class="cf-row cf-sub">${sub.join(sep)}</div>` : "");
   }
 
   function autoGrow(textarea) {
@@ -1384,10 +1694,31 @@
     if (el.scrollDown) el.scrollDown.classList.toggle("show", !nearBottom());
   }
 
+  // Kill the current pi subprocess (if any) so a new conversation cannot leak
+  // the previous one's context. Best-effort: the session map entry is removed
+  // server-side, so the next /chat/start or /chat spawns a fresh `pi` process
+  // with no memory of earlier chats. Resolves once the kill request is sent
+  // (callers that need ordering — e.g. re-pre-spawning after a config change —
+  // can await it before issuing a new /chat/start).
+  async function killCurrentChatSession() {
+    const sid = CH.chatSessionId;
+    CH.chatSessionId = null;
+    if (sid) {
+      try {
+        await fetch(window.apiUrl("/chat/kill"), {
+          method: "POST",
+          headers: { ...window.authHeaders(), "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: sid }),
+        });
+      } catch { /* server unreachable — fine */ }
+    }
+  }
+
   function newSession() {
     if (CH.chatBusy) return;
     // Start a brand-new conversation for the workspace: wipe the on-screen
     // thread (and any resumed session target) and re-arm a fresh pi session.
+    killCurrentChatSession();
     CH.chatHistory = [];
     CH.openSid = null;
     CH.resumeFile = null;
@@ -1492,11 +1823,12 @@
     live = null;
     CH.chatHistory = CH.chatHistory.map((m) => ({ ...m, streaming: false }));
     persistConversation();
-    setHint(`model ${model}`, "");
+    setHint("reply complete", "");
     setComposerEnabled(true);
     updateHeader();
     renderChat();
     el.input?.focus();
+    renderChatFooter();
   }
 
   // Start a conversation from a hero suggestion chip.
@@ -1537,6 +1869,7 @@
       CH.lastOpenCount = s?.event_count ?? CH.chatHistory.length;
       persistConversation();
       renderChat();
+      renderChatFooter();
       if (el.hint) {
         setHint(
           msgs.length
@@ -1755,15 +2088,37 @@
       el.model.addEventListener("change", () => {
         CH.chatModel = el.model.value;
         updateHeader();
+        renderChatFooter();
+        renderComposerThinking();
         // Model applies to a freshly spawned session; re-pre-spawn when no
         // conversation exists yet so the new model is actually used.
         if (!CH.chatHistory.length && CH.workspace) {
           CH.chatSessionId = null;
           ensureChatSession();
+        } else if (CH.chatHistory.length) {
+          setHint("model change applies to a new session", "");
+        } else {
+          setHint("", "");
         }
-        setHint(CH.chatModel ? `model ${CH.chatModel}` : "", "");
       });
     }
+    if (el.thinking) {
+      // The level is persisted (settings.json defaultThinkingLevel) and the
+      // session re-armed so the next spawned pi process resolves it.
+      el.thinking.addEventListener("change", () => {
+        const level = el.thinking.value;
+        CH.thinkingLevel = level;
+        if (CH.footer) CH.footer.thinking = level;
+        renderChatFooter();
+        postTeam({ action: "setThinkingLevel", level });
+        fitComposerSelects();
+      });
+    }
+    if (el.model) {
+      // Keep the model pill hugging its text when the window resizes.
+      el.model.addEventListener("change", () => fitComposerSelects());
+    }
+    window.addEventListener("resize", () => fitComposerSelects());
     if (el.send) {
       el.send.addEventListener("click", sendPrompt);
     }
@@ -1777,13 +2132,16 @@
       el.input.addEventListener("input", () => autoGrow(el.input));
     }
 
-    CH.sessions = state.sessions || [];
+    CH.sessions = (state.sessions || []).filter(isChatSession);
     loadAgentTeam();
     renderWorkspaces();
     renderAgents();
     renderComposerModel();
     renderChat();
     attemptRestore();
+    fetchChatFooter(true);
+    // Elapsed / branch / go-usage keep ticking: re-render + refresh every 30s.
+    setInterval(() => { renderChatFooter(); fetchChatFooter(); }, 30000);
   }
 
   // Expose hooks for app.js

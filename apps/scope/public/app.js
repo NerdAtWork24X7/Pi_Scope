@@ -70,7 +70,6 @@ const headerBreadcrumb = $("#header-breadcrumb");
 const btnExpandAll = $("#btn-expand-all");
 const btnCollapseAll = $("#btn-collapse-all");
 const pauseToastSingle = $("#pause-toast-single");
-const helpOverlay = $("#help-overlay");
 const sysPromptBtn = $("#btn-sysprompt");
 const spOverlay = $("#sp-overlay");
 const spBody = $("#sp-body");
@@ -1102,56 +1101,6 @@ btnCollapseAll.addEventListener("click", () => {
   eventView.querySelectorAll(".evt-detail.open").forEach(d => d.classList.remove("open"));
 });
 
-// ─── Keyboard nav ──────────────────────────────────────────────────────────
-
-document.addEventListener("keydown", (e) => {
-  if (STATE.view === "terminal") return;
-  if (spOverlay && spOverlay.classList.contains("show")) {
-    if (e.key === "Escape") { e.preventDefault(); toggleSysPrompt(false); }
-    return;
-  }
-  if (e.key === "?") { e.preventDefault(); toggleHelp(); return; }
-  if (e.key === "/" && STATE.view === "single" && STATE.selectedSessionId) {
-    e.preventDefault(); searchBox.focus(); return;
-  }
-  if (STATE.view !== "single" || !STATE.selectedSessionId) return;
-  // While a form control (e.g. the search box opened with "/") holds focus,
-  // Space/j/k must not navigate. Escape blurs it so keyboard nav resumes —
-  // otherwise Space silently stops working until the field loses focus.
-  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA") {
-    if (e.key === "Escape") e.target.blur();
-    return;
-  }
-
-  const evts = getFilteredEvents();
-  switch (e.key) {
-    case "j": case "ArrowDown": e.preventDefault();
-      STATE.focusedIdx = Math.min(STATE.focusedIdx + 1, evts.length - 1);
-      refreshFocus(); scrollToFocused(); break;
-    case "k": case "ArrowUp": e.preventDefault();
-      STATE.focusedIdx = Math.max(STATE.focusedIdx - 1, 0);
-      refreshFocus(); scrollToFocused(); break;
-    case "Enter": case " ": e.preventDefault(); toggleFocusedDetail(); break;
-    case "Escape": e.preventDefault(); collapseAll(); break;
-    case "g": e.preventDefault(); STATE.focusedIdx = 0; refreshFocus(); scrollToFocused(); break;
-    case "G": e.preventDefault(); STATE.focusedIdx = evts.length - 1; refreshFocus(); scrollToFocused(); break;
-  }
-});
-
-function scrollToFocused() {
-  const row = eventView.querySelector(`.evt-row[data-idx="${STATE.focusedIdx}"]`);
-  if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
-}
-function toggleFocusedDetail() {
-  const details = eventView.querySelectorAll(".evt-detail");
-  if (STATE.focusedIdx >= 0 && STATE.focusedIdx < details.length) {
-    details[STATE.focusedIdx].classList.toggle("open");
-  }
-}
-function collapseAll() {
-  eventView.querySelectorAll(".evt-detail.open").forEach(d => d.classList.remove("open"));
-}
-
 // ─── System prompt modal (single view) ───────────────────────────────────
 
 function openSysPrompt() {
@@ -1209,13 +1158,6 @@ spCopyBtn?.addEventListener("click", () => {
 });
 spCloseBtn?.addEventListener("click", () => toggleSysPrompt(false));
 sysPromptBtn?.addEventListener("click", openSysPrompt);
-
-
-// ─── Help overlay ──────────────────────────────────────────────────────────
-
-window.toggleHelp = function() {
-  helpOverlay.classList.toggle("show");
-};
 
 // ─── Sidebar collapse (mini icon mode) ─────────────────────────────────────
 // Collapses the left sidebar to a strip of single-letter agent chips with a

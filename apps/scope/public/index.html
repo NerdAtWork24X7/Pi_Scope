@@ -75,8 +75,8 @@
       --diff-add: #16a34a;
       --diff-del: #dc2626;
       --diff-change: #dd8629;
-      --glass-bg: rgba(255, 255, 255, 0.72);
-      --glass-bg-strong: rgba(255, 255, 255, 0.88);
+      --glass-bg: rgba(255, 255, 255, 0.50);
+      --glass-bg-strong: rgba(255, 255, 255, 0.72);
       --glass-border: rgba(15, 17, 21, 0.08);
       --glass-shadow: 0 8px 32px rgba(15, 17, 21, 0.10);
       --bg-gradient: linear-gradient(180deg, #eaf1ff 0%, #ffffff 40%, #f4f7fb 100%);
@@ -118,8 +118,8 @@
       --diff-add: #4ed17e;
       --diff-del: #f25a5a;
       --diff-change: #f7ad31;
-      --glass-bg: rgba(27, 27, 28, 0.70);
-      --glass-bg-strong: rgba(27, 27, 28, 0.88);
+      --glass-bg: rgba(27, 27, 28, 0.50);
+      --glass-bg-strong: rgba(27, 27, 28, 0.72);
       --glass-border: rgba(249, 250, 251, 0.10);
       --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
       --bg-gradient: linear-gradient(180deg, #1c2334 0%, #151517 40%, #0f0f11 100%);
@@ -291,22 +291,6 @@
     #live-dot.red {
       background: var(--red);
       box-shadow: 0 0 4px var(--red)
-    }
-
-    #btn-help {
-      background: none;
-      border: 1px solid var(--border);
-      color: var(--muted);
-      cursor: pointer;
-      font-size: 19.5px;
-      padding: 1px 6px;
-      border-radius: 3px;
-      line-height: 1
-    }
-
-    #btn-help:hover {
-      color: var(--text);
-      border-color: var(--accent)
     }
 
     #btn-theme {
@@ -1079,24 +1063,6 @@
       display: block
     }
 
-    /* help overlay */
-    #help-overlay {
-      display: none;
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: rgba(0, 0, 0, 0.7);
-      z-index: 100;
-      justify-content: center;
-      align-items: center
-    }
-
-    #help-overlay.show {
-      display: flex
-    }
-
     /* system prompt modal (single view) */
     #sp-overlay {
       display: none;
@@ -1153,43 +1119,6 @@
 
     #sp-box .llm-pre {
       max-height: 340px
-    }
-
-    #help-box {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 20px 24px;
-      max-width: 340px;
-      width: 90%
-    }
-
-    #help-box h2 {
-      font-size: 21px;
-      margin-bottom: 10px
-    }
-
-    #help-box .kb-row {
-      display: flex;
-      justify-content: space-between;
-      padding: 3px 0;
-      font-size: 16.5px;
-      border-bottom: 1px solid var(--hairline-strong)
-    }
-
-    #help-box .kb-key {
-      color: var(--accent);
-      font-family: monospace;
-      font-size: 15px
-    }
-
-    #help-box .kb-desc {
-      color: var(--muted)
-    }
-
-    #help-box .kb-close {
-      margin-top: 10px;
-      text-align: right
     }
 
     /* Live-event entry (single view): slide in from the left while pulsing a
@@ -1680,11 +1609,6 @@
       padding: 4px 12px
     }
 
-    body.layout-form #btn-help {
-      padding: 3px 9px;
-      border-radius: 6px
-    }
-
     body.layout-form #btn-theme {
       padding: 3px 9px;
       border-radius: 6px;
@@ -1952,19 +1876,6 @@
     body.layout-form .snav-context-bar {
       height: 6px;
       border-radius: 4px
-    }
-
-    body.layout-form #help-box {
-      padding: 24px 28px
-    }
-
-    body.layout-form .kb-row {
-      padding: 4px 0;
-      font-size: 16.5px
-    }
-
-    body.layout-form #help-box h2 {
-      margin-bottom: 14px
     }
 
     /* ─── Form-mode event emoji map ─────────────────────────────────── */
@@ -4065,7 +3976,6 @@
       border-radius: 8px;
       box-shadow: var(--glass-shadow);
       padding: 4px;
-      backdrop-filter: blur(14px);
     }
 
     .git-menu-item {
@@ -4114,7 +4024,6 @@
       padding: 16px 20px;
       min-width: 340px;
       max-width: 480px;
-      backdrop-filter: blur(18px);
     }
 
     .git-modal-title {
@@ -4338,13 +4247,19 @@
       white-space: pre-wrap;
     }
 
-    /* ─── Glassmorphism: subtle frosted surfaces ────────────────────────── */
+    /* ─── Translucent glass: body gradient shows through every page ──────── */
     body {
       background: var(--bg-gradient);
       background-attachment: fixed;
     }
 
-    /* Frosted chrome (small / mostly-static surfaces): backdrop blur is cheap here. */
+    /* Every page pane + chrome surface is a plain translucent rgba fill laid
+     over that fixed gradient — including the content panes themselves, so the
+     body gradient shows through on all 7 pages. Deliberately NO
+     backdrop-filter anywhere: blur is the only expensive part (it forces
+     per-frame recomposition behind scrolling/streaming surfaces such as the
+     terminal and live event rows), while a translucent solid over a static
+     gradient composites for almost nothing. */
     header,
     aside,
     .pane-header,
@@ -4352,15 +4267,8 @@
     #trajectory-overview,
     #trajectory-inspector,
     .diff-toolbar,
-    .diff-col-head {
-      background: var(--glass-bg);
-      -webkit-backdrop-filter: blur(14px) saturate(1.4);
-      backdrop-filter: blur(14px) saturate(1.4);
-    }
-
-    /* Content panes: skip backdrop-filter — blur over streaming content (esp. the
-     terminal) is recomputed every frame and makes the app laggy. A translucent
-     solid keeps the frosted tint at negligible cost. */
+    .diff-col-head,
+    #single-pane,
     #trajectory-pane,
     #terminal-pane,
     #files-pane,
@@ -4385,15 +4293,14 @@
       border-bottom-color: var(--glass-border);
     }
 
+    /* Floating popovers / modals: slightly more opaque so content behind stays
+     readable, still plain rgba — no backdrop blur. */
     .term-menu,
     .pause-toast,
     #trajectory-pause-toast,
-    #help-box,
     #sp-box,
     .cp-modal-box {
       background: var(--glass-bg-strong);
-      -webkit-backdrop-filter: blur(18px) saturate(1.4);
-      backdrop-filter: blur(18px) saturate(1.4);
       box-shadow: var(--glass-shadow);
     }
 
@@ -4407,14 +4314,15 @@
      * ─────────────────────────────────────────────────────────────────────── */
 
     /* ── Pane & layout ──────────────────────────────────────────────────── */
-    #chat-pane {
-      background: var(--bg);
-    }
+    /* The whole chat page is translucent glass like the other views (no
+       backdrop-filter — see the glassmorphism note in the main sheet), so the
+       fixed body gradient shows through rails, header and message canvas.
+       Composer box + user bubbles stay solid for readability. */
     .chat-layout {
       gap: 0;
     }
     .chat-rail {
-      background: var(--surface);
+      background: var(--glass-bg);
       width: 260px;
     }
     #chat-workspace-rail {
@@ -4690,14 +4598,12 @@
 
     /* ── Center column ──────────────────────────────────────────────────── */
     .chat-main {
-      background: var(--bg);
+      background: var(--glass-bg);
     }
     .chat-header {
       padding: 12px 20px;
       border-bottom: 1px solid var(--border);
-      background: var(--surface);
-      -webkit-backdrop-filter: blur(16px) saturate(1.5);
-      backdrop-filter: blur(16px) saturate(1.5);
+      background: var(--glass-bg);
       gap: 12px;
     }
     .chat-avatar {
@@ -4835,8 +4741,7 @@
       gap: 0;
       scrollbar-width: thin;
       background:
-        radial-gradient(1200px 420px at 50% -140px, var(--accent-soft) 0%, rgba(0, 0, 0, 0) 70%),
-        var(--bg);
+        radial-gradient(1200px 420px at 50% -140px, var(--accent-soft) 0%, rgba(0, 0, 0, 0) 70%);
       background-attachment: local;
     }
     .chat-scroll-down {
@@ -5439,8 +5344,53 @@
     /* ── Composer ───────────────────────────────────────────────────────── */
     .chat-composer {
       border-top: none;
-      background: linear-gradient(to top, var(--bg) 70%, transparent);
       padding: 4px 28px 14px;
+    }
+    /* Session/status line above the input: moved out of the bottom bar so the
+       model + thinking controls keep their own row and long model names can
+       never shove the status text around. The row reserves a slim height even
+       when empty so the composer doesn't jump between states. */
+    .chat-composer-top {
+      max-width: 940px;
+      margin: 0 auto 3px;
+      padding: 0 10px;
+      display: flex;
+      align-items: center;
+      min-height: 17px;
+    }
+    .chat-composer-hint {
+      font-size: 11.5px;
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .chat-composer-hint:empty {
+      display: none;
+    }
+    .chat-composer-hint::before {
+      content: "●";
+      font-size: 7px;
+      line-height: 1;
+      opacity: 0.55;
+      flex-shrink: 0;
+    }
+    .chat-composer-hint.busy {
+      color: var(--accent);
+    }
+    .chat-composer-hint.busy::before {
+      opacity: 1;
+    }
+    .chat-composer-hint.err {
+      color: var(--red);
+    }
+    .chat-composer-hint.err::before {
+      color: var(--red);
+      opacity: 1;
     }
     .chat-composer-box {
       max-width: 940px;
@@ -5486,56 +5436,77 @@
     }
     .chat-composer-bar {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 10px;
+      gap: 8px 10px;
       margin: 0;
-      padding: 6px 8px 8px 12px;
+      padding: 6px 14px 10px;
     }
-    .chat-model-wrap {
+    .chat-model-wrap,
+    .chat-think-wrap {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       min-width: 0;
+      max-width: 100%;
+      flex: 0 1 auto;
     }
-    .chat-model-label {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      flex-shrink: 0;
-    }
-    #chat-model {
-      border: 1px solid var(--border);
-      background: var(--bg);
-      color: var(--text);
-      border-radius: 8px;
-      font-size: 12px;
-      font-family: var(--mono, monospace);
-      padding: 4px 8px;
-      max-width: 200px;
-      cursor: pointer;
-      outline: none;
-    }
-    #chat-model:focus {
-      border-color: var(--accent);
-    }
-    #chat-model:disabled {
-      opacity: 0.6;
-    }
-    .chat-composer-hint {
-      flex: 1;
-      font-size: 12px;
-      color: var(--muted);
+    .chat-model-wrap .chat-model-label,
+    .chat-think-wrap .chat-think-label {
+      max-width: 74px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .chat-composer-hint.busy {
+    .chat-composer-bar .chat-send {
+      margin-left: auto;
+    }
+    .chat-model-wrap .dot,
+    .chat-think-wrap .dot {
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+    .chat-model-wrap .dot {
       color: var(--accent);
     }
-    .chat-composer-hint.err {
-      color: var(--red);
+    .chat-think-wrap .dot {
+      color: var(--orange);
+    }
+    .chat-model-label,
+    .chat-think-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      flex-shrink: 0;
+    }
+    #chat-model,
+    #chat-thinking {
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-family: var(--mono, monospace);
+      /* generous right padding: room for the native dropdown chevron so the
+         label never runs into (or past) the pill's right edge */
+      padding: 3px 26px 3px 12px;
+      cursor: pointer;
+      outline: none;
+    }
+    #chat-model:hover,
+    #chat-thinking:hover {
+      border-color: var(--accent);
+    }
+    #chat-model:focus-visible,
+    #chat-thinking:focus-visible {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(65, 118, 230, 0.16);
+    }
+    #chat-model:disabled,
+    #chat-thinking:disabled {
+      opacity: 0.55;
     }
     .chat-send {
       width: 34px;
@@ -5566,17 +5537,252 @@
       cursor: default;
       transform: none;
     }
-    .chat-composer-status {
+    .chat-composer-footer {
       max-width: 940px;
-      margin: 5px auto 0;
-      padding: 0 6px;
-      font-size: 11px;
-      color: var(--muted);
-      opacity: 0.85;
+      margin: 7px auto 0;
+      padding: 0 8px;
+      font-size: 10.5px;
       font-family: var(--mono, monospace);
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .cf-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .cf-main {
+      justify-content: space-between;
+      flex-wrap: wrap;
+      row-gap: 6px;
+    }
+    .cf-chips {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+    .cf-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--pill-bg);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 9px;
+      font-size: 10.5px;
+      line-height: 1.55;
       white-space: nowrap;
+      color: var(--text);
+    }
+    .cf-chip .cf-in {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .cf-chip .cf-in svg {
+      opacity: 0.9;
+    }
+    .cf-chip .cf-out {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      color: var(--text);
+      margin-left: 2px;
+    }
+    .cf-chip .cf-out svg {
+      opacity: 0.7;
+    }
+    .cf-chip.cf-cost {
+      color: var(--orange);
+    }
+    .cf-chip.cf-cost svg {
+      opacity: 0.9;
+    }
+    .cf-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+      white-space: nowrap;
+      font-size: 10.5px;
+    }
+    .cf-meta-it {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .cf-meta-it svg {
+      opacity: 0.75;
+      flex-shrink: 0;
+    }
+    /* Context gauge chip (row 1) */
+    .cf-ctx {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      color: var(--muted);
+    }
+    .cf-ctx > svg {
+      color: var(--accent);
+      opacity: 0.9;
+    }
+    .cf-ctx .cf-ctx-l {
+      letter-spacing: 0.4px;
+    }
+    .cf-ctx-p {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .cf-ctx-cap {
+      color: var(--muted);
+      opacity: 0.8;
+    }
+    /* Slim rounded gauge bars (context window + rolling usage) */
+    .cf-bar {
+      display: inline-block;
+      height: 5px;
+      border-radius: 3px;
+      background: var(--pill-bg);
+      border: 1px solid var(--border);
       overflow: hidden;
-      text-overflow: ellipsis;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+      flex-shrink: 0;
+    }
+    .cf-bar-ctx {
+      width: 86px;
+    }
+    .cf-bar-go {
+      width: 52px;
+    }
+    .cf-fill {
+      display: block;
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.35s ease;
+    }
+    .cf-fill.cf-success {
+      background: var(--green);
+    }
+    .cf-fill.cf-warn {
+      background: var(--orange);
+    }
+    .cf-fill.cf-err {
+      background: var(--red);
+    }
+    /* Row 2: provider pricing · rolling usage */
+    .cf-sub {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-width: 0;
+      font-size: 10.5px;
+      color: var(--muted);
+      padding: 0 2px;
+    }
+    .cf-pay {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+    .cf-pay > svg {
+      color: var(--accent);
+      opacity: 0.9;
+    }
+    .cf-pay b {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .cf-pay .cf-sub-dim {
+      opacity: 0.7;
+    }
+    .cf-pay .cf-sub-text {
+      color: var(--text);
+    }
+    .cf-pay .cf-sub-cache {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      color: var(--green);
+    }
+    .cf-go-all {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+    .cf-go-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--text);
+    }
+    .cf-go-title svg {
+      color: var(--accent);
+      opacity: 0.9;
+    }
+    .cf-go {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .cf-go .cf-go-l {
+      min-width: 16px;
+      text-align: right;
+    }
+    .cf-go-p {
+      min-width: 30px;
+      font-weight: 600;
+    }
+    .cf-go-p.cf-success {
+      color: var(--green);
+    }
+    .cf-go-p.cf-warn {
+      color: var(--orange);
+    }
+    .cf-go-p.cf-err {
+      color: var(--red);
+    }
+    .cf-reset {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      opacity: 0.8;
+    }
+    .cf-sep {
+      opacity: 0.4;
+    }
+    .cf-accent {
+      color: var(--accent);
+    }
+    .cf-warn {
+      color: var(--orange);
+    }
+    .cf-err {
+      color: var(--red);
+    }
+    .cf-success {
+      color: var(--green);
+    }
+    .cf-dim {
+      opacity: 0.7;
+    }
+    .cf-muted {
+      color: var(--muted);
+    }
+    .cf-text {
+      color: var(--text);
     }
     .chat-composer-foot {
       max-width: 940px;
@@ -5978,6 +6184,11 @@
       border-radius: 5px;
       padding: 0 4px;
     }
+    .at-sep {
+      height: 1px;
+      background: var(--hairline);
+      margin: 4px 2px;
+    }
 
     /* ── Rail hide / show (sidebars fold to slim strips by default) ─────── */
     /* Toggle sits in the rail header as a subtle ghost icon button (Claude-style
@@ -6079,7 +6290,6 @@
     </div>
     <div id="header-right">
       <button id="btn-theme" title="Toggle light / dark theme" onclick="toggleTheme()">☀</button>
-      <button id="btn-help" title="Keyboard shortcuts" onclick="toggleHelp()">?</button>
       <div id="live-indicator">
         <span id="live-dot" class="red"></span>
         <span id="live-label">off</span>
@@ -6174,7 +6384,7 @@
         <span id="terminal-status" style="margin-left:auto;color:var(--muted);font-size:13.5px">connecting…</span>
         <span id="terminal-dot" class="live-dot red" style="margin-left:6px"></span>
       </div>
-      <div id="terminal-mount" style="flex:1;min-height:0;padding:6px;background:var(--bg);overflow:hidden"></div>
+      <div id="terminal-mount" style="flex:1;min-height:0;padding:6px;overflow:hidden"></div>
     </section>
 
     <section id="files-pane" style="display:none;flex-direction:column;flex:1;overflow:hidden">
@@ -6353,20 +6563,28 @@
           </div>
 
           <div class="chat-composer" id="chat-composer">
+            <div class="chat-composer-top">
+              <span class="chat-composer-hint" id="chat-composer-hint"></span>
+            </div>
             <div class="chat-composer-box">
               <textarea id="chat-input" rows="1" placeholder="Message the pi coding agent…" spellcheck="false"></textarea>
               <div class="chat-composer-bar">
                 <span class="chat-model-wrap" title="Model used for this chat">
+                  <span class="dot">◆</span>
                   <span class="chat-model-label">Model</span>
                   <select id="chat-model"></select>
                 </span>
-                <span class="chat-composer-hint" id="chat-composer-hint"></span>
+                <span class="chat-think-wrap" title="Thinking level — applied to the next session (pi resolves it at agent start)">
+                  <span class="dot">●</span>
+                  <span class="chat-think-label">Thinking</span>
+                  <select id="chat-thinking"></select>
+                </span>
                 <button class="chat-send" id="chat-send" type="button" title="Send to pi (Enter)">
                   <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
                 </button>
               </div>
             </div>
-            <div class="chat-composer-status" id="chat-composer-status"></div>
+            <div class="chat-composer-footer" id="chat-composer-footer"></div>
             <div class="chat-composer-foot">
               <span class="chat-kbd"><kbd>Enter</kbd> send <span class="chat-kbd-dot">·</span> <kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
             </div>
@@ -6404,22 +6622,6 @@
         <button id="cp-merge-cancel" class="btn-sm" type="button">Cancel</button>
         <button id="cp-merge-confirm" class="btn-sm" type="button">Merge</button>
       </div>
-    </div>
-  </div>
-
-  <!-- Help overlay -->
-  <div id="help-overlay" onclick="if(event.target===this) toggleHelp()">
-    <div id="help-box">
-      <h2>⌨ Keyboard shortcuts</h2>
-      <div class="kb-row"><span class="kb-key">j / ↓</span><span class="kb-desc">Next event</span></div>
-      <div class="kb-row"><span class="kb-key">k / ↑</span><span class="kb-desc">Previous event</span></div>
-      <div class="kb-row"><span class="kb-key">Enter / Space</span><span class="kb-desc">Expand event</span></div>
-      <div class="kb-row"><span class="kb-key">Esc</span><span class="kb-desc">Collapse all</span></div>
-      <div class="kb-row"><span class="kb-key">g</span><span class="kb-desc">Jump to top</span></div>
-      <div class="kb-row"><span class="kb-key">G</span><span class="kb-desc">Jump to bottom</span></div>
-      <div class="kb-row"><span class="kb-key">?</span><span class="kb-desc">Toggle this help</span></div>
-      <div class="kb-row"><span class="kb-key">/</span><span class="kb-desc">Focus search</span></div>
-      <div class="kb-close"><button class="btn-sm" onclick="toggleHelp()">Close</button></div>
     </div>
   </div>
 
