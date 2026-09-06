@@ -14,7 +14,7 @@ import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent } from
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { attachTerminal } from "./terminal.ts";
-import { startChat, startChatSession, killChatSession, shutdownChatSessions } from "./chat.ts";
+import { startChat, startChatSession, killChatSession, stopChat, shutdownChatSessions } from "./chat.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -1421,7 +1421,22 @@ async function handle(req: Request): Promise<Response> {
       prompt: typeof parsed.prompt === "string" ? parsed.prompt : "",
       sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
       sessionFile: typeof parsed.sessionFile === "string" ? parsed.sessionFile : "",
+      streamingBehavior: typeof parsed.streamingBehavior === "string" ? parsed.streamingBehavior : "",
     });
+  }
+
+  // ── POST /chat/stop (abort the agent's current run, keep the session) ────
+  // Unlike /chat/kill, this sends `clear_queue` + `abort` to the live pi
+  // subprocess so the current run stops but the conversation context survives —
+  // the user can keep chatting in the same session.
+  if (pathname === "/chat/stop" && method === "POST") {
+    let bodyText: string;
+    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
+    let parsed: any;
+    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
+    const ok = sessionId ? stopChat(sessionId) : false;
+    return jsonResponse({ ok, sessionId });
   }
 
   // ── POST /chat/kill (stop a chat subprocess by session id) ─────────────

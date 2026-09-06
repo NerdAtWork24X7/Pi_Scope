@@ -66,6 +66,7 @@ interface ChatSession {
   prompted: boolean; // has ever received a prompt (vs idle pre-spawn)
   resumedFile: string | null; // pi session file this subprocess is currently on
   resumeCallback: (() => void) | null; // prompt write deferred until a pending switch_session/new_session resolves
+  stopRequested: boolean; // a /chat/stop abort was issued for the current run
 }
 
 const sessions = new Map<string, ChatSession>();
@@ -133,6 +134,12 @@ function handleLine(sess: ChatSession, line: string) {
         }
         return;
       }
+      // A rejected command (e.g. a queued steer/follow-up that pi refused)
+      // should surface to the client instead of a misleading "accepted".
+      if (ev.success === false) {
+        enqueue(ctrl, { type: "error", message: ev.error || "pi rejected the command" });
+        return;
+      }
       enqueue(ctrl, { type: "accepted" });
       return;
     }
@@ -149,7 +156,17 @@ function handleLine(sess: ChatSession, line: string) {
       // a tool loop). Tell the client a new bubble starts so streamed deltas and
       // the per-message `final` snapshot land in their own message instead of
       // piling into one bubble where a later snapshot overwrites earlier text.
-      if (ev.message?.role === "assistant") enqueue(ctrl, { type: "msg_start" });
+      if (ev.message?.role === "assistant") {
+        enqueue(ctrl, { type: "msg_start" });
+      } else if (ev.message?.role === "user") {
+        // A queued steer/follow-up message was just picked up by pi's run loop.
+        // pi does NOT emit a fresh agent_start for these (they run inside the
+        // current loop unless a continuation is forced), so surface an
+        // equivalent run_start. This lets the client adopt the queued user
+        // bubble as the anchor for the incoming assistant response AND drop the
+        // "waiting for its turn" status the moment pi starts working on it.
+        enqueue(ctrl, { type: "run_start" });
+      }
       return;
     case "message_end": {
       // Some providers only deliver the complete message on message_end; emit a
@@ -169,10 +186,24 @@ function handleLine(sess: ChatSession, line: string) {
     case "tool_execution_end":
       enqueue(ctrl, { type: "tool_end", name: ev.toolName || ev.tool || "" });
       return;
+    case "agent_start":
+      // A new low-level agent run began. The client uses this to anchor the
+      // assistant messages of a queued steer/follow-up right after the user
+      // bubble that triggered it (and to place an earlier run's leftover
+      // tool-loop messages before that bubble).
+      enqueue(ctrl, { type: "run_start" });
+      return;
     case "agent_settled":
-    case "agent_end":
-      enqueue(ctrl, { type: "done", sessionId: sess.id, model: sess.model });
+      // Fully settled — no retry, compaction retry, or queued steer/follow-up
+      // remains. Only now is the turn truly done; agent_end can be followed by
+      // queued continuations, so it is never treated as completion.
+      enqueue(ctrl, { type: "done", sessionId: sess.id, model: sess.model, aborted: sess.stopRequested });
+      sess.stopRequested = false;
       closeActive(sess);
+      return;
+    case "agent_end":
+      // A single low-level run completed; queued steer/follow-up, retry or
+      // compaction may still follow, so wait for agent_settled.
       return;
     default:
       return;
@@ -190,7 +221,7 @@ function spawnChat(id: string, cwd: string, model: string): ChatSession {
     env: { ...process.env, PI_OFFLINE: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, resumedFile: null, resumeCallback: null };
+  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, resumedFile: null, resumeCallback: null, stopRequested: false };
 
   proc.stdout.on("data", (d: Buffer) => {
     sess.buffer += d.toString();
@@ -225,8 +256,14 @@ function spawnChat(id: string, cwd: string, model: string): ChatSession {
 }
 
 /** Spawn/queue a prompt to a (possibly reused) pi subprocess and return a
- *  streaming NDJSON Response. `cwd` must already be validated by the caller. */
-export function startChat(opts: { cwd: string; model?: string; prompt: string; sessionId?: string; sessionFile?: string }): Response {
+ *  streaming NDJSON Response. `cwd` must already be validated by the caller.
+ *
+ *  When `streamingBehavior` is "steer" or "followUp" and a prompt is already in
+ *  flight, the message is queued to pi (delivered after the current tool turn /
+ *  after the agent settles) and a JSON `{ queued: true }` response is returned
+ *  instead of a stream — the in-flight stream keeps delivering events to the
+ *  client. */
+export function startChat(opts: { cwd: string; model?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string }): Response {
   const { cwd, prompt } = opts;
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   if (!prompt || !prompt.trim()) {
@@ -248,6 +285,17 @@ export function startChat(opts: { cwd: string; model?: string; prompt: string; s
   sess.lastUsed = Date.now();
   sess.prompted = true;
   if (sess.active) {
+    // A prompt is already streaming to this session. With a steer/follow-up
+    // behavior we queue the message to pi (it streams back over the existing
+    // controller); without one we reject, preserving the old one-at-a-time rule.
+    if (opts.streamingBehavior === "steer" || opts.streamingBehavior === "followUp") {
+      try {
+        sess.proc.stdin.write(JSON.stringify({ type: "prompt", message: prompt, streamingBehavior: opts.streamingBehavior }) + "\n");
+      } catch (err: any) {
+        return new Response(JSON.stringify({ error: err.message || String(err) }), { status: 500, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ ok: true, queued: true, streamingBehavior: opts.streamingBehavior }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     return new Response(JSON.stringify({ error: "a prompt is already running" }), { status: 409, headers: { "content-type": "application/json" } });
   }
 
@@ -339,6 +387,27 @@ export function killChatSession(id: string): void {
   if (!sess) return;
   try { sess.proc.kill(); } catch { /* already dead */ }
   sessions.delete(id);
+}
+
+/** Abort the agent's current run in a chat session (and drop any queued
+ *  steer/follow-up messages) so the user can stop it without killing the
+ *  subprocess and losing the conversation context. pi emits agent_settled after
+ *  the abort, which closes the in-flight stream with `aborted: true`. */
+export function stopChat(id: string): boolean {
+  const sess = sessions.get(id);
+  if (!sess) return false;
+  const wasActive = !!sess.active;
+  if (wasActive) sess.stopRequested = true;
+  try {
+    // clear_queue first so queued steer/follow-up messages don't continue after
+    // the abort; abort then stops the current run and waits for idle.
+    sess.proc.stdin.write(JSON.stringify({ type: "clear_queue" }) + "\n");
+    sess.proc.stdin.write(JSON.stringify({ type: "abort" }) + "\n");
+  } catch {
+    sess.stopRequested = false;
+    return false;
+  }
+  return true;
 }
 
 /** Kill every chat subprocess (called on server shutdown). */

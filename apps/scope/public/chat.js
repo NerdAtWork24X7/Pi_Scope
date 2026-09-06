@@ -39,6 +39,9 @@
   function loadCollapsedSecs() {
     try { return JSON.parse(localStorage.getItem("scope-chat-team-collapsed") || "[]"); } catch { return []; }
   }
+  function loadBool(key, dflt) {
+    try { const v = localStorage.getItem(key); return v === null ? dflt : v === "1"; } catch { return dflt; }
+  }
   function saveCollapsedSecs() {
     try { localStorage.setItem("scope-chat-team-collapsed", JSON.stringify([...CH.collapsedSecs])); } catch {}
   }
@@ -68,6 +71,9 @@
     footer: null,          // /chat/footer snapshot { branch, thinking, modelMeta, goUsage }
     footerFetchedAt: 0,
     thinkingLevel: null,   // selected thinking level (defaults to footer.thinking)
+    showThinking: loadBool("scope-chat-show-thinking", false), // global fold/unfold of thought blocks
+    expandTools: loadBool("scope-chat-expand-tools", false),   // fold chips vs. show tool calls with results
+    steer: loadBool("scope-chat-steer", false), // send next message mid-run (steer) vs queue until done
   };
 
   const el = {};
@@ -98,6 +104,8 @@
     el.composer = $("#chat-composer");
     el.footer = $("#chat-composer-footer");
     el.thinking = $("#chat-thinking");
+    el.steer = $("#chat-steer");
+    el.stop = $("#chat-stop");
   }
 
   // ─── Selectors / data ─────────────────────────────────────────────────────
@@ -1014,13 +1022,163 @@
 
   // ─── Message rendering ────────────────────────────────────────────────────
 
+  // Format a tool-call's arguments for display. Tool payloads arrive as either
+  // a JSON object or a string; normalize to a readable block.
+  function fmtArgs(args) {
+    if (args == null || args === "") return "";
+    if (typeof args === "object") {
+      try { return JSON.stringify(args, null, 2); } catch { return String(args); }
+    }
+    return String(args);
+  }
+
+  function toolStateMeta(state) {
+    if (state === "live") return { cls: "live", word: "running" };
+    if (state === "err") return { cls: "err", word: "error" };
+    return { cls: "ok", word: "done" };
+  }
+
+  // One tool call as an expandable block (used in "show tool calls with result").
+  function toolCallHtml(t) {
+    const st = toolStateMeta(t.state);
+    const args = fmtArgs(t.args);
+    const hasResult = t.result != null && t.result !== "";
+    const resultCls = st.cls === "err" ? "err" : "ok";
+    const body =
+      `<div class="chat-tool-call-body">` +
+      (args ? `<div class="chat-tool-call-args"><div class="chat-tool-call-k">Args</div><pre>${esc(args)}</pre></div>` : "") +
+      (hasResult
+        ? `<div class="chat-tool-call-result ${resultCls}"><div class="chat-tool-call-k">Result</div><pre>${esc(t.result)}</pre></div>`
+        : (st.cls === "live" ? `<div class="chat-tool-call-live"><span class="chat-tool-call-k">Running…</span></div>` : "")) +
+      `</div>`;
+    return (
+      `<details class="chat-tool-call ${st.cls}" data-name="${esc(t.name)}" open>` +
+      `<summary>` +
+      `<span class="chat-tool-icon">${toolIcon(t.name)}</span>` +
+      `<span class="chat-tool-name">${esc(t.name)}</span>` +
+      `<span class="chat-tool-dot"></span>` +
+      `<span class="chat-tool-call-state">${st.word}</span>` +
+      `</summary>` +
+      body +
+      `</details>`
+    );
+  }
+
+  // Render a message's tool activity in the current display mode. Folded mode
+  // shows compact chips; expanded mode shows each call with its args + result.
+  function renderToolsHtml(tools) {
+    if (!tools || !tools.length) return "";
+    if (!CH.expandTools) {
+      return `<div class="chat-tools">` + tools.map((t) =>
+        `<span class="chat-tool ${t.state || ""}"><span class="chat-tool-icon">${toolIcon(t.name)}</span>` +
+        `<span class="chat-tool-name">${esc(t.name)}</span><span class="chat-tool-dot"></span></span>`
+      ).join("") + `</div>`;
+    }
+    return `<div class="chat-tools chat-tools-expanded">` + tools.map(toolCallHtml).join("") + `</div>`;
+  }
+
+  // ─── View toggles: fold/unfold thinking, show/fold tool calls ─────────────
+  function updateToggleButtons() {
+    const t = document.getElementById("chat-toggle-thinking");
+    const tl = document.getElementById("chat-toggle-tools");
+    if (t) {
+      t.classList.toggle("on", CH.showThinking);
+      t.setAttribute("aria-pressed", CH.showThinking ? "true" : "false");
+      t.title = CH.showThinking ? "Fold thinking" : "Show thinking";
+    }
+    if (tl) {
+      tl.classList.toggle("on", CH.expandTools);
+      tl.setAttribute("aria-pressed", CH.expandTools ? "true" : "false");
+      tl.title = CH.expandTools ? "Fold tool calls" : "Show tool call results";
+    }
+  }
+
+  function updateSteerToggle() {
+    if (!el.steer) return;
+    el.steer.classList.toggle("on", CH.steer);
+    el.steer.setAttribute("aria-pressed", CH.steer ? "true" : "false");
+    el.steer.title = CH.steer
+      ? "Steer is on — your next message reaches pi immediately, mid-run"
+      : "Steer is off — your next message is queued until pi finishes the current turn";
+  }
+
+  // "⏹ stopped" chip appended to a live assistant message body when the user
+  // aborts the agent mid-run. Kept in sync across the final re-render via m.stopped.
+  function addStoppedNote(body, m) {
+    m.stopped = true;
+    if (!body) return;
+    let n = body.querySelector(".chat-stopped-note");
+    if (!n) {
+      n = document.createElement("div");
+      n.className = "chat-stopped-note";
+      n.textContent = "⏹ stopped by you";
+      body.appendChild(n);
+    }
+  }
+
+  // A queued steer/follow-up that was cleared by the stop action gets a small
+  // "cancelled" chip so the user knows their message won't be answered.
+  function addCancelledNote(node, m) {
+    m.cancelled = true;
+    if (!node) return;
+    let n = node.querySelector(".chat-msg-cancelled");
+    if (!n) {
+      n = document.createElement("div");
+      n.className = "chat-msg-cancelled";
+      n.textContent = "cancelled";
+      node.querySelector(".chat-bubble-user")?.appendChild(n);
+    }
+  }
+
+  function applyThinkingState() {
+    el.msg.querySelectorAll("details.chat-thinking").forEach((d) => { d.open = CH.showThinking; });
+    updateToggleButtons();
+  }
+
+  function toggleThinking() {
+    CH.showThinking = !CH.showThinking;
+    try { localStorage.setItem("scope-chat-show-thinking", CH.showThinking ? "1" : "0"); } catch {}
+    applyThinkingState();
+  }
+
+  // Re-render each message's tool activity in the current display mode without
+  // rebuilding the whole list (which would disrupt an in-flight stream).
+  function refreshToolDisplay() {
+    el.msg.querySelectorAll(".chat-msg").forEach((node) => {
+      const i = node.dataset.i;
+      const m = CH.chatHistory[Number(i)];
+      if (!m || m.role !== "assistant") return;
+      const body = node.querySelector(".chat-msg-body");
+      if (!body) return;
+      body.querySelectorAll(".chat-tools").forEach((t) => t.remove());
+      const toolsHtml = renderToolsHtml(m.tools || []);
+      if (toolsHtml) {
+        const wrap = document.createElement("div");
+        wrap.innerHTML = toolsHtml;
+        const toolsEl = wrap.firstElementChild;
+        const ref = body.querySelector(".chat-text, .chat-usage");
+        if (ref) body.insertBefore(toolsEl, ref);
+        else body.appendChild(toolsEl);
+      }
+    });
+    updateToggleButtons();
+  }
+
+  function toggleTools() {
+    CH.expandTools = !CH.expandTools;
+    try { localStorage.setItem("scope-chat-expand-tools", CH.expandTools ? "1" : "0"); } catch {}
+    refreshToolDisplay();
+  }
+
   function renderChatMsg(m, i) {
     if (m.role === "user") {
       const copyAttr = esc(m.text || "");
       return (
         `<div class="chat-msg chat-user" data-i="${i}">` +
         `<div class="chat-msg-body">` +
-        `<div class="chat-bubble chat-bubble-user"><div class="chat-bubble-text">${esc(m.text || "")}</div></div>` +
+        `<div class="chat-bubble chat-bubble-user"><div class="chat-bubble-text">${esc(m.text || "")}</div>` +
+        (m.cancelled ? `<div class="chat-msg-cancelled">cancelled</div>` : "") +
+        `</div>` +
         `<div class="chat-msg-top">` +
         `<span class="chat-msg-name">you</span>` +
         `<span class="chat-msg-time">${esc(fmtTs(m.ts))}</span>` +
@@ -1034,14 +1192,9 @@
     const cost = usage.cost?.total ?? usage.cost_total;
     if (tokens != null) badges.push(`<span class="chat-badge">${esc(S.fmtTokens(tokens))} tokens</span>`);
     if (cost != null) badges.push(`<span class="chat-badge cost">$${Number(cost).toFixed(5)}</span>`);
-    const tools = (m.tools || []).length
-      ? `<div class="chat-tools">` + (m.tools || []).map((t) =>
-          `<span class="chat-tool ${t.state || ""}"><span class="chat-tool-icon">${toolIcon(t.name)}</span>` +
-          `<span class="chat-tool-name">${esc(t.name)}</span><span class="chat-tool-dot"></span></span>`
-        ).join("") + `</div>`
-      : "";
+    const tools = renderToolsHtml(m.tools || []);
     const thinking = m.thinking
-      ? `<details class="chat-thinking"><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre>${esc(m.thinking)}</pre></details>`
+      ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre>${esc(m.thinking)}</pre></details>`
       : "";
     const body = m.text
       ? `<div class="chat-text">${fmtMarkdown(m.text)}</div>`
@@ -1049,6 +1202,7 @@
           ? `<div class="chat-msg-time">(no text response)</div>`
           : "");
     const errNote = m.errorNote ? `<div class="chat-error-note">${esc(m.errorNote)}</div>` : "";
+    const stoppedNote = m.stopped ? `<div class="chat-stopped-note">⏹ stopped by you</div>` : "";
     const copyAttr = esc((m.text || "") + (m.thinking ? "\n\n" + m.thinking : ""));
     return (
       `<div class="chat-msg chat-ai" data-i="${i}">` +
@@ -1065,6 +1219,7 @@
       body +
       (badges.length ? `<div class="chat-usage">${badges.join("")}</div>` : "") +
       errNote +
+      stoppedNote +
       `</div></div>`
     );
   }
@@ -1130,11 +1285,12 @@
     updateScrollDown();
   }
 
-  function renderChatMsgLivePlaceholder(m) {
+  function renderChatMsgLivePlaceholder(m, idx) {
     // Empty assistant row that streaming events fill in-place.
+    const dataIdx = idx != null ? idx : CH.chatHistory.length - 1;
     const copyAttr = esc(m.text || "");
     return (
-      `<div class="chat-msg chat-ai chat-ai-live" data-i="${CH.chatHistory.length - 1}">` +
+      `<div class="chat-msg chat-ai chat-ai-live" data-i="${dataIdx}">` +
       `<div class="chat-msg-avatar">π</div>` +
       `<div class="chat-msg-body">` +
       `<div class="chat-msg-top">` +
@@ -1149,7 +1305,22 @@
   }
 
   // ─── Live streaming into the active assistant message ─────────────────────
-  let live = null; // { body, m }
+  let live = null; // { body, m, isFirst, queue, after }
+  let chatGen = 0; // generation guard: a newer turn supersedes an older finalize
+
+  // Coalesce footer re-renders to one per animation frame. The composer footer
+  // (token/cost chips + context gauge) is re-derived from the live usage stream,
+  // and pi can emit many `usage` events per turn. Rebuilding el.footer.innerHTML
+  // for each one stamps the DOM and makes the context bar blink on/off; rAF
+  // batching keeps it to a single paint per frame.
+  let footerRenderFrame = 0;
+  function scheduleFooterRender() {
+    if (footerRenderFrame) return;
+    footerRenderFrame = requestAnimationFrame(() => {
+      footerRenderFrame = 0;
+      renderChatFooter();
+    });
+  }
 
   function clearLiveTyping() {
     if (!live) return;
@@ -1170,7 +1341,7 @@
     if (!det) {
       det = document.createElement("details");
       det.className = "chat-thinking";
-      det.open = true;
+      det.open = CH.showThinking;
       det.innerHTML = `<summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre></pre>`;
       livePrependTextNode(body, det, ".chat-tools, .chat-text, .chat-usage");
     }
@@ -1201,18 +1372,37 @@
     let toolsEl = body.querySelector(".chat-tools");
     if (!toolsEl) {
       toolsEl = document.createElement("div");
-      toolsEl.className = "chat-tools";
+      toolsEl.className = CH.expandTools ? "chat-tools chat-tools-expanded" : "chat-tools";
       livePrependTextNode(body, toolsEl, ".chat-text, .chat-usage");
     }
-    const chip = document.createElement("span");
-    chip.className = "chat-tool live";
-    chip.dataset.name = name;
-    chip.innerHTML =
-      `<span class="chat-tool-icon">${toolIcon(name)}</span>` +
-      `<span class="chat-tool-name">${esc(name)}</span>` +
-      `<span class="chat-tool-dot"></span>`;
-    toolsEl.appendChild(chip);
     m.tools.push({ name, args, state: "live" });
+    if (CH.expandTools) {
+      const det = document.createElement("details");
+      det.className = "chat-tool-call live";
+      det.dataset.name = name;
+      det.open = true;
+      det.innerHTML =
+        `<summary>` +
+        `<span class="chat-tool-icon">${toolIcon(name)}</span>` +
+        `<span class="chat-tool-name">${esc(name)}</span>` +
+        `<span class="chat-tool-dot"></span>` +
+        `<span class="chat-tool-call-state">running</span>` +
+        `</summary>` +
+        `<div class="chat-tool-call-body">` +
+        (args ? `<div class="chat-tool-call-args"><div class="chat-tool-call-k">Args</div><pre>${esc(fmtArgs(args))}</pre></div>` : "") +
+        `<div class="chat-tool-call-live"><span class="chat-tool-call-k">Running…</span></div>` +
+        `</div>`;
+      toolsEl.appendChild(det);
+    } else {
+      const chip = document.createElement("span");
+      chip.className = "chat-tool live";
+      chip.dataset.name = name;
+      chip.innerHTML =
+        `<span class="chat-tool-icon">${toolIcon(name)}</span>` +
+        `<span class="chat-tool-name">${esc(name)}</span>` +
+        `<span class="chat-tool-dot"></span>`;
+      toolsEl.appendChild(chip);
+    }
   }
 
   function streamToolEnd(body, m, name) {
@@ -1220,6 +1410,14 @@
     if (t) t.state = "ok";
     const chip = toolChip(body, name);
     if (chip) { chip.classList.remove("live"); chip.classList.add("ok"); }
+    const det = body.querySelector(`.chat-tool-call[data-name="${CSS.escape(name)}"]`);
+    if (det) {
+      det.classList.remove("live");
+      det.classList.add("ok");
+      const state = det.querySelector(".chat-tool-call-state");
+      if (state) state.textContent = "done";
+      det.querySelector(".chat-tool-call-live")?.remove();
+    }
   }
 
   function streamError(body, m, msg) {
@@ -1251,13 +1449,71 @@
           role: "assistant", text: "", thinking: "", tools: [], usage: null,
           model: live.m.model || CH.chatModel, ts: Date.now(), streaming: true,
         };
-        CH.chatHistory.push(m2);
-        const wrap = document.createElement("div");
-        wrap.innerHTML = renderChatMsgLivePlaceholder(m2);
-        const node = wrap.firstElementChild;
-        if (node && el.msg) el.msg.appendChild(node);
-        live = { body: node.querySelector(".chat-msg-body"), m: m2, isFirst: false };
+        let node = null;
+        let mIdx = CH.chatHistory.length;
+        if (el.msg) {
+          // Place the new bubble relative to any queued steer/follow-up bubbles so
+          // an earlier run's leftover tool-loop messages land before the queued
+          // user message, and the queued run's own messages land right after it.
+          if (live.queue.length) {
+            const ref = live.queue[0];
+            mIdx = CH.chatHistory.indexOf(ref.msg);
+            if (mIdx < 0) {
+              // The queued user bubble was trimmed from history (very long
+              // thread) — fall back to appending at the end.
+              CH.chatHistory.push(m2);
+              mIdx = CH.chatHistory.length - 1;
+              const wrap = document.createElement("div");
+              wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
+              node = wrap.firstElementChild;
+              if (node) el.msg.appendChild(node);
+            } else {
+              CH.chatHistory.splice(mIdx, 0, m2);
+              const wrap = document.createElement("div");
+              wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
+              node = wrap.firstElementChild;
+              if (node && ref.node) ref.node.before(node);
+            }
+          } else if (live.after) {
+            mIdx = CH.chatHistory.indexOf(live.after.msg) + 1;
+            if (mIdx <= 0) {
+              CH.chatHistory.push(m2);
+              mIdx = CH.chatHistory.length - 1;
+              const wrap = document.createElement("div");
+              wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
+              node = wrap.firstElementChild;
+              if (node) el.msg.appendChild(node);
+            } else {
+              CH.chatHistory.splice(mIdx, 0, m2);
+              const wrap = document.createElement("div");
+              wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
+              node = wrap.firstElementChild;
+              if (node && live.after.node) live.after.node.after(node);
+            }
+          } else {
+            CH.chatHistory.push(m2);
+            const wrap = document.createElement("div");
+            wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
+            node = wrap.firstElementChild;
+            if (node) el.msg.appendChild(node);
+          }
+        } else {
+          CH.chatHistory.push(m2);
+        }
+        live = { body: node ? node.querySelector(".chat-msg-body") : live.body, m: m2, isFirst: false, queue: live.queue, after: live.after };
         if (nearBottom()) scrollToBottom();
+        break;
+      }
+      case "run_start": {
+        // A new low-level agent run began. If the user queued a steer/follow-up
+        // message, that run is now being processed — adopt its user bubble as
+        // the anchor so the assistant response streams in right after it. This
+        // is the moment the "waiting for its turn" status is dropped: pi has
+        // moved on from queueing and is actually working the message now.
+        if (live && live.queue.length) {
+          live.after = live.queue.shift();
+          setHint("pi is responding to your message…", "busy");
+        }
         break;
       }
       case "text":
@@ -1301,7 +1557,9 @@
     if (nearBottom()) scrollToBottom();
     // Keep the composer footer in lockstep with the live turn — the usage / final
     // snapshots are exactly what its token + cost numbers are derived from.
-    if (ev.type === "usage" || ev.type === "final") renderChatFooter();
+    // Coalesced to one render per frame so a burst of usage events doesn't
+    // stampede the DOM and make the context gauge blink.
+    if (ev.type === "usage" || ev.type === "final") scheduleFooterRender();
   }
 
   function setHint(text, kind) {
@@ -1316,7 +1574,11 @@
     el.input.disabled = !on;
     el.model.disabled = !on;
     if (el.thinking) el.thinking.disabled = !on;
-    el.send.disabled = !on || CH.chatBusy;
+    if (el.steer) el.steer.disabled = !on;
+    // Keep Send enabled while a turn streams so the user can steer / queue a
+    // follow-up; the stop button appears in its place of action.
+    el.send.disabled = !on;
+    if (el.stop) el.stop.classList.toggle("show", CH.chatBusy);
     if (el.input) el.input.placeholder = "Message the pi coding agent…";
   }
 
@@ -1602,21 +1864,27 @@
     const provider = selMeta?.provider || (selModel ? selModel.split("/")[0] : "");
 
     // ── Row 1: conversation telemetry chips · right-aligned session meta ──
+    // A thread exists once any assistant bubble is on screen. Keep the token and
+    // cost chips mounted for that whole thread: the live usage stream can deliver
+    // all-zero / absent input for the in-flight turn, which previously dropped the
+    // count to 0 and made the chips blink out and back in. Same fix as the context
+    // gauge below. They're hidden only for a genuinely empty composer or a static
+    // thread that never captured usage snapshots.
+    const hasThread = CH.chatHistory.some((m) => m.role === "assistant");
+    const showUsage = hasThread && (CH.chatBusy || conv.count > 0);
     const chips = [];
-    if (conv.count && (conv.input || conv.output)) {
+    if (showUsage) {
       chips.push(
         `<span class="cf-chip" title="${esc(`${cfFmt(conv.input)} input tokens · ${cfFmt(conv.output)} output tokens across the conversation shown`)}">` +
         `<span class="cf-in">${cfIco("up", 9)}${cfFmt(conv.input)}</span>` +
         `<span class="cf-out">${cfIco("down", 9)}${cfFmt(conv.output)}</span>` +
         `</span>`
       );
-    }
-    if (conv.count) {
       // The dollar glyph is already the chip's icon, so the amount itself is
       // rendered without a second currency symbol.
       chips.push(`<span class="cf-chip cf-cost" title="Total spent on this conversation">${cfIco("dollar", 10)}<span>${esc(cfCost(conv.cost).replace(/^\$/, ""))}</span></span>`);
     }
-    if (ctxWin > 0 && conv.ctx > 0) {
+    if (hasThread && ctxWin > 0) {
       const pct = Math.min(100, (conv.ctx / ctxWin) * 100);
       chips.push(
         `<span class="cf-ctx" title="${esc(`context ${pct.toFixed(1)}% of the ${cfFmt(ctxWin)} window${winMeta?.maxTokens ? ` (max output ${cfFmt(winMeta.maxTokens)})` : ""}`)}">` +
@@ -1752,18 +2020,157 @@
     if (orch) openSession(orch.session_id);
   }
 
+  // Read an NDJSON stream from POST /chat into the active `live` message. Shared
+  // by sendPrompt (a fresh turn) and sendWhileBusy's race path (the agent settled
+  // between the click and the request landing, so pi treated it as a new prompt).
+  async function consumeChatStream(res, aiMsg) {
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx);
+        buf = buf.slice(idx + 1);
+        if (!line.trim()) continue;
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === "done") {
+          if (live?.m) live.m.streaming = false;
+          if (ev.sessionId) CH.chatSessionId = ev.sessionId;
+          if (ev.error) {
+            const tgt = live?.m || aiMsg;
+            tgt.errorNote = ev.error === "process closed"
+              ? "pi session ended unexpectedly (process closed)"
+              : ev.error;
+          }
+          if (ev.aborted) {
+            // The user stopped the agent: mark any queued steer/follow-up as
+            // cancelled (clear_queue dropped them) and stamp the live message.
+            if (live) {
+              for (const q of live.queue) addCancelledNote(q.node, q.msg);
+              addStoppedNote(live.body, live.m);
+            } else {
+              addStoppedNote(null, aiMsg);
+            }
+          }
+        } else {
+          handleChatEvent(ev);
+        }
+      }
+    }
+  }
+
+  // Finalize a chat turn: clear the busy flag, stop the live stream, persist and
+  // re-render the thread with full markdown. Guarded by `gen` so a newer turn
+  // (e.g. a steer that raced the agent settling and became a fresh prompt) can
+  // supersede an older turn's finalize without clobbering its live state.
+  function finalizeChatTurn(gen) {
+    if (gen !== chatGen) return;
+    CH.chatBusy = false;
+    live = null;
+    CH.chatHistory = CH.chatHistory.map((m) => ({ ...m, streaming: false }));
+    persistConversation();
+    setHint("reply complete", "");
+    setComposerEnabled(true);
+    updateHeader();
+    renderChat();
+    el.input?.focus();
+    renderChatFooter();
+  }
+
+  // Queue a message to a pi session that is already streaming. With the Steer
+  // toggle on, the message is delivered mid-run (after the current tool turn);
+  // off, it waits until the agent settles. The in-flight stream keeps pushing
+  // events to the same `live` message, so we only append the user bubble and
+  // record it in live.queue — the assistant response arrives on a later run_start.
+  async function sendWhileBusy(text) {
+    const model = CH.chatModel || defaultChatModel();
+    const streamingBehavior = CH.steer ? "steer" : "followUp";
+    const userMsg = { role: "user", text, ts: Date.now() };
+    CH.chatHistory.push(userMsg);
+    el.input.value = "";
+    autoGrow(el.input);
+    try {
+      const res = await fetch(window.apiUrl("/chat"), {
+        method: "POST",
+        headers: { ...window.authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ cwd: CH.workspace, model, prompt: text, sessionId: CH.chatSessionId, sessionFile: CH.resumeFile || "", streamingBehavior }),
+      });
+      const ct = res.headers.get("content-type") || "";
+      if (res.ok && ct.includes("ndjson")) {
+        // Race: the agent settled while the request was in flight, so pi treated
+        // this as a fresh prompt — render the new turn and consume the stream.
+        const gen = ++chatGen;
+        CH.chatBusy = true;
+        const aiMsg = { role: "assistant", text: "", thinking: "", tools: [], usage: null, model, ts: Date.now(), streaming: true };
+        CH.chatHistory.push(aiMsg);
+        el.msg.innerHTML = CH.chatHistory.slice(0, -1).map((m, i) => renderChatMsg(m, i)).join("") +
+          renderChatMsgLivePlaceholder(aiMsg);
+        live = {
+          body: el.msg.querySelector(".chat-msg.chat-ai-live .chat-msg-body"),
+          m: aiMsg,
+          isFirst: true,
+          queue: [],
+          after: null,
+        };
+        setHint("pi is thinking…", "busy");
+        updateHeader();
+        scrollToBottom(true);
+        await consumeChatStream(res, aiMsg);
+        finalizeChatTurn(gen);
+      } else {
+        // Queued steer/follow-up. Append the user bubble and record it in
+        // live.queue so the in-flight stream places the response after it.
+        let node = null;
+        if (el.msg) {
+          const wrap = document.createElement("div");
+          wrap.innerHTML = renderChatMsg(userMsg, CH.chatHistory.length - 1);
+          node = wrap.firstElementChild;
+          if (node) el.msg.appendChild(node);
+          scrollToBottom(true);
+        }
+        if (!res.ok) {
+          let detail = "";
+          try { detail = (await res.json())?.error || ""; } catch { /* non-JSON body */ }
+          if (live) streamError(live.body, live.m, `queued message failed: HTTP ${res.status}${detail ? ": " + detail : ""}`);
+          setHint("could not queue that message", "err");
+        } else {
+          if (live && node) live.queue.push({ msg: userMsg, node });
+          setHint(
+            CH.steer
+              ? "steering pi — it will pivot after this tool turn"
+              : "queued — pi will continue once this turn settles",
+            "busy"
+          );
+        }
+      }
+    } catch (err) {
+      if (live) streamError(live.body, live.m, (err && err.message) || String(err));
+    }
+    el.input?.focus();
+  }
+
   async function sendPrompt() {
     const text = el.input.value.trim();
-    if (!text || CH.chatBusy) return;
+    if (!text) return;
     if (!CH.workspace) { el.input.focus(); return; }
+    // A turn is already streaming: send this as a steer/follow-up instead of a
+    // fresh prompt, and let the in-flight stream carry the response.
+    if (CH.chatBusy) {
+      await sendWhileBusy(text);
+      return;
+    }
 
     // Sending turns the canvas into a live conversation (not a session replay).
     CH.openSid = null;
 
     const model = CH.chatModel || defaultChatModel();
+    const gen = ++chatGen;
     CH.chatBusy = true;
     setComposerEnabled(true);
-    if (el.send) el.send.disabled = true;
     setHint("pi is thinking…", "busy");
 
     const userMsg = { role: "user", text, ts: Date.now() };
@@ -1782,6 +2189,8 @@
       body: el.msg.querySelector(".chat-msg.chat-ai-live .chat-msg-body"),
       m: aiMsg,
       isFirst: true, // the placeholder already stands in for the first assistant message
+      queue: [], // queued steer/follow-up user bubbles awaiting their run
+      after: null, // the user bubble the current assistant run's messages follow
     };
     updateHeader();
     scrollToBottom(true);
@@ -1800,48 +2209,13 @@
         try { detail = (await res.json())?.error || ""; } catch { /* non-JSON body */ }
         streamError(live.body, aiMsg, `HTTP ${res.status}${detail ? ": " + detail : ""}`);
       } else {
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        let buf = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          let idx;
-          while ((idx = buf.indexOf("\n")) >= 0) {
-            const line = buf.slice(0, idx);
-            buf = buf.slice(idx + 1);
-            if (!line.trim()) continue;
-            let ev; try { ev = JSON.parse(line); } catch { continue; }
-            if (ev.type === "done") {
-              if (live?.m) live.m.streaming = false;
-              if (ev.sessionId) CH.chatSessionId = ev.sessionId;
-              if (ev.error) {
-                const tgt = live?.m || aiMsg;
-                tgt.errorNote = ev.error === "process closed"
-                  ? "pi session ended unexpectedly (process closed)"
-                  : ev.error;
-              }
-            } else {
-              handleChatEvent(ev);
-            }
-          }
-        }
+        await consumeChatStream(res, aiMsg);
       }
     } catch (err) {
       streamError(live.body, aiMsg, (err && err.message) || String(err));
     }
 
-    CH.chatBusy = false;
-    live = null;
-    CH.chatHistory = CH.chatHistory.map((m) => ({ ...m, streaming: false }));
-    persistConversation();
-    setHint("reply complete", "");
-    setComposerEnabled(true);
-    updateHeader();
-    renderChat();
-    el.input?.focus();
-    renderChatFooter();
+    finalizeChatTurn(gen);
   }
 
   // Start a conversation from a hero suggestion chip.
@@ -1856,6 +2230,20 @@
     renderWorkspaces();
     const input = document.getElementById("chat-ws-add-input");
     if (input) input.focus();
+  }
+
+  // Open the "add workspace" flow. When the native directory picker is
+  // available (Electron) open the file manager directly and submit the chosen
+  // path; otherwise fall back to the inline manual-entry row in the sidebar.
+  async function openAddWorkspace() {
+    if (typeof window.scopeNative?.pickDirectory === "function") {
+      try {
+        const dir = await window.scopeNative.pickDirectory();
+        if (dir) { submitAddWorkspace(dir); return; }
+        // cancelled — fall back to manual entry
+      } catch { /* dialog failed — fall back to manual entry */ }
+    }
+    addWorkspaceRow();
   }
 
   // ─── Loading a session transcript into the chat window ───────────────────
@@ -1940,10 +2328,23 @@
           }
         }
       } else if (ev.type === "tool_call") {
-        pendingTools.push({ name: p.tool_name || "tool", state: "ok" });
+        pendingTools.push({
+          name: p.tool_name || "tool",
+          state: "ok",
+          args: p.args,
+          callId: p.tool_call_id,
+          result: undefined,
+          isError: false,
+        });
       } else if (ev.type === "tool_result") {
-        const last = pendingTools[pendingTools.length - 1];
-        if (last && last.name === (p.tool_name || last.name) && S.isToolResultError(p)) last.state = "err";
+        const isErr = S.isToolResultError(p);
+        const byCall = pendingTools.find((t) => t.callId && t.callId === p.tool_call_id);
+        const target = byCall || pendingTools[pendingTools.length - 1];
+        if (target && (target.name === (p.tool_name || target.name))) {
+          if (isErr) target.state = "err";
+          target.isError = isErr;
+          target.result = p.content_text || "";
+        }
       }
     }
     // Flush anything still pending at the end of the event list.
@@ -2070,7 +2471,7 @@
         return;
       }
       if (e.target.closest("#chat-hero-add")) {
-        addWorkspaceRow();
+        openAddWorkspace();
         return;
       }
     });
@@ -2084,18 +2485,13 @@
     if (el.btnNew) el.btnNew.addEventListener("click", newSession);
     if (el.btnOpen) el.btnOpen.addEventListener("click", openCurrentSessionTimeline);
 
+    const tThink = document.getElementById("chat-toggle-thinking");
+    if (tThink) tThink.addEventListener("click", toggleThinking);
+    const tTools = document.getElementById("chat-toggle-tools");
+    if (tTools) tTools.addEventListener("click", toggleTools);
+
     if (el.wsAdd) {
-      el.wsAdd.addEventListener("click", async () => {
-        if (typeof window.scopeNative?.pickDirectory === "function") {
-          try {
-            const dir = await window.scopeNative.pickDirectory();
-            if (dir) submitAddWorkspace(dir);
-            else addWorkspaceRow();
-            return;
-          } catch { /* fall through to manual entry */ }
-        }
-        addWorkspaceRow();
-      });
+      el.wsAdd.addEventListener("click", openAddWorkspace);
     }
     if (el.model) {
       el.model.addEventListener("change", () => {
@@ -2135,6 +2531,25 @@
     if (el.send) {
       el.send.addEventListener("click", sendPrompt);
     }
+    if (el.steer) {
+      el.steer.addEventListener("click", () => {
+        CH.steer = !CH.steer;
+        try { localStorage.setItem("scope-chat-steer", CH.steer ? "1" : "0"); } catch {}
+        updateSteerToggle();
+        setHint(CH.steer ? "Steer on — next message reaches pi mid-run" : "Steer off — next message queues until pi finishes", "");
+      });
+    }
+    if (el.stop) {
+      el.stop.addEventListener("click", () => {
+        if (!CH.chatSessionId) return;
+        setHint("stopping pi…", "busy");
+        fetch(window.apiUrl("/chat/stop"), {
+          method: "POST",
+          headers: { ...window.authHeaders(), "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: CH.chatSessionId }),
+        }).catch(() => { /* server unreachable — the stream will still settle */ });
+      });
+    }
     if (el.input) {
       el.input.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
@@ -2151,6 +2566,8 @@
     renderAgents();
     renderComposerModel();
     renderChat();
+    updateToggleButtons();
+    updateSteerToggle();
     attemptRestore();
     fetchChatFooter(true);
     // Elapsed / branch / go-usage keep ticking: re-render + refresh every 30s.

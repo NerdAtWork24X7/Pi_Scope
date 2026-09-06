@@ -4689,6 +4689,28 @@
       opacity: 0.4;
       pointer-events: none;
     }
+    .chat-hbtn.chat-toggle {
+      width: auto;
+      padding: 0 9px;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.1px;
+      border-color: var(--border);
+    }
+    .chat-hbtn.chat-toggle .chat-toggle-label {
+      white-space: nowrap;
+    }
+    .chat-hbtn.chat-toggle.on {
+      color: var(--accent);
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+    .chat-hbtn.chat-toggle.on:hover {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
     .chat-live-dot {
       width: 9px;
       height: 9px;
@@ -5165,6 +5187,125 @@
       50% { opacity: 0.35; }
     }
 
+    /* Expanded tool-call blocks (show-with-result mode) */
+    .chat-tools.chat-tools-expanded {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .chat-tool-call {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--surface);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      animation: chat-msg-in 0.15s ease both;
+    }
+    .chat-tool-call > summary {
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 11px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 11.5px;
+      color: var(--text);
+    }
+    .chat-tool-call > summary::-webkit-details-marker {
+      display: none;
+    }
+    .chat-tool-call > summary::before {
+      content: "▸";
+      font-size: 10px;
+      color: var(--muted);
+      transition: transform 0.15s ease;
+    }
+    .chat-tool-call[open] > summary::before {
+      transform: rotate(90deg);
+    }
+    .chat-tool-call > summary .chat-tool-icon {
+      color: var(--accent);
+      opacity: 0.9;
+    }
+    .chat-tool-call > summary .chat-tool-name {
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    .chat-tool-call > summary .chat-tool-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+      margin-left: auto;
+    }
+    .chat-tool-call.live > summary .chat-tool-dot {
+      background: var(--accent);
+      animation: chat-blink-soft 0.9s ease-in-out infinite;
+    }
+    .chat-tool-call.ok > summary .chat-tool-dot {
+      background: var(--green);
+    }
+    .chat-tool-call.err > summary .chat-tool-dot {
+      background: var(--red);
+    }
+    .chat-tool-call-body {
+      border-top: 1px solid var(--hairline);
+      padding: 8px 11px 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--bg);
+    }
+    .chat-tool-call-k {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 3px;
+    }
+    .chat-tool-call pre {
+      margin: 0;
+      max-height: 220px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--mono, monospace);
+      font-size: 11.5px;
+      line-height: 1.55;
+      color: var(--muted);
+    }
+    .chat-tool-call pre::-webkit-scrollbar {
+      width: 7px;
+      height: 7px;
+    }
+    .chat-tool-call pre::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .chat-tool-call pre::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 999px;
+    }
+    .chat-tool-call pre::-webkit-scrollbar-thumb:hover {
+      background: var(--muted);
+    }
+    .chat-tool-call.err .chat-tool-call-result pre {
+      color: var(--red);
+    }
+    .chat-tool-call-state {
+      font-size: 11px;
+      font-weight: 600;
+      margin-left: auto;
+    }
+    .chat-tool-call.ok .chat-tool-call-state { color: var(--green); }
+    .chat-tool-call.err .chat-tool-call-state { color: var(--red); }
+    .chat-tool-call.live .chat-tool-call-state { color: var(--accent); }
+
     /* Typing indicator */
     .chat-typing {
       display: inline-flex;
@@ -5447,7 +5588,14 @@
       white-space: nowrap;
     }
     .chat-composer-bar .chat-send {
+      margin-left: 0;
+    }
+    .chat-composer-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       margin-left: auto;
+      flex-shrink: 0;
     }
     .chat-model-wrap .dot,
     .chat-think-wrap .dot {
@@ -5525,6 +5673,111 @@
       cursor: default;
       transform: none;
     }
+    /* Steer toggle — a quiet pill that flips between "queue until done" (off)
+       and "deliver mid-run" (on). The dot + accent fill make the active state
+       readable at a glance without shouting over the model/thinking controls. */
+    .chat-steer {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 11px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      cursor: pointer;
+      flex: 0 0 auto;
+      transition: all 0.14s ease;
+    }
+    .chat-steer .chat-steer-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      opacity: 0.55;
+      transition: all 0.14s ease;
+    }
+    .chat-steer:hover {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    .chat-steer:focus-visible {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(65, 118, 230, 0.16);
+      outline: none;
+    }
+    .chat-steer.on {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .chat-steer.on .chat-steer-dot {
+      background: var(--accent);
+      opacity: 1;
+    }
+    .chat-steer:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+    /* Stop button — red circle, hidden until a prompt is streaming. It aborts
+       the agent's current run without killing the session. */
+    .chat-stop {
+      width: 34px;
+      height: 34px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: var(--red);
+      color: #fff;
+      border: none;
+      border-radius: 50%;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.14s ease;
+      box-shadow: 0 2px 8px rgba(239, 68, 68, 0.28);
+    }
+    .chat-stop.show {
+      display: flex;
+    }
+    .chat-stop:hover {
+      background: #dc2626;
+      transform: translateY(-1px);
+    }
+    .chat-stop:active {
+      transform: translateY(0);
+    }
+    .chat-stop:focus-visible {
+      box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.25);
+      outline: none;
+    }
+    .chat-stopped-note {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 8px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--row-error);
+      color: var(--red);
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .chat-msg-cancelled {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+    }
     .chat-composer-footer {
       max-width: 940px;
       margin: 7px auto 0;
@@ -5566,6 +5819,9 @@
       line-height: 1.55;
       white-space: nowrap;
       color: var(--text);
+      /* Equal-width digits so the token/cost chips don't shift the footer as
+         the numbers tick up during a live turn. */
+      font-variant-numeric: tabular-nums;
     }
     .cf-chip .cf-in {
       display: inline-flex;
