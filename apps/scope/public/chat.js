@@ -412,18 +412,28 @@
 
   // ─── Agent-team rail (right) ─────────────────────────────────────────────
   let teamFetchedAt = 0;
+  // Serialized signature of the last team snapshot we rendered from. Rails only
+  // rebuild when this (or the session list) actually changes, so the per-poll
+  // agent-team throttle never re-renders identical DOM.
+  let teamJsonSig = null;
   async function loadAgentTeam() {
-    // The /agent-team snapshot changes rarely; throttle the fetch so the 3s
-    // session poll doesn't hammer the server and rebuild both rails every tick.
+    // The /agent-team snapshot changes rarely; throttle the fetch so the poll
+    // doesn't hammer the server.
     const now = Date.now();
     if (teamFetchedAt && now - teamFetchedAt < 15000) {
-      renderAgents();
-      renderWorkspaces();
+      // Still pick up external edits to the team config without touching DOM
+      // when nothing changed.
+      if (CH.teamData && teamJsonSig !== JSON.stringify(CH.teamData)) {
+        teamJsonSig = JSON.stringify(CH.teamData);
+        renderAgents();
+        renderWorkspaces();
+      }
       return;
     }
     teamFetchedAt = now;
     const { res, data } = await window.SCOPE.api("/agent-team");
     if (res.ok && data) CH.teamData = data;
+    teamJsonSig = JSON.stringify(CH.teamData || null);
     renderAgents();
     renderWorkspaces();
   }
@@ -1371,7 +1381,10 @@
       const label = fromSettings ? m : `${m} · (session)`;
       html += `<option value="${esc(m)}"${m === CH.chatModel ? " selected" : ""} title="${esc(m)}">${esc(label)}</option>`;
     }
-    el.model.innerHTML = html;
+    // Avoid rewriting the <select> every poll — an innerHTML swap resets the
+    // element and would drop an open dropdown. Only patch when the options
+    // actually changed.
+    if (el.model.innerHTML !== html) el.model.innerHTML = html;
     fitComposerSelects();
     renderComposerThinking();
   }
@@ -1475,7 +1488,7 @@
   // Fetch the static footer data (branch, thinking, model metadata, go usage).
   // Throttled to once per 30s; `force` skips the throttle (workspace switch).
   async function fetchChatFooter(force) {
-    if (!CH.workspace) return;
+    if (!CH.workspace || document.hidden) return;
     const now = Date.now();
     if (!force && CH.footerFetchedAt && now - CH.footerFetchedAt < 30000) return;
     CH.footerFetchedAt = now;
@@ -2141,7 +2154,12 @@
     attemptRestore();
     fetchChatFooter(true);
     // Elapsed / branch / go-usage keep ticking: re-render + refresh every 30s.
-    setInterval(() => { renderChatFooter(); fetchChatFooter(); }, 30000);
+    // Skip both while the tab is hidden — nothing is visible to update.
+    setInterval(() => {
+      if (document.hidden) return;
+      renderChatFooter();
+      fetchChatFooter();
+    }, 30000);
   }
 
   // Expose hooks for app.js

@@ -361,6 +361,9 @@ window.setView = function(mode) {
 // ─── Sessions ───────────────────────────────────────────────────────────────
 
 async function fetchSessions() {
+  // Skip polling while the tab is hidden — the SSE feed keeps state patched in
+  // memory and the next visible tick catches everything up.
+  if (document.hidden) return;
   try {
     const url = apiUrl("/sessions", { limit: 100 });
     const res = await fetch(url, { headers: authHeaders() });
@@ -665,7 +668,7 @@ function buildMiniSessionItem(s) {
 // 2 s tick to refresh the activity-window dot color without re-rendering the
 // entire sidebar. Cheap DOM patch — only touches the dot's class list.
 setInterval(() => {
-  if (!STATE.sessions.length || !STATE.sidebarCollapsed) return;
+  if (document.hidden || !STATE.sessions.length || !STATE.sidebarCollapsed) return;
   document.querySelectorAll(".session-mini").forEach(el => {
     const sid = el.dataset.sid;
     const s = STATE.sessions.find(x => x.session_id === sid);
@@ -681,7 +684,7 @@ setInterval(() => {
 // 500 ms tick to refresh subagent status dots in the expanded session list.
 // Same pattern as mini-dots — cheap DOM patch without full re-render.
 setInterval(() => {
-  if (!STATE.sessions.length || STATE.sidebarCollapsed) return;
+  if (document.hidden || !STATE.sessions.length || STATE.sidebarCollapsed) return;
   document.querySelectorAll(".session-item .status-dot").forEach(el => {
     const sid = el.closest(".session-item")?.dataset.sid;
     if (!sid) return;
