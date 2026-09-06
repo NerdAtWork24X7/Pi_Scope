@@ -64,6 +64,7 @@ interface ChatSession {
   lastUsed: number;
   dead: boolean;
   prompted: boolean; // has ever received a prompt (vs idle pre-spawn)
+  thinkingLevel: string | null; // last thinking level pushed to this subprocess (null = pi's boot default)
   resumedFile: string | null; // pi session file this subprocess is currently on
   resumeCallback: (() => void) | null; // prompt write deferred until a pending switch_session/new_session resolves
   stopRequested: boolean; // a /chat/stop abort was issued for the current run
@@ -221,7 +222,7 @@ function spawnChat(id: string, cwd: string, model: string): ChatSession {
     env: { ...process.env, PI_OFFLINE: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, resumedFile: null, resumeCallback: null, stopRequested: false };
+  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false };
 
   proc.stdout.on("data", (d: Buffer) => {
     sess.buffer += d.toString();
@@ -263,7 +264,7 @@ function spawnChat(id: string, cwd: string, model: string): ChatSession {
  *  after the agent settles) and a JSON `{ queued: true }` response is returned
  *  instead of a stream — the in-flight stream keeps delivering events to the
  *  client. */
-export function startChat(opts: { cwd: string; model?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string }): Response {
+export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string }): Response {
   const { cwd, prompt } = opts;
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   if (!prompt || !prompt.trim()) {
@@ -302,6 +303,34 @@ export function startChat(opts: { cwd: string; model?: string; prompt: string; s
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       sess!.active = { controller };
+      // Push the latest model/thinking choice into the running subprocess before
+      // prompting. pi resolves --model and the thinking level only at boot, so a
+      // subprocess spawned (or pointed at a recorded session) earlier would
+      // otherwise keep serving stale values. The RPC set_model /
+      // set_thinking_level commands update it in place — the conversation
+      // context survives, which respawning could never guarantee.
+      const writePrefCommands = (force: boolean) => {
+        const level = (opts.thinkingLevel || "").trim();
+        if (!force && sess!.model === model && (!level || sess!.thinkingLevel === level)) return;
+        const slash = model.indexOf("/");
+        if (slash > 0) {
+          try {
+            sess!.proc.stdin.write(JSON.stringify({ type: "set_model", provider: model.slice(0, slash), modelId: model.slice(slash + 1) }) + "\n");
+            sess!.model = model;
+          } catch (err: any) {
+            enqueue(controller, { type: "error", message: err.message || String(err) });
+          }
+        }
+        if (level) {
+          try {
+            sess!.proc.stdin.write(JSON.stringify({ type: "set_thinking_level", level }) + "\n");
+            sess!.thinkingLevel = level;
+          } catch (err: any) {
+            enqueue(controller, { type: "error", message: err.message || String(err) });
+          }
+        }
+      };
+      writePrefCommands(false);
       const sendPrompt = () => {
         try {
           sess!.proc.stdin.write(JSON.stringify({ type: "prompt", message: prompt }) + "\n");
@@ -316,7 +345,11 @@ export function startChat(opts: { cwd: string; model?: string; prompt: string; s
       // the prompt once pi confirms the swap; pi answers these with a `response`
       // event which fires sess.resumeCallback in handleLine.
       const queueResume = (cmd: any) => {
-        sess!.resumeCallback = sendPrompt;
+        // switch_session may restore the recorded session's own model/thinking
+        // state, so re-push the requested prefs AFTER the swap confirms and
+        // before the prompt lands (force: our in-memory tracking can't be
+        // trusted across a session switch).
+        sess!.resumeCallback = () => { writePrefCommands(true); sendPrompt(); };
         try {
           sess!.proc.stdin.write(JSON.stringify(cmd) + "\n");
         } catch (err: any) {

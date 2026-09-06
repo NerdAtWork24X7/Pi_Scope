@@ -535,24 +535,43 @@
     // a skill can be enabled for the orchestrator, subagents, both, or neither.
     const skills = td.skills || [];
     const skillItem = (sk, group, on) =>
-      `<div class="at-item${on ? " on" : ""}" data-dir="${esc(sk.dir)}" data-group="${group}" title="${esc(sk.name)}${sk.description ? " — " + esc(sk.description) : ""}">` +
-      `<span class="at-item-mark">${on ? "●" : "○"}</span>` +
-      `<span class="at-item-name">${esc(sk.name)}</span>` +
+      `<div class="at-chip${on ? " on" : ""}" data-dir="${esc(sk.dir)}" data-group="${group}" title="${esc(sk.name)}${sk.description ? " — " + esc(sk.description) : ""}">` +
+      `<span class="at-chip-dot"></span>` +
+      `<span class="at-chip-name">${esc(sk.name)}</span>` +
       `</div>`;
-    const groupSkillBody = (group) =>
-      skills.map((sk) => skillItem(sk, group, group === "orchestrator" ? !!sk.orchestrator : !!sk.subagent)).join("");
+    // Skills preceded by a single "skills" separator row (label + rule + count).
+    const skillGroupsBody = (group) => {
+      if (!skills.length) return "";
+      const isOn = (sk) => (group === "orchestrator" ? !!sk.orchestrator : !!sk.subagent);
+      const onCount = skills.filter(isOn).length;
+      return (
+        `<div class="at-group-label"><span>skills</span><span class="at-group-line"></span><span class="at-group-n">${onCount}/${skills.length}</span></div>` +
+        skills.map((sk) => skillItem(sk, group, isOn(sk))).join("")
+      );
+    };
 
     html += atSection("orch", "Agent Team",
       `<div class="at-orch">` +
-      `<span class="status-dot ${orchSt}"></span>` +
-      `<span class="at-orch-name">Orchestrator</span></div>` +
-      groupSkillBody("orchestrator")
+      `<span class="at-orch-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4c0 1.1-.45 2.1-1.17 2.83A4 4 0 0 1 18 12.5V14H6v-1.5a4 4 0 0 1 3.17-3.67A3.99 3.99 0 0 1 8 6a4 4 0 0 1 4-4z"/><path d="M6 14v3a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-3"/></svg></span>` +
+      `<span class="at-orch-meta"><span class="at-orch-name">Orchestrator</span>` +
+      `<span class="at-orch-status status-dot ${orchSt}"></span></span></div>` +
+      (skills.length ? `<div class="at-chips">` + skillGroupsBody("orchestrator") + `</div>` : "")
     );
 
     html += atSection("mode", "Mode & Memory",
-      `<div class="at-rows">` +
-      `<div class="at-row clickable" data-action="toggleMode" title="Click to toggle mode"><span class="at-k">Mode</span><span class="at-v">${mode === "creative" ? "◆ Creative" : "◇ Standard"}</span></div>` +
-      `<div class="at-row clickable" data-action="toggleMemory" title="Click to toggle memory"><span class="at-k">Memory</span><span class="at-v">${memActive ? `● ${esc(memModel || "on")}` : "○ off"}</span></div>` +
+      `<div class="at-mm">` +
+      `<div class="at-card mode" data-action="toggleMode" title="Click to toggle mode" role="button" tabindex="0">` +
+      `<span class="at-card-ava">${mode === "creative" ? "◆" : "◇"}</span>` +
+      `<span class="at-card-body"><span class="at-card-name">Mode</span>` +
+      `<span class="at-card-sub">${mode === "creative" ? "Creative" : "Standard"}</span></span>` +
+      `<button class="at-toggle${mode === "creative" ? " on" : ""}" type="button" data-mode-toggle title="Toggle mode" aria-pressed="${mode === "creative"}"><span class="at-toggle-knob"></span></button>` +
+      `</div>` +
+      `<div class="at-card mode" data-action="toggleMemory" title="Click to toggle memory" role="button" tabindex="0">` +
+      `<span class="at-card-ava${memActive ? " mem-on" : ""}">⌾</span>` +
+      `<span class="at-card-body"><span class="at-card-name">Memory</span>` +
+      `<span class="at-card-sub">${memActive ? esc(memModel || "on") : "off"}</span></span>` +
+      `<button class="at-toggle${memActive ? " on" : ""}" type="button" data-memory-toggle title="Toggle memory" aria-pressed="${memActive}"><span class="at-toggle-knob"></span></button>` +
+      `</div>` +
       `</div>`
     );
 
@@ -565,10 +584,12 @@
         const isActive = tn === activeTeam;
         const isViewed = tn === viewedTeam;
         teamBody +=
-          `<div class="at-item${isViewed ? " active" : ""}" data-team="${esc(tn)}" title="${esc(tn)}">` +
-          `<span class="at-item-mark">${isActive ? "●" : "○"}</span>` +
-          `<span class="at-item-name">${esc(tn)}</span>` +
-          `<span class="at-item-count">${activeCount}/${members.length}</span></div>`;
+          `<div class="at-chip team${isViewed ? " on" : ""}" data-team="${esc(tn)}" title="${esc(tn)} — ${activeCount}/${members.length} active">` +
+          `<span class="at-chip-dot"></span>` +
+          `<span class="at-chip-name">${esc(tn)}</span>` +
+          `<span class="at-chip-count">${activeCount}/${members.length}</span>` +
+          `${isActive ? `<span class="at-card-pill">active</span>` : ""}` +
+          `</div>`;
       }
     }
     html += atSection("teams", "Teams", teamBody, { count: teamNames.length });
@@ -583,17 +604,20 @@
         const enabled = !isDisabled;
         const st = sess ? S.subagentStatus(sess) : "gray";
         const isActive = sess && CH.agentId === sess.session_id;
+        const statusLabel = st === "green" ? "running" : st === "orange" ? "waiting" : st === "red" ? "stopped" : "idle";
         subBody +=
-          `<div class="at-item${isActive ? " active" : ""}${isDisabled ? " disabled" : " on"}" data-agent="${esc(m.name)}" title="${esc(m.name)}">` +
+          `<div class="at-chip sub${enabled ? " on" : ""}${isActive ? " active" : ""}" data-agent="${esc(m.name)}" title="${esc(m.name)} — ${statusLabel}${enabled ? "" : " (disabled)"}">` +
           `<span class="status-dot ${st}"></span>` +
-          `<div class="at-item-body">` +
-          `<div class="at-item-name">${esc(m.name)}${isDisabled ? ` <span class="at-off">off</span>` : ` <span class="at-on">on</span>`}</div>` +
-          `</div></div>`;
+          `<span class="at-chip-name">${esc(m.name)}</span>` +
+          (isDisabled ? `<span class="at-off">off</span>` : `<span class="at-on">on</span>`) +
+          `</div>`;
       }
     }
     // Subagent skills follow the members, separated by a thin divider (mirrors
     // the pi agent-team sidebar layout).
-    if (skills.length) subBody += `<div class="at-sep"></div>` + groupSkillBody("subagent");
+    if (skills.length) subBody += `<div class="at-sep"></div><div class="at-chips">` + skillGroupsBody("subagent") + `</div>`;
+    // Wrap member chips in the flex-wrap container so several share a row.
+    subBody = `<div class="at-chips">` + subBody + `</div>`;
     html += atSection("subagents", "Subagents", subBody, { count: members.length });
 
     const exts = td.extensions || [];
@@ -602,39 +626,40 @@
     else {
       for (const ex of exts) {
         extBody +=
-          `<div class="at-item${ex.enabled ? " on" : ""}" data-path="${esc(ex.path)}" title="${esc(ex.path)}">` +
-          `<span class="at-item-mark">${ex.enabled ? "●" : "○"}</span>` +
-          `<span class="at-item-name">${esc(ex.name)}</span>` +
+          `<div class="at-chip${ex.enabled ? " on" : ""}" data-path="${esc(ex.path)}" title="${esc(ex.path)}">` +
+          `<span class="at-chip-dot"></span>` +
+          `<span class="at-chip-name">${esc(ex.name)}</span>` +
           `</div>`;
       }
     }
-    html += atSection("extensions", "Extensions", extBody, { count: exts.length });
+    html += atSection("extensions", "Extensions", `<div class="at-chips">` + extBody + `</div>`, { count: exts.length });
 
     el.agents.innerHTML = html;
 
     el.agents.querySelectorAll(".at-sec-head").forEach((n) =>
       n.addEventListener("click", () => toggleSection(n.dataset.sec))
     );
-    el.agents.querySelectorAll(".at-item[data-team]").forEach((n) =>
+    el.agents.querySelectorAll(".at-chip[data-team]").forEach((n) =>
       n.addEventListener("click", () => {
         const team = n.dataset.team;
         CH.team = team;
         postTeam({ action: "setTeam", team });
       })
     );
-    el.agents.querySelectorAll(".at-row[data-action]").forEach((n) =>
+    el.agents.querySelectorAll(".at-card[data-action]").forEach((n) =>
       n.addEventListener("click", () => postTeam({ action: n.dataset.action }))
     );
-    el.agents.querySelectorAll(".at-item[data-agent]").forEach((n) =>
+    // Clicking a subagent chip toggles it on/off (original card behavior).
+    el.agents.querySelectorAll(".at-chip.sub[data-agent]").forEach((n) =>
       n.addEventListener("click", () => {
         const name = n.dataset.agent;
         postTeam({ action: "toggleAgent", agent: name, disabled: !disabled.has((name || "").toLowerCase()) });
       })
     );
-    el.agents.querySelectorAll(".at-item[data-dir]").forEach((n) =>
+    el.agents.querySelectorAll(".at-chip[data-dir]").forEach((n) =>
       n.addEventListener("click", () => postTeam({ action: "toggleSkill", group: n.dataset.group, dir: n.dataset.dir }))
     );
-    el.agents.querySelectorAll(".at-item[data-path]").forEach((n) =>
+    el.agents.querySelectorAll(".at-chip[data-path]").forEach((n) =>
       n.addEventListener("click", () => postTeam({ action: "toggleExtension", path: n.dataset.path }))
     );
   }
@@ -653,15 +678,15 @@
       const active = CH.agentId === s.session_id ? " active" : "";
       const name = s.agent_name ?? s.cwd?.split("/").pop() ?? S.shortId(s.session_id);
       const st = S.subagentStatus(s);
+      const statusLabel = st === "green" ? "running" : st === "orange" ? "waiting" : st === "red" ? "stopped" : "idle";
       html +=
-        `<div class="at-item${active}" data-sid="${s.session_id}" title="${esc(name)}">` +
+        `<div class="at-chip sub${active ? " on active" : ""}" data-sid="${s.session_id}" title="${esc(name)} — ${statusLabel}">` +
         `<span class="status-dot ${st}"></span>` +
-        `<div class="at-item-body">` +
-        `<div class="at-item-name">${esc(name)}</div>` +
-        `</div></div>`;
+        `<span class="at-chip-name">${esc(name)}</span>` +
+        `</div>`;
     }
-    el.agents.innerHTML = html;
-    el.agents.querySelectorAll(".at-item[data-sid]").forEach((n) =>
+    el.agents.innerHTML = `<div class="at-chips">` + html + `</div>`;
+    el.agents.querySelectorAll(".at-chip[data-sid]").forEach((n) =>
       n.addEventListener("click", () => loadSessionChat(n.dataset.sid))
     );
   }
@@ -2097,7 +2122,7 @@
       const res = await fetch(window.apiUrl("/chat"), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd: CH.workspace, model, prompt: text, sessionId: CH.chatSessionId, sessionFile: CH.resumeFile || "", streamingBehavior }),
+        body: JSON.stringify({ cwd: CH.workspace, model, thinkingLevel: CH.thinkingLevel || "", prompt: text, sessionId: CH.chatSessionId, sessionFile: CH.resumeFile || "", streamingBehavior }),
       });
       const ct = res.headers.get("content-type") || "";
       if (res.ok && ct.includes("ndjson")) {
@@ -2202,7 +2227,7 @@
       const res = await fetch(window.apiUrl("/chat"), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd: CH.workspace, model, prompt: text, sessionId: CH.chatSessionId, sessionFile: CH.resumeFile || "" }),
+        body: JSON.stringify({ cwd: CH.workspace, model, thinkingLevel: CH.thinkingLevel || "", prompt: text, sessionId: CH.chatSessionId, sessionFile: CH.resumeFile || "" }),
       });
       if (!res.ok || !res.body) {
         let detail = "";
@@ -2499,21 +2524,22 @@
         updateHeader();
         renderChatFooter();
         renderComposerThinking();
-        // Model applies to a freshly spawned session; re-pre-spawn when no
-        // conversation exists yet so the new model is actually used.
+        // The server respawns the idle pi subprocess when the requested model
+        // differs, and pi honors --model when switch_session resumes a recorded
+        // file — so the new model applies to this conversation from the next
+        // message on, whether or not a session is open.
         if (!CH.chatHistory.length && CH.workspace) {
           CH.chatSessionId = null;
           ensureChatSession();
-        } else if (CH.chatHistory.length) {
-          setHint("model change applies to a new session", "");
-        } else {
-          setHint("", "");
         }
+        setHint(`next message uses ${CH.chatModel}`, "");
       });
     }
     if (el.thinking) {
-      // The level is persisted (settings.json defaultThinkingLevel) and the
-      // session re-armed so the next spawned pi process resolves it.
+      // The level is persisted (settings.json defaultThinkingLevel) for future
+      // sessions and sent with every prompt (server pushes it to the running pi
+      // subprocess via RPC set_thinking_level), so it applies from the next
+      // message without respawning.
       el.thinking.addEventListener("change", () => {
         const level = el.thinking.value;
         CH.thinkingLevel = level;

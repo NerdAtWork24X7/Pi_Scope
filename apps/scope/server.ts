@@ -1287,9 +1287,9 @@ async function handle(req: Request): Promise<Response> {
           const VALID = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
           if (!VALID.includes(level)) return jsonResponse({ error: `invalid thinking level: ${level}` }, 400);
           // pi resolves the thinking level at agent start and clamps it to the
-          // model's capabilities; the running rpc process cached its level at
-          // boot, so the re-arm (kill + respawn) after this toggle is what makes
-          // the new level take effect on the next prompt.
+          // model's capabilities. Chat prompts also carry thinkingLevel and the
+          // chat module pushes it to the running rpc subprocess via
+          // set_thinking_level, so the choice applies without a respawn.
           updateSettingsJson((cfg) => { cfg.defaultThinkingLevel = level; });
           break;
         }
@@ -1418,6 +1418,10 @@ async function handle(req: Request): Promise<Response> {
     return startChat({
       cwd: absCwd,
       model: typeof parsed.model === "string" ? parsed.model : "",
+      // The composer's thinking-level choice; pushed to the subprocess via RPC
+      // set_thinking_level so it applies without a respawn (pi otherwise caches
+      // settings.json's defaultThinkingLevel at boot).
+      thinkingLevel: typeof parsed.thinkingLevel === "string" ? parsed.thinkingLevel : "",
       prompt: typeof parsed.prompt === "string" ? parsed.prompt : "",
       sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
       sessionFile: typeof parsed.sessionFile === "string" ? parsed.sessionFile : "",

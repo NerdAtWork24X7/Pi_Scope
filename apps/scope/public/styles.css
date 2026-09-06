@@ -6062,21 +6062,283 @@
     }
 
     /* ── Agent-team rail polish ─────────────────────────────────────────── */
+    /* Sections are self-contained cards: soft surface, hairline border, and a
+       subtle lift on hover so each group reads as a distinct unit. */
     .at-sec {
       margin: 2px 0;
-      padding: 10px 8px;
-      border: 1px solid transparent;
-      border-radius: 10px;
+      padding: 11px 10px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
     .at-sec:hover {
-      border-color: var(--hairline);
+      border-color: var(--border-strong);
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
     }
     .at-sec-head {
       font-size: 10.5px;
       letter-spacing: 0.8px;
-      margin: -2px -4px 8px;
+      margin: -2px -4px 9px;
       padding: 2px 4px;
+      border-radius: 6px;
     }
+    .at-sec-head:hover {
+      background: var(--row-hover);
+    }
+
+    /* Team / agent cards: avatar tile + name + status line. */
+    .at-card {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 9px;
+      margin: 2px 0;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+    .at-card:hover {
+      background: var(--row-hover);
+      border-color: var(--border);
+    }
+    .at-card.active {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+    .at-card.disabled {
+      opacity: 0.55;
+    }
+    .at-card-ava {
+      flex-shrink: 0;
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border: 1px solid var(--border);
+    }
+    .at-card-ava.st-green {
+      color: var(--green);
+      background: color-mix(in srgb, var(--green) 14%, transparent);
+      border-color: color-mix(in srgb, var(--green) 35%, transparent);
+    }
+    .at-card-ava.st-orange {
+      color: var(--orange);
+      background: color-mix(in srgb, var(--orange) 14%, transparent);
+      border-color: color-mix(in srgb, var(--orange) 35%, transparent);
+    }
+    .at-card-ava.st-red {
+      color: var(--red);
+      background: color-mix(in srgb, var(--red) 14%, transparent);
+      border-color: color-mix(in srgb, var(--red) 35%, transparent);
+    }
+    .at-card-ava.st-gray {
+      color: var(--muted);
+    }
+    .at-card-body {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .at-card-name {
+      font-size: 12.5px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .at-card-sub {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10.5px;
+      color: var(--muted);
+    }
+    .at-card-sub .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+    }
+    .at-card-sub .status-dot.green { background: var(--green); box-shadow: 0 0 5px var(--green); }
+    .at-card-sub .status-dot.orange { background: var(--orange); }
+    .at-card-sub .status-dot.red { background: var(--red); }
+    .at-card-pill {
+      flex-shrink: 0;
+      font-size: 9.5px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      padding: 2px 7px;
+    }
+
+    /* On/off switch button (subagents). Click stops propagation in chat.js. */
+    .at-toggle {
+      flex-shrink: 0;
+      width: 30px;
+      height: 17px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--pill-bg);
+      cursor: pointer;
+      position: relative;
+      padding: 0;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .at-toggle:hover {
+      border-color: var(--border-strong);
+    }
+    .at-toggle .at-toggle-knob {
+      position: absolute;
+      top: 1px;
+      left: 1px;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: transform 0.15s ease, background 0.15s ease;
+    }
+    .at-toggle.on {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+    .at-toggle.on .at-toggle-knob {
+      transform: translateX(13px);
+      background: var(--accent);
+    }
+
+    /* Skill / extension chips — compact toggles, wrap in a grid. */
+    .at-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+    .at-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 3px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--pill-bg);
+      color: var(--muted);
+      cursor: pointer;
+      /* Fit the text: shrink to content, but stretch to fill a full row of
+         the wrapping flexbox when a chip is too wide to share its line. */
+      flex: 0 1 auto;
+      min-width: fit-content;
+      transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    }
+    .at-chip:hover {
+      border-color: var(--border-strong);
+      color: var(--fg);
+    }
+    .at-chip-dot {
+      flex-shrink: 0;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--border-strong);
+      transition: background 0.12s ease;
+    }
+    .at-chip.on {
+      color: var(--fg);
+      background: var(--accent-soft);
+      border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    }
+    .at-chip.on .at-chip-dot {
+      background: var(--accent);
+    }
+    /* Subagent chips carry a live status dot instead of the static one, and
+       the selected session gets a solid accent ring. */
+    .at-chip.sub .at-chip-dot {
+      display: none;
+    }
+    .at-chip.sub .status-dot {
+      flex-shrink: 0;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    .at-chip.sub .status-dot.green { background: var(--green); box-shadow: 0 0 5px var(--green); }
+    .at-chip.sub .status-dot.orange { background: var(--orange); }
+    .at-chip.sub .status-dot.red { background: var(--red); }
+    .at-chip.sub.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    /* Team chips show an active-count badge; the active team gets the pill. */
+    .at-chip.team .at-chip-count {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--muted);
+      background: var(--pill-bg);
+      border-radius: 999px;
+      padding: 1px 6px;
+    }
+    .at-chip.team.on .at-chip-count {
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 16%, transparent);
+    }
+    .at-chip.team .at-card-pill {
+      margin-left: 1px;
+    }
+    .at-chip-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* Long names truncate instead of forcing a huge chip. */
+    .at-chip .at-chip-name {
+      max-width: 160px;
+    }
+    /* Skill group separators: small caps label + hairline rule + count.
+       Marks where enabled skills end and disabled ones begin. */
+    .at-group-label {
+      flex-basis: 100%;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 6px 0 2px;
+      font-size: 9.5px;
+      font-weight: 600;
+      letter-spacing: 0.7px;
+      text-transform: uppercase;
+      color: var(--muted);
+      user-select: none;
+    }
+    .at-group-label:first-child {
+      margin-top: 1px;
+    }
+    .at-group-line {
+      flex: 1;
+      height: 1px;
+      background: var(--hairline);
+    }
+    .at-group-n {
+      font-size: 9.5px;
+      font-weight: 500;
+      color: var(--muted);
+      opacity: 0.8;
+    }
+
     .at-item {
       border-radius: 8px;
       margin: 1px 0;
@@ -6103,24 +6365,109 @@
       font-weight: 500;
     }
     .at-orch {
+      display: flex;
+      align-items: center;
+      gap: 9px;
       border: 1px solid var(--border);
-      border-radius: 9px;
-      background: var(--surface-2);
-      padding: 7px 9px;
-      margin-bottom: 2px;
+      border-radius: 10px;
+      background: var(--pill-bg);
+      padding: 8px 9px;
+      margin-bottom: 7px;
     }
-    .at-orch .status-dot {
+    .at-orch-icon {
+      flex-shrink: 0;
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border: 1px solid var(--border);
+    }
+    .at-orch-meta {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .at-orch-name {
+      font-size: 12.5px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .at-orch-status {
       width: 7px;
       height: 7px;
       border-radius: 50%;
       background: var(--muted);
       flex-shrink: 0;
     }
-    .at-orch .status-dot.green {
-      background: var(--green);
-    }
+    .at-orch-status.green { background: var(--green); box-shadow: 0 0 5px var(--green); }
+    .at-orch-status.red { background: var(--red); }
+    .at-orch-status.orange { background: var(--orange); }
     .at-row {
       padding: 3px 4px;
+    }
+    /* Mode & Memory as compact toggle cards, side by side like chips. */
+    .at-mm {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+    .at-card.mode {
+      flex: 1 1 auto;
+      min-width: fit-content;
+      padding: 5px 7px;
+      gap: 7px;
+      border: 1px solid var(--border);
+      background: var(--pill-bg);
+      border-radius: 999px;
+      margin: 0;
+    }
+    .at-card.mode:hover {
+      border-color: var(--border-strong);
+      background: var(--row-hover);
+    }
+    .at-card.mode .at-card-ava {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      font-size: 9px;
+      border: none;
+      background: var(--accent-soft);
+    }
+    .at-card.mode .at-card-ava.mem-on {
+      color: var(--green);
+      background: color-mix(in srgb, var(--green) 14%, transparent);
+    }
+    .at-card.mode .at-card-body {
+      gap: 2px;
+    }
+    .at-card.mode .at-card-name {
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+    .at-card.mode .at-card-sub {
+      font-size: 9.5px;
+      text-transform: capitalize;
+      line-height: 1.1;
+    }
+    .at-card.mode .at-toggle {
+      width: 26px;
+      height: 15px;
+    }
+    .at-card.mode .at-toggle .at-toggle-knob {
+      width: 11px;
+      height: 11px;
+    }
+    .at-card.mode .at-toggle.on .at-toggle-knob {
+      transform: translateX(11px);
     }
 
     /* Session rows under a workspace */
