@@ -11,7 +11,7 @@ const STATE = {
   // V3 regression fix: token must come from ?token=… query param. The hash is
   // for shareable view-state only; we don't want the token in shared URLs.
   token: new URLSearchParams(location.search).get("token") ?? "",
-  view: "single", search: "",
+  view: "chat", search: "",
   typeFilter: new Set(), autoScroll: true,
   selectedSessionId: null, cwd: "", sessions: [], events: [], sessionsLoaded: false,
   sidebarCollapsed: loadSidebarCollapsed(),
@@ -39,7 +39,7 @@ function loadURLState() {
   if (!h) return;
   const p = new URLSearchParams(h);
   if (p.has("view")) STATE.view = p.get("view");
-  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat"].includes(STATE.view)) STATE.view = "single";
+  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat"].includes(STATE.view)) STATE.view = "chat";
   if (p.has("sid")) { STATE.selectedSessionId = p.get("sid"); STATE.ackd.add(STATE.selectedSessionId); }
 }
 
@@ -446,10 +446,11 @@ function clearAllSessions() {
     .catch(err => alert("Failed to clear agents: " + err));
 }
 
-// Permanently delete a single session and its events from the DB.
+// Permanently delete a single session and its events from the DB. Returns the
+// fetch promise on success (for chaining), or false if the user cancels.
 function deleteSession(sid) {
-  if (!confirm(`Delete this session and all its events?\n\n${sid.slice(0, 8)}…`)) return;
-  fetch(apiUrl(`/sessions/${sid}`), { method: "DELETE", headers: authHeaders() })
+  if (!confirm(`Delete this session and all its events?\n\n${sid.slice(0, 8)}…`)) return false;
+  return fetch(apiUrl(`/sessions/${sid}`), { method: "DELETE", headers: authHeaders() })
     .then(r => r.json())
     .then(data => {
       if (data && data.ok) {
@@ -665,26 +666,30 @@ function buildMiniSessionItem(s) {
 // 2 s tick to refresh the activity-window dot color without re-rendering the
 // entire sidebar. Cheap DOM patch — only touches the dot's class list.
 setInterval(() => {
-  if (!STATE.sidebarCollapsed) return;
+  if (!STATE.sessions.length || !STATE.sidebarCollapsed) return;
   document.querySelectorAll(".session-mini").forEach(el => {
     const sid = el.dataset.sid;
     const s = STATE.sessions.find(x => x.session_id === sid);
     if (!s) return;
     const dot = el.querySelector(".mini-dot");
-    if (dot) dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
+    if (dot) {
+      const cls = "mini-dot " + window.SCOPE.activityStatus(s);
+      if (dot.className !== cls) dot.className = cls; // skip identical writes
+    }
   });
 }, 500);
 
 // 500 ms tick to refresh subagent status dots in the expanded session list.
 // Same pattern as mini-dots — cheap DOM patch without full re-render.
 setInterval(() => {
-  if (STATE.sidebarCollapsed) return;
+  if (!STATE.sessions.length || STATE.sidebarCollapsed) return;
   document.querySelectorAll(".session-item .status-dot").forEach(el => {
     const sid = el.closest(".session-item")?.dataset.sid;
     if (!sid) return;
     const s = STATE.sessions.find(x => x.session_id === sid);
     if (!s) return;
-    el.className = "status-dot " + window.SCOPE.subagentStatus(s);
+    const cls = "status-dot " + window.SCOPE.subagentStatus(s);
+    if (el.className !== cls) el.className = cls;
   });
 }, 500);
 
@@ -1227,7 +1232,6 @@ function applySidebarCollapsed() {
   document.body.classList.toggle("sidebar-collapsed", STATE.sidebarCollapsed);
   const btn = document.getElementById("sidebar-toggle");
   if (btn) {
-    btn.textContent = STATE.sidebarCollapsed ? "»" : "«";
     btn.title = STATE.sidebarCollapsed
       ? "Expand sidebar"
       : "Collapse sidebar (more room for the main view)";
@@ -1402,6 +1406,7 @@ Object.assign(window.SCOPE, {
   saveURLState,
   computeAgentInfo,
   selectSession,
+  deleteSession,
 });
 
 // ─── Boot ───────────────────────────────────────────────────────────────────

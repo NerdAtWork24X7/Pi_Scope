@@ -55,6 +55,7 @@ export interface PreparedQueries {
   listModels: StatementSync;
   getSessionEvents: StatementSync;
   getSessionEventsSince: StatementSync;
+  getMaxSeq: StatementSync;
   getSessionStats: StatementSync;
   getSessionContext: StatementSync;
   countTotals: StatementSync;
@@ -195,6 +196,11 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     LIMIT $limit
   `);
 
+  // ── Highest stored seq for a session (loopback seq-seed probe) ────────
+  const getMaxSeq = db.prepare(`
+    SELECT MAX(seq) AS max_seq FROM events WHERE session_id = $session_id
+  `);
+
   // ── Session stats (cost, tokens, errors) ──────────────────────────────
   const getSessionStats = db.prepare(`
     SELECT
@@ -294,6 +300,7 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     listModels,
     getSessionEvents,
     getSessionEventsSince,
+    getMaxSeq,
     getSessionStats,
     getSessionModelTokens,
     getSessionContext,

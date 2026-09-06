@@ -175,7 +175,17 @@ interface BranchNavPayload {
 }
 
 // ━━ Module-scope state ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-let seqCounter = 0;
+// Per-session monotonic sequence counters. Seeded from the server at boot for
+// a resumed session so continued turns keep numbering where the session left
+// off — restarting at 0 would collide on the server's (session_id, seq) UNIQUE
+// index and every continued message would be silently dropped by INSERT OR
+// IGNORE, leaving transcripts stuck at the original session's data.
+const seqBySession = new Map<string, number>();
+function nextSeq(sessionId: string): number {
+  const n = seqBySession.get(sessionId) ?? 0;
+  seqBySession.set(sessionId, n + 1);
+  return n;
+}
 
 // Last text captured from a message_end → assistant_message event.  Used as a
 // definitive fallback in agent_end when scanning event.messages yields nothing
@@ -261,6 +271,34 @@ async function probeServer(url: string): Promise<boolean> {
     return res.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Seed the seq counter for a resumed session from the server's highest recorded
+// seq for that session (GET /sessions/:id/seq, loopback-trusted — no auth
+// needed, matching POST /events). Using the auth-gated events endpoint here
+// broke dev setups where the extension can't resolve the server token: the seed
+// 401'd, the counter restarted at 0, and every continued event collided on the
+// (session_id, seq) UNIQUE index and was silently dropped. On failure (server
+// down, session unknown) we start at 0 — the previous behavior. Fire-and-forget;
+// a short timeout keeps this from ever stalling agent boot.
+async function seedSessionSeq(sessionId: string, url: string): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch(
+      `${url.replace(/\/+$/, "")}/sessions/${encodeURIComponent(sessionId)}/seq`,
+      { signal: controller.signal }
+    );
+    if (!res.ok) return;
+    const data: any = await res.json();
+    if (typeof data?.seq === "number" && data.seq >= 0) {
+      seqBySession.set(sessionId, data.seq + 1);
+    }
+  } catch {
+    // server unreachable — start at 0
   } finally {
     clearTimeout(timer);
   }
@@ -408,7 +446,7 @@ function createEventEnvelope<T>(
     model?: string;
   }
 ): ObsEventEnvelope<T> {
-  const seq = seqCounter++;
+  const seq = nextSeq(sessionInfo.sessionId);
   return {
     event_id: crypto.randomUUID(),
     ts: new Date().toISOString(),
@@ -437,14 +475,14 @@ class EventQueue {
   private isFlushing = false;
   private consecutiveFailures = 0;
   private droppedEventsCount = 0;
-  private getNextSeq: () => number;
+  private getNextSeq: (sessionId: string) => number;
 
   constructor(
     private serverUrl: string,
     private tokenProvider: () => string,
     private pi: ExtensionAPI,
     private onPostFailed: (err: any) => void,
-    getNextSeq: () => number
+    getNextSeq: (sessionId: string) => number
   ) {
     this.getNextSeq = getNextSeq;
   }
@@ -482,7 +520,7 @@ class EventQueue {
       },
       // Allocate a real monotonic seq instead of -1 (which would collide on the
       // server's (session_id, seq) UNIQUE index if overflow recurs).
-      seq: this.getNextSeq(),
+      seq: this.getNextSeq(event.session_id),
     };
   }
 
@@ -689,8 +727,8 @@ export default function (pi: ExtensionAPI) {
       tags = process.env.OBS_TAG.split(",").map(t => t.trim()).filter(Boolean);
     }
 
-    // 3. Reset seq counter + boot-snapshot gate
-    seqCounter = 0;
+    // 3. Reset per-session seq counters + boot-snapshot gate
+    seqBySession.clear();
     lastAssistantText = null;
     lastToolResultText = null;
 
@@ -702,7 +740,7 @@ export default function (pi: ExtensionAPI) {
       (err) => {
         logObs("post_failed", { error: err?.message || String(err) });
       },
-      () => seqCounter++
+      (sid: string) => nextSeq(sid)
     );
 
     if (!token) {
@@ -744,6 +782,12 @@ export default function (pi: ExtensionAPI) {
       provider: ctx.model?.provider,
       model: ctx.model?.id,
     };
+
+    // 5b. If this process resumed an existing pi session, continue its event
+    // sequence where the server left off instead of restarting at 0 (which
+    // would collide on the server's (session_id, seq) UNIQUE index and drop
+    // every continued turn). Fire-and-forget — boot must never block.
+    void seedSessionSeq(sessionInfo.sessionId, serverUrl);
 
     // 6. Log boot
     logObs("obs boot", { serverUrl, pool, tags, agentName: name });

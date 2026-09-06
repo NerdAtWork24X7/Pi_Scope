@@ -64,6 +64,8 @@ interface ChatSession {
   lastUsed: number;
   dead: boolean;
   prompted: boolean; // has ever received a prompt (vs idle pre-spawn)
+  resumedFile: string | null; // pi session file this subprocess is currently on
+  resumeCallback: (() => void) | null; // prompt write deferred until a pending switch_session/new_session resolves
 }
 
 const sessions = new Map<string, ChatSession>();
@@ -116,9 +118,24 @@ function handleLine(sess: ChatSession, line: string) {
   if (!ctrl) return; // stray event with no in-flight prompt — ignore
 
   switch (ev.type) {
-    case "response":
+    case "response": {
+      // A switch_session / new_session we issued before the prompt resolves by
+      // firing the deferred prompt write once pi confirms the session swap.
+      if (ev.command === "switch_session" || ev.command === "new_session") {
+        const cb = sess.resumeCallback;
+        sess.resumeCallback = null;
+        if (!cb) return;
+        if (ev.success && !ev.data?.cancelled) {
+          cb();
+        } else {
+          enqueue(ctrl, { type: "error", message: "⚠ could not resume the session — continuing without it" });
+          cb();
+        }
+        return;
+      }
       enqueue(ctrl, { type: "accepted" });
       return;
+    }
     case "message_update":
       if (ev.assistantMessageEvent) {
         const a = ev.assistantMessageEvent;
@@ -126,6 +143,13 @@ function handleLine(sess: ChatSession, line: string) {
         else if (a.type === "thinking_delta") enqueue(ctrl, { type: "thinking", delta: a.delta || "" });
       }
       if (ev.usage) enqueue(ctrl, { type: "usage", usage: ev.usage });
+      return;
+    case "message_start":
+      // A single run can contain several assistant messages (one per LLM call in
+      // a tool loop). Tell the client a new bubble starts so streamed deltas and
+      // the per-message `final` snapshot land in their own message instead of
+      // piling into one bubble where a later snapshot overwrites earlier text.
+      if (ev.message?.role === "assistant") enqueue(ctrl, { type: "msg_start" });
       return;
     case "message_end": {
       // Some providers only deliver the complete message on message_end; emit a
@@ -160,7 +184,7 @@ function spawnChat(id: string, cwd: string, model: string): ChatSession {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false };
+  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, resumedFile: null, resumeCallback: null };
 
   proc.stdout.on("data", (d: Buffer) => {
     sess.buffer += d.toString();
@@ -173,6 +197,9 @@ function spawnChat(id: string, cwd: string, model: string): ChatSession {
   });
   proc.stderr.on("data", (d: Buffer) => {
     sess.stderrBuf += d.toString();
+    // Bound the retained stderr: a long-lived session could otherwise accumulate
+    // it forever. Keep only the tail — enough to surface the error on close.
+    if (sess.stderrBuf.length > 64 * 1024) sess.stderrBuf = sess.stderrBuf.slice(-64 * 1024);
     const ctrl = sess.active?.controller;
     if (ctrl) enqueue(ctrl, { type: "stderr", text: d.toString() });
   });
@@ -193,7 +220,7 @@ function spawnChat(id: string, cwd: string, model: string): ChatSession {
 
 /** Spawn/queue a prompt to a (possibly reused) pi subprocess and return a
  *  streaming NDJSON Response. `cwd` must already be validated by the caller. */
-export function startChat(opts: { cwd: string; model?: string; prompt: string; sessionId?: string }): Response {
+export function startChat(opts: { cwd: string; model?: string; prompt: string; sessionId?: string; sessionFile?: string }): Response {
   const { cwd, prompt } = opts;
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   if (!prompt || !prompt.trim()) {
@@ -201,6 +228,11 @@ export function startChat(opts: { cwd: string; model?: string; prompt: string; s
   }
 
   const sid = (opts.sessionId || "").trim() || crypto.randomUUID();
+  // The pi session file to continue. The scope extension records the agent's own
+  // session file path, so when the user keeps chatting in a session they opened
+  // from the rail we switch the subprocess onto that file and pi resumes with
+  // the full conversation context instead of starting from scratch.
+  const sessionFile = (opts.sessionFile || "").trim() || "";
   let sess = sessions.get(sid);
   if (!sess || sess.dead || sess.proc.exitCode !== null) {
     try { if (sess) sess.proc.kill(); } catch { /* ignore */ }
@@ -216,13 +248,45 @@ export function startChat(opts: { cwd: string; model?: string; prompt: string; s
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       sess!.active = { controller };
-      try {
-        sess!.proc.stdin.write(JSON.stringify({ type: "prompt", message: prompt }) + "\n");
-      } catch (err: any) {
-        enqueue(controller, { type: "error", message: err.message || String(err) });
-        enqueue(controller, { type: "done", sessionId: sid, model });
-        try { controller.close(); } catch { /* ignore */ }
-        sess!.active = null;
+      const sendPrompt = () => {
+        try {
+          sess!.proc.stdin.write(JSON.stringify({ type: "prompt", message: prompt }) + "\n");
+        } catch (err: any) {
+          enqueue(controller, { type: "error", message: err.message || String(err) });
+          enqueue(controller, { type: "done", sessionId: sid, model });
+          try { controller.close(); } catch { /* ignore */ }
+          sess!.active = null;
+        }
+      };
+      // Point the subprocess at the requested session before the prompt and send
+      // the prompt once pi confirms the swap; pi answers these with a `response`
+      // event which fires sess.resumeCallback in handleLine.
+      const queueResume = (cmd: any) => {
+        sess!.resumeCallback = sendPrompt;
+        try {
+          sess!.proc.stdin.write(JSON.stringify(cmd) + "\n");
+        } catch (err: any) {
+          sess!.resumeCallback = null;
+          enqueue(controller, { type: "error", message: err.message || String(err) });
+          enqueue(controller, { type: "done", sessionId: sid, model });
+          try { controller.close(); } catch { /* ignore */ }
+          sess!.active = null;
+        }
+      };
+      if (sessionFile) {
+        if (sess!.resumedFile !== sessionFile) {
+          sess!.resumedFile = sessionFile;
+          queueResume({ type: "switch_session", sessionPath: sessionFile });
+        } else {
+          sendPrompt(); // already on this session file — just continue
+        }
+      } else if (sess!.resumedFile) {
+        // Fresh conversation on a subprocess that was previously pointed at a
+        // recorded session: start a brand-new pi session instead of continuing.
+        sess!.resumedFile = null;
+        queueResume({ type: "new_session" });
+      } else {
+        sendPrompt();
       }
     },
     cancel() {

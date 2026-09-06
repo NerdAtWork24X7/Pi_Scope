@@ -14,7 +14,7 @@ import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent } from
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { attachTerminal } from "./terminal.ts";
-import { startChat, startChatSession, shutdownChatSessions, killChatSession } from "./chat.ts";
+import { startChat, startChatSession, shutdownChatSessions } from "./chat.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -642,6 +642,12 @@ function matchSessionEvents(pathname: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Match /sessions/<session_id>/seq (loopback seq-seed probe) */
+function matchSessionSeq(pathname: string): string | null {
+  const m = pathname.match(/^\/sessions\/([^/]+)\/seq$/);
+  return m ? m[1] : null;
+}
+
 /** Match /sessions/<session_id>/stats */
 function matchSessionStats(pathname: string): string | null {
   const m = pathname.match(/^\/sessions\/([^/]+)\/stats$/);
@@ -759,7 +765,14 @@ async function handle(req: Request): Promise<Response> {
   // process. Skipping the token check here removes the token-file race that
   // otherwise 401s every POST across server restarts / source-vs-packaged
   // builds. All reads (sessions, SSE, files, checkpoints) stay token-gated.
-  const isLocalProducer = (pathname === "/events" && method === "POST") || pathname === "/capture/llm-request" || pathname === "/capture/llm-response";
+  const isLocalProducer =
+    (pathname === "/events" && method === "POST") ||
+    pathname === "/capture/llm-request" ||
+    pathname === "/capture/llm-response" ||
+    // Loopback seq-seed probe (used by the extension to continue a resumed
+    // session's event sequence). Same trust model as POST /events: the server
+    // binds loopback only, so any sender is already a trusted local process.
+    (method === "GET" && matchSessionSeq(pathname) !== null);
   if (!isLocalProducer && !checkAuth(req)) {
     return jsonResponse({ error: "unauthorized" }, 401);
   }
@@ -1119,18 +1132,6 @@ async function handle(req: Request): Promise<Response> {
             if (disabled) set.add(key); else set.delete(key);
             cfg.disabledAgents = Array.from(set);
           });
-          // Kill the pi subprocess for this agent so the disabled
-          // state is immediately reflected in the running session.
-          if (disabled) {
-            try {
-              const rows = q.listSessions.all({ $pool: "", $tag: "", $limit: 200 }) as any[];
-              for (const row of rows) {
-                if ((row.agent_name || "").toLowerCase() === key) {
-                  killChatSession(row.session_id);
-                }
-              }
-            } catch { /* sessions may not be queryable */ }
-          }
           break;
         }
         case "toggleSkill": {
@@ -1243,6 +1244,7 @@ async function handle(req: Request): Promise<Response> {
       model: typeof parsed.model === "string" ? parsed.model : "",
       prompt: typeof parsed.prompt === "string" ? parsed.prompt : "",
       sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
+      sessionFile: typeof parsed.sessionFile === "string" ? parsed.sessionFile : "",
     });
   }
 
@@ -1287,6 +1289,22 @@ async function handle(req: Request): Promise<Response> {
       q.deleteSessionEvents.run({ $session_id: sidDelete });
       q.deleteSessionRow.run({ $session_id: sidDelete });
       return jsonResponse({ ok: true, session_id: sidDelete });
+    } catch (err: any) {
+      return jsonResponse({ error: err.message }, 500);
+    }
+  }
+
+  // ── GET /sessions/:session_id/seq (loopback-trusted) ───────────────────
+  // Returns the highest stored seq for a session (or -1 if none). The
+  // extension uses this to continue numbering a resumed session where it left
+  // off — without it, continued events restart at 0, collide on the
+  // (session_id, seq) UNIQUE index, and are silently dropped by INSERT OR
+  // IGNORE (resumed transcripts go stale).
+  const sidSeq = matchSessionSeq(pathname);
+  if (sidSeq && method === "GET") {
+    try {
+      const row: any = q.getMaxSeq.get({ $session_id: sidSeq });
+      return jsonResponse({ ok: true, session_id: sidSeq, seq: row?.max_seq ?? -1 });
     } catch (err: any) {
       return jsonResponse({ error: err.message }, 500);
     }
