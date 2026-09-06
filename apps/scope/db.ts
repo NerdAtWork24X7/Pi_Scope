@@ -56,6 +56,7 @@ export interface PreparedQueries {
   getSessionEvents: StatementSync;
   getSessionEventsSince: StatementSync;
   getMaxSeq: StatementSync;
+  getEventById: StatementSync;
   getSessionStats: StatementSync;
   getSessionContext: StatementSync;
   countTotals: StatementSync;
@@ -201,6 +202,11 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     SELECT MAX(seq) AS max_seq FROM events WHERE session_id = $session_id
   `);
 
+  // ── Event lookup by id (distinguishes idempotent retries from seq collisions) ──
+  const getEventById = db.prepare(`
+    SELECT event_id FROM events WHERE event_id = $event_id
+  `);
+
   // ── Session stats (cost, tokens, errors) ──────────────────────────────
   const getSessionStats = db.prepare(`
     SELECT
@@ -301,6 +307,7 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     getSessionEvents,
     getSessionEventsSince,
     getMaxSeq,
+    getEventById,
     getSessionStats,
     getSessionModelTokens,
     getSessionContext,

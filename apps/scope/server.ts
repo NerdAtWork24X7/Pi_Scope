@@ -439,19 +439,37 @@ function checkAuth(req: Request): boolean {
  * Returns the event_id if ingested, null if duplicate.
  */
 function ingestEvent(event: ObsEvent): string | null {
-  const row = toRow(event);
-  const result = q.insertEvent.run(row);
+  let effective = event;
+  let result = q.insertEvent.run(toRow(effective));
+
+  // A no-op insert means (session_id, seq) already exists. Two cases:
+  //   1. Idempotent retry — the same event_id is already stored. Keep the
+  //      no-op (returning null) so a batch re-POST never duplicates rows.
+  //   2. Seq collision — a resumed session's counter raced its server seed,
+  //      restarted at 0, and collided with the stored sequence. Renumber to
+  //      the next free seq and retry, so continued turns are NEVER silently
+  //      dropped (previously they were, leaving transcripts stuck at the
+  //      original data).
+  if (result.changes === 0) {
+    const dup = q.getEventById.get({ $event_id: event.event_id });
+    if (dup) return null;
+    const maxRow: any = q.getMaxSeq.get({ $session_id: event.session_id });
+    const next = (maxRow?.max_seq ?? -1) + 1;
+    effective = { ...event, seq: next };
+    result = q.insertEvent.run(toRow(effective));
+  }
+
   const isNew = result.changes > 0;
 
   // Bump event_count only for genuinely new events; duplicates (INSERT OR
   // IGNORE no-op) just refresh the session row without inflating the count.
-  q.upsertSession.run(toSessionRow(event, isNew));
+  q.upsertSession.run(toSessionRow(effective, isNew));
 
   if (isNew) {
-    broadcastEvent(event);
+    broadcastEvent(effective);
   }
 
-  return isNew ? event.event_id : null;
+  return isNew ? effective.event_id : null;
 }
 
 // ─── Request body reader with size cap ─────────────────────────────────────
