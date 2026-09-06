@@ -39,14 +39,14 @@ function loadURLState() {
   if (!h) return;
   const p = new URLSearchParams(h);
   if (p.has("view")) STATE.view = p.get("view");
-  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git"].includes(STATE.view)) STATE.view = "single";
+  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat"].includes(STATE.view)) STATE.view = "single";
   if (p.has("sid")) { STATE.selectedSessionId = p.get("sid"); STATE.ackd.add(STATE.selectedSessionId); }
 }
 
 function saveURLState() {
   const p = new URLSearchParams();
   p.set("view", STATE.view);
-  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
+  if ((STATE.view === "single" || STATE.view === "trajectory" || STATE.view === "chat") && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
   const newHash = "#" + p.toString();
   if (location.hash !== newHash) history.replaceState(null, "", newHash);
 }
@@ -65,6 +65,7 @@ const filterChips = $("#filter-chips");
 const singlePane = $("#single-pane");
 const filesPane = $("#files-pane");
 const checkpointsPane = document.getElementById("checkpoints-pane");
+const chatPane = document.getElementById("chat-pane");
 const headerBreadcrumb = $("#header-breadcrumb");
 const btnExpandAll = $("#btn-expand-all");
 const btnCollapseAll = $("#btn-collapse-all");
@@ -319,9 +320,10 @@ window.toggleTheme = function() {
 };
 
 window.setView = function(mode) {
-  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git"].includes(mode)) mode = "single";
+  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat"].includes(mode)) mode = "single";
   STATE.view = mode;
   localStorage.setItem("scope-view", mode);
+  document.body.classList.toggle("layout-chat", mode === "chat");
   $("#btn-single").classList.toggle("active", mode === "single");
   $("#btn-trajectory")?.classList.toggle("active", mode === "trajectory");
   $("#btn-terminal")?.classList.toggle("active", mode === "terminal");
@@ -340,6 +342,9 @@ window.setView = function(mode) {
   const gitPane = document.getElementById("git-pane");
   if (gitPane) gitPane.style.display = mode === "git" ? "flex" : "none";
   if (mode === "git") window.__gitOnView?.();
+  $("#btn-chat")?.classList.toggle("active", mode === "chat");
+  if (chatPane) chatPane.style.display = mode === "chat" ? "flex" : "none";
+  if (mode === "chat") window.__chatOnView?.();
   if (mode === "trajectory") window.__trajectoryOnView?.();
   if (sessionSubnav) sessionSubnav.style.display = (mode === "single" && STATE.selectedSessionId) ? "flex" : "none";
   renderSessions();
@@ -373,6 +378,7 @@ async function fetchSessions() {
     if (STATE.view === "checkpoints") window.__checkpointsOnSessions?.();
     if (STATE.view === "git") window.__gitOnSessions?.();
     if (STATE.view === "trajectory") window.__trajectoryOnSessions?.();
+    if (STATE.view === "chat") window.__chatOnSessions?.();
     // Batch-fetch stats for all visible sessions (one request, not N)
     var newSids = sessions.map(function(s){return s.session_id}).filter(function(id){return !STATE.sessionStats[id]});
     if (newSids.length) {
@@ -1395,6 +1401,7 @@ Object.assign(window.SCOPE, {
   fetchSessionEvents, renderSessions, apiUrl, authHeaders,
   saveURLState,
   computeAgentInfo,
+  selectSession,
 });
 
 // ─── Boot ───────────────────────────────────────────────────────────────────

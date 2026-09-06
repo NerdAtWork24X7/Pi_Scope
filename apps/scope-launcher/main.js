@@ -1,6 +1,6 @@
 // main.js — Electron shell for the Pi Scope 1-click app.
 // Boots the SCOPE server (or reuses a running one) and shows the WebUI in-app.
-const { app, BrowserWindow, nativeImage } = require("electron");
+const { app, BrowserWindow, nativeImage, dialog, ipcMain } = require("electron");
 app.setName("pi-scope-launcher");
 const { ensureServer, stopServer } = require("./scope-control");
 const path = require("node:path");
@@ -42,7 +42,11 @@ async function launch() {
     title: "Pi Scope",
     icon: APP_ICON,
     show: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, "preload.js"),
+    },
   });
 
   console.log("[launcher] SCOPE up — opening " + uiUrl);
@@ -55,6 +59,24 @@ async function launch() {
     serverProc = null;
   });
 }
+
+// Native directory picker for the Chat "Add workspace" flow. The renderer
+// (contextIsolation: true) cannot call dialog directly, so the preload bridges
+// it via ipcRenderer.invoke. Returns the chosen absolute path or null.
+ipcMain.handle("pick-directory", async () => {
+  try {
+    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+    const result = await dialog.showOpenDialog(win, {
+      title: "Select workspace directory",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    if (result.canceled || !result.filePaths.length) return null;
+    return result.filePaths[0];
+  } catch (err) {
+    console.error("[launcher] pick-directory failed:", err.message);
+    return null;
+  }
+});
 
 app.whenReady().then(launch);
 app.on("window-all-closed", () => app.quit());

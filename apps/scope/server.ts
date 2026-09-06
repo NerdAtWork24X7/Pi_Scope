@@ -14,6 +14,7 @@ import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent } from
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { attachTerminal } from "./terminal.ts";
+import { startChat, startChatSession, shutdownChatSessions, killChatSession } from "./chat.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -62,6 +63,258 @@ try {
   fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
   fs.writeFileSync(TOKEN_FILE, AUTH_TOKEN, { mode: 0o600 });
 } catch {}
+
+// ─── Agent-team sidebar state ───────────────────────────────────────────────
+// The pi agent-team harness persists its sidebar state to two files under the
+// agent dir (~/.pi/agent): agents/teams.yaml (teams + members + memory_model)
+// and agent-team-config.json (activeTeam, mode, disabledAgents, skills). The
+// web Chat view's right sidebar mirrors the agent-team sidebar (sidebar.ts), so
+// the server reads these files and returns a normalized snapshot.
+const AGENT_DIR = process.env.SCOPE_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+const TEAMS_YAML = process.env.SCOPE_TEAMS_YAML ?? path.join(AGENT_DIR, "agents", "teams.yaml");
+const AGENT_CONFIG = process.env.SCOPE_AGENT_CONFIG ?? path.join(AGENT_DIR, "agent-team-config.json");
+const SETTINGS_JSON = process.env.SCOPE_SETTINGS_JSON ?? path.join(AGENT_DIR, "settings.json");
+const SKILLS_DIR = process.env.SCOPE_SKILLS_DIR ?? path.join(AGENT_DIR, "skills");
+
+/** Minimal parser for the teams.yaml format used by the agent-team harness. */
+function parseTeamsYaml(raw: string): { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean } {
+  const teams: Record<string, any[]> = {};
+  let memoryModel: string | undefined;
+  let memoryActive: boolean | undefined;
+  let curTeam: string | null = null;
+  let curMember: any = null;
+  let inMemory = false;
+
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    // Top-level key: no leading whitespace, `key:`.
+    const top = t.match(/^([A-Za-z0-9_-]+):\s*$/);
+    if (top && !/^\s/.test(line)) {
+      curMember = null;
+      if (top[1] === "memory_model") {
+        inMemory = true;
+        curTeam = null;
+      } else {
+        inMemory = false;
+        curTeam = top[1];
+      }
+      continue;
+    }
+    // Member list item: "- name: x", "- name" (simple), or "- agent_name".
+    if (t.startsWith("- ")) {
+      const rest = t.slice(2).trim();
+      const simple = rest.match(/^([A-Za-z0-9_.-]+)$/);
+      if (simple && !inMemory) {
+        curMember = { name: simple[1] };
+        if (curTeam) (teams[curTeam] = teams[curTeam] || []).push(curMember);
+        continue;
+      }
+      const nm = rest.match(/^name:\s*(.+)$/);
+      if (nm && !inMemory) {
+        curMember = { name: nm[1].trim() };
+        if (curTeam) (teams[curTeam] = teams[curTeam] || []).push(curMember);
+        continue;
+      }
+      curMember = null;
+      continue;
+    }
+    // Property line: "model: x" / "active: true" under a member or memory_model.
+    const prop = t.match(/^([A-Za-z_-]+):\s*(.*)$/);
+    if (prop) {
+      const k = prop[1];
+      const v = prop[2].trim();
+      if (inMemory) {
+        if (k === "model") memoryModel = v;
+        else if (k === "active") memoryActive = v === "true";
+      } else if (curMember) {
+        if (k === "model") curMember.model = v;
+        else if (k === "active") curMember.active = v === "true";
+      }
+    }
+  }
+  return { teams, memoryModel, memoryActive };
+}
+
+function loadAgentTeam(): Record<string, any> {
+  const out: Record<string, any> = {
+    teams: {},
+    teamsOrder: [],
+    memoryModel: undefined,
+    memoryActive: undefined,
+    activeTeam: undefined,
+    mode: undefined,
+    disabledAgents: [],
+    orchestratorSkills: [],
+    subagentSkills: [],
+    skills: [],
+    extensions: [],
+    enabledModels: [],
+    defaultModel: undefined,
+  };
+  try {
+    const p = parseTeamsYaml(fs.readFileSync(TEAMS_YAML, "utf8"));
+    out.teams = p.teams;
+    out.teamsOrder = Object.keys(p.teams);
+    out.memoryModel = p.memoryModel;
+    out.memoryActive = p.memoryActive;
+  } catch { /* teams.yaml absent — return empty teams */ }
+  try {
+    const cfg = JSON.parse(fs.readFileSync(AGENT_CONFIG, "utf8"));
+    out.activeTeam = cfg.activeTeam;
+    out.mode = cfg.mode;
+    out.disabledAgents = cfg.disabledAgents || [];
+    out.orchestratorSkills = cfg.orchestratorSkills || [];
+    out.subagentSkills = cfg.subagentSkills || [];
+    // Chat view workspaces: directories the user added explicitly, plus
+    // session-derived workspaces the user removed from the list.
+    out.chatWorkspaces = cfg.chatWorkspaces || [];
+    out.chatWorkspacesRemoved = cfg.chatWorkspacesRemoved || [];
+  } catch { /* config absent */ }
+
+  // Models the user enabled in pi settings — the authoritative model list for
+  // the Chat composer dropdown.
+  try {
+    const settings = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8"));
+    out.enabledModels = Array.isArray(settings.enabledModels) ? settings.enabledModels : [];
+    out.defaultModel = settings.defaultModel;
+  } catch { /* settings absent */ }
+
+  // Skills: all discovered from the skills dir, annotated with which agent
+  // group (orchestrator/subagent) currently has them enabled.
+  const orchSet = new Set(out.orchestratorSkills || []);
+  const subSet = new Set(out.subagentSkills || []);
+  out.skills = discoverSkills().map((s) => ({
+    ...s,
+    orchestrator: orchSet.has(s.dir),
+    subagent: subSet.has(s.dir),
+  }));
+  out.extensions = discoverExtensions();
+  return out;
+}
+
+// ─── Settings / skills / extensions discovery ───────────────────────────────
+
+/** Parse a settings.json `extensions` entry into { path, enabled }.
+ *  Entries look like "+extensions/agent-team/index.ts" or "-extensions/obscura/index.ts". */
+function parseExtensionEntry(entry: string): { path: string; enabled: boolean } | null {
+  const m = entry.match(/^([-+]?)(extensions?\/.+)$/);
+  if (!m) return null;
+  return { path: m[2], enabled: m[1] !== "-" };
+}
+
+/** Parse a settings.json `skills` entry into { name, disabled }.
+ *  Entries look like "-skills/flet/SKILL.md" or "+skills/electron-scaffold/SKILL.md". */
+function parseSkillSettingEntry(entry: string): { name: string; disabled: boolean } | null {
+  const m = entry.match(/^([-+]?)skills\/([^/]+)\/SKILL\.md$/);
+  if (!m) return null;
+  return { name: m[2], disabled: m[1] === "-" };
+}
+
+/** Read settings.json extensions list and return normalized entries. */
+function discoverExtensions(): { path: string; enabled: boolean; name: string }[] {
+  let list: string[] = [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8"));
+    list = Array.isArray(raw?.extensions) ? raw.extensions : [];
+  } catch { /* settings absent */ }
+  const out: { path: string; enabled: boolean; name: string }[] = [];
+  for (const entry of list) {
+    const parsed = parseExtensionEntry(String(entry));
+    if (!parsed) continue;
+    const base = path.basename(parsed.path);
+    // index.ts → use the directory name (e.g. agent-team); otherwise the file base name.
+    const name = base === "index.ts" ? path.basename(path.dirname(parsed.path)) : base.replace(/\.ts$/, "");
+    out.push({ path: parsed.path, enabled: parsed.enabled, name });
+  }
+  return out;
+}
+
+/** Scan the skills dir for SKILL.md frontmatter, returning all skills with
+ *  whether they are currently enabled at the settings.json level. */
+function discoverSkills(): { name: string; dir: string; description: string; settingsEnabled: boolean }[] {
+  const disabled = new Set<string>();
+  try {
+    const raw = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8"));
+    const list: string[] = Array.isArray(raw?.skills) ? raw.skills : [];
+    for (const entry of list) {
+      const parsed = parseSkillSettingEntry(String(entry));
+      if (parsed?.disabled) disabled.add(parsed.name);
+    }
+  } catch { /* settings absent */ }
+  const out: { name: string; dir: string; description: string; settingsEnabled: boolean }[] = [];
+  if (!fs.existsSync(SKILLS_DIR)) return out;
+  for (const f of fs.readdirSync(SKILLS_DIR, { withFileTypes: true })) {
+    if (!f.isDirectory()) continue;
+    const md = path.join(SKILLS_DIR, f.name, "SKILL.md");
+    if (!fs.existsSync(md)) continue;
+    let name = f.name, description = "";
+    try {
+      const raw = fs.readFileSync(md, "utf8");
+      const fm = raw.match(/^---\s*\n([\s\S]*?)\n---\s*/);
+      if (fm) {
+        for (const line of fm[1].split("\n")) {
+          const i = line.indexOf(":");
+          if (i > 0) {
+            const k = line.slice(0, i).trim();
+            const v = line.slice(i + 1).trim();
+            if (k === "name") name = v;
+            else if (k === "description") description = v;
+          }
+        }
+      }
+    } catch { /* skip unreadable */ }
+    out.push({ name, dir: f.name, description, settingsEnabled: !disabled.has(f.name) });
+  }
+  return out;
+}
+
+// ─── Config persistence (teams.yaml / agent-team-config.json / settings.json) ─
+
+function serializeTeamsYaml(data: { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean }): string {
+  const lines: string[] = [];
+  if (data.memoryModel) {
+    lines.push("memory_model:");
+    lines.push(`  model: ${data.memoryModel}`);
+    lines.push(`  active: ${data.memoryActive === true ? "true" : "false"}`);
+    lines.push("");
+  }
+  for (const [teamName, members] of Object.entries(data.teams || {})) {
+    lines.push(`${teamName}:`);
+    for (const m of members) {
+      lines.push(`  - name: ${m.name}`);
+      if (m.model) lines.push(`    model: ${m.model}`);
+      if (m.active === false) lines.push(`    active: false`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n") + "\n";
+}
+
+function updateTeamsYaml(mutate: (p: { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean }) => void): void {
+  let parsed: { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean };
+  try {
+    parsed = parseTeamsYaml(fs.readFileSync(TEAMS_YAML, "utf8"));
+  } catch {
+    parsed = { teams: {} };
+  }
+  mutate(parsed);
+  fs.writeFileSync(TEAMS_YAML, serializeTeamsYaml(parsed));
+}
+
+function updateAgentConfig(mutate: (cfg: any) => void): void {
+  let cfg: any = {};
+  try { cfg = JSON.parse(fs.readFileSync(AGENT_CONFIG, "utf8")); } catch { /* absent */ }
+  mutate(cfg);
+  fs.writeFileSync(AGENT_CONFIG, JSON.stringify(cfg, null, 2) + "\n");
+}
+
+function updateSettingsJson(mutate: (cfg: any) => void): void {
+  let cfg: any = {};
+  try { cfg = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8")); } catch { /* absent */ }
+  mutate(cfg);
+  fs.writeFileSync(SETTINGS_JSON, JSON.stringify(cfg, null, 2) + "\n");
+}
 
 // ─── Init ───────────────────────────────────────────────────────────────────
 
@@ -302,6 +555,18 @@ function validateCwd(cwd: string): string | null {
       return abs === live || abs.startsWith(live + path.sep);
     });
   }
+  // Also allow directories the user explicitly added as chat workspaces in the
+  // Chat view (persisted in agent-team-config.json).
+  if (!ok) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(AGENT_CONFIG, "utf8"));
+      const extras: string[] = cfg.chatWorkspaces || [];
+      ok = extras.some((r) => {
+        const live = path.resolve(r);
+        return abs === live || abs.startsWith(live + path.sep);
+      });
+    } catch { /* config absent */ }
+  }
   if (!ok) return null;
   return abs;
 }
@@ -406,6 +671,9 @@ function gracefulShutdown(): void {
     }
     try { wssRef.close(); } catch {}
   }
+
+  // Kill any lingering pi chat subprocesses.
+  shutdownChatSessions();
 
   // Checkpoint and close the SQLite database.
   try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
@@ -809,6 +1077,173 @@ async function handle(req: Request): Promise<Response> {
     } catch (err: any) {
       return jsonResponse({ error: err.message }, 500);
     }
+  }
+
+  // ── GET /agent-team (snapshot of the agent-team sidebar state) ──────────
+  if (pathname === "/agent-team" && method === "GET") {
+    return jsonResponse(loadAgentTeam());
+  }
+
+  // ── POST /agent-team (persist a sidebar toggle) ─────────────────────────
+  if (pathname === "/agent-team" && method === "POST") {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const action = body?.action;
+    try {
+      switch (action) {
+        case "setTeam":
+          updateAgentConfig((cfg) => { cfg.activeTeam = body.team; });
+          break;
+        case "toggleMode":
+          updateAgentConfig((cfg) => { cfg.mode = cfg.mode === "creative" ? "standard" : "creative"; });
+          break;
+        case "toggleMemory":
+          updateTeamsYaml((p) => {
+            const on = p.memoryActive !== true;
+            // Enabling memory requires a configured model; otherwise keep it off.
+            p.memoryActive = on ? !!p.memoryModel : false;
+          });
+          break;
+        case "toggleAgent": {
+          const key = String(body.agent || "").toLowerCase();
+          const disabled = !!body.disabled;
+          updateTeamsYaml((p) => {
+            for (const members of Object.values(p.teams || {})) {
+              const mem = (members as any[]).find((m) => (m.name || "").toLowerCase() === key);
+              if (mem) mem.active = !disabled;
+            }
+          });
+          updateAgentConfig((cfg) => {
+            cfg.disabledAgents = cfg.disabledAgents || [];
+            const set = new Set(cfg.disabledAgents.map((s: string) => s.toLowerCase()));
+            if (disabled) set.add(key); else set.delete(key);
+            cfg.disabledAgents = Array.from(set);
+          });
+          // Kill the pi subprocess for this agent so the disabled
+          // state is immediately reflected in the running session.
+          if (disabled) {
+            try {
+              const rows = q.listSessions.all({ $pool: "", $tag: "", $limit: 200 }) as any[];
+              for (const row of rows) {
+                if ((row.agent_name || "").toLowerCase() === key) {
+                  killChatSession(row.session_id);
+                }
+              }
+            } catch { /* sessions may not be queryable */ }
+          }
+          break;
+        }
+        case "toggleSkill": {
+          const group = body.group; // "orchestrator" | "subagent"
+          const dir = body.dir;
+          updateAgentConfig((cfg) => {
+            const key = group === "orchestrator" ? "orchestratorSkills" : "subagentSkills";
+            const arr: string[] = cfg[key] || [];
+            const set = new Set(arr);
+            if (set.has(dir)) set.delete(dir); else set.add(dir);
+            cfg[key] = Array.from(set);
+          });
+          break;
+        }
+        case "toggleExtension": {
+          const entryPath = body.path;
+          updateSettingsJson((cfg) => {
+            cfg.extensions = cfg.extensions || [];
+            const idx = cfg.extensions.findIndex((e: string) => parseExtensionEntry(e)?.path === entryPath);
+            if (idx >= 0) {
+              const parsed = parseExtensionEntry(cfg.extensions[idx]);
+              if (parsed) cfg.extensions[idx] = (parsed.enabled ? "-" : "+") + parsed.path;
+            }
+          });
+          break;
+        }
+        case "toggleSkillSetting": {
+          const dir = body.dir;
+          updateSettingsJson((cfg) => {
+            cfg.skills = cfg.skills || [];
+            const idx = cfg.skills.findIndex((e: string) => parseSkillSettingEntry(e)?.name === dir);
+            if (idx >= 0) {
+              const parsed = parseSkillSettingEntry(cfg.skills[idx]);
+              cfg.skills[idx] = (parsed?.disabled ? "+" : "-") + `skills/${dir}/SKILL.md`;
+            } else {
+              cfg.skills.push(`+skills/${dir}/SKILL.md`);
+            }
+          });
+          break;
+        }
+        case "addWorkspace": {
+          // Add a directory as a chat workspace. Must already exist on disk.
+          const p = String(body.path || "").trim();
+          if (!p) return jsonResponse({ error: "missing path" }, 400);
+          let abs: string;
+          try { abs = fs.realpathSync(path.resolve(p)); } catch { return jsonResponse({ error: `directory not found: ${p}` }, 400); }
+          let st: fs.Stats;
+          try { st = fs.statSync(abs); } catch { return jsonResponse({ error: `directory not found: ${p}` }, 400); }
+          if (!st.isDirectory()) return jsonResponse({ error: `not a directory: ${p}` }, 400);
+          updateAgentConfig((cfg) => {
+            const arr: string[] = cfg.chatWorkspaces || [];
+            if (!arr.includes(abs)) arr.push(abs);
+            cfg.chatWorkspaces = arr;
+            // Re-adding un-hides it if it was previously removed.
+            cfg.chatWorkspacesRemoved = (cfg.chatWorkspacesRemoved || []).filter((s: string) => s !== abs);
+          });
+          break;
+        }
+        case "removeWorkspace": {
+          // Remove a workspace from the chat rail. Session-derived workspaces
+          // are remembered as removed so the session poll doesn't re-add them.
+          const raw = String(body.path || "");
+          if (!raw) return jsonResponse({ error: "missing path" }, 400);
+          const key = raw === "(unknown)" ? raw : path.resolve(raw);
+          updateAgentConfig((cfg) => {
+            cfg.chatWorkspaces = (cfg.chatWorkspaces || []).filter((s: string) => path.resolve(s) !== key);
+            const removed: string[] = cfg.chatWorkspacesRemoved || [];
+            if (!removed.includes(key)) removed.push(key);
+            cfg.chatWorkspacesRemoved = removed;
+          });
+          break;
+        }
+        default:
+          return jsonResponse({ error: `unknown action: ${action}` }, 400);
+      }
+    } catch (err: any) {
+      return jsonResponse({ error: err.message || String(err) }, 500);
+    }
+    return jsonResponse(loadAgentTeam());
+  }
+
+  // ── POST /chat/start (pre-spawn the pi session for a workspace) ────────
+  // Called when the user selects a workspace in the Chat view so `pi --mode
+  // rpc` is already running before the first prompt is typed.
+  if (pathname === "/chat/start" && method === "POST") {
+    let bodyText: string;
+    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
+    let parsed: any;
+    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const r = startChatSession({ cwd: absCwd, model: typeof parsed.model === "string" ? parsed.model : "" });
+    return jsonResponse({ ...r, cwd: absCwd, model: (parsed.model || "").trim() || "google/gemini-2.5-flash-lite" });
+  }
+
+  // ── POST /chat (real-time prompt to the pi coding agent) ───────────────
+  if (pathname === "/chat" && method === "POST") {
+    let bodyText: string;
+    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
+    let parsed: any;
+    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    return startChat({
+      cwd: absCwd,
+      model: typeof parsed.model === "string" ? parsed.model : "",
+      prompt: typeof parsed.prompt === "string" ? parsed.prompt : "",
+      sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
+    });
   }
 
   // ── GET /sessions ──────────────────────────────────────────────────────

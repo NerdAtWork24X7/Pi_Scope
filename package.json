@@ -8,5 +8,11 @@
     "type": "git",
     "url": "https://github.com/NerdAtWork24X7/Pi_Scope.git"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.63.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
 }

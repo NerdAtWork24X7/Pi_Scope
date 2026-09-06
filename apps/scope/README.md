@@ -24,6 +24,8 @@ SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 | `SCOPE_DB_PATH` | `db/scope.db` | SQLite database path |
 | `SCOPE_AUTH_TOKEN` | dev_token | Bearer token for auth |
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
+| `SCOPE_SETTINGS_JSON` | `~/.pi/agent/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
+| `SCOPE_SKILLS_DIR` | `~/.pi/agent/skills` | Override the skills directory scanned for the agent-team sidebar |
 
 ## Herdr cwd integration
 

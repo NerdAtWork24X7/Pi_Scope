@@ -35,4 +35,6 @@ export interface SessionSummary {
   event_count: number;
   tags: string[];
   has_shutdown?: boolean;
+  /** First user message sent to the LLM in this session (truncated preview). */
+  first_msg?: string;
 }

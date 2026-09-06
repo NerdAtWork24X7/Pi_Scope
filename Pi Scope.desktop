@@ -8,3 +8,4 @@ Icon=/home/alexa/wk/Pi_Scope/apps/scope-launcher/icon.png
 Terminal=false
 Categories=Development;Utility;Monitor;
 StartupWMClass=pi-scope-launcher
+Name[en_US]=Pi Scope

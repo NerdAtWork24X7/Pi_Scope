@@ -132,7 +132,24 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       COALESCE(model, '') AS model,
       first_ts, last_ts, event_count,
       tags_json,
-      EXISTS (SELECT 1 FROM events WHERE events.session_id = sessions.session_id AND events.type = 'session_shutdown') AS has_shutdown
+      EXISTS (SELECT 1 FROM events WHERE events.session_id = sessions.session_id AND events.type = 'session_shutdown') AS has_shutdown,
+      COALESCE(
+        (SELECT substr(json_extract(e.payload_json, '$.text'), 1, 200)
+         FROM events e
+         WHERE e.session_id = sessions.session_id
+           AND e.type = 'user_message'
+           AND COALESCE(json_extract(e.payload_json, '$.text'), '') != ''
+         ORDER BY e.seq ASC
+         LIMIT 1),
+        (SELECT substr(json_extract(e.payload_json, '$.user_msg_preview'), 1, 200)
+         FROM events e
+         WHERE e.session_id = sessions.session_id
+           AND e.type = 'llm_request'
+           AND COALESCE(json_extract(e.payload_json, '$.user_msg_preview'), '') != ''
+         ORDER BY e.seq ASC
+         LIMIT 1),
+        ''
+      ) AS first_msg
     FROM sessions
     WHERE ($pool = '' OR pool = $pool)
       AND ($tag = '' OR EXISTS (
@@ -341,6 +358,7 @@ export function rowToSession(row: any): SessionSummary {
     event_count: row.event_count,
     tags,
     has_shutdown: !!row.has_shutdown,
+    first_msg: row.first_msg || undefined,
   };
 }
 
