@@ -75,18 +75,30 @@
     try { localStorage.setItem(CUSTOM_WS_KEY, JSON.stringify(CH.customWs)); } catch {}
   }
   // Fold a project's config snapshot into the union (no-op when already known).
-  // Removals are authoritative client intent: a workspace the user removed stays
-  // hidden even if another project's config still lists it (per-project storage
-  // can't be enumerated, so stale entries there are filtered here). Only an
-  // explicit re-add (submitAddWorkspace) clears the removal.
+  // chatWorkspaces / chatWorkspacesRemoved are stored PER PROJECT, but the
+  // sidebar is a UNION of every project's list we have seen. A removal recorded
+  // in ONE project's config must therefore not hide a workspace that ANOTHER
+  // project still lists — previously mono-pi-extension's removal of Pi_Scope
+  // made Pi_Scope vanish from the rail everywhere, even though Pi_Scope's own
+  // config lists it (the reported "empty workspace gets overwritten" bug).
+  // Rule: a workspace explicitly listed by any seen project stays visible;
+  // a removal is honored only while no seen project lists it.
   function mergeCustomWs(data) {
     if (!data) return;
     let changed = false;
     for (const w of data.chatWorkspaces || []) {
       if (!CH.customWs.list.includes(w)) { CH.customWs.list.push(w); changed = true; }
+      // A listing anywhere beats a removal recorded elsewhere.
+      if (CH.customWs.removed.includes(w)) {
+        CH.customWs.removed = CH.customWs.removed.filter((r) => r !== w);
+        changed = true;
+      }
     }
     for (const w of data.chatWorkspacesRemoved || []) {
-      if (!CH.customWs.removed.includes(w)) { CH.customWs.removed.push(w); changed = true; }
+      if (!CH.customWs.list.includes(w) && !CH.customWs.removed.includes(w)) {
+        CH.customWs.removed.push(w);
+        changed = true;
+      }
     }
     if (changed) saveCustomWs();
   }
@@ -721,8 +733,13 @@
         mergeCustomWs(data);
         CH.adding = false;
         renderWorkspaces();
+        // Prefer the exact path the user typed when the server echoed it back
+        // (the config stores the canonical resolved path, so a relative/symlink
+        // input falls back to the first workspace in the response we hadn't
+        // seen before, then the typed path). This avoids selecting a random
+        // pre-existing workspace that merely sorts first in the response.
         const added = (data.chatWorkspaces || []).find((c) => !before.has(c));
-        selectWorkspace(added || p);
+        selectWorkspace((data.chatWorkspaces || []).includes(p) ? p : (added || p));
       } else if (err) {
         err.textContent = data?.error || `HTTP ${res.status}`;
       }
