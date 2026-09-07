@@ -905,10 +905,35 @@
     renderAgents();
   }
 
+  // The whole agent-team view (orchestrator, teams, subagents, mode & memory)
+  // is driven by pi's agent-team extension. It only shows when that extension
+  // is available (its file exists on disk) AND enabled in settings.json, and
+  // the harness "agent team enabled" master switch (agent-team-config.json
+  // `enabled`, default on) is on. Anything less and the sidebar falls back to
+  // the plain session list instead of showing team UI that isn't running.
+  function teamHarnessOn(td) {
+    if (!td) return true; // snapshot not loaded yet — keep the default until we know
+    if (td.enabled === false) return false;
+    return (td.extensions || []).some((ex) =>
+      ex.available && ex.enabled && (ex.name === "agent-team" || /agent-team/.test(ex.path || ""))
+    );
+  }
+
+  // The right rail's header chrome is agent-team specific — the "Agent Team"
+  // label and its collapse toggle. When the team harness is off the rail just
+  // lists sessions, so drop the toggle and retitle it.
+  function applyRailHeader(teamsOn) {
+    if (el.toggleRight) el.toggleRight.style.display = teamsOn ? "" : "none";
+    const title = document.querySelector("#chat-agent-rail .chat-rail-title");
+    if (title) title.textContent = teamsOn ? "Agent Team" : "Agents";
+  }
+
   function renderAgents() {
     if (!el.agents) return;
     const td = CH.teamData;
-    if (!td || !td.teamsOrder || !td.teamsOrder.length) {
+    const teamsOn = teamHarnessOn(td);
+    applyRailHeader(teamsOn);
+    if (!td || !teamsOn || !td.teamsOrder || !td.teamsOrder.length) {
       renderAgentSessions();
       return;
     }
@@ -1020,13 +1045,16 @@
     subBody = `<div class="at-chips">` + subBody + `</div>`;
     html += atSection("subagents", "Subagents", subBody, { count: members.length });
 
-    const exts = td.extensions || [];
+    // Only show extensions that are both active and actually available on disk
+    // (the server marks entries whose file exists); disabled or missing-file
+    // extensions stay in the Settings page, where they can be re-enabled.
+    const exts = (td.extensions || []).filter((ex) => ex.enabled && ex.available);
     let extBody = "";
     if (!exts.length) extBody = `<div class="at-dim">none enabled</div>`;
     else {
       for (const ex of exts) {
         extBody +=
-          `<div class="at-chip${ex.enabled ? " on" : ""}" data-path="${esc(ex.path)}" title="${esc(ex.path)}">` +
+          `<div class="at-chip on" data-path="${esc(ex.path)}" title="${esc(ex.path)}">` +
           `<span class="at-chip-dot"></span>` +
           `<span class="at-chip-name">${esc(ex.name)}</span>` +
           `</div>`;

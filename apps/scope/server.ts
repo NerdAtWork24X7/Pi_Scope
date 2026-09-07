@@ -199,6 +199,7 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     memoryActive: undefined,
     activeTeam: undefined,
     mode: undefined,
+    enabled: true, // agent-team-config.json `enabled` master switch (default on)
     disabledAgents: [],
     orchestratorSkills: [],
     subagentSkills: [],
@@ -221,6 +222,9 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     const cfg = JSON.parse(fs.readFileSync(readAgentConfigPathFor(project || TERMINAL_CWD), "utf8"));
     out.activeTeam = cfg.activeTeam;
     out.mode = cfg.mode;
+    // The "agent team enabled" master switch pi honors for the team harness;
+    // default on when the field is absent.
+    out.enabled = cfg.enabled !== false;
     out.disabledAgents = cfg.disabledAgents || [];
     out.orchestratorSkills = cfg.orchestratorSkills || [];
     out.subagentSkills = cfg.subagentSkills || [];
@@ -350,21 +354,29 @@ function parseSkillSettingEntry(entry: string): { name: string; disabled: boolea
   return { name: m[2], disabled: m[1] === "-" };
 }
 
-/** Read settings.json extensions list and return normalized entries. */
-function discoverExtensions(): { path: string; enabled: boolean; name: string }[] {
+/** Read settings.json extensions list and return normalized entries, each
+ *  annotated with whether its file actually exists on disk (`available`).
+ *  Relative entries resolve against the agent dir (pi's extension layout);
+ *  absolute entries are used as-is. Entries whose file is missing (moved,
+ *  deleted, mistyped) can't be loaded by pi, so UIs skip them instead of
+ *  showing dead toggles. */
+function discoverExtensions(): { path: string; enabled: boolean; name: string; available: boolean }[] {
   let list: string[] = [];
   try {
     const raw = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8"));
     list = Array.isArray(raw?.extensions) ? raw.extensions : [];
   } catch { /* settings absent */ }
-  const out: { path: string; enabled: boolean; name: string }[] = [];
+  const out: { path: string; enabled: boolean; name: string; available: boolean }[] = [];
   for (const entry of list) {
     const parsed = parseExtensionEntry(String(entry));
     if (!parsed) continue;
     const base = path.basename(parsed.path);
     // index.ts → use the directory name (e.g. agent-team); otherwise the file base name.
     const name = base === "index.ts" ? path.basename(path.dirname(parsed.path)) : base.replace(/\.ts$/, "");
-    out.push({ path: parsed.path, enabled: parsed.enabled, name });
+    const abs = path.isAbsolute(parsed.path) ? parsed.path : path.join(AGENT_DIR, parsed.path);
+    let available = false;
+    try { available = fs.statSync(abs).isFile(); } catch { /* file missing */ }
+    out.push({ path: parsed.path, enabled: parsed.enabled, name, available });
   }
   return out;
 }
@@ -475,8 +487,10 @@ const GO_LIMITS: Record<"h5" | "wk" | "mo", number> = { h5: 12, wk: 30, mo: 60 }
 // The `kilo` provider (kilo.ai) keeps its own on-disk model cache, separate from
 // models-store.json. Its models are ingested here so the Settings cost catalog
 // surfaces `kilo` as an independent provider (never conflated with a model of the
-// same id under another provider such as openrouter).
-const KILO_CACHE_DIR = process.env.SCOPE_KILO_CACHE_DIR ?? path.join(os.homedir(), ".pi", "cache");
+// same id under another provider such as openrouter). The path mirrors the
+// agent-team extension's model-cache.ts CACHE_DIR (~/.pi/kilo_Cache), which is
+// the only writer of these files.
+const KILO_CACHE_DIR = process.env.SCOPE_KILO_CACHE_DIR ?? path.join(os.homedir(), ".pi", "kilo_Cache");
 
 let modelsStoreCache: { mtimeMs: number; data: Record<string, any> } | null = null;
 let kiloCache: { models: any[] } | null = null;
@@ -494,7 +508,7 @@ function loadModelsStore(): Record<string, any> {
   }
 }
 
-/** Read the kilo provider's model cache (~/.pi/cache/kilo-models.json and
+/** Read the kilo provider's model cache (~/.pi/kilo_Cache/kilo-models.json and
  *  kilo-free-models.json). Each is a { cachedAt, data: [...] } envelope; merge
  *  the arrays. Cached in-process; a fresh read happens once per process since
  *  the caches change only when the kilo extension refreshes them at boot. */
@@ -1580,8 +1594,14 @@ async function handle(req: Request): Promise<Response> {
         case "toggleMemory":
           updateTeamsYaml(proj, (p) => {
             const on = p.memoryActive !== true;
-            // Enabling memory requires a configured model; otherwise keep it off.
-            p.memoryActive = on ? !!p.memoryModel : false;
+            // Mirror pi's agent-team toggleMemory (memory.ts): enabling memory
+            // falls back to the default model when teams.yaml has no
+            // memory_model configured (pi uses the orchestrator's current
+            // model), so the toggle works even before a memory model is ever
+            // set. Without any model the feature can't run — keep it off.
+            const model = p.memoryModel || readSettingsJson().defaultModel || "";
+            if (on && model) p.memoryModel = model;
+            p.memoryActive = on ? !!model : false;
           });
           break;
         case "setThinkingLevel": {

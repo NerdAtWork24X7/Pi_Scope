@@ -15,10 +15,19 @@
  * Events are idempotent (fixed event_ids), so re-running is safe.
  */
 
+import path from "node:path";
+
 const BASE = process.env.SCOPE_URL ?? "http://127.0.0.1:43190";
 const TOKEN = process.env.SCOPE_TOKEN ?? "";
 const NOW = Date.now();
 const min = 60_000;
+
+// Demo sessions reference the project the script is run from (the repo root),
+// never a hardcoded user directory — run `node docs/seed-demo.mjs` from the
+// repo root so the seeded sessions group under this project's path. The second
+// project is derived as a sibling so it stays portable too.
+const PROJECT = process.cwd();
+const SIBLING_PROJECT = path.resolve(PROJECT, "..", "model_selector");
 
 let seq = 0;
 const t = (ago) => (payload) => ({ ...payload, _ago: ago });
@@ -48,7 +57,7 @@ const USAGE = (input, output, cost, extra = {}) => ({
 
 function buildCoderSession() {
   const S = "sess-darkmode-9f3a2b";
-  const C = { session: S, agent: "coder", model: "deepseek/deepseek-v4-flash", cwd: "/home/alexa/wk/Pi_Scope", tags: ["ui", "frontend"], provider: "deepseek" };
+  const C = { session: S, agent: "coder", model: "deepseek/deepseek-v4-flash", cwd: PROJECT, tags: ["ui", "frontend"], provider: "deepseek" };
   const E = [];
   E.push(evt("session_start", t(42 * min)({ reason: "manual" }), C));
   E.push(evt("agent_start", t(42 * min - 8000)({ prompt: "Add dark mode support to the Settings page — a theme toggle in the header, persisted to localStorage" }), C));
@@ -80,8 +89,8 @@ function buildCoderSession() {
     text: "Logic wired. Let me boot the server and verify the toggle survives a reload.",
     usage: USAGE(18_104, 244, 0.0056, { cacheRead: 11_200 }), latency_ms: 3900, prefill_ms: 700, output_tps: 62, stop_reason: "tool_use", turn_index: 0,
   }), C));
-  E.push(evt("tool_call", t(42 * min - 37_000)({ tool_call_id: "tc-4", tool_name: "run_terminal_command", args: { command: "node apps/scope/server.ts", cwd: "/home/alexa/wk/Pi_Scope" } }), C));
-  E.push(evt("tool_result", t(42 * min - 39_000)({ tool_call_id: "tc-4", tool_name: "run_terminal_command", content_text: "pi-scope server v0.1.0\n  UI:    http://127.0.0.1:43190/?token=3f9a…c21d\n  DB:    /home/alexa/wk/Pi_Scope/db/scope.db", details_summary: { exit_code: 0 } }), C));
+  E.push(evt("tool_call", t(42 * min - 37_000)({ tool_call_id: "tc-4", tool_name: "run_terminal_command", args: { command: "node apps/scope/server.ts", cwd: PROJECT } }), C));
+  E.push(evt("tool_result", t(42 * min - 39_000)({ tool_call_id: "tc-4", tool_name: "run_terminal_command", content_text: `pi-scope server v0.1.0\n  UI:    http://127.0.0.1:43190/?token=3f9a…c21d\n  DB:    ${PROJECT}/db/scope.db`, details_summary: { exit_code: 0 } }), C));
   E.push(evt("tool_call", t(42 * min - 40_000)({ tool_call_id: "tc-5", tool_name: "bash", args: { command: "curl -s http://127.0.0.1:43190/health | head -c 200" } }), C));
   E.push(evt("tool_result", t(42 * min - 40_500)({ tool_call_id: "tc-5", tool_name: "bash", content_text: '{"ok":true,"version":"0.1.0","uptime_s":3,"events_total":12,"sessions_total":1}', details_summary: { exit_code: 0 } }), C));
   E.push(evt("assistant_message", t(42 * min - 41_000)({
@@ -112,7 +121,7 @@ function buildCoderSession() {
 
 function buildTesterSession() {
   const S = "sess-tester-77c1d0";
-  const C = { session: S, agent: "tester", model: "gemini/gemini-3.5-flash", cwd: "/home/alexa/wk/Pi_Scope", tags: ["qa"], provider: "google", parent: "sess-darkmode-9f3a2b" };
+  const C = { session: S, agent: "tester", model: "gemini/gemini-3.5-flash", cwd: PROJECT, tags: ["qa"], provider: "google", parent: "sess-darkmode-9f3a2b" };
   const E = [];
   E.push(evt("session_start", t(20 * min)({ reason: "spawned" }), C));
   E.push(evt("agent_start", t(19.8 * min)({ prompt: "Verify the dark-mode toggle: toggle on, reload, assert the theme persists and the live indicator still works." }), C));
@@ -131,7 +140,7 @@ function buildTesterSession() {
 
 function buildApiSession() {
   const S = "sess-api-2e5f91";
-  const C = { session: S, agent: "coder", model: "opencode-go/deepseek-v4-pro", cwd: "/home/alexa/wk/model_selector", tags: ["api", "backend"], provider: "opencode-go" };
+  const C = { session: S, agent: "coder", model: "opencode-go/deepseek-v4-pro", cwd: SIBLING_PROJECT, tags: ["api", "backend"], provider: "opencode-go" };
   const E = [];
   E.push(evt("session_start", t(10 * min)({ reason: "manual" }), C));
   E.push(evt("agent_start", t(9.6 * min)({ prompt: "Add pagination to the model selector API — limit/offset params plus a total count in the response" }), C));

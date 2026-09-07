@@ -26,3 +26,8 @@ apps/scope-launcher/dist/
 apps/scope-launcher/node-portable/
 
 squashfs-root/
+
+# Machine-specific desktop launcher shortcuts (Exec/Icon must be absolute
+# paths, so these are generated per-machine and never committed)
+Pi Scope.desktop
+apps/scope-launcher/pi-scope.desktop

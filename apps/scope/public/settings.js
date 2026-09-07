@@ -451,7 +451,6 @@
     const activeTeam = SET.activeTeam && teams[SET.activeTeam] ? SET.activeTeam : order[0];
     const disabled = new Set(strList(SET.disabledAgents));
     const cr = SET.agentConfigRaw || {};
-    const memModel = SET.memoryModel;
 
     let teamHtml = "";
     if (!order.length) {
@@ -490,8 +489,6 @@
       `<div class="settings-group-kicker">Teams</div>` +
       `<h2 class="settings-group-title">agent teams ${scopeBadge("project")}</h2>` +
       `<div class="settings-intro">Teams come from <code>~/.pi/agent/agents/teams.yaml</code>. Activate a team, toggle which subagents are enabled, and set a per-agent model. Members without an explicit <code>active: false</code> are on.</div>` +
-      (memModel ? field("Memory model", "used by the memory summarizer",
-        `<input type="text" class="set-input" value="${esc(memModel)}" data-act="setMemoryModel">`) : "") +
       teamHtml +
       `<div class="settings-group-div"></div>` +
       `<div class="settings-group-kicker">Tool policy</div>` +
@@ -543,6 +540,14 @@
       `</div>` +
       field("Add model", "provider/model id",
         `<span class="set-input-wrap"><input type="text" class="set-input" id="set-add-model" list="set-model-list" placeholder="provider/model"><button type="button" class="btn-sm" id="set-add-model-btn">Add</button></span>`) +
+      `<div class="settings-group-div"></div>` +
+      `<div class="settings-group-kicker">Memory</div>` +
+      field("Memory model", "powers the memory summarizer; (default) falls back to the settings default model when memory is enabled",
+        selectControl(
+          [{ value: "", label: "(default)" }, ...enabled.map((m) => ({ value: m, label: m }))],
+          SET.memoryModel || "",
+          'data-act="setMemoryModel"'
+        )) +
       renderModelCost() +
       `</div>`
     );
