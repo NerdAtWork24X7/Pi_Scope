@@ -19,6 +19,9 @@ export interface ObsEvent {
   agent_name?: string;
   session_file?: string;
   cwd?: string;
+  /** Set on events from a spawned subagent: the pi session that spawned it.
+   *  Passed by the harness via the SCOPE_PARENT_SESSION env var. */
+  parent_session_id?: string;
 }
 
 /** Summary row for a session as returned by the DB layer. */
@@ -37,4 +40,8 @@ export interface SessionSummary {
   has_shutdown?: boolean;
   /** First user message sent to the LLM in this session (truncated preview). */
   first_msg?: string;
+  /** Session that spawned this one. Exact value recorded from the
+   *  SCOPE_PARENT_SESSION env var by the pi-scope extension; falls back to a
+   *  heuristic inference from spawn-ish tool_call events when absent. */
+  parent_session_id?: string;
 }

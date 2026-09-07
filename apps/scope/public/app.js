@@ -39,7 +39,7 @@ function loadURLState() {
   if (!h) return;
   const p = new URLSearchParams(h);
   if (p.has("view")) STATE.view = p.get("view");
-  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat"].includes(STATE.view)) STATE.view = "chat";
+  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat", "settings"].includes(STATE.view)) STATE.view = "chat";
   if (p.has("sid")) { STATE.selectedSessionId = p.get("sid"); STATE.ackd.add(STATE.selectedSessionId); }
 }
 
@@ -319,10 +319,11 @@ window.toggleTheme = function() {
 };
 
 window.setView = function(mode) {
-  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat"].includes(mode)) mode = "single";
+  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat", "settings"].includes(mode)) mode = "single";
   STATE.view = mode;
   localStorage.setItem("scope-view", mode);
   document.body.classList.toggle("layout-chat", mode === "chat");
+  document.body.classList.toggle("layout-settings", mode === "settings");
   $("#btn-single").classList.toggle("active", mode === "single");
   $("#btn-trajectory")?.classList.toggle("active", mode === "trajectory");
   $("#btn-terminal")?.classList.toggle("active", mode === "terminal");
@@ -344,6 +345,10 @@ window.setView = function(mode) {
   $("#btn-chat")?.classList.toggle("active", mode === "chat");
   if (chatPane) chatPane.style.display = mode === "chat" ? "flex" : "none";
   if (mode === "chat") window.__chatOnView?.();
+  $("#btn-settings")?.classList.toggle("active", mode === "settings");
+  const settingsPane = document.getElementById("settings-pane");
+  if (settingsPane) settingsPane.style.display = mode === "settings" ? "flex" : "none";
+  if (mode === "settings") window.__settingsOnView?.();
   if (mode === "trajectory") window.__trajectoryOnView?.();
   if (sessionSubnav) sessionSubnav.style.display = (mode === "single" && STATE.selectedSessionId) ? "flex" : "none";
   renderSessions();

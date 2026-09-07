@@ -14,7 +14,7 @@ import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent } from
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { attachTerminal } from "./terminal.ts";
-import { startChat, startChatSession, killChatSession, stopChat, shutdownChatSessions } from "./chat.ts";
+import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs } from "./chat.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -76,6 +76,61 @@ const AGENT_CONFIG = process.env.SCOPE_AGENT_CONFIG ?? path.join(AGENT_DIR, "age
 const SETTINGS_JSON = process.env.SCOPE_SETTINGS_JSON ?? path.join(AGENT_DIR, "settings.json");
 const SKILLS_DIR = process.env.SCOPE_SKILLS_DIR ?? path.join(AGENT_DIR, "skills");
 
+// ─── Project-scoped agent-team config (agent-team-config.json / teams.yaml) ─
+// pi's agent-team extension now stores these PER PROJECT under each project's
+// own <project>/.pi/settings directory (it resolves them from process.cwd() =
+// the directory pi was launched from). Scope chats launch pi with cwd = the
+// selected chat workspace, so each chat workspace is a "project" with its own
+// agent-team configuration. Mirror the extension's resolution exactly:
+//   • read  → project-local <proj>/.pi/settings/... when present, else the
+//             global agent-dir copy (fallback)
+//   • write → always project-local, so toggles persist per project instead of
+//             mutating the global config
+// Scope targets the chat workspace currently open (client sends cwd on every
+// agent-team / settings call); when none is given it falls back to the most
+// recently used project, then the server's own launch directory.
+let lastProjectDir: string | null = null;
+
+function projectSettingsDir(proj: string): string {
+  return path.join(proj, ".pi", "settings");
+}
+function projectTeamsYamlPath(proj: string): string {
+  return path.join(projectSettingsDir(proj), "agents", "teams.yaml");
+}
+function projectAgentConfigPath(proj: string): string {
+  return path.join(projectSettingsDir(proj), "agent-team-config.json");
+}
+function fileExists(p: string): boolean {
+  try { return fs.statSync(p).isFile(); } catch { return false; }
+}
+/** Read path for teams.yaml for a project: project-local when present, else
+ *  the global agent-dir copy. Mirrors the extension's teamsYamlPath(). */
+function readTeamsPathFor(proj: string): string {
+  const p = projectTeamsYamlPath(proj);
+  return fileExists(p) ? p : TEAMS_YAML;
+}
+/** Read path for agent-team-config.json for a project: project-local when
+ *  present, else the global agent-dir copy. Mirrors loadPersistedConfig(). */
+function readAgentConfigPathFor(proj: string): string {
+  const p = projectAgentConfigPath(proj);
+  return fileExists(p) ? p : AGENT_CONFIG;
+}
+/** Resolve the project directory for an agent-team request: an explicit
+ *  workspace (cwd) wins, then the last project seen, then the server's launch
+ *  directory. `remember=false` (used by validateCwd) never moves the cursor. */
+function resolveProjectDir(cwdRaw?: string | null, remember = true): string | null {
+  let proj: string | null = null;
+  if (cwdRaw) {
+    try {
+      const abs = fs.realpathSync(path.resolve(cwdRaw));
+      if (fs.statSync(abs).isDirectory()) proj = abs;
+    } catch { /* not a real directory — fall through */ }
+  }
+  proj = proj || lastProjectDir || TERMINAL_CWD || null;
+  if (proj && remember) lastProjectDir = proj;
+  return proj;
+}
+
 /** Minimal parser for the teams.yaml format used by the agent-team harness. */
 function parseTeamsYaml(raw: string): { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean } {
   const teams: Record<string, any[]> = {};
@@ -136,7 +191,7 @@ function parseTeamsYaml(raw: string): { teams: Record<string, any[]>; memoryMode
   return { teams, memoryModel, memoryActive };
 }
 
-function loadAgentTeam(): Record<string, any> {
+function loadAgentTeam(proj?: string | null): Record<string, any> {
   const out: Record<string, any> = {
     teams: {},
     teamsOrder: [],
@@ -151,23 +206,27 @@ function loadAgentTeam(): Record<string, any> {
     extensions: [],
     enabledModels: [],
     defaultModel: undefined,
+    project: null, // resolved project dir these team settings belong to
   };
+  const project = resolveProjectDir(proj, false);
+  out.project = project;
   try {
-    const p = parseTeamsYaml(fs.readFileSync(TEAMS_YAML, "utf8"));
+    const p = parseTeamsYaml(fs.readFileSync(readTeamsPathFor(project || TERMINAL_CWD), "utf8"));
     out.teams = p.teams;
     out.teamsOrder = Object.keys(p.teams);
     out.memoryModel = p.memoryModel;
     out.memoryActive = p.memoryActive;
   } catch { /* teams.yaml absent — return empty teams */ }
   try {
-    const cfg = JSON.parse(fs.readFileSync(AGENT_CONFIG, "utf8"));
+    const cfg = JSON.parse(fs.readFileSync(readAgentConfigPathFor(project || TERMINAL_CWD), "utf8"));
     out.activeTeam = cfg.activeTeam;
     out.mode = cfg.mode;
     out.disabledAgents = cfg.disabledAgents || [];
     out.orchestratorSkills = cfg.orchestratorSkills || [];
     out.subagentSkills = cfg.subagentSkills || [];
     // Chat view workspaces: directories the user added explicitly, plus
-    // session-derived workspaces the user removed from the list.
+    // session-derived workspaces the user removed from the list. Stored in
+    // the project's own agent-team-config.json (per-project, like pi).
     out.chatWorkspaces = cfg.chatWorkspaces || [];
     out.chatWorkspacesRemoved = cfg.chatWorkspacesRemoved || [];
   } catch { /* config absent */ }
@@ -191,6 +250,86 @@ function loadAgentTeam(): Record<string, any> {
   }));
   out.extensions = discoverExtensions();
   return out;
+}
+
+// ─── Settings snapshot (consolidated pi + agent-team config) ────────────────
+
+/** Valid thinking levels, in ascending effort (pi resolves at agent start). */
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** Read settings.json as a plain object (absent → {}). */
+function readSettingsJson(): Record<string, any> {
+  try { return JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8")); } catch { return {}; }
+}
+
+/** Read agent-team-config.json as a plain object (absent → {}). */
+function readAgentConfig(proj?: string | null): Record<string, any> {
+  try { return JSON.parse(fs.readFileSync(readAgentConfigPathFor(proj || TERMINAL_CWD), "utf8")); } catch { return {}; }
+}
+
+/** Full, normalized settings snapshot for the Settings page: everything the
+ *  agent-team rail knows ADD the raw config fields and model metadata that are
+ *  only meaningful in a fuller settings surface. A single endpoint keeps the
+ *  page and the rail in sync and gives one source of truth for the UI. */
+function loadSettingsSnapshot(proj?: string | null): Record<string, any> {
+  const team = loadAgentTeam(proj);
+  const settings = readSettingsJson();
+  const cfg = readAgentConfig(proj);
+  return {
+    ...team,
+    // settings.json
+    settingsRaw: {
+      defaultModel: settings.defaultModel,
+      defaultProvider: settings.defaultProvider,
+      defaultThinkingLevel: settings.defaultThinkingLevel,
+      theme: settings.theme,
+      quietStartup: settings.quietStartup,
+      doubleEscapeAction: settings.doubleEscapeAction,
+      hideThinkingBlock: settings.hideThinkingBlock,
+      editorPaddingX: settings.editorPaddingX,
+      terminal: settings.terminal ?? {},
+      compaction: settings.compaction ?? {},
+      packages: Array.isArray(settings.packages) ? settings.packages : [],
+    },
+    // agent-team-config.json
+    agentConfigRaw: {
+      enabled: cfg.enabled,
+      gridCols: cfg.gridCols,
+      parallelDispatch: cfg.parallelDispatch,
+      maxParallel: cfg.maxParallel,
+      debugLevel: cfg.debugLevel,
+      skipOrchestratorTools: Array.isArray(cfg.skipOrchestratorTools) ? cfg.skipOrchestratorTools : [],
+      destructiveTools: Array.isArray(cfg.destructiveTools) ? cfg.destructiveTools : [],
+    },
+    // Shared vocabulary for form controls
+    thinkingLevels: THINKING_LEVELS,
+    modelsMeta: buildModelMeta(),
+    // The raw teams.yaml teams/members (deduped over loadAgentTeam for editing).
+    teams: team.teams ?? {},
+    teamsOrder: team.teamsOrder ?? Object.keys(team.teams ?? {}),
+  };
+}
+
+/** Final setter for any settings.json scalar — reused by all settings actions. */
+function setSettingsField(key: string, value: unknown): void {
+  updateSettingsJson((cfg) => { cfg[key] = value; });
+}
+
+/** Set a nested settings.json object path (e.g. terminal.showTerminalProgress). */
+function setSettingsNested(paths: string[], value: unknown): void {
+  updateSettingsJson((cfg) => {
+    let node = cfg;
+    for (let i = 0; i < paths.length - 1; i++) {
+      if (typeof node[paths[i]] !== "object" || node[paths[i]] === null) node[paths[i]] = {};
+      node = node[paths[i]];
+    }
+    node[paths[paths.length - 1]] = value;
+  });
+}
+
+/** Set a list-valued agent-team-config.json field (destructiveTools / skipOrchestratorTools). */
+function setAgentConfigList(proj: string | null, key: string, values: string[]): void {
+  updateAgentConfig(proj, (cfg) => { cfg[key] = Array.isArray(values) ? values : []; });
 }
 
 // ─── Settings / skills / extensions discovery ───────────────────────────────
@@ -291,22 +430,28 @@ function serializeTeamsYaml(data: { teams: Record<string, any[]>; memoryModel?: 
   return lines.join("\n") + "\n";
 }
 
-function updateTeamsYaml(mutate: (p: { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean }) => void): void {
+function updateTeamsYaml(proj: string | null, mutate: (p: { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean }) => void): void {
+  const readPath = readTeamsPathFor(proj || TERMINAL_CWD);
   let parsed: { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean };
   try {
-    parsed = parseTeamsYaml(fs.readFileSync(TEAMS_YAML, "utf8"));
+    parsed = parseTeamsYaml(fs.readFileSync(readPath, "utf8"));
   } catch {
     parsed = { teams: {} };
   }
   mutate(parsed);
-  fs.writeFileSync(TEAMS_YAML, serializeTeamsYaml(parsed));
+  const writePath = proj ? projectTeamsYamlPath(proj) : projectTeamsYamlPath(TERMINAL_CWD);
+  fs.mkdirSync(path.dirname(writePath), { recursive: true });
+  fs.writeFileSync(writePath, serializeTeamsYaml(parsed));
 }
 
-function updateAgentConfig(mutate: (cfg: any) => void): void {
+function updateAgentConfig(proj: string | null, mutate: (cfg: any) => void): void {
+  const readPath = readAgentConfigPathFor(proj || TERMINAL_CWD);
   let cfg: any = {};
-  try { cfg = JSON.parse(fs.readFileSync(AGENT_CONFIG, "utf8")); } catch { /* absent */ }
+  try { cfg = JSON.parse(fs.readFileSync(readPath, "utf8")); } catch { /* absent */ }
   mutate(cfg);
-  fs.writeFileSync(AGENT_CONFIG, JSON.stringify(cfg, null, 2) + "\n");
+  const writePath = proj ? projectAgentConfigPath(proj) : projectAgentConfigPath(TERMINAL_CWD);
+  fs.mkdirSync(path.dirname(writePath), { recursive: true });
+  fs.writeFileSync(writePath, JSON.stringify(cfg, null, 2) + "\n");
 }
 
 function updateSettingsJson(mutate: (cfg: any) => void): void {
@@ -327,8 +472,14 @@ const AUTH_JSON = process.env.SCOPE_AUTH_JSON ?? path.join(AGENT_DIR, "auth.json
 const GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
 const GO_USAGE_TTL = 60_000;
 const GO_LIMITS: Record<"h5" | "wk" | "mo", number> = { h5: 12, wk: 30, mo: 60 };
+// The `kilo` provider (kilo.ai) keeps its own on-disk model cache, separate from
+// models-store.json. Its models are ingested here so the Settings cost catalog
+// surfaces `kilo` as an independent provider (never conflated with a model of the
+// same id under another provider such as openrouter).
+const KILO_CACHE_DIR = process.env.SCOPE_KILO_CACHE_DIR ?? path.join(os.homedir(), ".pi", "cache");
 
 let modelsStoreCache: { mtimeMs: number; data: Record<string, any> } | null = null;
+let kiloCache: { models: any[] } | null = null;
 
 /** Read the pi model store (~/.pi/agent/models-store.json), cached by mtime. */
 function loadModelsStore(): Record<string, any> {
@@ -343,6 +494,23 @@ function loadModelsStore(): Record<string, any> {
   }
 }
 
+/** Read the kilo provider's model cache (~/.pi/cache/kilo-models.json and
+ *  kilo-free-models.json). Each is a { cachedAt, data: [...] } envelope; merge
+ *  the arrays. Cached in-process; a fresh read happens once per process since
+ *  the caches change only when the kilo extension refreshes them at boot. */
+function loadKiloModels(): any[] {
+  if (kiloCache) return kiloCache.models;
+  const models: any[] = [];
+  for (const file of ["kilo-models.json", "kilo-free-models.json"]) {
+    try {
+      const env = JSON.parse(fs.readFileSync(path.join(KILO_CACHE_DIR, file), "utf8"));
+      if (Array.isArray(env?.data)) models.push(...env.data);
+    } catch { /* cache absent / corrupt — skip */ }
+  }
+  kiloCache = { models };
+  return models;
+}
+
 /** Thinking levels a model supports, from its thinkingLevelMap (array form, or
  *  object map whose non-null values are supported). null → use pi's default. */
 function thinkingLevelsFor(m: any): string[] | null {
@@ -355,7 +523,7 @@ function thinkingLevelsFor(m: any): string[] | null {
   return null;
 }
 
-/** Flatten the store into { "<provider>/<id>": { provider, contextWindow, maxTokens, cost, thinkingLevels } }. */
+/** Flatten the store + kilo cache into { "<provider>/<id>": { provider, contextWindow, maxTokens, cost, thinkingLevels } }. */
 function buildModelMeta(): Record<string, any> {
   const out: Record<string, any> = {};
   const store = loadModelsStore();
@@ -370,6 +538,20 @@ function buildModelMeta(): Record<string, any> {
         thinkingLevels: thinkingLevelsFor(m),
       };
     }
+  }
+  // `kilo` is an independent provider whose models live in its own cache, not
+  // models-store.json. Register them under the `kilo/` key so they show up in
+  // the cost catalog as a provider of their own — distinct from any same-id
+  // model that another provider (e.g. openrouter) happens to expose.
+  for (const m of loadKiloModels()) {
+    if (!m?.id) continue;
+    out[`kilo/${m.id}`] = {
+      provider: "kilo",
+      contextWindow: m.contextWindow ?? 0,
+      maxTokens: m.maxTokens ?? 0,
+      cost: m.cost ?? {},
+      thinkingLevels: thinkingLevelsFor(m),
+    };
   }
   return out;
 }
@@ -702,10 +884,13 @@ function validateCwd(cwd: string): string | null {
     });
   }
   // Also allow directories the user explicitly added as chat workspaces in the
-  // Chat view (persisted in agent-team-config.json).
+  // Chat view (persisted in the current project's agent-team-config.json —
+  // per-project, like pi). The project context is the last one seen or the
+  // server's launch directory; never moves the project cursor here.
   if (!ok) {
     try {
-      const cfg = JSON.parse(fs.readFileSync(AGENT_CONFIG, "utf8"));
+      const cfgProj = lastProjectDir || TERMINAL_CWD || AGENT_DIR;
+      const cfg = JSON.parse(fs.readFileSync(readAgentConfigPathFor(cfgProj), "utf8"));
       const extras: string[] = cfg.chatWorkspaces || [];
       ok = extras.some((r) => {
         const live = path.resolve(r);
@@ -1257,9 +1442,119 @@ async function handle(req: Request): Promise<Response> {
     return jsonResponse({ branch, thinking, modelMeta: buildModelMeta(), goUsage: computeGoUsage() });
   }
 
+  // ── GET /settings (consolidated pi + agent-team settings snapshot) ──────
+  // `cwd` (chat workspace) selects which project's agent-team config to load;
+  // absent → last-used project, then the server's launch directory.
+  if (pathname === "/settings" && method === "GET") {
+    const proj = resolveProjectDir(url.searchParams.get("cwd"));
+    return jsonResponse(loadSettingsSnapshot(proj));
+  }
+
+  // ── POST /settings (persist a granular pi / agent-team setting) ─────────
+  // Scalar field actions for settings.json and agent-team-config.json that the
+  // agent-team rail does not surface. Team / mode / memory / agent / skill /
+  // extension toggles continue to go through POST /agent-team so both surfaces
+  // share one writer.
+  if (pathname === "/settings" && method === "POST") {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const action = body?.action;
+    const value = body?.value;
+    const proj = resolveProjectDir(typeof body.cwd === "string" ? body.cwd : null);
+    try {
+      switch (action) {
+        case "setDefaultModel":
+          setSettingsField("defaultModel", String(value || ""));
+          break;
+        case "setDefaultProvider":
+          setSettingsField("defaultProvider", String(value || ""));
+          break;
+        // Set both defaultProvider + defaultModel in one write — the equivalent
+        // of the pi /modelcost selector's "set as default" action. `value` is
+        // { provider, model }.
+        case "setDefaultModelProvider": {
+          const v = (value ?? {}) as { provider?: unknown; model?: unknown };
+          const provider = String(v.provider ?? "").trim();
+          const model = String(v.model ?? "").trim();
+          updateSettingsJson((cfg) => {
+            if (provider) cfg.defaultProvider = provider;
+            if (model) cfg.defaultModel = model;
+          });
+          break;
+        }
+        case "setDefaultThinkingLevel": {
+          const level = String(value || "");
+          if (!THINKING_LEVELS.includes(level)) return jsonResponse({ error: `invalid thinking level: ${level}` }, 400);
+          setSettingsField("defaultThinkingLevel", level);
+          break;
+        }
+        case "setTheme":
+          setSettingsField("theme", String(value || ""));
+          break;
+        case "setQuietStartup":
+          setSettingsField("quietStartup", !!value);
+          break;
+        case "setDoubleEscapeAction":
+          setSettingsField("doubleEscapeAction", String(value || ""));
+          break;
+        case "setHideThinkingBlock":
+          setSettingsField("hideThinkingBlock", !!value);
+          break;
+        case "setEditorPaddingX":
+          setSettingsField("editorPaddingX", Number(value) || 0);
+          break;
+        case "setTerminalShowProgress":
+          setSettingsNested(["terminal", "showTerminalProgress"], !!value);
+          break;
+        case "setCompactionEnabled":
+          setSettingsNested(["compaction", "enabled"], !!value);
+          break;
+        case "setEnabledModels": {
+          const list = Array.isArray(value) ? value.map((s) => String(s)) : [];
+          updateSettingsJson((cfg) => { cfg.enabledModels = list; });
+          break;
+        }
+        case "setTeamEnabled":
+          updateAgentConfig(proj, (cfg) => { cfg.enabled = !!value; });
+          break;
+        case "setGridCols":
+          updateAgentConfig(proj, (cfg) => { cfg.gridCols = Math.min(4, Math.max(1, Number(value) || 1)); });
+          break;
+        case "setParallelDispatch":
+          updateAgentConfig(proj, (cfg) => { cfg.parallelDispatch = !!value; });
+          break;
+        case "setMaxParallel":
+          updateAgentConfig(proj, (cfg) => { cfg.maxParallel = Math.max(1, Number(value) || 1); });
+          break;
+        case "setDebugLevel":
+          updateAgentConfig(proj, (cfg) => { cfg.debugLevel = Math.min(3, Math.max(0, Number(value) || 0)); });
+          break;
+        case "setSkipOrchestratorTools":
+          setAgentConfigList(proj, "skipOrchestratorTools", Array.isArray(value) ? value : []);
+          break;
+        case "setDestructiveTools":
+          setAgentConfigList(proj, "destructiveTools", Array.isArray(value) ? value : []);
+          break;
+        case "setMemoryModel": {
+          const model = String(value || "").trim();
+          updateTeamsYaml(proj, (p) => { p.memoryModel = model || undefined; });
+          break;
+        }
+        default:
+          return jsonResponse({ error: `unknown settings action: ${action}` }, 400);
+      }
+    } catch (err: any) {
+      return jsonResponse({ error: err.message || String(err) }, 500);
+    }
+    return jsonResponse(loadSettingsSnapshot(proj));
+  }
+
   // ── GET /agent-team (snapshot of the agent-team sidebar state) ──────────
+  // `cwd` (chat workspace) selects which project's agent-team config to load;
+  // absent → last-used project, then the server's launch directory.
   if (pathname === "/agent-team" && method === "GET") {
-    return jsonResponse(loadAgentTeam());
+    const proj = resolveProjectDir(url.searchParams.get("cwd"));
+    return jsonResponse(loadAgentTeam(proj));
   }
 
   // ── POST /agent-team (persist a sidebar toggle) ─────────────────────────
@@ -1267,16 +1562,23 @@ async function handle(req: Request): Promise<Response> {
     let body: any;
     try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
     const action = body?.action;
+    const proj = resolveProjectDir(typeof body.cwd === "string" ? body.cwd : null);
     try {
       switch (action) {
         case "setTeam":
-          updateAgentConfig((cfg) => { cfg.activeTeam = body.team; });
+          updateAgentConfig(proj, (cfg) => { cfg.activeTeam = body.team; });
           break;
         case "toggleMode":
-          updateAgentConfig((cfg) => { cfg.mode = cfg.mode === "creative" ? "standard" : "creative"; });
+          updateAgentConfig(proj, (cfg) => { cfg.mode = cfg.mode === "creative" ? "standard" : "creative"; });
           break;
+        case "setMode": {
+          const m = String(body.mode || "");
+          if (m !== "creative" && m !== "standard") return jsonResponse({ error: `invalid mode: ${m}` }, 400);
+          updateAgentConfig(proj, (cfg) => { cfg.mode = m; });
+          break;
+        }
         case "toggleMemory":
-          updateTeamsYaml((p) => {
+          updateTeamsYaml(proj, (p) => {
             const on = p.memoryActive !== true;
             // Enabling memory requires a configured model; otherwise keep it off.
             p.memoryActive = on ? !!p.memoryModel : false;
@@ -1296,13 +1598,13 @@ async function handle(req: Request): Promise<Response> {
         case "toggleAgent": {
           const key = String(body.agent || "").toLowerCase();
           const disabled = !!body.disabled;
-          updateTeamsYaml((p) => {
+          updateTeamsYaml(proj, (p) => {
             for (const members of Object.values(p.teams || {})) {
               const mem = (members as any[]).find((m) => (m.name || "").toLowerCase() === key);
               if (mem) mem.active = !disabled;
             }
           });
-          updateAgentConfig((cfg) => {
+          updateAgentConfig(proj, (cfg) => {
             cfg.disabledAgents = cfg.disabledAgents || [];
             const set = new Set(cfg.disabledAgents.map((s: string) => s.toLowerCase()));
             if (disabled) set.add(key); else set.delete(key);
@@ -1310,10 +1612,25 @@ async function handle(req: Request): Promise<Response> {
           });
           break;
         }
+        case "setMemberModel": {
+          // Set a specific team member's model in teams.yaml. `agent` is the
+          // member name; the write targets every team containing that member
+          // (a member may exist in several teams). Empty model clears it.
+          const key = String(body.agent || "");
+          const model = String(body.model || "").trim();
+          if (!key) return jsonResponse({ error: "missing agent" }, 400);
+          updateTeamsYaml(proj, (p) => {
+            for (const members of Object.values(p.teams || {})) {
+              const mem = (members as any[]).find((m) => (m.name || "").toLowerCase() === key.toLowerCase());
+              if (mem) { if (model) mem.model = model; else delete mem.model; }
+            }
+          });
+          break;
+        }
         case "toggleSkill": {
           const group = body.group; // "orchestrator" | "subagent"
           const dir = body.dir;
-          updateAgentConfig((cfg) => {
+          updateAgentConfig(proj, (cfg) => {
             const key = group === "orchestrator" ? "orchestratorSkills" : "subagentSkills";
             const arr: string[] = cfg[key] || [];
             const set = new Set(arr);
@@ -1357,13 +1674,27 @@ async function handle(req: Request): Promise<Response> {
           let st: fs.Stats;
           try { st = fs.statSync(abs); } catch { return jsonResponse({ error: `directory not found: ${p}` }, 400); }
           if (!st.isDirectory()) return jsonResponse({ error: `not a directory: ${p}` }, 400);
-          updateAgentConfig((cfg) => {
+          // chatWorkspaces lives in the current project's agent-team-config.json
+          // (per-project, like pi) — the project this request targets via cwd.
+          updateAgentConfig(proj, (cfg) => {
             const arr: string[] = cfg.chatWorkspaces || [];
             if (!arr.includes(abs)) arr.push(abs);
             cfg.chatWorkspaces = arr;
             // Re-adding un-hides it if it was previously removed.
             cfg.chatWorkspacesRemoved = (cfg.chatWorkspacesRemoved || []).filter((s: string) => s !== abs);
           });
+          // Self-register the workspace in ITS OWN project config too. The rail
+          // lists each project's chatWorkspaces, so without this, opening a
+          // session-less workspace makes it the active project and its own
+          // (empty) list drops the row — clicking a workspace would hide it.
+          if (abs !== proj) {
+            updateAgentConfig(abs, (cfg) => {
+              const arr: string[] = cfg.chatWorkspaces || [];
+              if (!arr.includes(abs)) arr.push(abs);
+              cfg.chatWorkspaces = arr;
+              cfg.chatWorkspacesRemoved = (cfg.chatWorkspacesRemoved || []).filter((s: string) => s !== abs);
+            });
+          }
           break;
         }
         case "removeWorkspace": {
@@ -1372,12 +1703,24 @@ async function handle(req: Request): Promise<Response> {
           const raw = String(body.path || "");
           if (!raw) return jsonResponse({ error: "missing path" }, 400);
           const key = raw === "(unknown)" ? raw : path.resolve(raw);
-          updateAgentConfig((cfg) => {
+          updateAgentConfig(proj, (cfg) => {
             cfg.chatWorkspaces = (cfg.chatWorkspaces || []).filter((s: string) => path.resolve(s) !== key);
             const removed: string[] = cfg.chatWorkspacesRemoved || [];
             if (!removed.includes(key)) removed.push(key);
             cfg.chatWorkspacesRemoved = removed;
           });
+          // Drop the workspace from its own project list too (and remember the
+          // removal), so it can't resurface when that workspace becomes active.
+          // Skip when there's no per-project config there yet (session-derived
+          // rows shouldn't cause config files to be created just by removal).
+          if (key !== proj && key !== "(unknown)" && fileExists(projectAgentConfigPath(key))) {
+            updateAgentConfig(key, (cfg) => {
+              cfg.chatWorkspaces = (cfg.chatWorkspaces || []).filter((s: string) => path.resolve(s) !== key);
+              const removed: string[] = cfg.chatWorkspacesRemoved || [];
+              if (!removed.includes(key)) removed.push(key);
+              cfg.chatWorkspacesRemoved = removed;
+            });
+          }
           break;
         }
         default:
@@ -1386,7 +1729,7 @@ async function handle(req: Request): Promise<Response> {
     } catch (err: any) {
       return jsonResponse({ error: err.message || String(err) }, 500);
     }
-    return jsonResponse(loadAgentTeam());
+    return jsonResponse(loadAgentTeam(proj));
   }
 
   // ── POST /chat/start (pre-spawn the pi session for a workspace) ────────
@@ -1457,6 +1800,44 @@ async function handle(req: Request): Promise<Response> {
     return jsonResponse({ ok: true });
   }
 
+  // ── POST /chat/prefs (push model/thinking into a running chat subprocess) ─
+  // Applies updated default model / thinking level to an already-running (or
+  // pre-spawned) pi session in place, so Settings changes take effect on the
+  // live agent without killing it and losing the conversation context.
+  if (pathname === "/chat/prefs" && method === "POST") {
+    let bodyText: string;
+    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
+    let parsed: any;
+    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
+    if (!sessionId) return jsonResponse({ error: "missing sessionId" }, 400);
+    return jsonResponse(pushChatPrefs(sessionId, {
+      model: typeof parsed.model === "string" ? parsed.model : "",
+      thinkingLevel: typeof parsed.thinkingLevel === "string" ? parsed.thinkingLevel : "",
+    }));
+  }
+
+  // ── POST /chat/ui (answer an extension_ui dialog, e.g. ask_user_question) ──
+  // pi blocks while an extension waits on the host for a select/input dialog
+  // (the ask_user_question questionnaire). The chat view renders the dialog
+  // as an answerable card; answering POSTs here, which writes the matching
+  // `extension_ui_response` back to the pi subprocess's stdin so the tool
+  // resolves and the agent can continue.
+  if (pathname === "/chat/ui" && method === "POST") {
+    let bodyText: string;
+    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
+    let parsed: any;
+    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
+    const uiId = typeof parsed.id === "string" ? parsed.id.trim() : "";
+    if (!sessionId || !uiId) return jsonResponse({ error: "missing sessionId or dialog id" }, 400);
+    const ok = answerChatUi(sessionId, uiId, {
+      value: typeof parsed.value === "string" ? parsed.value : "",
+      cancelled: parsed.cancelled === true,
+    });
+    return jsonResponse({ ok, sessionId });
+  }
+
   // ── GET /sessions ──────────────────────────────────────────────────────
   if (pathname === "/sessions" && method === "GET") {
     const pool = url.searchParams.get("pool") ?? "";
@@ -1471,6 +1852,23 @@ async function handle(req: Request): Promise<Response> {
       const sessions = rows
         .filter((r) => !since || r.last_ts >= since)
         .map(rowToSession);
+
+      // Spawn linkage for subagent nesting in the UI. The exact parent is
+      // stored on the session row (recorded by the extension from the
+      // SCOPE_PARENT_SESSION env var its harness sets). For sessions without
+      // one — anything recorded before that field existed, or harnesses that
+      // don't set it — fall back to inferring from spawn-ish tool_call events.
+      // Inference is batched into one query over the sessions that still need
+      // it; failures are non-fatal — the list just renders flat.
+      const needInfer = sessions.filter((s) => !s.parent_session_id);
+      if (needInfer.length) {
+        try {
+          const ids = needInfer.map((s) => s.session_id);
+          const parents = q.getSessionParents.all({ $session_ids: JSON.stringify(ids) }) as any[];
+          const byChild = new Map(parents.map((p: any) => [p.child_id, p.parent_id]));
+          for (const s of needInfer) s.parent_session_id = byChild.get(s.session_id) || undefined;
+        } catch { /* nesting is optional — skip on query error */ }
+      }
 
       return jsonResponse({ sessions });
     } catch (err: any) {

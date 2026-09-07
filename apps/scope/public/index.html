@@ -34,6 +34,7 @@
         <span class="view-toggle-sep" aria-hidden="true"></span>
         <button id="btn-single" class="active" onclick="setView('single')">Single</button>
         <button id="btn-trajectory" onclick="setView('trajectory')">Trajectory</button>
+        <button id="btn-settings" onclick="setView('settings')">Settings</button>
       </div>
     </div>
     <div id="header-right">
@@ -368,6 +369,23 @@
       </div>
     </section>
 
+    <section id="settings-pane" style="display:none;flex-direction:column;flex:1;overflow:hidden">
+      <div class="settings-layout">
+        <nav class="settings-nav" id="settings-nav" aria-label="Settings categories">
+          <button class="settings-nav-item active" data-sec="agent" type="button">Agent</button>
+          <button class="settings-nav-item" data-sec="teams" type="button">Teams</button>
+          <button class="settings-nav-item" data-sec="models" type="button">Models</button>
+          <button class="settings-nav-item" data-sec="skills" type="button">Skills</button>
+          <button class="settings-nav-item" data-sec="extensions" type="button">Extensions</button>
+          <button class="settings-nav-item" data-sec="workspaces" type="button">Workspaces</button>
+          <button class="settings-nav-item" data-sec="pi" type="button">pi</button>
+        </nav>
+        <div class="settings-content" id="settings-content">
+          <div class="settings-empty">Loading settings…</div>
+        </div>
+      </div>
+    </section>
+
   </main>
 
   <!-- Checkpoint merge modal (body-level so its fixed positioning stays viewport-relative) -->
@@ -409,6 +427,7 @@
   <script src="git.js"></script>
   <script src="trajectory.js"></script>
   <script src="chat.js"></script>
+  <script src="settings.js"></script>
 </body>
 
 </html>

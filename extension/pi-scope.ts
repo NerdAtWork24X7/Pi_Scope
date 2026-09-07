@@ -440,6 +440,7 @@ function createEventEnvelope<T>(
     sessionFile?: string;
     cwd: string;
     agentName?: string;
+    parentSessionId?: string;
     pool: string;
     tags: string[];
     provider?: string;
@@ -455,6 +456,7 @@ function createEventEnvelope<T>(
     session_file: sessionInfo.sessionFile,
     cwd: sessionInfo.cwd,
     agent_name: sessionInfo.agentName,
+    parent_session_id: sessionInfo.parentSessionId,
     pool: sessionInfo.pool,
     tags: sessionInfo.tags,
     provider: sessionInfo.provider,
@@ -659,6 +661,7 @@ export default function (pi: ExtensionAPI) {
     sessionFile?: string;
     cwd: string;
     agentName?: string;
+    parentSessionId?: string;
     pool: string;
     tags: string[];
     provider?: string;
@@ -725,6 +728,12 @@ export default function (pi: ExtensionAPI) {
       process.env.OBS_NAME ||
       process.env.SCOPE_NAME ||
       genAgentName();
+    // Exact spawn linkage: the harness that spawns a subagent passes the
+    // PARENT pi session id in SCOPE_PARENT_SESSION. The server stores it on
+    // the session row so the UI can nest the subagent under the session that
+    // spawned it — no timestamp/args inference needed. Set it (per process)
+    // when launching subagents, e.g. SCOPE_PARENT_SESSION=<parent session_id>.
+    const parentSessionId = (process.env.SCOPE_PARENT_SESSION || "").trim() || undefined;
 
     // Parse tags
     const rawTag = pi.getFlag("o-tag");
@@ -792,6 +801,7 @@ export default function (pi: ExtensionAPI) {
       sessionFile: sessFile,
       cwd,
       agentName: name,
+      parentSessionId,
       pool,
       tags,
       provider: sessModel?.provider,

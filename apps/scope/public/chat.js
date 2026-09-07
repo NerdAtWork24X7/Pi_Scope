@@ -45,6 +45,51 @@
   function saveCollapsedSecs() {
     try { localStorage.setItem("scope-chat-team-collapsed", JSON.stringify([...CH.collapsedSecs])); } catch {}
   }
+  // Main sessions whose spawned-subagent rows are currently EXPANDED. Defaults
+  // to everything collapsed — subagents sit folded under their parent session.
+  function loadSubOpen() {
+    try { return JSON.parse(localStorage.getItem("scope-chat-sub-open") || "[]"); } catch { return []; }
+  }
+  function saveSubOpen() {
+    try { localStorage.setItem("scope-chat-sub-open", JSON.stringify([...CH.subOpen])); } catch {}
+  }
+
+  // ─── Custom-workspace union (sidebar display cache) ──────────────────────
+  // chatWorkspaces is stored PER PROJECT (each workspace's own
+  // .pi/settings/agent-team-config.json). The sidebar must stay stable as the
+  // user clicks between workspaces — otherwise opening a workspace whose own
+  // config doesn't list itself (e.g. one added before self-registration, or
+  // listed only in another project's config) would make its row vanish. So we
+  // keep a union of every project's workspace list we have SEEN, persisted in
+  // localStorage; removal is tracked the same way. The server still stores the
+  // list per-project; this is purely a display cache.
+  const CUSTOM_WS_KEY = "scope-chat-custom-ws";
+  function loadCustomWs() {
+    try {
+      const v = JSON.parse(localStorage.getItem(CUSTOM_WS_KEY) || "null");
+      if (v && Array.isArray(v.list)) return { list: v.list, removed: Array.isArray(v.removed) ? v.removed : [] };
+    } catch {}
+    return { list: [], removed: [] };
+  }
+  function saveCustomWs() {
+    try { localStorage.setItem(CUSTOM_WS_KEY, JSON.stringify(CH.customWs)); } catch {}
+  }
+  // Fold a project's config snapshot into the union (no-op when already known).
+  // Removals are authoritative client intent: a workspace the user removed stays
+  // hidden even if another project's config still lists it (per-project storage
+  // can't be enumerated, so stale entries there are filtered here). Only an
+  // explicit re-add (submitAddWorkspace) clears the removal.
+  function mergeCustomWs(data) {
+    if (!data) return;
+    let changed = false;
+    for (const w of data.chatWorkspaces || []) {
+      if (!CH.customWs.list.includes(w)) { CH.customWs.list.push(w); changed = true; }
+    }
+    for (const w of data.chatWorkspacesRemoved || []) {
+      if (!CH.customWs.removed.includes(w)) { CH.customWs.removed.push(w); changed = true; }
+    }
+    if (changed) saveCustomWs();
+  }
 
   // ─── Chat state ───────────────────────────────────────────────────────────
   const CH = {
@@ -56,6 +101,7 @@
     chatSessionId: null,
     resumeFile: null,  // pi session file to continue (set when a recorded session is opened)
     chatBusy: false,
+    suppressLive: false, // live preview frozen because the user browsed away mid-run
     chatHistory: [],   // [{role:'user'|'assistant', text, thinking, tools, usage, model, ts, streaming}]
     adding: false,     // inline "add workspace" input is open
     events: [],
@@ -68,13 +114,189 @@
     lastOpenCount: null, // event_count of the open session at last load — refetch when it grows
     expandedWs: new Set(loadExpandedWs()),
     collapsedSecs: new Set(loadCollapsedSecs()),
+    subOpen: new Set(loadSubOpen()), // expanded subagent groups (default: collapsed)
     footer: null,          // /chat/footer snapshot { branch, thinking, modelMeta, goUsage }
     footerFetchedAt: 0,
     thinkingLevel: null,   // selected thinking level (defaults to footer.thinking)
     showThinking: loadBool("scope-chat-show-thinking", false), // global fold/unfold of thought blocks
     expandTools: loadBool("scope-chat-expand-tools", false),   // fold chips vs. show tool calls with results
     steer: loadBool("scope-chat-steer", false), // send next message mid-run (steer) vs queue until done
+    customWs: loadCustomWs(), // union of chat workspaces seen across projects (sidebar display cache)
+    threads: new Map(),   // thread id → thread (one per chat conversation, keyed by session id or "free:<cwd>")
+    curId: null,          // id of the thread currently shown in the canvas
   };
+
+  // ─── Per-session threads ──────────────────────────────────────────────────
+  // Every conversation the user can chat in is an independent THREAD with its
+  // own pi subprocess on the server (keyed by its session id) and its own
+  // message list, busy state and live stream. One thread is visible at a time
+  // (the canvas); the others keep RUNNING in the background — their streams
+  // still arrive and update their messages, they just don't touch the DOM
+  // until you switch back, at which point live streaming resumes. Typing in a
+  // busy thread queues the message within that thread; typing in an idle
+  // thread starts a fresh turn there. Nothing waits on another session.
+  function makeThread(id, kind, sid) {
+    return {
+      id,                // map key: the session id, or "free:" + workspace
+      kind,              // "free" (new conversation) | "session" (recorded session)
+      sid: sid || null,  // recorded session id (free threads adopt one once recorded)
+      workspace: CH.workspace,
+      key: null,         // server subprocess key (the session id for session threads)
+      resumeFile: null,  // pi session file to continue
+      firstPrompt: null, // first user prompt text (free thread — matches its recorded row)
+      adopted: false,    // free thread already matched to its recorded session row
+      history: [],       // [{role, text, thinking, tools, usage, model, ts, streaming}]
+      busy: false,       // a turn is streaming on this thread
+      gen: 0,            // turn generation guard (a newer turn supersedes an older finalize)
+      live: null,        // { m, isFirst, queue, after } while busy
+      suppressed: false, // busy but not visible — events update the model only
+      dialogs: new Map(),// open extension_ui dialogs for this thread
+      pendingCustom: null,
+      openSid: null,     // recorded session shown (== sid for session threads)
+      lastOpenCount: null,
+      loadingSid: null,
+    };
+  }
+  function curThread() {
+    return CH.threads.get(CH.curId) || null;
+  }
+  function freeThreadId() {
+    return "free:" + (CH.workspace || "");
+  }
+  // Get or create the workspace's "new conversation" thread.
+  function freeThread(ws) {
+    const id = "free:" + (ws || "");
+    let t = CH.threads.get(id);
+    if (!t) {
+      t = makeThread(id, "free", null);
+      t.workspace = ws || null;
+      CH.threads.set(id, t);
+    }
+    return t;
+  }
+  // Get or create a recorded-session thread.
+  function sessionThread(sid, resumeFile, workspace) {
+    let t = CH.threads.get(sid);
+    if (!t) {
+      t = makeThread(sid, "session", sid);
+      t.workspace = workspace || CH.workspace;
+      t.resumeFile = resumeFile || null;
+      t.openSid = sid;
+      CH.threads.set(sid, t);
+    }
+    return t;
+  }
+  // Bind the visible canvas to a thread: mirror its state into the singleton
+  // CH fields the rest of the UI reads, so rendering/persistence keep working
+  // unchanged on the current thread.
+  function bindThread(t) {
+    if (!t) return;
+    CH.curId = t.id;
+    CH.chatHistory = t.history;
+    CH.chatSessionId = t.key;
+    CH.resumeFile = t.resumeFile;
+    CH.chatBusy = t.busy;
+    CH.suppressLive = t.suppressed;
+    CH.openSid = t.openSid;
+    CH.loadingSid = t.loadingSid;
+    CH.lastOpenCount = t.lastOpenCount;
+  }
+  // Keep the singleton mirrors in sync after a thread's state changed in place.
+  function syncCurThread() {
+    const t = curThread();
+    if (!t) return;
+    CH.chatHistory = t.history;
+    CH.chatSessionId = t.key;
+    CH.chatBusy = t.busy;
+    CH.suppressLive = t.suppressed;
+    CH.openSid = t.openSid;
+    CH.loadingSid = t.loadingSid;
+    CH.lastOpenCount = t.lastOpenCount;
+  }
+  // Find the thread serving a recorded session: an existing session thread, a
+  // free thread whose conversation got recorded under that id (matched by the
+  // first prompt text + workspace), or an alias already established.
+  function threadForSid(sid) {
+    if (!sid) return null;
+    if (CH.threads.has(sid)) return CH.threads.get(sid);
+    const row = CH.sessions.find((s) => s.session_id === sid);
+    if (!row) return null;
+    const want = String(row.first_msg || "").slice(0, 200).trim();
+    if (!want) return null;
+    for (const t of CH.threads.values()) {
+      if (t.kind !== "free" || t.adopted) continue;
+      if (t.workspace !== row.cwd) continue;
+      const first = (t.history.find((m) => m.role === "user")?.text || t.firstPrompt || "").slice(0, 200).trim();
+      if (first && first === want) {
+        t.adopted = true;
+        t.sid = sid;
+        t.resumeFile = row.session_file || t.resumeFile;
+        CH.threads.set(sid, t);
+        return t;
+      }
+    }
+    return null;
+  }
+  // Called on every poll: match un-adopted free threads to the session row pi
+  // recorded for them, so opening that row continues the SAME thread/subprocess
+  // instead of spawning a second pi on the same session file.
+  function adoptFreeThreads() {
+    for (const t of CH.threads.values()) {
+      if (t.kind !== "free" || t.adopted || !t.firstPrompt) continue;
+      const want = String(t.firstPrompt).slice(0, 200).trim();
+      if (!want) continue;
+      const row = CH.sessions.find((s) =>
+        s.cwd === t.workspace && !s.parent_session_id &&
+        String(s.first_msg || "").slice(0, 200).trim() === want
+      );
+      if (!row) continue;
+      // Never overwrite a session thread that already exists (e.g. the user
+      // already opened the row) — that one is authoritative for the session.
+      if (CH.threads.has(row.session_id)) continue;
+      t.adopted = true;
+      t.sid = row.session_id;
+      t.resumeFile = row.session_file || t.resumeFile;
+      CH.threads.set(row.session_id, t);
+    }
+  }
+  // (Re)resolve the live DOM pointers of an attached busy thread after the
+  // canvas was rendered: children[i] ↔ history[i] by index parity.
+  function attachLiveDom(t) {
+    if (!t || !t.live || !el.msg) return;
+    const mIdx = t.history.indexOf(t.live.m);
+    const row = mIdx >= 0 ? el.msg.children[mIdx] : null;
+    t.live.body = row ? row.querySelector(".chat-msg-body") : null;
+    for (const q of t.live.queue || []) {
+      const qi = t.history.indexOf(q.msg);
+      q.node = qi >= 0 ? el.msg.children[qi] : null;
+    }
+    if (t.live.after) {
+      const ai = t.history.indexOf(t.live.after.msg);
+      t.live.after.node = ai >= 0 ? el.msg.children[ai] : null;
+    }
+  }
+  // Leave a busy thread: freeze its DOM preview, decline any on-screen
+  // question (pi must not hang on an invisible card) and keep updating its
+  // model in the background.
+  function detachThread(t) {
+    if (!t || !t.busy) return;
+    t.suppressed = true;
+    for (const dlg of [...t.dialogs.values()]) {
+      if (dlg && dlg.id) void postUiAnswer(dlg.id, { cancelled: true }, t);
+    }
+    t.dialogs.clear();
+    t.pendingCustom = null;
+    if (t.live) t.live.body = null;
+  }
+  // Return to a busy thread (via a workspace or session click): resume live
+  // DOM streaming. Mirrors detachThread — clears the freeze so handleChatEvent
+  // treats the thread as attached again. Call after renderChat() so the DOM
+  // pointers resolve against the freshly rendered rows.
+  function attachThread(t) {
+    if (!t) return;
+    t.suppressed = false;
+    if (t.busy && t.live) attachLiveDom(t);
+  }
 
   const el = {};
   let restoreAttempted = false; // conversation snapshot restored once per page load
@@ -122,11 +344,11 @@
       const cwd = s.cwd || "(unknown)";
       (map[cwd] = map[cwd] || []).push(s);
     }
-    const custom = (CH.teamData?.chatWorkspaces || []);
+    // Custom (session-less) workspaces: the union of every project's list we've
+    // seen, minus removals — stable across workspace switches and reloads.
+    const custom = (CH.customWs?.list || []).filter((cwd) => !(CH.customWs?.removed || []).includes(cwd));
     for (const cwd of custom) if (!map[cwd]) map[cwd] = [];
-    const removed = new Set(CH.teamData?.chatWorkspacesRemoved || []);
     return Object.keys(map)
-      .filter((cwd) => !removed.has(cwd))
       .sort((a, b) => (a === "(unknown)" ? 1 : b === "(unknown)" ? -1 : a.localeCompare(b)));
   }
 
@@ -151,6 +373,9 @@
 
   function onSessions() {
     CH.sessions = (state.sessions || []).filter(isChatSession);
+    // A free conversation's recorded row may have just appeared — match it to
+    // the free thread so opening it continues the same subprocess.
+    adoptFreeThreads();
     loadAgentTeam();
     renderComposerModel();
     // Rebuild the workspace + agent rails only when their data actually changed
@@ -162,13 +387,11 @@
       renderWorkspaces();
       renderAgents();
     }
-    if (!CH.chatBusy) {
-      // Header state + composer status depend on per-session stats that update
-      // on polls; the message list itself only changes through explicit actions
-      // (send / load session / new session), which re-render on their own.
-      updateHeader();
-      updateScrollDown();
-    }
+    // Header state reflects the CURRENT thread's busy flag (background threads
+    // don't affect the visible one). The message list itself only changes
+    // through explicit actions / streams, which re-render on their own.
+    updateHeader();
+    updateScrollDown();
     if (!CH.workspace) {
       const ws = workspaces();
       if (ws.length) selectWorkspace(preferredWorkspace(ws));
@@ -179,6 +402,7 @@
 
   function onView() {
     CH.sessions = (state.sessions || []).filter(isChatSession);
+    adoptFreeThreads();
     loadAgentTeam();
     if (!CH.workspace) {
       const ws = workspaces();
@@ -262,10 +486,14 @@
         `<span class="chat-ws-dot ${pst.dot}" title="${esc(pst.word)}"></span>` +
         `<span class="chat-ws-remove" data-remove="${esc(cwd)}" title="Remove workspace">&times;</span>` +
         `</div>`;
-      html +=
-        `<div class="chat-ws-children"${expanded ? "" : ' style="display:none"'}>` +
-        sessions.map((s) => renderWsSession(s)).join("") +
-        `</div>`;
+      // Build the parent/child tree straight from the workspace's sessions.
+      // No pre-nesting pass: ordering children after a parent that sorts
+      // earlier in the poll (active subagents have newer last_ts than the
+      // orchestrator) used to emit each child TWICE — once in its own right
+      // and again under the parent — doubling the fold rows while a run
+      // streamed. buildWsSessionTree groups by parent id itself.
+      const tree = buildWsSessionTree(sessions);
+      html += `<div class="chat-ws-children"${expanded ? "" : ' style="display:none"'}>` + renderWsSessionTree(tree) + `</div>`;
     }
     el.ws.innerHTML = html;
     wireWorkspaces();
@@ -275,7 +503,7 @@
   // The row stays minimal (status dot + first message); the session message
   // and status live in the hover tooltip, and the model / token usage / time
   // are shown in the composer status line below the input.
-  function renderWsSession(s) {
+  function renderWsSession(s, isNested) {
     const name = s.agent_name ?? s.cwd?.split("/").pop() ?? S.shortId(s.session_id);
     const st = S.subagentStatus(s);
     const stMeta = piStatusMeta(st);
@@ -283,9 +511,10 @@
     const hasErr = (stats?.error_count || 0) > 0;
     const row1 = s.first_msg ? S.trunc(s.first_msg, 46) : name;
     const statusText = stMeta.word + (hasErr ? " ⚠ needs review" : "");
-    const tip = (s.first_msg ? s.first_msg : name) + (statusText ? " — " + statusText : "");
+    const tip = (s.first_msg ? s.first_msg : name) + (statusText ? " — " + statusText : "") +
+      (isNested && s.parent_session_id ? " — spawned by session " + S.shortId(s.parent_session_id) : "");
     return (
-      `<div class="ws-sess" data-sid="${esc(s.session_id)}" title="${esc(tip)}">` +
+      `<div class="ws-sess${isNested ? " ws-sess-sub" : ""}" data-sid="${esc(s.session_id)}" title="${esc(tip)}">` +
       `<span class="status-dot ${st}"></span>` +
       `<div class="ws-sess-body">` +
       `<div class="ws-sess-name" title="${s.first_msg ? esc(s.first_msg) : esc(name)}">${esc(row1)}</div>` +
@@ -302,13 +531,90 @@
     renderWorkspaces();
   }
 
+  // Split a workspace's session list into { roots, subs }: main sessions plus
+  // the subagent sessions each spawned (children keep the poll order, so they
+  // render newest-first within their group). A session whose parent isn't in
+  // the same workspace list is a root, so orphans never vanish.
+  function buildWsSessionTree(sessions) {
+    const ids = new Set(sessions.map((s) => s.session_id));
+    const subs = new Map(); // parent session_id → child sessions
+    const roots = [];
+    for (const s of sessions) {
+      if (s.parent_session_id && ids.has(s.parent_session_id)) {
+        if (!subs.has(s.parent_session_id)) subs.set(s.parent_session_id, []);
+        subs.get(s.parent_session_id).push(s);
+      } else {
+        roots.push(s);
+      }
+    }
+    return { roots, subs };
+  }
+
+  // Render a workspace's sessions as a tree: each main (root) session row is
+  // followed by a fold row that expands/collapses its spawned subagent rows.
+  // Groups default to collapsed — subagents fold under their main session and
+  // are revealed on demand instead of always cluttering the rail.
+  function renderWsSessionTree({ roots, subs }) {
+    let html = "";
+    for (const r of roots) {
+      html += renderWsSession(r, false);
+      const kids = subs.get(r.session_id) || [];
+      if (!kids.length) continue;
+      const open = CH.subOpen.has(r.session_id);
+      const running = kids.some((k) => S.subagentStatus(k) === "green");
+      const label = `${kids.length} sub-session${kids.length === 1 ? "" : "s"}`;
+      html +=
+        `<div class="ws-sess-fold ws-sess-sub${open ? " open" : ""}" data-fold="${esc(r.session_id)}"` +
+        ` title="${esc(running ? "a subagent is still running" : "click to expand or collapse the sub-sessions")}">` +
+        `<span class="ws-sess-fold-caret">${open ? "▾" : "▸"}</span>` +
+        `<span class="ws-sess-fold-label">${esc(label)}</span>` +
+        (running ? `<span class="ws-sess-fold-dot green" title="a subagent is running"></span>` : "") +
+        `</div>` +
+        `<div class="ws-sess-subs"${open ? "" : ' style="display:none"'}>` +
+        kids.map((k) => renderWsSession(k, true)).join("") +
+        `</div>`;
+    }
+    return html;
+  }
+
+  // Expand/collapse a main session's subagent group (default: collapsed).
+  function toggleSubs(sid) {
+    if (!sid) return;
+    if (CH.subOpen.has(sid)) CH.subOpen.delete(sid);
+    else CH.subOpen.add(sid);
+    saveSubOpen();
+    renderWorkspaces();
+  }
+
+  // Return the canvas to a workspace's own conversation (its free thread) —
+  // e.g. after browsing a recorded session, clicking the active workspace row
+  // brings you back to the chat you were having there, resuming its live
+  // stream if it's still running.
+  function showFreeConversation(cwd) {
+    const prev = curThread();
+    const t = freeThread(cwd);
+    if (prev && prev !== t) detachThread(prev);
+    bindThread(t);
+    updateHeader();
+    renderChat();
+    attachThread(t); // resume live streaming if this thread is still running
+    if (el.input) el.input.focus();
+  }
+
   function wireWorkspaces() {
     el.ws.querySelectorAll(".chat-ws").forEach((n) =>
       n.addEventListener("click", (e) => {
         if (e.target.closest(".chat-ws-remove")) return; // handled by its own listener
+        if (e.target.closest(".chat-ws-caret")) return; // the caret owns collapse
         const cwd = n.dataset.cwd;
         if (CH.workspace !== cwd) selectWorkspace(cwd);
-        else toggleWs(cwd);
+        else showFreeConversation(cwd);
+      })
+    );
+    el.ws.querySelectorAll(".chat-ws-caret").forEach((n) =>
+      n.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleWs(n.closest(".chat-ws")?.dataset.cwd);
       })
     );
     el.ws.querySelectorAll(".chat-ws-remove").forEach((n) =>
@@ -321,6 +627,12 @@
       n.addEventListener("click", (e) => {
         e.stopPropagation();
         loadSessionChat(n.dataset.sid);
+      })
+    );
+    el.ws.querySelectorAll(".ws-sess-fold").forEach((n) =>
+      n.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleSubs(n.dataset.fold);
       })
     );
     el.ws.querySelectorAll(".ws-sess-del").forEach((n) =>
@@ -366,11 +678,22 @@
     const p = window.SCOPE.deleteSession(sid);
     if (!p) return; // canceled by the user
     p.then(() => {
-      if (CH.openSid === sid) {
-        CH.openSid = null;
-        CH.lastOpenCount = null;
-        CH.chatHistory = [];
-        CH.resumeFile = null;
+      const cur = curThread();
+      if (cur && cur.openSid === sid) {
+        // The deleted session was on screen: reset its thread to a blank
+        // conversation (the subprocess, if any, was keyed to it — kill it so a
+        // stale pi can't linger on a deleted session).
+        if (cur.key) {
+          fetch(window.apiUrl("/chat/kill"), {
+            method: "POST",
+            headers: { ...window.authHeaders(), "content-type": "application/json" },
+            body: JSON.stringify({ sessionId: cur.key }),
+          }).catch(() => {});
+        }
+        CH.threads.delete(cur.id);
+        CH.threads.delete(sid);
+        const ft = freeThread(CH.workspace);
+        bindThread(ft);
         renderChat();
       }
       CH.sessions = (state.sessions || []).filter(isChatSession);
@@ -386,10 +709,16 @@
     const p = (picked ?? (input?.value || "")).trim();
     if (!p) { CH.adding = false; renderWorkspaces(); return; }
     try {
-      const before = new Set(CH.teamData?.chatWorkspaces || []);
-      const { res, data } = await window.SCOPE.api("/agent-team", {}, { action: "addWorkspace", path: p });
+      const before = new Set(CH.customWs?.list || []);
+      const { res, data } = await window.SCOPE.api("/agent-team", {}, { action: "addWorkspace", path: p, cwd: CH.workspace || "" });
       if (res.ok && data) {
         CH.teamData = data;
+        // Re-adding un-hides the workspace in the local union (the server also
+        // clears chatWorkspacesRemoved in the project configs it writes).
+        CH.customWs.removed = (CH.customWs.removed || []).filter((w) => w !== p);
+        if (!CH.customWs.list.includes(p)) CH.customWs.list.push(p);
+        saveCustomWs();
+        mergeCustomWs(data);
         CH.adding = false;
         renderWorkspaces();
         const added = (data.chatWorkspaces || []).find((c) => !before.has(c));
@@ -404,8 +733,16 @@
 
   async function removeWorkspace(cwd) {
     try {
-      const { res, data } = await window.SCOPE.api("/agent-team", {}, { action: "removeWorkspace", path: cwd });
-      if (res.ok && data) CH.teamData = data;
+      const { res, data } = await window.SCOPE.api("/agent-team", {}, { action: "removeWorkspace", path: cwd, cwd: CH.workspace || "" });
+      if (res.ok && data) {
+        CH.teamData = data;
+        mergeCustomWs(data);
+      }
+      // Drop the removed workspace from the local union regardless of the
+      // server response so the sidebar hides it immediately and forever.
+      CH.customWs.list = (CH.customWs.list || []).filter((w) => w !== cwd);
+      if (!CH.customWs.removed.includes(cwd)) CH.customWs.removed.push(cwd);
+      saveCustomWs();
     } catch { /* server unreachable — re-render from local state below */ }
     if (CH.workspace === cwd) {
       const ws = workspaces();
@@ -439,20 +776,30 @@
       return;
     }
     teamFetchedAt = now;
-    const { res, data } = await window.SCOPE.api("/agent-team");
-    if (res.ok && data) CH.teamData = data;
+    // agent-team config is per project: fetch the currently open chat
+    // workspace's .pi/settings (the server falls back to the last project
+    // when no workspace is selected yet).
+    const params = CH.workspace ? { cwd: CH.workspace } : {};
+    const { res, data } = await window.SCOPE.api("/agent-team", params);
+    if (res.ok && data) {
+      CH.teamData = data;
+      mergeCustomWs(data);
+    }
     teamJsonSig = JSON.stringify(CH.teamData || null);
     renderAgents();
     renderWorkspaces();
   }
 
   // Persist a sidebar toggle via POST /agent-team, then reload the snapshot.
+  // Toggles write the CURRENT chat workspace's project config (cwd) — pi's
+  // agent-team config is per project now.
   async function postTeam(body) {
     let ok = false;
     try {
-      const { res, data } = await window.SCOPE.api("/agent-team", {}, body);
+      const { res, data } = await window.SCOPE.api("/agent-team", {}, { ...body, cwd: CH.workspace || "" });
       if (res.ok && data) {
         CH.teamData = data;
+        mergeCustomWs(data);
         ok = true;
       }
     } catch { /* server unreachable — keep last snapshot */ }
@@ -466,13 +813,27 @@
   // session the same way the model dropdown does:
   //   • idle pre-spawn (no conversation yet): kill it and re-pre-spawn so the
   //     very next prompt runs under the freshly written config;
-  //   • live conversation in progress: leave the subprocess alone (killing it
-  //     would silently drop the thread) and tell the user the setting lands on
-  //     the next new session.
+  //   • live conversation in progress: push the current model/thinking into the
+  //     running subprocess via RPC (set_model / set_thinking_level) so those
+  //     settings apply in place without killing the thread — harness-level
+  //     settings (mode/memory/team) that pi only reads at boot still land on
+  //     the next new session, which we surface in the hint.
   function rearmChatAfterConfigChange() {
     if (!CH.workspace) return;
     if (CH.chatBusy || CH.chatHistory.length) {
-      if (el.hint) setHint("⚙ team settings apply to a new chat session", "");
+      if (CH.chatSessionId) {
+        // Refresh the composer footer first (it re-reads settings.json's new
+        // default model/thinking), so the push reflects the freshly written
+        // default when the user hasn't overridden it in the composer.
+        void (async () => {
+          await fetchChatFooter(true);
+          renderComposerThinking();
+          await pushLivePrefs(CH.chatModel, CH.thinkingLevel);
+        })();
+        if (el.hint) setHint("⚙ model/thinking applied to this chat; mode/team settings land on a new session", "");
+      } else if (el.hint) {
+        setHint("⚙ team settings apply to a new chat session", "");
+      }
       return;
     }
     if (!CH.chatSessionId) return; // nothing pre-spawned — next send spawns fresh anyway
@@ -480,6 +841,28 @@
       await killCurrentChatSession();
       ensureChatSession();
     })();
+  }
+
+  // Push the composer's model + thinking into the running pi subprocess so a
+  // Settings change takes effect on the live agent (no respawn, context intact).
+  // Falls back to the composer's current selection when either is unset so the
+  // live session never gets a blank pref.
+  async function pushLivePrefs(model, thinkingLevel) {
+    const sid = CH.chatSessionId;
+    if (!sid) return;
+    const effModel = model || CH.chatModel || "";
+    const effLevel = thinkingLevel || CH.thinkingLevel || CH.footer?.thinking || "";
+    try {
+      await fetch(window.apiUrl("/chat/prefs"), {
+        method: "POST",
+        headers: { ...window.authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionId: sid,
+          model: effModel,
+          thinkingLevel: effLevel,
+        }),
+      });
+    } catch { /* server unreachable — prefs re-push on the next prompt anyway */ }
   }
 
   function atSection(key, title, bodyHtml, opts) {
@@ -697,14 +1080,30 @@
     CH.team = null;
     CH.expandedWs.add(cwd);
     saveExpandedWs();
-    resetChat();
+    // Switching workspaces never kills or resets other sessions' threads — it
+    // just shows this workspace's own conversation (its free thread, or the
+    // last session you were viewing here), which keeps running in the
+    // background when you're elsewhere.
+    const prev = curThread();
+    const t = freeThread(cwd);
+    t.workspace = cwd;
+    if (prev && prev !== t) detachThread(prev); // freeze the old preview, decline its open questions
+    bindThread(t);
     renderWorkspaces();
     renderAgents();
+    // Agent-team config (teams, workspaces, skills) is PER PROJECT now — force
+    // a reload so the rails immediately reflect the newly selected workspace's
+    // own .pi/settings instead of the previous project's (stale for ≤15s).
+    teamFetchedAt = 0;
+    void loadAgentTeam();
     persistWorkspace();
     CH.footer = null;
     CH.footerFetchedAt = 0;
     CH.footerGoRetry = false;
     fetchChatFooter(true);
+    renderChat();
+    attachThread(t); // re-attach this workspace's thread if it's still streaming
+    ensureChatSession();
     // NB: no clearSnapshot() here — attemptRestore() (called right after boot
     // auto-select) validates the stored snapshot's workspace and restores the
     // conversation, so wiping it here would defeat reload persistence.
@@ -752,10 +1151,19 @@
             text: m.text ? String(m.text).slice(0, SNAP_CAP) : "",
             thinking: m.thinking ? String(m.thinking).slice(0, SNAP_CAP) : "",
             tools: (m.tools || []).map((t) => ({ name: t.name, state: t.state })),
+            asks: (m.asks || []).slice(-16),
             model: m.model || "",
             ts: m.ts,
           }));
-        localStorage.setItem(SNAP_KEY, JSON.stringify({ cwd: CH.workspace, msgs, openSid: CH.openSid, resumeFile: CH.resumeFile || "" }));
+        const t = curThread();
+        localStorage.setItem(SNAP_KEY, JSON.stringify({
+          cwd: CH.workspace,
+          msgs,
+          openSid: CH.openSid,
+          resumeFile: CH.resumeFile || "",
+          threadId: CH.curId || "",
+          sid: t?.sid || (t?.kind === "session" ? t.sid : "") || "",
+        }));
       } catch {}
     }, 800);
   }
@@ -764,7 +1172,7 @@
   }
 
   // After a reload, restore the conversation that was on screen for this
-  // workspace as editable history.
+  // workspace as editable history, into the same thread it belonged to.
   function attemptRestore() {
     if (restoreAttempted || CH.chatBusy || !CH.workspace) return;
     if (CH.chatHistory.length) { restoreAttempted = true; return; } // keep the live thread
@@ -775,16 +1183,21 @@
       if (snap) clearSnapshot();
       return;
     }
-    CH.chatHistory = snap.msgs;
-    CH.openSid = snap.openSid || null;
-    CH.resumeFile = snap.resumeFile || null;
-    CH.loadingSid = null;
-    // The snapshot is a point-in-time copy; force the next poll to re-fetch the
-    // open session so messages recorded after the snapshot aren't missed.
-    CH.lastOpenCount = null;
+    // Restore into the thread the conversation belonged to (a recorded session
+    // thread or the workspace's free thread).
+    let t = null;
+    if (snap.threadId) t = CH.threads.get(snap.threadId) || null;
+    if (!t && snap.sid) t = threadForSid(snap.sid) || null;
+    if (!t) t = freeThread(CH.workspace);
+    t.history = snap.msgs;
+    t.openSid = snap.openSid || (t.kind === "session" ? t.sid : null) || null;
+    t.resumeFile = snap.resumeFile || t.resumeFile || null;
+    t.loadingSid = null;
+    t.lastOpenCount = null; // point-in-time copy — refetch on next poll
+    bindThread(t);
     persistConversation();
     renderChat();
-    if (el.hint) setHint(`${CH.chatHistory.length} message${CH.chatHistory.length === 1 ? "" : "s"} restored — type to continue`, "");
+    if (el.hint) setHint(`${t.history.length} message${t.history.length === 1 ? "" : "s"} restored — type to continue`, "");
     ensureChatSession();
   }
 
@@ -794,13 +1207,14 @@
   // transcript keeps up with an agent that's still working — and so a page
   // reload (which restores the stale snapshot) picks up the latest messages.
   function refreshOpenSession() {
-    if (!CH.openSid || CH.chatBusy || CH.loadingSid) return;
-    const s = CH.sessions.find((x) => x.session_id === CH.openSid);
+    const t = curThread();
+    if (!t || !t.openSid || t.busy || t.loadingSid) return;
+    const s = CH.sessions.find((x) => x.session_id === t.openSid);
     if (!s) return;
     const count = s.event_count ?? 0;
-    if (CH.lastOpenCount != null && count <= CH.lastOpenCount) return;
-    CH.lastOpenCount = count;
-    void loadSessionChat(CH.openSid, true);
+    if (t.lastOpenCount != null && count <= t.lastOpenCount) return;
+    t.lastOpenCount = count;
+    void loadSessionChat(t.openSid, true);
   }
 
   // ─── Interactive chat with the pi coding agent ────────────────────────────
@@ -843,34 +1257,60 @@
     return all[0] || "google/gemini-2.5-flash-lite";
   }
 
-  function resetChat() {
-    killCurrentChatSession();
-    CH.resumeFile = null;
-    CH.chatBusy = false;
-    CH.chatHistory = [];
-    CH.loadingSid = null;
-    CH.openSid = null;
+  // Reset the CURRENT workspace's free conversation to a brand-new chat: kill
+  // its pi subprocess (context is gone anyway), wipe the thread and re-arm a
+  // fresh pre-spawn. Other sessions' threads are untouched and keep running.
+  async function resetChat() {
+    const t = freeThread(CH.workspace);
+    if (t.key) {
+      try {
+        await fetch(window.apiUrl("/chat/kill"), {
+          method: "POST",
+          headers: { ...window.authHeaders(), "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: t.key }),
+        });
+      } catch { /* server unreachable — fine */ }
+    }
+    t.key = null;
+    t.resumeFile = null;
+    t.busy = false;
+    t.suppressed = false;
+    t.gen = 0;
+    t.live = null;
+    t.dialogs.clear();
+    t.pendingCustom = null;
+    t.history = [];
+    t.openSid = null;
+    t.lastOpenCount = null;
+    t.loadingSid = null;
+    t.firstPrompt = null;
+    t.adopted = false;
+    t.sid = null;
     CH.chatModel = defaultChatModel();
+    bindThread(t);
     renderComposerModel();
     renderChat();
     ensureChatSession();
   }
 
-  // Pre-start the pi session for the selected workspace (POST /chat/start) so
+  // Pre-start the workspace's free pi session (POST /chat/start) so
   // `pi --mode rpc` is already running before the first prompt is typed.
   async function ensureChatSession() {
-    if (!CH.workspace || CH.chatSessionId || CH.chatBusy) return;
+    if (!CH.workspace) return;
+    const t = freeThread(CH.workspace);
+    if (t.key || t.busy) return;
     try {
       const { res, data } = await window.SCOPE.api("/chat/start", {}, { cwd: CH.workspace, model: CH.chatModel || defaultChatModel() });
       if (res.ok && data?.sessionId) {
-        CH.chatSessionId = data.sessionId;
-        if (el.hint && !CH.chatHistory.length) setHint("session ready", "");
-      } else if (el.hint && !CH.chatHistory.length) {
+        t.key = data.sessionId;
+        syncCurThread();
+        if (el.hint && !t.history.length) setHint("session ready", "");
+      } else if (el.hint && !t.history.length) {
         setHint(`⚠ ${data?.error || `HTTP ${res.status}`}`, "err");
       }
     } catch {
       // server unreachable — first prompt will spawn instead
-      if (el.hint && !CH.chatHistory.length) setHint("server offline — retry on your next message", "err");
+      if (el.hint && !t.history.length) setHint("server offline — retry on your next message", "err");
     }
     updateHeader();
     renderChatFooter();
@@ -1226,6 +1666,19 @@
       : (!m.streaming && !m.thinking && !(m.tools || []).length
           ? `<div class="chat-msg-time">(no text response)</div>`
           : "");
+    // Answered questions (ask_user_question cards answered live in this bubble)
+    // survive the stream as a compact Q&A recap in the final transcript.
+    const asksHtml = (m.asks && m.asks.length)
+      ? `<div class="chat-asks">` +
+        m.asks.map((a) => {
+          const declined = a.a === "declined";
+          return `<div class="chat-asks-i${declined ? " declined" : ""}">` +
+            `<span class="chat-asks-q">${esc(a.q || "")}</span>` +
+            `<span class="chat-asks-a">${declined ? esc("declined") : esc(a.a || "")}</span>` +
+            `</div>`;
+        }).join("") +
+        `</div>`
+      : "";
     const errNote = m.errorNote ? `<div class="chat-error-note">${esc(m.errorNote)}</div>` : "";
     const stoppedNote = m.stopped ? `<div class="chat-stopped-note">⏹ stopped by you</div>` : "";
     const copyAttr = esc((m.text || "") + (m.thinking ? "\n\n" + m.thinking : ""));
@@ -1243,6 +1696,7 @@
       tools +
       body +
       (badges.length ? `<div class="chat-usage">${badges.join("")}</div>` : "") +
+      asksHtml +
       errNote +
       stoppedNote +
       `</div></div>`
@@ -1252,6 +1706,9 @@
   function renderChat() {
     if (!el.msg) return;
     updateHeader();
+    // The composer is free whenever a workspace is selected: a prompt always
+    // targets the CURRENT thread (queuing within it when it's busy), so other
+    // sessions streaming in the background never lock the input.
     setComposerEnabled(!!CH.workspace);
     // Preserve the user's reading position across re-renders (session polls
     // call renderChat every few seconds). When pinned near the bottom we stay
@@ -1303,7 +1760,15 @@
       return;
     }
     let html = "";
-    for (let idx = 0; idx < CH.chatHistory.length; idx++) html += renderChatMsg(CH.chatHistory[idx], idx);
+    const curT = curThread();
+    for (let idx = 0; idx < CH.chatHistory.length; idx++) {
+      const m = CH.chatHistory[idx];
+      // A busy thread's in-flight assistant message renders as the live
+      // placeholder so incoming deltas stream into it (also after switching
+      // back to a session that is still running).
+      if (curT && curT.busy && curT.live && m === curT.live.m) html += renderChatMsgLivePlaceholder(m, idx);
+      else html += renderChatMsg(m, idx);
+    }
     el.msg.innerHTML = html;
     if (stickBottom) scrollToBottom(true);
     else if (prevHeight > 1) el.msg.scrollTop = Math.round((prevTop / prevHeight) * el.msg.scrollHeight);
@@ -1330,8 +1795,10 @@
   }
 
   // ─── Live streaming into the active assistant message ─────────────────────
-  let live = null; // { body, m, isFirst, queue, after }
-  let chatGen = 0; // generation guard: a newer turn supersedes an older finalize
+  // Live-stream state lives on the THREAD (t.live = { m, isFirst, queue, after }
+  // plus the resolved DOM body while attached). Streaming helpers take the DOM
+  // body as a parameter: when the thread is not visible (running in the
+  // background) the body is null and only the message model is updated.
 
   // Coalesce footer re-renders to one per animation frame. The composer footer
   // (token/cost chips + context gauge) is re-derived from the live usage stream,
@@ -1347,9 +1814,9 @@
     });
   }
 
-  function clearLiveTyping() {
-    if (!live) return;
-    const t = live.body.querySelector(".chat-typing");
+  function clearLiveTyping(body) {
+    if (!body) return;
+    const t = body.querySelector(".chat-typing");
     if (t) t.remove();
   }
 
@@ -1361,7 +1828,8 @@
 
   function streamThinking(body, m, delta) {
     m.thinking = (m.thinking || "") + delta;
-    clearLiveTyping();
+    if (!body) return; // background thread — model only
+    clearLiveTyping(body);
     let det = body.querySelector("details.chat-thinking");
     if (!det) {
       det = document.createElement("details");
@@ -1376,7 +1844,8 @@
 
   function streamText(body, m, delta) {
     m.text = (m.text || "") + delta;
-    clearLiveTyping();
+    if (!body) return; // background thread — model only
+    clearLiveTyping(body);
     let t = body.querySelector(".chat-text.chat-stream-text");
     if (!t) {
       t = document.createElement("div");
@@ -1388,12 +1857,15 @@
   }
 
   function toolChip(body, name) {
+    if (!body) return null;
     return body.querySelector(`.chat-tool[data-name="${CSS.escape(name)}"]`);
   }
 
   function streamToolStart(body, m, name, args) {
     m.tools = m.tools || [];
-    clearLiveTyping();
+    m.tools.push({ name, args, state: "live" });
+    if (!body) return; // background thread — model only
+    clearLiveTyping(body);
     let toolsEl = body.querySelector(".chat-tools");
     if (!toolsEl) {
       toolsEl = document.createElement("div");
@@ -1433,6 +1905,7 @@
   function streamToolEnd(body, m, name) {
     const t = m.tools?.find((x) => x.name === name && x.state === "live");
     if (t) t.state = "ok";
+    if (!body) return; // background thread — model only
     const chip = toolChip(body, name);
     if (chip) { chip.classList.remove("live"); chip.classList.add("ok"); }
     const det = body.querySelector(`.chat-tool-call[data-name="${CSS.escape(name)}"]`);
@@ -1447,86 +1920,330 @@
 
   function streamError(body, m, msg) {
     m.errorNote = msg;
+    if (!body) return; // background thread — model only
     const n = document.createElement("div");
     n.className = "chat-error-note";
     n.textContent = "⚠ " + msg;
     body.appendChild(n);
-    clearLiveTyping();
+    clearLiveTyping(body);
   }
 
-  // Append one live event into the in-flight assistant message DOM. Always
-  // target live.m: after a msg_start the in-flight message is a NEW bubble, not
-  // the aiMsg captured when the prompt was sent.
-  function handleChatEvent(ev) {
-    if (!live) return;
-    const body = live.body;
-    const m = live.m;
+  // ─── Interactive host dialogs (ask_user_question & friends) ───────────────
+  // pi's RPC dialog sub-protocol: an extension (e.g. ask_user_question) calls
+  // ui.select()/ui.input(), and pi streams the dialog as an extension_ui_request
+  // that the HOST must render and answer. If we did nothing the tool would hang
+  // invisibly — instead we show an answerable card in the live bubble and POST
+  // the reply (extension_ui_response) via /chat/ui so pi's tool resolves and the
+  // agent keeps going. Dialogs are sequential (pi waits for each answer), so one
+  // card is on screen at a time; answered cards are summarized into m.asks so
+  // the final transcript still shows the Q&A.
+  const ICON_ASK = `<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>`;
+  // Dialogs live on the THREAD (t.dialogs / t.pendingCustom) so each session's
+  // question cards are tracked independently and get declined when the user
+  // switches away mid-question.
+
+  function cleanUiTitle(title) {
+    return String(title || "").replace(/\s+/g, " ").trim();
+  }
+
+  // An option line from a ui.select request is "1. Label — description". The ask
+  // questionnaire maps a picked option back to the original list by its leading
+  // number, so the raw line is what must be sent back when the user picks it.
+  function parseOptionLine(line) {
+    const raw = String(line == null ? "" : line);
+    const m = raw.match(/^\s*(\d+)\.\s+(.*)$/);
+    if (!m) return { num: "", label: raw.trim(), desc: "", raw };
+    const dm = m[2].match(/^(.*?)(?:\s+—\s+(.*))?$/);
+    return { num: m[1], label: (dm ? dm[1] : m[2]).trim(), desc: dm && dm[2] ? dm[2].trim() : "", raw };
+  }
+
+  // The questionnaire appends a "N. Type something." sentinel row that switches
+  // to free text; it must never be answered as a regular option.
+  function isSentinelLine(line) {
+    return /type something/i.test(String(line || ""));
+  }
+
+  function recordAsk(m, title, answer) {
+    if (!m) return;
+    m.asks = m.asks || [];
+    m.asks.push({
+      q: cleanUiTitle(title).slice(0, 400),
+      a: String(answer || "").slice(0, 400),
+      ts: Date.now(),
+    });
+    if (m.asks.length > 24) m.asks.splice(0, m.asks.length - 24);
+  }
+
+  async function postUiAnswer(dialogId, payload, t) {
+    const sid = (t && t.key) || CH.chatSessionId || "";
+    if (!sid) return { ok: false, error: "no live chat session" };
+    try {
+      const { res, data } = await window.SCOPE.api("/chat/ui", {}, { sessionId: sid, id: dialogId, ...payload });
+      return res.ok ? { ok: true } : { ok: false, error: (data && data.error) || `HTTP ${res.status}` };
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+  }
+
+  function askNote(card, text) {
+    if (!card) return;
+    let note = card.querySelector(".chat-ask-note");
+    if (!note) {
+      note = document.createElement("div");
+      note.className = "chat-ask-note";
+      card.appendChild(note);
+    }
+    note.textContent = text;
+  }
+
+  function setAskStatus(card, text, isErr) {
+    if (!card) return;
+    let st = card.querySelector(".chat-ask-status");
+    if (!st) {
+      st = document.createElement("div");
+      st.className = "chat-ask-status";
+      card.appendChild(st);
+    }
+    st.hidden = false;
+    st.className = "chat-ask-status" + (isErr ? " err" : "");
+    st.textContent = text;
+  }
+
+  // Disable a question card once it has been answered / declined.
+  function markAskAnswered(card, label, declined) {
+    if (!card) return;
+    card.classList.add("answered");
+    card.querySelectorAll(".chat-ask-opt").forEach((b) => { b.disabled = true; });
+    const row = card.querySelector(".chat-ask-custom-row");
+    if (row) row.remove();
+    const x = card.querySelector(".chat-ask-x");
+    if (x) x.remove();
+    const note = card.querySelector(".chat-ask-note");
+    if (note) note.remove();
+    if (label != null) setAskStatus(card, declined ? "declined" : "✓ " + label, declined);
+  }
+
+  // ui.select: an option list. The sentinel row opens an inline "type your own
+  // answer" box instead of answering.
+  function showUiSelect(body, m, ev, t) {
+    const opts = Array.isArray(ev.options) ? ev.options : [];
+    let sentinelIdx = -1;
+    opts.forEach((raw, i) => { if (isSentinelLine(parseOptionLine(raw).label)) sentinelIdx = i; });
+    const dlg = { mode: "select", id: ev.id, opts, sentinelIdx, m, title: cleanUiTitle(ev.title), t };
+    if (t) t.dialogs.set(ev.id, dlg);
+
+    const card = document.createElement("div");
+    card.className = "chat-ask";
+    card.dataset.id = ev.id;
+    let optHtml = "";
+    opts.forEach((raw, i) => {
+      if (isSentinelLine(parseOptionLine(raw).label)) {
+        optHtml +=
+          `<button type="button" class="chat-ask-opt chat-ask-opt-other" data-i="${i}">` +
+          `<span class="chat-ask-opt-l">✏️ Type your own answer</span>` +
+          `<span class="chat-ask-opt-d">Answer in your own words instead of the options</span></button>`;
+      } else {
+        const p = parseOptionLine(raw);
+        optHtml +=
+          `<button type="button" class="chat-ask-opt" data-i="${i}">` +
+          (p.num ? `<span class="chat-ask-opt-num">${esc(p.num)}</span>` : "") +
+          `<span class="chat-ask-opt-b"><span class="chat-ask-opt-l">${esc(p.label)}</span>` +
+          (p.desc ? `<span class="chat-ask-opt-d">${esc(p.desc)}</span>` : "") +
+          `</span></button>`;
+      }
+    });
+    card.innerHTML =
+      `<div class="chat-ask-head"><span class="chat-ask-ic">${ico(ICON_ASK, 13)}</span>` +
+      `<div class="chat-ask-q">${esc(dlg.title)}</div>` +
+      `<button type="button" class="chat-ask-x" title="Decline — pi is told you dismissed the question">&times;</button></div>` +
+      (opts.length ? `<div class="chat-ask-opts">${optHtml}</div>` : "") +
+      `<div class="chat-ask-custom-row" hidden>` +
+      `<input class="chat-ask-input" type="text" placeholder="Type your own answer…" autocomplete="off" spellcheck="false" />` +
+      `<button type="button" class="chat-ask-send">Send</button></div>` +
+      `<div class="chat-ask-note">pi is waiting for your answer</div>`;
+    body.appendChild(card);
+
+    card.querySelector(".chat-ask-x").addEventListener("click", (e) => {
+      e.preventDefault();
+      void declineUi(dlg, card);
+    });
+    card.querySelectorAll(".chat-ask-opt").forEach((b) =>
+      b.addEventListener("click", () => {
+        const raw = dlg.opts[Number(b.dataset.i)];
+        if (raw == null) return;
+        if (isSentinelLine(parseOptionLine(raw).label)) revealCustom(card);
+        else void answerSelect(dlg, card, raw);
+      })
+    );
+    const send = () => submitCustom(dlg, card, card.querySelector(".chat-ask-input").value);
+    const sendBtn = card.querySelector(".chat-ask-send");
+    const inp = card.querySelector(".chat-ask-input");
+    if (sendBtn) sendBtn.addEventListener("click", send);
+    if (inp) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); send(); } });
+    if (nearBottom()) scrollToBottom();
+  }
+
+  function revealCustom(card) {
+    const row = card.querySelector(".chat-ask-custom-row");
+    if (!row) return;
+    row.hidden = false;
+    card.classList.add("custom");
+    const inp = card.querySelector(".chat-ask-input");
+    if (inp) inp.focus();
+    askNote(card, "type your answer and press Enter — or pick one of the options above");
+  }
+
+  async function answerSelect(dlg, card, raw) {
+    askNote(card, "sending your answer…");
+    const r = await postUiAnswer(dlg.id, { value: raw }, dlg.t);
+    if (!r.ok) { setAskStatus(card, "⚠ " + (r.error || "could not reach pi"), true); return; }
+    const p = parseOptionLine(raw);
+    recordAsk(dlg.m, dlg.title, p.label);
+    markAskAnswered(card, p.label, false);
+  }
+
+  // "Type your own answer" on a select card: answer the select with the sentinel
+  // row (so pi opens its free-text follow-up), then auto-answer that input with
+  // the text the user typed — they answer once, pi sees one custom answer.
+  function submitCustom(dlg, card, value) {
+    const typed = String(value || "").trim();
+    if (!typed) return;
+    askNote(card, "sending your answer…");
+    const sentinelRaw = dlg.sentinelIdx >= 0 ? dlg.opts[dlg.sentinelIdx] : "";
+    if (sentinelRaw) {
+      if (dlg.t) dlg.t.pendingCustom = { value: typed, title: dlg.title };
+      void postUiAnswer(dlg.id, { value: sentinelRaw }, dlg.t).then((r) => {
+        if (!r.ok) {
+          if (dlg.t) dlg.t.pendingCustom = null;
+          setAskStatus(card, "⚠ " + (r.error || "could not reach pi"), true);
+        }
+      });
+    } else {
+      void postUiAnswer(dlg.id, { value: typed }, dlg.t);
+      recordAsk(dlg.m, dlg.title, typed);
+    }
+    markAskAnswered(card, typed, false);
+  }
+
+  // ui.input: a free-text dialog. Multi-select questionnaires arrive here too
+  // (numbered list in the title, answers as "1,3" or plain custom text).
+  function showUiInput(body, m, ev, t) {
+    const title = cleanUiTitle(ev.title);
+    // Free-text dialog that pi opened for a "type something" answer we already
+    // collected — deliver it without making the user type it twice.
+    if (t && t.pendingCustom) {
+      const pending = t.pendingCustom;
+      t.pendingCustom = null;
+      void postUiAnswer(ev.id, { value: pending.value }, t);
+      recordAsk(m, pending.title || title, pending.value);
+      const note = document.createElement("div");
+      note.className = "chat-ask chat-ask-auto";
+      note.innerHTML =
+        `<div class="chat-ask-head"><span class="chat-ask-ic">${ico(ICON_ASK, 13)}</span>` +
+        `<div class="chat-ask-q">${esc(title)}</div></div>` +
+        `<div class="chat-ask-note">✓ your answer was sent</div>`;
+      body.appendChild(note);
+      if (nearBottom()) scrollToBottom();
+      return;
+    }
+    const dlg = { mode: "input", id: ev.id, m, title, placeholder: ev.placeholder || "", t };
+    if (t) t.dialogs.set(ev.id, dlg);
+    const card = document.createElement("div");
+    card.className = "chat-ask";
+    card.dataset.id = ev.id;
+    card.innerHTML =
+      `<div class="chat-ask-head"><span class="chat-ask-ic">${ico(ICON_ASK, 13)}</span>` +
+      `<div class="chat-ask-q">${esc(title)}</div>` +
+      `<button type="button" class="chat-ask-x" title="Decline — pi is told you dismissed the question">&times;</button></div>` +
+      `<div class="chat-ask-input-row">` +
+      `<textarea class="chat-ask-input" rows="2" placeholder="${esc(dlg.placeholder || "Type your answer…")}" spellcheck="false"></textarea>` +
+      `<button type="button" class="chat-ask-send">Send</button></div>` +
+      `<div class="chat-ask-note">pi is waiting for your answer</div>`;
+    body.appendChild(card);
+
+    const submit = () => submitInput(dlg, card, card.querySelector(".chat-ask-input").value);
+    card.querySelector(".chat-ask-x").addEventListener("click", (e) => {
+      e.preventDefault();
+      void declineUi(dlg, card);
+    });
+    const sendBtn = card.querySelector(".chat-ask-send");
+    const ta = card.querySelector(".chat-ask-input");
+    if (sendBtn) sendBtn.addEventListener("click", submit);
+    if (ta) {
+      ta.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); }
+      });
+      ta.focus();
+    }
+    if (nearBottom()) scrollToBottom();
+  }
+
+  async function submitInput(dlg, card, value) {
+    const typed = String(value || "").trim();
+    if (!typed) return;
+    askNote(card, "sending your answer…");
+    const r = await postUiAnswer(dlg.id, { value: typed }, dlg.t);
+    if (!r.ok) { setAskStatus(card, "⚠ " + (r.error || "could not reach pi"), true); return; }
+    recordAsk(dlg.m, dlg.title, typed);
+    markAskAnswered(card, typed, false);
+  }
+
+  async function declineUi(dlg, card) {
+    if (!dlg) return;
+    askNote(card, "declining…");
+    const r = await postUiAnswer(dlg.id, { cancelled: true }, dlg.t);
+    if (!r.ok) { setAskStatus(card, "⚠ " + (r.error || "could not reach pi"), true); return; }
+    recordAsk(dlg.m, dlg.title, "declined");
+    markAskAnswered(card, "", true);
+  }
+
+  // Append one live event into the in-flight assistant message of a thread.
+  // Model updates ALWAYS happen (background threads keep their conversation
+  // current); DOM streaming only runs when the thread is the visible one and
+  // its live body is resolved. Always target t.live.m: after a msg_start the
+  // in-flight message is a NEW bubble, not the aiMsg captured when the prompt
+  // was sent.
+  function handleChatEvent(ev, t) {
+    if (!t || !t.busy || !t.live) return;
+    const attached = t === curThread() && !t.suppressed;
+    const body = attached ? t.live.body : null;
+    const m = t.live.m;
     switch (ev.type) {
       case "msg_start": {
         // A run can contain several assistant messages (one per LLM call in a
         // tool loop). The first fills the placeholder; each later one becomes
         // its own bubble so a per-message `final` snapshot can't overwrite the
         // text streamed so far — mirroring how session transcripts render.
-        if (!live) break;
-        if (live.isFirst) { live.isFirst = false; break; }
-        live.m.streaming = false;
+        if (t.live.isFirst) { t.live.isFirst = false; break; }
+        t.live.m.streaming = false;
         const m2 = {
           role: "assistant", text: "", thinking: "", tools: [], usage: null,
-          model: live.m.model || CH.chatModel, ts: Date.now(), streaming: true,
+          model: m.model || CH.chatModel, ts: Date.now(), streaming: true,
         };
-        let node = null;
-        let mIdx = CH.chatHistory.length;
-        if (el.msg) {
-          // Place the new bubble relative to any queued steer/follow-up bubbles so
-          // an earlier run's leftover tool-loop messages land before the queued
-          // user message, and the queued run's own messages land right after it.
-          if (live.queue.length) {
-            const ref = live.queue[0];
-            mIdx = CH.chatHistory.indexOf(ref.msg);
-            if (mIdx < 0) {
-              // The queued user bubble was trimmed from history (very long
-              // thread) — fall back to appending at the end.
-              CH.chatHistory.push(m2);
-              mIdx = CH.chatHistory.length - 1;
-              const wrap = document.createElement("div");
-              wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
-              node = wrap.firstElementChild;
-              if (node) el.msg.appendChild(node);
-            } else {
-              CH.chatHistory.splice(mIdx, 0, m2);
-              const wrap = document.createElement("div");
-              wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
-              node = wrap.firstElementChild;
-              if (node && ref.node) ref.node.before(node);
-            }
-          } else if (live.after) {
-            mIdx = CH.chatHistory.indexOf(live.after.msg) + 1;
-            if (mIdx <= 0) {
-              CH.chatHistory.push(m2);
-              mIdx = CH.chatHistory.length - 1;
-              const wrap = document.createElement("div");
-              wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
-              node = wrap.firstElementChild;
-              if (node) el.msg.appendChild(node);
-            } else {
-              CH.chatHistory.splice(mIdx, 0, m2);
-              const wrap = document.createElement("div");
-              wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
-              node = wrap.firstElementChild;
-              if (node && live.after.node) live.after.node.after(node);
-            }
-          } else {
-            CH.chatHistory.push(m2);
-            const wrap = document.createElement("div");
-            wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
-            node = wrap.firstElementChild;
-            if (node) el.msg.appendChild(node);
-          }
-        } else {
-          CH.chatHistory.push(m2);
+        // Place the new bubble relative to any queued steer/follow-up bubbles so
+        // an earlier run's leftover tool-loop messages land before the queued
+        // user message, and the queued run's own messages land right after it.
+        let mIdx = t.history.length;
+        if (t.live.queue.length) {
+          const qi = t.history.indexOf(t.live.queue[0].msg);
+          if (qi >= 0) mIdx = qi;
+        } else if (t.live.after) {
+          const ai = t.history.indexOf(t.live.after.msg);
+          if (ai >= 0) mIdx = ai + 1;
         }
-        live = { body: node ? node.querySelector(".chat-msg-body") : live.body, m: m2, isFirst: false, queue: live.queue, after: live.after };
-        if (nearBottom()) scrollToBottom();
+        t.history.splice(mIdx, 0, m2);
+        if (body && el.msg) {
+          const wrap = document.createElement("div");
+          wrap.innerHTML = renderChatMsgLivePlaceholder(m2, mIdx);
+          const node = wrap.firstElementChild;
+          if (node) el.msg.insertBefore(node, el.msg.children[mIdx] || null);
+        }
+        // Keep the DOM row ↔ history index parity intact for the new live msg.
+        const newBody = (body && el.msg && el.msg.children[mIdx])
+          ? el.msg.children[mIdx].querySelector(".chat-msg-body")
+          : null;
+        t.live = { body: newBody || t.live.body, m: m2, isFirst: false, queue: t.live.queue, after: t.live.after };
+        if (attached && nearBottom()) scrollToBottom();
         break;
       }
       case "run_start": {
@@ -1535,9 +2252,9 @@
         // the anchor so the assistant response streams in right after it. This
         // is the moment the "waiting for its turn" status is dropped: pi has
         // moved on from queueing and is actually working the message now.
-        if (live && live.queue.length) {
-          live.after = live.queue.shift();
-          setHint("pi is responding to your message…", "busy");
+        if (t.live.queue.length) {
+          t.live.after = t.live.queue.shift();
+          if (attached) setHint("pi is responding to your message…", "busy");
         }
         break;
       }
@@ -1553,6 +2270,27 @@
       case "tool_end":
         streamToolEnd(body, m, ev.name || "");
         break;
+      case "session":
+        // The server announces the real subprocess session id at stream start
+        // (it generates one when the request didn't carry one), so answers to
+        // extension dialogs can target the right session.
+        if (ev.sessionId) t.key = ev.sessionId;
+        if (t === curThread()) syncCurThread();
+        break;
+      case "ui_select":
+        // Attached: render an answerable card. Background thread: decline so
+        // pi never hangs on an invisible question.
+        if (body) showUiSelect(body, m, ev, t);
+        else if (t.key) void postUiAnswer(ev.id, { cancelled: true }, t);
+        break;
+      case "ui_input":
+        if (body) showUiInput(body, m, ev, t);
+        else if (t.key) void postUiAnswer(ev.id, { cancelled: true }, t);
+        break;
+      case "ui_notify":
+        // Surface non-info notifications (warnings/errors) as a composer hint.
+        if (attached && ev.kind && ev.kind !== "info" && el.hint) setHint("ℹ " + (ev.message || ""), ev.kind === "error" ? "err" : "busy");
+        break;
       case "usage":
         m.usage = ev.usage || m.usage;
         break;
@@ -1560,15 +2298,19 @@
         // Authoritative snapshot (some providers only deliver it on message_end).
         if (ev.text !== undefined) {
           m.text = ev.text || "";
-          const t = body.querySelector(".chat-text.chat-stream-text");
-          if (t) t.textContent = m.text;
+          if (body) {
+            const elt = body.querySelector(".chat-text.chat-stream-text");
+            if (elt) elt.textContent = m.text;
+          }
         }
         if (ev.thinking !== undefined) {
           m.thinking = ev.thinking || "";
-          const det = body.querySelector("details.chat-thinking");
-          if (det) {
-            det.querySelector("pre").textContent = m.thinking;
-            if (!m.thinking) det.remove();
+          if (body) {
+            const det = body.querySelector("details.chat-thinking");
+            if (det) {
+              det.querySelector("pre").textContent = m.thinking;
+              if (!m.thinking) det.remove();
+            }
           }
         }
         break;
@@ -1579,12 +2321,12 @@
       default:
         break;
     }
-    if (nearBottom()) scrollToBottom();
-    // Keep the composer footer in lockstep with the live turn — the usage / final
-    // snapshots are exactly what its token + cost numbers are derived from.
-    // Coalesced to one render per frame so a burst of usage events doesn't
-    // stampede the DOM and make the context gauge blink.
-    if (ev.type === "usage" || ev.type === "final") scheduleFooterRender();
+    if (attached && nearBottom()) scrollToBottom();
+    // Keep the composer footer in lockstep with the VISIBLE live turn — the
+    // usage / final snapshots are exactly what its token + cost numbers are
+    // derived from. Coalesced to one render per frame so a burst of usage
+    // events doesn't stampede the DOM and make the context gauge blink.
+    if (attached && (ev.type === "usage" || ev.type === "final")) scheduleFooterRender();
   }
 
   function setHint(text, kind) {
@@ -1889,27 +2631,31 @@
     const provider = selMeta?.provider || (selModel ? selModel.split("/")[0] : "");
 
     // ── Row 1: conversation telemetry chips · right-aligned session meta ──
-    // A thread exists once any assistant bubble is on screen. Keep the token and
-    // cost chips mounted for that whole thread: the live usage stream can deliver
-    // all-zero / absent input for the in-flight turn, which previously dropped the
-    // count to 0 and made the chips blink out and back in. Same fix as the context
-    // gauge below. They're hidden only for a genuinely empty composer or a static
-    // thread that never captured usage snapshots.
+    // Cost and the context gauge are ALWAYS visible once a workspace is open:
+    // cost reads $0 before any spend, and the context gauge reads 0% / window
+    // before any tokens — so the spend + context readout never disappears. The
+    // token in/out chips appear once a thread exists and stay mounted for the
+    // whole thread (the live usage stream can briefly deliver all-zero input,
+    // which previously dropped the count to 0 and made chips blink on/off).
     const hasThread = CH.chatHistory.some((m) => m.role === "assistant");
-    const showUsage = hasThread && (CH.chatBusy || conv.count > 0);
     const chips = [];
-    if (showUsage) {
+    // Cost chip — always present. The dollar glyph is already the chip's icon,
+    // so the amount itself renders without a second currency symbol.
+    chips.push(`<span class="cf-chip cf-cost" title="Total spent on this conversation">${cfIco("dollar", 10)}<span>${esc(cfCost(conv.cost).replace(/^\$/, ""))}</span></span>`);
+    // Token in/out chips — shown once a thread exists, kept mounted for it.
+    if (hasThread) {
       chips.push(
         `<span class="cf-chip" title="${esc(`${cfFmt(conv.input)} input tokens · ${cfFmt(conv.output)} output tokens across the conversation shown`)}">` +
         `<span class="cf-in">${cfIco("up", 9)}${cfFmt(conv.input)}</span>` +
         `<span class="cf-out">${cfIco("down", 9)}${cfFmt(conv.output)}</span>` +
         `</span>`
       );
-      // The dollar glyph is already the chip's icon, so the amount itself is
-      // rendered without a second currency symbol.
-      chips.push(`<span class="cf-chip cf-cost" title="Total spent on this conversation">${cfIco("dollar", 10)}<span>${esc(cfCost(conv.cost).replace(/^\$/, ""))}</span></span>`);
     }
-    if (hasThread && ctxWin > 0) {
+    // Context gauge — always shown once a workspace is open, so the context
+    // readout never disappears. When the window is known it reads
+    // `N% / window`; when a model has no declared window (rare) it still
+    // renders the used-context figure with a neutral denominator.
+    if (ctxWin > 0) {
       const pct = Math.min(100, (conv.ctx / ctxWin) * 100);
       chips.push(
         `<span class="cf-ctx" title="${esc(`context ${pct.toFixed(1)}% of the ${cfFmt(ctxWin)} window${winMeta?.maxTokens ? ` (max output ${cfFmt(winMeta.maxTokens)})` : ""}`)}">` +
@@ -1918,6 +2664,17 @@
         cfBar(pct, "ctx") +
         `<span class="cf-ctx-p">${pct.toFixed(0)}%</span>` +
         `<span class="cf-ctx-cap">/${cfFmt(ctxWin)}</span>` +
+        `</span>`
+      );
+    } else {
+      // No declared context window — still surface the used tokens so the
+      // indicator is permanently visible rather than blinking out.
+      chips.push(
+        `<span class="cf-ctx cf-ctx-unknown" title="Context window not known for the selected model; showing tokens used">` +
+        cfIco("gauge", 10) +
+        `<span class="cf-ctx-l">ctx</span>` +
+        `<span class="cf-ctx-p">${cfFmt(conv.ctx)}</span>` +
+        `<span class="cf-ctx-cap">tk</span>` +
         `</span>`
       );
     }
@@ -2006,32 +2763,29 @@
   // with no memory of earlier chats. Resolves once the kill request is sent
   // (callers that need ordering — e.g. re-pre-spawning after a config change —
   // can await it before issuing a new /chat/start).
+  // Kill the CURRENT thread's pi subprocess (if any) so a fresh one can be
+  // spawned with no memory of earlier chats. Best-effort.
   async function killCurrentChatSession() {
-    const sid = CH.chatSessionId;
-    CH.chatSessionId = null;
-    if (sid) {
-      try {
-        await fetch(window.apiUrl("/chat/kill"), {
-          method: "POST",
-          headers: { ...window.authHeaders(), "content-type": "application/json" },
-          body: JSON.stringify({ sessionId: sid }),
-        });
-      } catch { /* server unreachable — fine */ }
-    }
+    const t = curThread();
+    const sid = t?.key;
+    if (!sid) return;
+    t.key = null;
+    syncCurThread();
+    try {
+      await fetch(window.apiUrl("/chat/kill"), {
+        method: "POST",
+        headers: { ...window.authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: sid }),
+      });
+    } catch { /* server unreachable — fine */ }
   }
 
   function newSession() {
     if (CH.chatBusy) return;
-    // Start a brand-new conversation for the workspace: wipe the on-screen
-    // thread (and any resumed session target) and re-arm a fresh pi session.
-    killCurrentChatSession();
-    CH.chatHistory = [];
-    CH.openSid = null;
-    CH.resumeFile = null;
-    CH.loadingSid = null;
+    // Start a brand-new conversation for the workspace: wipe the free thread
+    // (and any resumed session target) and re-arm a fresh pi session.
     clearSnapshot();
-    renderChat();
-    ensureChatSession();
+    void resetChat();
     setHint(`model ${CH.chatModel || ""}`.trim(), "");
     el.input?.focus();
   }
@@ -2048,7 +2802,7 @@
   // Read an NDJSON stream from POST /chat into the active `live` message. Shared
   // by sendPrompt (a fresh turn) and sendWhileBusy's race path (the agent settled
   // between the click and the request landing, so pi treated it as a new prompt).
-  async function consumeChatStream(res, aiMsg) {
+  async function consumeChatStream(res, t) {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -2063,40 +2817,45 @@
         if (!line.trim()) continue;
         let ev; try { ev = JSON.parse(line); } catch { continue; }
         if (ev.type === "done") {
-          if (live?.m) live.m.streaming = false;
-          if (ev.sessionId) CH.chatSessionId = ev.sessionId;
+          if (t.live?.m) t.live.m.streaming = false;
+          if (ev.sessionId) t.key = ev.sessionId;
           if (ev.error) {
-            const tgt = live?.m || aiMsg;
-            tgt.errorNote = ev.error === "process closed"
+            const tgt = t.live?.m;
+            if (tgt) tgt.errorNote = ev.error === "process closed"
               ? "pi session ended unexpectedly (process closed)"
               : ev.error;
           }
           if (ev.aborted) {
             // The user stopped the agent: mark any queued steer/follow-up as
             // cancelled (clear_queue dropped them) and stamp the live message.
-            if (live) {
-              for (const q of live.queue) addCancelledNote(q.node, q.msg);
-              addStoppedNote(live.body, live.m);
-            } else {
-              addStoppedNote(null, aiMsg);
-            }
+            for (const q of t.live?.queue || []) addCancelledNote(q.node, q.msg);
+            if (t.live) addStoppedNote(t.live.body, t.live.m);
+            else addStoppedNote(null, t.history[t.history.length - 1]);
           }
+          syncCurThread();
         } else {
-          handleChatEvent(ev);
+          handleChatEvent(ev, t);
         }
       }
     }
   }
 
-  // Finalize a chat turn: clear the busy flag, stop the live stream, persist and
-  // re-render the thread with full markdown. Guarded by `gen` so a newer turn
-  // (e.g. a steer that raced the agent settling and became a fresh prompt) can
-  // supersede an older turn's finalize without clobbering its live state.
-  function finalizeChatTurn(gen) {
-    if (gen !== chatGen) return;
-    CH.chatBusy = false;
-    live = null;
-    CH.chatHistory = CH.chatHistory.map((m) => ({ ...m, streaming: false }));
+  // Finalize a chat turn on a thread: clear its busy flag, stop the live
+  // stream, persist and re-render the visible thread with full markdown.
+  // Guarded by `gen` so a newer turn (e.g. a steer that raced the agent
+  // settling and became a fresh prompt) can supersede an older turn's finalize
+  // without clobbering its live state. Background threads just update their
+  // model — the canvas only re-renders for the visible one.
+  function finalizeChatTurn(t, gen) {
+    if (!t || gen !== t.gen) return;
+    t.busy = false;
+    t.suppressed = false;
+    t.live = null;
+    t.dialogs.clear();
+    t.pendingCustom = null;
+    t.history = t.history.map((m) => ({ ...m, streaming: false }));
+    if (t !== curThread()) { syncCurThread(); return; }
+    syncCurThread();
     persistConversation();
     setHint("reply complete", "");
     setComposerEnabled(true);
@@ -2106,35 +2865,41 @@
     renderChatFooter();
   }
 
-  // Queue a message to a pi session that is already streaming. With the Steer
-  // toggle on, the message is delivered mid-run (after the current tool turn);
-  // off, it waits until the agent settles. The in-flight stream keeps pushing
-  // events to the same `live` message, so we only append the user bubble and
-  // record it in live.queue — the assistant response arrives on a later run_start.
+  // Queue a message to the CURRENT thread's pi session when it is already
+  // streaming. With the Steer toggle on, the message is delivered mid-run
+  // (after the current tool turn); off, it waits until the agent settles. The
+  // in-flight stream keeps pushing events to the same live message, so we only
+  // append the user bubble and record it in t.live.queue — the assistant
+  // response arrives on a later run_start.
   async function sendWhileBusy(text) {
+    const t = curThread();
+    if (!t) return;
     const model = CH.chatModel || defaultChatModel();
     const streamingBehavior = CH.steer ? "steer" : "followUp";
     const userMsg = { role: "user", text, ts: Date.now() };
-    CH.chatHistory.push(userMsg);
+    t.history.push(userMsg);
+    syncCurThread();
     el.input.value = "";
     autoGrow(el.input);
     try {
       const res = await fetch(window.apiUrl("/chat"), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd: CH.workspace, model, thinkingLevel: CH.thinkingLevel || "", prompt: text, sessionId: CH.chatSessionId, sessionFile: CH.resumeFile || "", streamingBehavior }),
+        body: JSON.stringify({ cwd: CH.workspace, model, thinkingLevel: CH.thinkingLevel || "", prompt: text, sessionId: t.key || (t.kind === "session" ? t.sid : "") || "", sessionFile: t.resumeFile || "", streamingBehavior }),
       });
       const ct = res.headers.get("content-type") || "";
       if (res.ok && ct.includes("ndjson")) {
         // Race: the agent settled while the request was in flight, so pi treated
         // this as a fresh prompt — render the new turn and consume the stream.
-        const gen = ++chatGen;
-        CH.chatBusy = true;
+        const gen = ++t.gen;
+        t.busy = true;
+        t.suppressed = false;
         const aiMsg = { role: "assistant", text: "", thinking: "", tools: [], usage: null, model, ts: Date.now(), streaming: true };
-        CH.chatHistory.push(aiMsg);
-        el.msg.innerHTML = CH.chatHistory.slice(0, -1).map((m, i) => renderChatMsg(m, i)).join("") +
+        t.history.push(aiMsg);
+        syncCurThread();
+        el.msg.innerHTML = t.history.slice(0, -1).map((m, i) => renderChatMsg(m, i)).join("") +
           renderChatMsgLivePlaceholder(aiMsg);
-        live = {
+        t.live = {
           body: el.msg.querySelector(".chat-msg.chat-ai-live .chat-msg-body"),
           m: aiMsg,
           isFirst: true,
@@ -2144,15 +2909,15 @@
         setHint("pi is thinking…", "busy");
         updateHeader();
         scrollToBottom(true);
-        await consumeChatStream(res, aiMsg);
-        finalizeChatTurn(gen);
+        await consumeChatStream(res, t);
+        finalizeChatTurn(t, gen);
       } else {
         // Queued steer/follow-up. Append the user bubble and record it in
-        // live.queue so the in-flight stream places the response after it.
+        // t.live.queue so the in-flight stream places the response after it.
         let node = null;
         if (el.msg) {
           const wrap = document.createElement("div");
-          wrap.innerHTML = renderChatMsg(userMsg, CH.chatHistory.length - 1);
+          wrap.innerHTML = renderChatMsg(userMsg, t.history.length - 1);
           node = wrap.firstElementChild;
           if (node) el.msg.appendChild(node);
           scrollToBottom(true);
@@ -2160,10 +2925,10 @@
         if (!res.ok) {
           let detail = "";
           try { detail = (await res.json())?.error || ""; } catch { /* non-JSON body */ }
-          if (live) streamError(live.body, live.m, `queued message failed: HTTP ${res.status}${detail ? ": " + detail : ""}`);
+          if (t.live) streamError(t.live.body, t.live.m, `queued message failed: HTTP ${res.status}${detail ? ": " + detail : ""}`);
           setHint("could not queue that message", "err");
         } else {
-          if (live && node) live.queue.push({ msg: userMsg, node });
+          if (t.live && node) t.live.queue.push({ msg: userMsg, node });
           setHint(
             CH.steer
               ? "steering pi — it will pivot after this tool turn"
@@ -2173,7 +2938,7 @@
         }
       }
     } catch (err) {
-      if (live) streamError(live.body, live.m, (err && err.message) || String(err));
+      if (t.live) streamError(t.live.body, t.live.m, (err && err.message) || String(err));
     }
     el.input?.focus();
   }
@@ -2182,35 +2947,44 @@
     const text = el.input.value.trim();
     if (!text) return;
     if (!CH.workspace) { el.input.focus(); return; }
-    // A turn is already streaming: send this as a steer/follow-up instead of a
-    // fresh prompt, and let the in-flight stream carry the response.
-    if (CH.chatBusy) {
+    let t = curThread();
+    if (!t) {
+      t = freeThread(CH.workspace);
+      bindThread(t);
+    }
+    // A turn is already streaming on THIS thread: send as a steer/follow-up
+    // instead of a fresh prompt, and let the in-flight stream carry the
+    // response (queued within this session only).
+    if (t.busy) {
       await sendWhileBusy(text);
       return;
     }
 
     // Sending turns the canvas into a live conversation (not a session replay).
-    CH.openSid = null;
+    t.openSid = null;
 
     const model = CH.chatModel || defaultChatModel();
-    const gen = ++chatGen;
-    CH.chatBusy = true;
+    const gen = ++t.gen;
+    t.busy = true;
+    t.suppressed = false;
     setComposerEnabled(true);
     setHint("pi is thinking…", "busy");
 
     const userMsg = { role: "user", text, ts: Date.now() };
     const aiMsg = { role: "assistant", text: "", thinking: "", tools: [], usage: null, model, ts: Date.now(), streaming: true };
-    CH.chatHistory.push(userMsg);
-    CH.chatHistory.push(aiMsg);
+    t.history.push(userMsg);
+    t.history.push(aiMsg);
+    if (t.kind === "free" && !t.firstPrompt) t.firstPrompt = text;
     // Bound the in-memory thread: drop the oldest messages from a very long
     // conversation while keeping the newest (including the one streaming).
-    if (CH.chatHistory.length > CHAT_HISTORY_MAX) {
-      CH.chatHistory.splice(0, CH.chatHistory.length - CHAT_HISTORY_MAX);
+    if (t.history.length > CHAT_HISTORY_MAX) {
+      t.history.splice(0, t.history.length - CHAT_HISTORY_MAX);
     }
+    syncCurThread();
 
-    el.msg.innerHTML = CH.chatHistory.slice(0, -1).map((m, i) => renderChatMsg(m, i)).join("") +
+    el.msg.innerHTML = t.history.slice(0, -1).map((m, i) => renderChatMsg(m, i)).join("") +
       renderChatMsgLivePlaceholder(aiMsg);
-    live = {
+    t.live = {
       body: el.msg.querySelector(".chat-msg.chat-ai-live .chat-msg-body"),
       m: aiMsg,
       isFirst: true, // the placeholder already stands in for the first assistant message
@@ -2227,25 +3001,36 @@
       const res = await fetch(window.apiUrl("/chat"), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd: CH.workspace, model, thinkingLevel: CH.thinkingLevel || "", prompt: text, sessionId: CH.chatSessionId, sessionFile: CH.resumeFile || "" }),
+        body: JSON.stringify({
+          cwd: CH.workspace,
+          model,
+          thinkingLevel: CH.thinkingLevel || "",
+          prompt: text,
+          // A recorded-session thread resumes its own pi session file: the
+          // server keys a subprocess per session id and switch_session onto the
+          // file. A free thread uses its pre-spawn key (or lets the server
+          // allocate one on first prompt).
+          sessionId: t.key || (t.kind === "session" ? t.sid : "") || "",
+          sessionFile: t.resumeFile || "",
+        }),
       });
       if (!res.ok || !res.body) {
         let detail = "";
         try { detail = (await res.json())?.error || ""; } catch { /* non-JSON body */ }
-        streamError(live.body, aiMsg, `HTTP ${res.status}${detail ? ": " + detail : ""}`);
+        streamError(t.live.body, aiMsg, `HTTP ${res.status}${detail ? ": " + detail : ""}`);
       } else {
-        await consumeChatStream(res, aiMsg);
+        await consumeChatStream(res, t);
       }
     } catch (err) {
-      streamError(live.body, aiMsg, (err && err.message) || String(err));
+      streamError(t.live.body, aiMsg, (err && err.message) || String(err));
     }
 
-    finalizeChatTurn(gen);
+    finalizeChatTurn(t, gen);
   }
 
   // Start a conversation from a hero suggestion chip.
   function promptFromChip(text) {
-    if (!CH.workspace || CH.chatBusy) return;
+    if (!CH.workspace) return;
     if (el.input) { el.input.value = text; autoGrow(el.input); }
     sendPrompt();
   }
@@ -2271,28 +3056,81 @@
     addWorkspaceRow();
   }
 
+  // Abandon the current thread's live preview (used when browsing away). With
+  // per-session threads the composer stays free — the thread just keeps
+  // updating its model in the background, and reopening it resumes streaming.
+  function abandonLivePreview() {
+    detachThread(curThread());
+    syncCurThread();
+    updateHeader();
+  }
+
   // ─── Loading a session transcript into the chat window ───────────────────
   // Clicking a session row (under a workspace, or in the fallback agent list)
-  // shows that session's captured conversation here with the composer enabled:
-  // the next message continues as a live pi chat in this workspace.
+  // shows that session's conversation here with the composer enabled. Sessions
+  // are INDEPENDENT: a running session you open keeps streaming live; other
+  // running sessions keep working in the background while you view this one.
   async function loadSessionChat(sid, silent) {
-    if (!sid || CH.chatBusy || CH.loadingSid === sid) return;
-    // Re-clicking a session that's already on screen re-fetches it (no early
-    // return) so messages recorded since the last load are picked up.
-    const s = CH.sessions.find((x) => x.session_id === sid) || null;
-    CH.openSid = sid;
-    CH.loadingSid = sid;
+    if (!sid) return;
+    const row = CH.sessions.find((x) => x.session_id === sid) || null;
+    // Chatting in a session means resuming pi's own session file in THAT
+    // project — follow the session's workspace.
+    if (row && row.cwd && row.cwd !== CH.workspace) {
+      CH.workspace = row.cwd;
+      persistWorkspace();
+    }
+    let t = threadForSid(sid);
+    if (!t) {
+      t = sessionThread(sid, row?.session_file || null, row?.cwd || CH.workspace);
+      t.workspace = row?.cwd || CH.workspace;
+    }
+    // Browsing away from a busy thread freezes its preview but its run keeps
+    // going in the background (model updates only).
+    const prev = curThread();
+    if (prev && prev !== t) detachThread(prev);
+    bindThread(t);
+    if (t.loadingSid === sid) {
+      // A transcript fetch for this thread is already in flight — bind to it
+      // and show the current state; the in-flight fetch renders when done.
+      if (t.busy && t.live) {
+        t.suppressed = false;
+        renderChat();
+        attachLiveDom(t);
+        return;
+      }
+      if (!silent && el.hint) setHint("loading session…", "busy");
+      renderChat();
+      return;
+    }
+    // A running session: show its current state and resume live streaming.
+    if (t.busy && t.live) {
+      t.suppressed = false;
+      t.loadingSid = null;
+      renderChat(); // renders history + the live placeholder tail
+      attachLiveDom(t);
+      updateHeader();
+      if (!silent && el.hint) setHint("session is still working — streaming live", "busy");
+      if (el.input && !silent) el.input.focus();
+      return;
+    }
+    // Idle: (re)load the recorded transcript into the thread. Re-clicking a
+    // session already on screen re-fetches so messages recorded since the last
+    // load are picked up.
+    t.openSid = sid;
+    t.loadingSid = sid;
+    t.lastOpenCount = null;
     if (!silent) renderChat(); // show the loading hero on first open only
     try {
       const { res, data } = await window.SCOPE.api(`/sessions/${encodeURIComponent(sid)}/events`, { limit: 1000 });
-      if (CH.loadingSid !== sid) return; // user moved on while we were fetching
-      const msgs = res.ok && Array.isArray(data?.events) ? buildSessionMsgs(data.events, s) : [];
-      CH.chatHistory = msgs.slice(-CHAT_HISTORY_MAX);
+      if (curThread() !== t || t.loadingSid !== sid) return; // user moved on
+      const msgs = res.ok && Array.isArray(data?.events) ? buildSessionMsgs(data.events, row) : [];
       // Continuing in this session means resuming pi's own session file, so the
       // agent picks up the full conversation context on the next prompt.
-      CH.resumeFile = s?.session_file || null;
-      CH.loadingSid = null;
-      CH.lastOpenCount = s?.event_count ?? CH.chatHistory.length;
+      t.history = msgs.slice(-CHAT_HISTORY_MAX);
+      t.resumeFile = row?.session_file || t.resumeFile;
+      t.loadingSid = null;
+      t.lastOpenCount = row?.event_count ?? t.history.length;
+      syncCurThread();
       persistConversation();
       renderChat();
       renderChatFooter();
@@ -2306,10 +3144,11 @@
       }
       if (el.input && !silent) el.input.focus();
     } catch (e) {
-      if (CH.loadingSid !== sid) return;
-      CH.loadingSid = null;
+      if (curThread() !== t || t.loadingSid !== sid) return;
+      t.loadingSid = null;
       if (!silent) {
-        CH.openSid = null;
+        t.openSid = null;
+        syncCurThread();
         renderChat();
         if (el.hint) setHint(`⚠ failed to load session: ${e?.message || e}`, "err");
       }
@@ -2529,7 +3368,9 @@
         // file — so the new model applies to this conversation from the next
         // message on, whether or not a session is open.
         if (!CH.chatHistory.length && CH.workspace) {
-          CH.chatSessionId = null;
+          const ft = freeThread(CH.workspace);
+          ft.key = null;
+          if (ft === curThread()) syncCurThread();
           ensureChatSession();
         }
         setHint(`next message uses ${CH.chatModel}`, "");
@@ -2608,6 +3449,10 @@
   // Expose hooks for app.js
   window.__chatOnView = onView;
   window.__chatOnSessions = onSessions;
+  // Exposed so the Settings page can re-arm the running pi chat session after a
+  // team-setting change (settings toggles only affect a subprocess that boots
+  // after the write, so an idle pre-spawn is killed and re-pre-spawned).
+  window.__chatConfigChanged = rearmChatAfterConfigChange;
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

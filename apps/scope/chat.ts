@@ -15,6 +15,10 @@
 //   {"type":"message_update",usage:{...}}
 //   {"type":"tool_execution_start",toolName,args}
 //   {"type":"tool_execution_end",toolName}
+//   {"type":"extension_ui_request",method:"select"/"input",...}  host dialog
+//        (ask_user_question): forwarded to the client, which answers it by
+//        writing {"type":"extension_ui_response",id,value|cancelled} back on
+//        stdin (via POST /chat/ui → answerChatUi).
 //   {"type":"agent_settled"}                                        prompt complete
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -68,6 +72,7 @@ interface ChatSession {
   resumedFile: string | null; // pi session file this subprocess is currently on
   resumeCallback: (() => void) | null; // prompt write deferred until a pending switch_session/new_session resolves
   stopRequested: boolean; // a /chat/stop abort was issued for the current run
+  fresh: boolean; // pre-spawned "new conversation" subprocess (vs bound to a recorded session)
 }
 
 const sessions = new Map<string, ChatSession>();
@@ -187,6 +192,36 @@ function handleLine(sess: ChatSession, line: string) {
     case "tool_execution_end":
       enqueue(ctrl, { type: "tool_end", name: ev.toolName || ev.tool || "" });
       return;
+    case "extension_ui_request": {
+      // An extension asked the HOST to render UI and is blocking until it gets a
+      // reply (pi's dialog sub-protocol). The ask_user_question tool renders its
+      // questionnaire through ui.select() / ui.input() here, so without handling
+      // these events nothing would ever appear in the chat — the tool would just
+      // hang. Forward the dialog to the client (which shows it as an answerable
+      // card) and let POST /chat/ui write the extension_ui_response back.
+      const u = ev as any;
+      const id = typeof u.id === "string" ? u.id : "";
+      if (!id) return;
+      if (u.method === "select") {
+        enqueue(ctrl, {
+          type: "ui_select",
+          id,
+          title: typeof u.title === "string" ? u.title : "",
+          options: Array.isArray(u.options) ? u.options.filter((o: any) => typeof o === "string") : [],
+        });
+      } else if (u.method === "input") {
+        enqueue(ctrl, {
+          type: "ui_input",
+          id,
+          title: typeof u.title === "string" ? u.title : "",
+          placeholder: typeof u.placeholder === "string" ? u.placeholder : "",
+        });
+      } else if (u.method === "notify") {
+        // Fire-and-forget host notifications; surface as a lightweight status.
+        enqueue(ctrl, { type: "ui_notify", message: u.message || "", kind: u.notifyType || "info" });
+      }
+      return;
+    }
     case "agent_start":
       // A new low-level agent run began. The client uses this to anchor the
       // assistant messages of a queued steer/follow-up right after the user
@@ -211,7 +246,27 @@ function handleLine(sess: ChatSession, line: string) {
   }
 }
 
-function spawnChat(id: string, cwd: string, model: string): ChatSession {
+/** Child env for the chat pi subprocess: the server's environment with
+ *  PI_OFFLINE set (pi's startup network ops are skipped — see spawnChat), and
+ *  the pi binary's own directory prepended to PATH. The agent-team extension
+ *  running INSIDE that pi process spawns further `pi` subprocesses (subagents,
+ *  the memory summarizer) by their bare name from the inherited environment.
+ *  Desktop/GUI launches often leave the pnpm global bin dir off PATH — we
+ *  resolved the top-level binary by absolute path, but those nested spawns use
+ *  plain `pi` and die with ENOENT ("<agent> failed to start") even though the
+ *  same dispatch works from a terminal whose PATH includes the bin dir. */
+function chatChildEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, PI_OFFLINE: "1" };
+  const binDir = PI_BIN.includes("/") ? path.dirname(PI_BIN) : "";
+  if (binDir) {
+    const parts = String(env.PATH || "").split(path.delimiter).filter(Boolean);
+    if (!parts.includes(binDir)) parts.unshift(binDir);
+    env.PATH = parts.join(path.delimiter);
+  }
+  return env;
+}
+
+function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatSession {
   // PI_OFFLINE=1 tells pi (and its pi-updater extension) to skip startup network
   // operations. Without it, pi-updater fires async version checks on
   // session_start; when the user resumes a recorded session and the scope server
@@ -219,10 +274,10 @@ function spawnChat(id: string, cwd: string, model: string): ChatSession {
   // in-flight check throws a stale-ctx error that kills the whole subprocess.
   const proc = spawn(PI_BIN, ["--mode", "rpc", "--model", model], {
     cwd,
-    env: { ...process.env, PI_OFFLINE: "1" },
+    env: chatChildEnv(),
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false };
+  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh };
 
   proc.stdout.on("data", (d: Buffer) => {
     sess.buffer += d.toString();
@@ -280,7 +335,12 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
   let sess = sessions.get(sid);
   if (!sess || sess.dead || sess.proc.exitCode !== null) {
     try { if (sess) sess.proc.kill(); } catch { /* ignore */ }
-    sess = spawnChat(sid, cwd, model);
+    // Every distinct session id gets its own pi subprocess, so different
+    // conversations in a workspace run truly in parallel. A subprocess that
+    // serves a recorded session is keyed by that session's id; the
+    // pre-spawned "new conversation" subprocess (fresh) is keyed by its own
+    // random id (spawned via startChatSession with fresh=true).
+    sess = spawnChat(sid, cwd, model, false);
     sessions.set(sid, sess);
   }
   sess.lastUsed = Date.now();
@@ -303,6 +363,10 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       sess!.active = { controller };
+      // Announce the real subprocess session id first. The browser may not have
+      // one yet (no pre-spawn, or a request without a sessionId), but answers to
+      // extension dialogs (POST /chat/ui) must target the actual session.
+      enqueue(controller, { type: "session", sessionId: sid, model });
       // Push the latest model/thinking choice into the running subprocess before
       // prompting. pi resolves --model and the thinking level only at boot, so a
       // subprocess spawned (or pointed at a recorded session) earlier would
@@ -389,14 +453,16 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
   });
 }
 
-/** Pre-spawn (or reuse) a pi chat subprocess for a workspace without sending a
- *  prompt, so a session is already running the moment the user selects a
- *  workspace. Never disturbs sessions with an in-flight prompt or an existing
- *  conversation; at most one idle pre-spawn is kept (mismatched cwd/model ones
- *  are killed). */
+/** Pre-spawn (or reuse) the workspace's "new conversation" pi subprocess
+ *  without sending a prompt, so a fresh session is already running the moment
+ *  the user selects a workspace. Only ever reuses or reaps the FRESH pre-spawn
+ *  itself — subprocesses bound to recorded sessions (startChat keyed by a
+ *  session id) are independent and must never be stolen or killed here, since
+ *  they may still be mid-run for another conversation. */
 export function startChatSession(opts: { cwd: string; model?: string }): { sessionId: string; reused: boolean } {
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   for (const [id, sess] of sessions) {
+    if (!sess.fresh) continue; // never touch recorded-session subprocesses
     if (sess.active || sess.prompted) continue; // in-flight or already conversed
     if (sess.cwd !== opts.cwd || sess.model !== model) {
       try { sess.proc.kill(); } catch { /* already dead */ }
@@ -404,13 +470,14 @@ export function startChatSession(opts: { cwd: string; model?: string }): { sessi
     }
   }
   for (const sess of sessions.values()) {
+    if (!sess.fresh) continue;
     if (sess.cwd === opts.cwd && sess.model === model && !sess.dead && sess.proc.exitCode === null && !sess.active) {
       sess.lastUsed = Date.now();
       return { sessionId: sess.id, reused: true };
     }
   }
   const sid = crypto.randomUUID();
-  sessions.set(sid, spawnChat(sid, opts.cwd, model));
+  sessions.set(sid, spawnChat(sid, opts.cwd, model, true));
   return { sessionId: sid, reused: false };
 }
 
@@ -420,6 +487,58 @@ export function killChatSession(id: string): void {
   if (!sess) return;
   try { sess.proc.kill(); } catch { /* already dead */ }
   sessions.delete(id);
+}
+
+/** Push the requested model + thinking level into a *live* chat subprocess via
+ *  the RPC set_model / set_thinking_level commands, so a config change applies
+ *  to a session that is already running (or pre-spawned) without killing it and
+ *  losing the conversation context. Returns how many commands were sent.
+ *
+ *  This mirrors the pref-write path in startChat but runs on demand (not only
+ *  just before a prompt), so e.g. changing the thinking level in Settings takes
+ *  effect on the running agent immediately rather than on the next new session. */
+export function pushChatPrefs(id: string, opts: { model?: string; thinkingLevel?: string }): { ok: boolean; sent: number } {
+  const sess = sessions.get(id);
+  if (!sess || sess.dead || sess.proc.exitCode !== null) return { ok: false, sent: 0 };
+  const model = (opts.model || "").trim();
+  const level = (opts.thinkingLevel || "").trim();
+  let sent = 0;
+  try {
+    // set_model needs provider + modelId (the "provider/model" split).
+    if (model) {
+      const slash = model.indexOf("/");
+      if (slash > 0) {
+        sess.proc.stdin.write(JSON.stringify({ type: "set_model", provider: model.slice(0, slash), modelId: model.slice(slash + 1) }) + "\n");
+        sess.model = model;
+        sent++;
+      }
+    }
+    if (level) {
+      sess.proc.stdin.write(JSON.stringify({ type: "set_thinking_level", level }) + "\n");
+      sess.thinkingLevel = level;
+      sent++;
+    }
+  } catch {
+    return { ok: false, sent };
+  }
+  return { ok: true, sent };
+}
+
+/** Answer a pending extension_ui dialog (e.g. ask_user_question's select/input)
+ *  by writing an `extension_ui_response` line to the subprocess's stdin. pi
+ *  resolves the matching dialog promise with `value` (or treats the request as
+ *  dismissed when `cancelled`). Returns false when the session is gone/dead so
+ *  the client can surface a stale-dialog error. */
+export function answerChatUi(id: string, uiId: string, opts: { value?: string; cancelled?: boolean }): boolean {
+  const sess = sessions.get(id);
+  if (!sess || sess.dead || sess.proc.exitCode !== null || !uiId) return false;
+  const body = opts?.cancelled ? { cancelled: true } : { value: String(opts?.value ?? "") };
+  try {
+    sess.proc.stdin.write(JSON.stringify({ type: "extension_ui_response", id: uiId, ...body }) + "\n");
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 /** Abort the agent's current run in a chat session (and drop any queued

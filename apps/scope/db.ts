@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   session_file TEXT,
   provider     TEXT,
   model        TEXT,
+  parent_session_id TEXT,
   first_ts     TEXT NOT NULL,
   last_ts      TEXT NOT NULL,
   event_count  INTEGER NOT NULL DEFAULT 0,
@@ -59,6 +60,7 @@ export interface PreparedQueries {
   getEventById: StatementSync;
   getSessionStats: StatementSync;
   getSessionContext: StatementSync;
+  getSessionParents: StatementSync;
   countTotals: StatementSync;
   clearSessions: StatementSync;
   clearEvents: StatementSync;
@@ -76,6 +78,12 @@ export function createDb(path: string): DatabaseSync {
   db.exec("PRAGMA wal_autocheckpoint = 2000");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
+  // Migration: sessions.parent_session_id was added after the first release.
+  // Existing DBs get the column added in-place; new DBs already have it via
+  // SCHEMA. (SQLite has no IF NOT EXISTS for ADD COLUMN.)
+  try {
+    db.exec(`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT`);
+  } catch { /* column already exists */ }
   return db;
 }
 
@@ -96,9 +104,9 @@ export function prepare(db: DatabaseSync): PreparedQueries {
   // duplicates refresh the row without inflating the count.
   const upsertSession = db.prepare(`
     INSERT INTO sessions
-      (session_id, pool, agent_name, cwd, session_file, provider, model, first_ts, last_ts, event_count, tags_json)
+      (session_id, pool, agent_name, cwd, session_file, provider, model, parent_session_id, first_ts, last_ts, event_count, tags_json)
     VALUES
-      ($session_id, $pool, $agent_name, $cwd, $session_file, $provider, $model, $ts, $ts, 1, $tags_json)
+      ($session_id, $pool, $agent_name, $cwd, $session_file, $provider, $model, $parent_session_id, $ts, $ts, 1, $tags_json)
     ON CONFLICT(session_id) DO UPDATE SET
       pool         = COALESCE(excluded.pool,         sessions.pool),
       agent_name   = COALESCE(excluded.agent_name,   sessions.agent_name),
@@ -106,6 +114,7 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       session_file = COALESCE(excluded.session_file, sessions.session_file),
       provider     = COALESCE(excluded.provider,     sessions.provider),
       model        = COALESCE(excluded.model,        sessions.model),
+      parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
       first_ts     = COALESCE(sessions.first_ts,     excluded.last_ts),
       last_ts      = MAX(excluded.last_ts,           sessions.last_ts),
       event_count  = sessions.event_count + $bump,
@@ -132,6 +141,7 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       COALESCE(session_file, '') AS session_file,
       COALESCE(provider, '') AS provider,
       COALESCE(model, '') AS model,
+      COALESCE(parent_session_id, '') AS parent_session_id,
       first_ts, last_ts, event_count,
       tags_json,
       EXISTS (SELECT 1 FROM events WHERE events.session_id = sessions.session_id AND events.type = 'session_shutdown') AS has_shutdown,
@@ -269,6 +279,82 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     LIMIT 1
   `);
 
+  // ── Infer parent session per child (spawn linkage) ────────────────────────
+  // A subagent is spawned by a spawn/task/dispatch-style tool_call issued from
+  // the parent's session; the child is a separate pi process, so the spawn is
+  // never observed directly from the child. Match on two signals, both required:
+  //   1. the tool_call names a spawn-ish tool, and
+  //   2. its args mention the child's agent_name (e.g. {"agent":"file_reader"})
+  //      OR the call landed in the 10-minute window just before the child's
+  //      first event (roles spawned implicitly by the harness, e.g. memory
+  //      summarizers).
+  // Candidate calls come from another session with the same cwd; the LAST such
+  // call before the child started wins. An orchestrator child (a harness-run
+  // continuation that happens to boot right after a spawn call) never matches
+  // the args of a dispatch and is excluded by name.
+  // One row per child in the requested set.
+  const getSessionParents = db.prepare(`
+    SELECT
+      child.session_id AS child_id,
+      (
+        SELECT p.session_id
+        FROM events pc
+        JOIN sessions p ON p.session_id = pc.session_id
+        JOIN sessions child_s ON child_s.session_id = child.session_id
+        WHERE pc.type = 'tool_call'
+          AND pc.session_id != child.session_id
+          AND pc.ts <= (SELECT MIN(e.ts) FROM events e WHERE e.session_id = child.session_id)
+          AND pc.ts >= datetime(
+                (SELECT MIN(e.ts) FROM events e WHERE e.session_id = child.session_id),
+                '-10 minutes')
+          AND COALESCE(p.cwd, '') = COALESCE(child_s.cwd, '')
+          AND (
+            lower(json_extract(pc.payload_json, '$.tool_name')) LIKE 'spawn%'
+            OR lower(json_extract(pc.payload_json, '$.tool_name')) LIKE 'task%'
+            OR lower(json_extract(pc.payload_json, '$.tool_name')) LIKE 'subagent%'
+            OR lower(json_extract(pc.payload_json, '$.tool_name')) LIKE 'dispatch%'
+            OR lower(json_extract(pc.payload_json, '$.tool_name')) LIKE '%agent'
+          )
+          AND (
+            pc.payload_json LIKE '%' || child_s.agent_name || '%'
+            OR (
+              child_s.agent_name IS NOT NULL
+              AND child_s.agent_name NOT IN ('orchestrator')
+            )
+          )
+        ORDER BY pc.ts DESC
+        LIMIT 1
+      ) AS parent_id
+    FROM sessions child
+    WHERE child.session_id IN (SELECT value FROM json_each($session_ids))
+      AND EXISTS (
+        SELECT 1 FROM events pc
+        JOIN sessions p ON p.session_id = pc.session_id
+        JOIN sessions child_s ON child_s.session_id = child.session_id
+        WHERE pc.type = 'tool_call'
+          AND pc.session_id != child.session_id
+          AND pc.ts <= (SELECT MIN(e.ts) FROM events e WHERE e.session_id = child.session_id)
+          AND pc.ts >= datetime(
+                (SELECT MIN(e.ts) FROM events e WHERE e.session_id = child.session_id),
+                '-10 minutes')
+          AND COALESCE(p.cwd, '') = COALESCE(child_s.cwd, '')
+          AND (
+            lower(json_extract(pc.payload_json, '$.tool_name')) LIKE 'spawn%'
+            OR lower(json_extract(pc.payload_json, '$.tool_name')) LIKE 'task%'
+            OR lower(json_extract(pc.payload_json, '$.tool_name')) LIKE 'subagent%'
+            OR lower(json_extract(pc.payload_json, '$.tool_name')) LIKE 'dispatch%'
+            OR lower(json_extract(pc.payload_json, '$.tool_name')) LIKE '%agent'
+          )
+          AND (
+            pc.payload_json LIKE '%' || child_s.agent_name || '%'
+            OR (
+              child_s.agent_name IS NOT NULL
+              AND child_s.agent_name NOT IN ('orchestrator')
+            )
+          )
+      )
+  `);
+
   // ── Totals for /health ──────────────────────────────────────────────────
   const countTotals = db.prepare(`
     SELECT
@@ -323,6 +409,7 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     getSessionStats,
     getSessionModelTokens,
     getSessionContext,
+    getSessionParents,
     getProviderCostSince,
     countTotals,
     clearSessions,
@@ -359,6 +446,7 @@ export function toSessionRow(e: ObsEvent, bump = false): Record<string, unknown>
     $session_file: e.session_file ?? null,
     $provider: e.provider ?? null,
     $model: e.model ?? null,
+    $parent_session_id: e.parent_session_id ?? null,
     $ts: e.ts,
     $tags_json: JSON.stringify(e.tags ?? []),
     $bump: bump ? 1 : 0,
@@ -386,6 +474,7 @@ export function rowToSession(row: any): SessionSummary {
     tags,
     has_shutdown: !!row.has_shutdown,
     first_msg: row.first_msg || undefined,
+    parent_session_id: row.parent_session_id || undefined,
   };
 }
 

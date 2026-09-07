@@ -53,6 +53,11 @@ If flags are omitted, the extension falls back to these variables:
 - `OBS_TAG`
 - `OBS_NAME`
 - `OBS_DISABLE`
+- `SCOPE_PARENT_SESSION` — pi session id of the agent that spawned this process.
+  Set it when a harness launches a subagent so the scope UI can nest the
+  subagent's session under its spawner (e.g. `SCOPE_PARENT_SESSION=<parent
+  session_id> pi ...`). Without it, the server falls back to inferring the
+  parent from spawn-style tool_call events.
 
 ## Emitted Telemetry Events
 
