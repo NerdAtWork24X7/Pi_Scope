@@ -1365,6 +1365,15 @@ loadURLState();
 setTheme(STATE.theme);
 // Restore a user-overridden working directory; else fall back to the server cwd.
 STATE.cwd = localStorage.getItem("scope-cwd") || "";
+// The shared session directory: set by the terminal bridge when the live
+// shell cwd changes, and by the Chat view when the user switches workspaces,
+// so Files / Git / Checkpoints / Terminal all point at the same project.
+// (Assigned before setView so the chat boot auto-select can sync it.)
+window.__setCwd = function (cwd) {
+  const inp = document.getElementById("terminal-cwd");
+  if (inp && document.activeElement === inp) return; // don't fight live typing
+  setCwd(cwd);
+};
 setView(STATE.view);
 applySidebarCollapsed();
 fetchSessions();
@@ -1384,13 +1393,6 @@ function setCwd(cwd) {
   else if (STATE.view === "checkpoints") window.__checkpointsOnView?.();
   else if (STATE.view === "git") window.__gitOnView?.();
 }
-// Called by the terminal bridge when the live shell cwd changes, so the
-// shared session directory follows the terminal automatically.
-window.__setCwd = function (cwd) {
-  const inp = document.getElementById("terminal-cwd");
-  if (inp && document.activeElement === inp) return; // don't fight live typing
-  setCwd(cwd);
-};
 async function initCwd() {
   const inp = document.getElementById("terminal-cwd");
   if (inp && !inp.value) inp.value = STATE.cwd;

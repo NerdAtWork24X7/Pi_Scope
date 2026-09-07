@@ -1114,6 +1114,11 @@
     teamFetchedAt = 0;
     void loadAgentTeam();
     persistWorkspace();
+    // The chat workspace is the project you're working on — mirror it into the
+    // shared session directory (STATE.cwd) so Files / Git / Checkpoints /
+    // Terminal (and Settings, which already reads the chat workspace key) all
+    // follow the switch instead of keeping a stale directory.
+    if (typeof window.__setCwd === "function" && cwd) window.__setCwd(cwd);
     CH.footer = null;
     CH.footerFetchedAt = 0;
     CH.footerGoRetry = false;
