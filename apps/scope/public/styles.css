@@ -26,7 +26,19 @@
       src: url('fonts/MesloLGSNerdFontMono-BoldItalic.ttf') format('truetype');
     }
 
+    /* Bundled color-emoji font (Noto Color Emoji, OFL 1.1). Nerd Fonts contain
+       no standard emoji glyphs, so without this every emoji falls back to a
+       tofu box on machines where the OS has no emoji font (or where the
+       renderer can't see it). Bundling makes emoji rendering deterministic:
+       regular glyphs still use MesloLGS NFM / monospace, emoji use this. */
+    @font-face {
+      font-family: 'Noto Color Emoji';
+      src: url('fonts/NotoColorEmoji.ttf') format('truetype');
+    }
+
     :root {
+      /* Emoji-capable fallbacks appended to every font stack via var(--emoji). */
+      --emoji: 'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif;
       /* DeepSeek design tokens (deepseek-harness ui-theme). Light theme first —
          this is chat.deepseek.com's default look: white surfaces, DeepSeek
          blue #4176e6 accent, neutral-bluish grays. */
@@ -122,7 +134,7 @@
     }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace, var(--emoji);
       background: var(--bg);
       color: var(--text);
       height: 100vh;
@@ -197,7 +209,7 @@
       color: var(--muted);
       border: none;
       cursor: pointer;
-      font-family: monospace
+      font-family: monospace, var(--emoji)
     }
 
     .view-toggle button.active {
@@ -260,7 +272,7 @@
       background: none;
       border: none;
       color: var(--text);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13.5px;
       padding: 6px 10px;
       border-radius: 3px;
@@ -363,7 +375,7 @@
       border-radius: 3px;
       color: var(--text);
       font-size: 15px;
-      font-family: monospace
+      font-family: monospace, var(--emoji)
     }
 
     .sidebar-filters input:focus,
@@ -468,7 +480,7 @@
     }
 
     .session-item .uuid {
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       color: var(--muted);
       font-size: 11.5px
     }
@@ -506,7 +518,7 @@
     .session-item .name-model {
       color: var(--muted);
       font-weight: 400;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 11.5px
     }
 
@@ -646,7 +658,7 @@
       border-radius: 3px;
       color: var(--text);
       font-size: 15px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       width: 120px
     }
 
@@ -718,7 +730,7 @@
       color: var(--muted);
       font-weight: 400;
       font-size: 11px;
-      font-family: monospace
+      font-family: monospace, var(--emoji)
     }
 
     .turn-header .turn-request {
@@ -751,7 +763,7 @@
       color: var(--muted);
       border-radius: 3px;
       cursor: pointer;
-      font-family: monospace
+      font-family: monospace, var(--emoji)
     }
 
     .btn-sm:hover {
@@ -789,7 +801,7 @@
       padding: 3px 8px;
       border-bottom: 1px solid var(--hairline);
       cursor: pointer;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 15px;
       line-height: 1.5
     }
@@ -1185,7 +1197,7 @@
     }
 
     .llm-tools li {
-      font-family: monospace
+      font-family: monospace, var(--emoji)
     }
 
     .llm-empty {
@@ -1218,7 +1230,7 @@
       padding: 6px 10px;
       border-bottom: 1px solid var(--border);
       color: var(--muted);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       word-break: break-word
     }
 
@@ -1276,7 +1288,7 @@
       background: var(--pill-bg);
       padding: 1px 5px;
       border-radius: 4px;
-      font-family: monospace
+      font-family: monospace, var(--emoji)
     }
 
     .snav-tags {
@@ -1319,7 +1331,7 @@
 
     .snav-value {
       color: var(--text);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13px
     }
 
@@ -1339,7 +1351,7 @@
     }
 
     .snav-perf .snav-value {
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .snav-context {
@@ -1358,7 +1370,7 @@
     }
 
     .snav-context-fig {
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12px;
       color: var(--text)
     }
@@ -1531,7 +1543,7 @@
       background: var(--pill-bg);
       border: 1px solid var(--border);
       color: var(--text);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-weight: 700;
       font-size: 14px;
       cursor: pointer;
@@ -1753,7 +1765,7 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       background: var(--pill-bg);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 11.5px;
       color: var(--text)
     }
@@ -1771,7 +1783,7 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       background: var(--pill-bg);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 11px;
       color: var(--muted)
     }
@@ -1990,7 +2002,7 @@
       padding: 5px 7px;
       border-radius: 4px;
       cursor: pointer;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13.5px;
     }
 
@@ -2070,7 +2082,7 @@
 
     .diff-filename {
       color: var(--text);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .diff-spacer {
@@ -2129,13 +2141,13 @@
       position: sticky;
       top: 0;
       z-index: 2;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .diff-lines {
       flex: 1;
       overflow: auto;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13px;
       line-height: 18px;
       margin: 0;
@@ -2224,7 +2236,7 @@
       gap: 4px;
       padding: 3px 7px;
       cursor: pointer;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13.5px;
       color: var(--muted);
       user-select: none;
@@ -2289,7 +2301,7 @@
     .diff-toobig {
       color: var(--muted);
       padding: 20px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     /* ─── Checkpoints view ──────────────────────────────────────────── */
@@ -2316,7 +2328,7 @@
       border-radius: 6px;
       margin-bottom: 8px;
       background: var(--surface);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13.5px;
     }
 
@@ -2386,7 +2398,7 @@
     .cp-modal-subtitle {
       font-size: 12.5px;
       color: var(--muted);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       margin-bottom: 12px;
       word-break: break-all;
     }
@@ -2405,7 +2417,7 @@
       border: 1px solid var(--border);
       border-radius: 4px;
       color: var(--text);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 14px;
       margin-bottom: 16px;
     }
@@ -2438,7 +2450,7 @@
       border-radius: 3px;
       color: var(--text);
       font-size: 15px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       width: 160px;
     }
 
@@ -2448,7 +2460,7 @@
     }
 
     #trajectory-label {
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       color: var(--text);
       font-size: 13.5px;
       white-space: nowrap;
@@ -2461,7 +2473,7 @@
       margin-left: auto;
       color: var(--muted);
       font-size: 13px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     #trajectory-overview {
@@ -2514,7 +2526,7 @@
     #trajectory-ledger {
       flex: 1;
       overflow-y: auto;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13.5px;
       min-height: 0;
       position: relative;
@@ -2589,7 +2601,7 @@
 
     .traj-col-cost {
       color: var(--orange);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12px;
     }
 
@@ -2763,7 +2775,7 @@
       line-height: 1;
       cursor: pointer;
       padding: 0;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .traj-inspector-actions button:hover {
@@ -2804,7 +2816,7 @@
       display: grid;
       grid-template-columns: 52px 1fr;
       gap: 3px 10px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12px;
     }
 
@@ -2860,7 +2872,7 @@
       line-height: 1;
       padding: 2px 6px;
       border-radius: 4px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .traj-sec-copy:hover {
@@ -2939,7 +2951,7 @@
     }
 
     .git-branch-chip {
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12px;
       padding: 1px 8px;
       border-radius: 9px;
@@ -2958,7 +2970,7 @@
     }
 
     .git-sync {
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12px;
       color: var(--muted);
     }
@@ -3066,7 +3078,7 @@
       gap: 6px;
       padding: 3px 10px 3px 6px;
       cursor: pointer;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13px;
       border-bottom: 1px solid var(--hairline);
     }
@@ -3247,7 +3259,7 @@
       padding: 8px 12px;
       border-bottom: 1px solid var(--border);
       background: var(--surface);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .git-diff-header .gdh-file {
@@ -3290,7 +3302,7 @@
     }
 
     .git-diff {
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12.5px;
       line-height: 1.5;
       padding: 8px 10px;
@@ -3338,7 +3350,7 @@
     }
 
     .git-split {
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12.5px;
       line-height: 1.5;
       padding-bottom: 12px;
@@ -3421,7 +3433,7 @@
       border-radius: 6px;
       color: var(--text);
       font-size: 13px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       line-height: 1.4;
     }
 
@@ -3475,7 +3487,7 @@
       height: 48px;
       border-bottom: 1px solid var(--hairline);
       cursor: pointer;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .git-commit-row:hover {
@@ -3537,7 +3549,7 @@
       border-radius: 9px;
       font-weight: 600;
       white-space: nowrap;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace, var(--emoji);
     }
 
     .git-ref-check {
@@ -3696,7 +3708,7 @@
       background: var(--accent-soft);
       border-bottom: 1px solid var(--border);
       font-size: 12.5px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       flex-shrink: 0;
     }
 
@@ -3715,7 +3727,7 @@
       align-items: center;
       gap: 10px;
       padding: 8px 0 4px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13px;
       flex-wrap: wrap;
     }
@@ -3726,7 +3738,7 @@
       align-items: center;
       gap: 10px;
       padding: 6px 0;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       flex-wrap: wrap;
     }
 
@@ -3753,7 +3765,7 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       color: var(--text);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13px;
       line-height: 1.5;
       resize: none;
@@ -3831,7 +3843,7 @@
       color: var(--muted);
       font-size: 12px;
       margin-top: 1px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .git-detail-row {
@@ -3843,7 +3855,7 @@
 
     .git-detail-hash {
       color: var(--accent);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12.5px;
     }
 
@@ -3875,7 +3887,7 @@
       align-items: center;
       gap: 7px;
       padding: 3px 0;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12.5px;
       color: var(--text);
     }
@@ -3915,7 +3927,7 @@
       align-items: center;
       gap: 6px;
       padding: 4px 10px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12px;
       color: var(--muted);
       cursor: pointer;
@@ -4039,7 +4051,7 @@
       border-radius: 6px;
       color: var(--text);
       font-size: 13px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       margin-bottom: 14px;
     }
 
@@ -4094,7 +4106,7 @@
       gap: 8px;
       padding: 6px 12px;
       border-bottom: 1px solid var(--hairline);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13px;
     }
 
@@ -4135,7 +4147,7 @@
       border-radius: 5px;
       color: var(--text);
       font-size: 13px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .git-remote-item {
@@ -4144,7 +4156,7 @@
       gap: 8px;
       padding: 6px 12px;
       border-bottom: 1px solid var(--hairline);
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 13px;
     }
 
@@ -4176,7 +4188,7 @@
       border-radius: 5px;
       color: var(--text);
       font-size: 13px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
     }
 
     .gsm-status {
@@ -4231,7 +4243,7 @@
 
     .git-log-msg {
       padding: 10px 12px;
-      font-family: monospace;
+      font-family: monospace, var(--emoji);
       font-size: 12px;
       color: var(--muted);
       white-space: pre-wrap;
@@ -4623,7 +4635,7 @@
       color: var(--text);
       font-size: 11.5px;
       padding: 6px 8px;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
     }
     .chat-ws-browse {
       background: var(--pill-bg);
@@ -4698,7 +4710,7 @@
     .chat-header-sub {
       font-size: 11.5px;
       color: var(--muted);
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
     }
     .chat-header-state {
       display: inline-flex;
@@ -4727,7 +4739,7 @@
     }
     .chat-header-model {
       font-size: 11px;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
       color: var(--muted);
       background: var(--pill-bg);
       border: 1px solid var(--border);
@@ -4940,7 +4952,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
     }
     .chat-msg-time {
       font-size: 10.5px;
@@ -5043,7 +5055,7 @@
       border-bottom-color: var(--accent);
     }
     .chat-text code {
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
       font-size: 12.5px;
       background: var(--pill-bg);
       border: 1px solid var(--border);
@@ -5106,7 +5118,7 @@
       text-transform: uppercase;
       letter-spacing: 0.8px;
       color: var(--muted);
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -5133,7 +5145,7 @@
       margin: 0;
       padding: 12px 14px;
       overflow-x: auto;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
       font-size: 12.5px;
       line-height: 1.6;
       color: var(--text);
@@ -5203,7 +5215,7 @@
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
       font-size: 12px;
       line-height: 1.6;
       color: var(--muted);
@@ -5354,7 +5366,7 @@
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
       font-size: 11.5px;
       line-height: 1.55;
       color: var(--muted);
@@ -5473,7 +5485,7 @@
       color: var(--muted);
       font-size: 11px;
       font-weight: 700;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
     }
     .chat-ask-opt-b {
       display: flex;
@@ -5638,7 +5650,7 @@
       border: 1px solid var(--border);
       border-radius: 999px;
       padding: 1px 9px;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
     }
     .chat-badge-model {
       color: var(--accent);
@@ -5912,7 +5924,7 @@
       color: var(--text);
       border-radius: 999px;
       font-size: 11.5px;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
       /* generous right padding: room for the native dropdown chevron so the
          label never runs into (or past) the pill's right edge */
       padding: 3px 26px 3px 12px;
@@ -6071,7 +6083,7 @@
       margin: 7px auto 0;
       padding: 0 8px;
       font-size: 10.5px;
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
       color: var(--muted);
       display: flex;
       flex-direction: column;
@@ -6337,7 +6349,7 @@
       gap: 5px;
     }
     .chat-kbd kbd {
-      font-family: var(--mono, monospace);
+      font-family: var(--mono, monospace), var(--emoji);
       font-size: 10px;
       background: var(--pill-bg);
       border: 1px solid var(--border);
@@ -7248,7 +7260,7 @@ body.layout-settings #sidebar-resizer {
 .settings-empty-title { font-size: 16px; font-weight: 700; color: var(--text); }
 .settings-empty-sub { font-size: 13.5px; line-height: 1.55; color: var(--muted); }
 .settings-empty-sub code {
-  font-family: 'MesloLGS NFM', monospace;
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
   font-size: 12px;
   background: var(--pill-bg);
   padding: 1px 5px;
@@ -7275,7 +7287,7 @@ body.layout-settings #sidebar-resizer {
   margin-left: 8px;
   padding: 2px 8px;
   border-radius: 999px;
-  font-family: 'MesloLGS NFM', monospace;
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: .6px;
@@ -7300,7 +7312,7 @@ body.layout-settings #sidebar-resizer {
   max-width: 640px;
 }
 .settings-intro code, .settings-group-title + .settings-intro code {
-  font-family: 'MesloLGS NFM', monospace;
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
   font-size: 12px;
   background: var(--pill-bg);
   padding: 1px 5px;
@@ -7342,7 +7354,7 @@ body.layout-settings #sidebar-resizer {
   border: 1px solid var(--border-strong);
   border-radius: 7px;
   color: var(--text);
-  font-family: 'MesloLGS NFM', monospace;
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
   font-size: 13px;
   transition: border-color .15s ease, background .15s ease;
 }
@@ -7478,7 +7490,7 @@ body.layout-settings #sidebar-resizer {
   padding: 5px 9px;
   font-size: 12px;
   color: var(--text);
-  font-family: 'MesloLGS NFM', monospace;
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
 }
 .set-model-chip-name { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .set-model-chip-x {
@@ -7511,7 +7523,7 @@ body.layout-settings #sidebar-resizer {
   font-weight: 600;
   color: var(--muted);
   white-space: nowrap;
-  font-family: 'MesloLGS NFM', monospace;
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
 }
 
 .set-cost-table { margin-top: 8px; border: 1px solid var(--border); border-radius: 9px; overflow-x: auto; overflow-y: hidden; background: var(--surface-2); position: relative; }
@@ -7520,7 +7532,7 @@ body.layout-settings #sidebar-resizer {
   align-items: center;
   gap: 12px;
   padding: 7px 12px;
-  font-family: 'MesloLGS NFM', monospace;
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
   font-size: 12.5px;
   color: var(--text);
   border-bottom: 1px solid var(--hairline);
@@ -7572,7 +7584,7 @@ body.layout-settings #sidebar-resizer {
 .set-cost-en:hover { color: var(--text); background: var(--accent-hover); }
 .set-cost-en.on { color: var(--green); }
 .set-cost-en:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.set-cost-enhint { font-family: 'MesloLGS NFM', monospace; font-size: 11px; background: var(--pill-bg); padding: 0 4px; border-radius: 4px; }
+.set-cost-enhint { font-family: 'MesloLGS NFM', monospace, var(--emoji); font-size: 11px; background: var(--pill-bg); padding: 0 4px; border-radius: 4px; }
 .set-cost-empty { padding: 14px 12px; color: var(--muted); font-size: 12.5px; }
 
 /* Resizable columns */
@@ -7615,7 +7627,7 @@ body.set-cost-resizing * { user-select: none; }
   border-radius: 7px;
   padding: 8px 11px;
 }
-.set-ws-path { font-size: 13px; font-family: 'MesloLGS NFM', monospace; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-ws-path { font-size: 13px; font-family: 'MesloLGS NFM', monospace, var(--emoji); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .set-ws-x {
   border: 0; background: transparent; color: var(--muted);
   cursor: pointer; font-size: 16px; line-height: 1; padding: 0 3px; border-radius: 4px;
