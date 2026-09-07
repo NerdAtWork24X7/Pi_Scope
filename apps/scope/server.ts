@@ -1558,7 +1558,8 @@ async function handle(req: Request): Promise<Response> {
           return jsonResponse({ error: `unknown settings action: ${action}` }, 400);
       }
     } catch (err: any) {
-      return jsonResponse({ error: err.message || String(err) }, 500);
+      console.error("POST /settings failed:", err);
+      return jsonResponse({ error: "internal server error" }, 500);
     }
     return jsonResponse(loadSettingsSnapshot(proj));
   }
@@ -1747,7 +1748,8 @@ async function handle(req: Request): Promise<Response> {
           return jsonResponse({ error: `unknown action: ${action}` }, 400);
       }
     } catch (err: any) {
-      return jsonResponse({ error: err.message || String(err) }, 500);
+      console.error("POST /agent-team failed:", err);
+      return jsonResponse({ error: "internal server error" }, 500);
     }
     return jsonResponse(loadAgentTeam(proj));
   }
