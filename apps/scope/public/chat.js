@@ -1585,7 +1585,7 @@
     if (!tools || !tools.length) return "";
     if (!CH.expandTools) {
       return `<div class="chat-tools">` + tools.map((t) =>
-        `<span class="chat-tool ${t.state || ""}"><span class="chat-tool-icon">${toolIcon(t.name)}</span>` +
+        `<span class="chat-tool ${esc(t.state || "")}"><span class="chat-tool-icon">${toolIcon(t.name)}</span>` +
         `<span class="chat-tool-name">${esc(t.name)}</span><span class="chat-tool-dot"></span></span>`
       ).join("") + `</div>`;
     }
