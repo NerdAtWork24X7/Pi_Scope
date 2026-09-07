@@ -353,7 +353,8 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
       try {
         sess.proc.stdin.write(JSON.stringify({ type: "prompt", message: prompt, streamingBehavior: opts.streamingBehavior }) + "\n");
       } catch (err: any) {
-        return new Response(JSON.stringify({ error: err.message || String(err) }), { status: 500, headers: { "content-type": "application/json" } });
+        console.error("Failed to queue prompt to chat subprocess", err);
+        return new Response(JSON.stringify({ error: "failed to queue prompt" }), { status: 500, headers: { "content-type": "application/json" } });
       }
       return new Response(JSON.stringify({ ok: true, queued: true, streamingBehavior: opts.streamingBehavior }), { status: 200, headers: { "content-type": "application/json" } });
     }
