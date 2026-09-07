@@ -7270,6 +7270,28 @@ body.layout-settings #sidebar-resizer {
   margin: 0 0 18px;
   letter-spacing: -0.3px;
 }
+.set-scope {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: 'MesloLGS NFM', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .6px;
+  text-transform: uppercase;
+  vertical-align: 3px;
+}
+.set-scope-project {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 35%, transparent);
+}
+.set-scope-global {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
 .settings-intro {
   font-size: 13px;
   line-height: 1.6;
@@ -7509,8 +7531,8 @@ body.layout-settings #sidebar-resizer {
 .set-cost-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .set-cost-row.default { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .set-cost-row.default .set-cost-name { color: var(--accent); }
-.set-cost-table.has-cache .set-cost-row { grid-template-columns: var(--cost-cols, 28px minmax(150px, 1fr) 112px 66px 66px 100px 62px 32px); }
-.set-cost-table:not(.has-cache) .set-cost-row { grid-template-columns: var(--cost-cols, 28px minmax(150px, 1fr) 112px 66px 66px 62px 32px); }
+.set-cost-table.has-cache .set-cost-row { grid-template-columns: var(--cost-cols, 44px minmax(150px, 1fr) 112px 66px 66px 100px 62px 48px); }
+.set-cost-table:not(.has-cache) .set-cost-row { grid-template-columns: var(--cost-cols, 44px minmax(150px, 1fr) 112px 66px 66px 62px 48px); }
 .set-cost-row:last-child { border-bottom: 0; }
 .set-cost-head {
   color: var(--muted);
@@ -7525,6 +7547,7 @@ body.layout-settings #sidebar-resizer {
 .set-cost-def { text-align: center; white-space: nowrap; }
 .set-cost-def .star-ok { color: var(--accent); }
 .set-cost-def .star-off { color: var(--muted); opacity: .5; }
+.set-cost-row .set-cost-def { font-size: 16px; line-height: 1; }
 .set-cost-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .set-cost-prov { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .set-cost-in, .set-cost-out, .set-cost-cache, .set-cost-ctx { text-align: right; white-space: nowrap; }
@@ -7536,13 +7559,14 @@ body.layout-settings #sidebar-resizer {
   background: transparent;
   color: var(--muted);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 700;
   line-height: 1;
-  padding: 2px 4px;
+  padding: 4px 6px;
   border-radius: 5px;
   cursor: pointer;
   text-align: center;
+  min-width: 24px;
   transition: color .14s ease, background .14s ease;
 }
 .set-cost-en:hover { color: var(--text); background: var(--accent-hover); }

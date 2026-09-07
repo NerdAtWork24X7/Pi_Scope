@@ -44,8 +44,8 @@
   // localStorage. `model: null` means the flexible minmax(150px, 1fr) track
   // (fills the panel); once the user drags it, it becomes a fixed pixel width.
   const COST_COLS_KEY = "pi-scope-cost-cols";
-  const COST_COL_DEFAULTS = { def: 28, model: null, provider: 112, in: 66, out: 66, cache: 100, context: 62, en: 32 };
-  const COST_COL_LIMITS = { def: [20, 60], model: [120, 640], provider: [60, 320], in: [40, 160], out: [40, 160], cache: [60, 240], context: [40, 200], en: [20, 60] };
+  const COST_COL_DEFAULTS = { def: 44, model: null, provider: 112, in: 66, out: 66, cache: 100, context: 62, en: 48 };
+  const COST_COL_LIMITS = { def: [28, 80], model: [120, 640], provider: [60, 320], in: [40, 160], out: [40, 160], cache: [60, 240], context: [40, 200], en: [28, 80] };
   let costCols = { ...COST_COL_DEFAULTS };
   try {
     const saved = JSON.parse(localStorage.getItem(COST_COLS_KEY) || "null");
@@ -366,6 +366,22 @@
     );
   }
 
+  // Scope badge shown next to section titles: "Project" means the control
+  // persists in the current workspace's .pi/settings (agent-team-config.json /
+  // agents/teams.yaml), "Global" means it lives in the shared pi
+  // settings.json (~/.pi/agent/settings.json). Mirrors where each section's
+  // writes actually land — see the per-action writers in server.ts.
+  function scopeBadge(scope) {
+    const project = scope === "project";
+    return (
+      `<span class="set-scope set-scope-${project ? "project" : "global"}" ` +
+      `title="${project
+        ? "Saved in this workspace's .pi/settings (agent-team-config.json / teams.yaml)"
+        : "Saved in the global ~/.pi/agent/settings.json"}">` +
+      `${project ? "Project" : "Global"}</span>`
+    );
+  }
+
   function toggleControl(on, attrs, labelOn, labelOff) {
     return (
       `<label class="set-toggle" ${attrs || ""}><input type="checkbox"${on ? " checked" : ""}>` +
@@ -404,7 +420,7 @@
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Agent behavior</div>` +
-      `<h2 class="settings-group-title">pi agent</h2>` +
+      `<h2 class="settings-group-title">pi agent ${scopeBadge("project")}</h2>` +
       field("Mode", "creative vs standard", selectControl(
         [{ value: "standard", label: "Standard" }, { value: "creative", label: "Creative" }],
         mode, 'data-act="setMode"'
@@ -472,7 +488,7 @@
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Teams</div>` +
-      `<h2 class="settings-group-title">agent teams</h2>` +
+      `<h2 class="settings-group-title">agent teams ${scopeBadge("project")}</h2>` +
       `<div class="settings-intro">Teams come from <code>~/.pi/agent/agents/teams.yaml</code>. Activate a team, toggle which subagents are enabled, and set a per-agent model. Members without an explicit <code>active: false</code> are on.</div>` +
       (memModel ? field("Memory model", "used by the memory summarizer",
         `<input type="text" class="set-input" value="${esc(memModel)}" data-act="setMemoryModel">`) : "") +
@@ -507,7 +523,7 @@
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Defaults</div>` +
-      `<h2 class="settings-group-title">models & inference</h2>` +
+      `<h2 class="settings-group-title">models & inference ${scopeBadge("global")}</h2>` +
       field("Default model", "used when no session model matches",
         `<input type="text" class="set-input" value="${esc(defaultModel)}" list="set-model-list" data-act="setDefaultModel">`) +
       `<datalist id="set-model-list">${known.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>` +
@@ -582,7 +598,7 @@
   function renderSkills() {
     const skills = strList(SET.skills);
     if (!skills.length) {
-      return `<div class="settings-group"><div class="settings-group-kicker">Skills</div><h2 class="settings-group-title">skills</h2>` +
+      return `<div class="settings-group"><div class="settings-group-kicker">Skills</div><h2 class="settings-group-title">skills ${scopeBadge("project")}</h2>` +
         `<div class="settings-empty-sub">No skills discovered in <code>~/.pi/agent/skills</code>.</div></div>`;
     }
     const group = (g, label) => {
@@ -602,7 +618,7 @@
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Skills</div>` +
-      `<h2 class="settings-group-title">capabilities</h2>` +
+      `<h2 class="settings-group-title">capabilities ${scopeBadge("project")}</h2>` +
       `<div class="settings-intro">Toggle a skill on for the orchestrator, subagents, both, or neither. Membership persists in <code>agent-team-config.json</code>.</div>` +
       group("orchestrator", "Orchestrator") +
       group("subagent", "Subagents") +
@@ -614,13 +630,13 @@
   function renderExtensions() {
     const exts = strList(SET.extensions);
     if (!exts.length) {
-      return `<div class="settings-group"><div class="settings-group-kicker">Extensions</div><h2 class="settings-group-title">extensions</h2>` +
+      return `<div class="settings-group"><div class="settings-group-kicker">Extensions</div><h2 class="settings-group-title">extensions ${scopeBadge("global")}</h2>` +
         `<div class="settings-empty-sub">No extensions configured.</div></div>`;
     }
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Extensions</div>` +
-      `<h2 class="settings-group-title">loaded extensions</h2>` +
+      `<h2 class="settings-group-title">loaded extensions ${scopeBadge("global")}</h2>` +
       `<div class="settings-intro">Extensions listed in <code>settings.json</code>. Toggle one to enable or disable it; <code>+</code> enables, <code>-</code> disables.</div>` +
       `<div class="set-chips">` +
       exts.map((ex) =>
@@ -638,7 +654,7 @@
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Workspaces</div>` +
-      `<h2 class="settings-group-title">chat workspaces</h2>` +
+      `<h2 class="settings-group-title">chat workspaces ${scopeBadge("project")}</h2>` +
       `<div class="settings-intro">Directories available in the Chat view's workspace rail. Session-derived workspaces you remove are remembered in <code>chatWorkspacesRemoved</code>.</div>` +
       `<div class="set-ws-list">` +
       ws.map((w) =>
@@ -661,7 +677,7 @@
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">pi settings.json</div>` +
-      `<h2 class="settings-group-title">pi coding agent</h2>` +
+      `<h2 class="settings-group-title">pi coding agent ${scopeBadge("global")}</h2>` +
       field("Theme", "pi terminal theme", `<input type="text" class="set-input" value="${esc(fText(sr.theme, "cyberpunk"))}" data-act="setTheme">`) +
       field("Quiet startup", "suppress verbose boot banner",
         toggleControl(fBool(sr.quietStartup, false), 'data-act="setQuietStartup"')) +
