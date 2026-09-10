@@ -246,31 +246,162 @@ function handleLine(sess: ChatSession, line: string) {
   }
 }
 
+/** Venv bin directories to expose to the chat pi subprocess, most specific
+ *  first. The Chat view spawns pi directly (no shell, no profile sourcing), so
+ *  it inherits the server's env — which, unlike the in-browser Terminal (a real
+ *  interactive bash that sources ~/.bashrc), never has the project's Python
+ *  venv activated. pi's web-fetch-style tools then fail with "cannot find
+ *  playwright" even though it is installed in the venv. Mirror what activating
+ *  the venv in a terminal does: prepend the venv's bin dir to PATH.
+ *
+ *  Only existing dirs that actually look like a venv (have a bin/{activate,
+ *  python, python3}) are added; a workspace-local venv wins over the home one. */
+function venvBinDirs(cwd: string): string[] {
+  const candidates = [
+    path.join(cwd, ".venv", "bin"),
+    path.join(cwd, "venv", "bin"),
+    path.join(os.homedir(), ".venv", "bin"),
+  ];
+  const seen = new Set<string>();
+  const dirs: string[] = [];
+  for (const dir of candidates) {
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    try {
+      const looksLikeVenv =
+        fs.existsSync(path.join(dir, "activate")) ||
+        fs.existsSync(path.join(dir, "python")) ||
+        fs.existsSync(path.join(dir, "python3"));
+      if (looksLikeVenv) dirs.push(dir);
+    } catch { /* unreadable — skip */ }
+  }
+  return dirs;
+}
+
+/** Shell rc files an interactive terminal sources, in the order we check them.
+ *  A GUI/desktop-launched server never reads these, so env vars exported only
+ *  there are invisible to chat-spawned subprocesses — chatChildEnv mirrors the
+ *  few the pi web tools depend on. */
+function shellRcFiles(): string[] {
+  const home = os.homedir();
+  return [".zshenv", ".zshrc", ".bash_profile", ".bashrc", ".profile"]
+    .map((f) => path.join(home, f))
+    .filter((p) => fs.existsSync(p));
+}
+
+/** True when `dir` holds an installed Playwright browser build (a subdirectory
+ *  named like chromium-<build>, firefox-<build>, webkit-<build>,
+ *  headless_shell-<build>, or chromium_headless_shell-<build>). Used so we
+ *  only adopt a candidate browsers dir that will actually work — never a stale
+ *  rc path that would break an otherwise-fine default resolution. */
+function looksLikePlaywrightBrowsersDir(dir: string): boolean {
+  try {
+    return fs.readdirSync(dir).some((name) =>
+      /^(chromium|firefox|webkit|headless_shell|chromium_headless_shell)-/.test(name)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve the Playwright browsers dir the way the user's interactive terminal
+ *  would, so chat-spawned pi subprocesses see the same Chromium as the
+ *  terminal. Order:
+ *  1. The server's own env, when the launcher already carried it through.
+ *  2. An `export PLAYWRIGHT_BROWSERS_PATH=...` (or bare assignment) in the
+ *     user's shell rc files — the typical setup for a custom browser dir
+ *     (e.g. `~/.zshrc` → `export PLAYWRIGHT_BROWSERS_PATH=$HOME/playwright-browsers`).
+ *     Quotes are stripped and `$HOME`/`${HOME}`/`~` expanded.
+ *  3. Playwright's own default cache locations, when they actually hold a
+ *     browser build (Linux `~/.cache/ms-playwright`, macOS
+ *     `~/Library/Caches/ms-playwright`, Windows `%LOCALAPPDATA%\ms-playwright`).
+ *  Returns null when nothing usable is found, so the child keeps its inherited
+ *  (default) resolution instead of pointing at a bogus path. */
+function resolvePlaywrightBrowsersPath(): string | null {
+  const explicit = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (explicit) return explicit;
+  const home = os.homedir();
+  const expand = (v: string) =>
+    v.replace(/^~(?=\/|$)/, home).replace(/\$\{HOME\}|\$HOME/g, home);
+  for (const rc of shellRcFiles()) {
+    let content: string;
+    try { content = fs.readFileSync(rc, "utf8"); } catch { continue; }
+    for (const rawLine of content.split("\n")) {
+      const line = rawLine.trim();
+      const m = line.match(/^(?:export\s+)?PLAYWRIGHT_BROWSERS_PATH\s*=\s*(.+)$/);
+      if (!m) continue;
+      const val = m[1].trim().replace(/^(['"])(.*)\1$/, "$2").trim();
+      if (!val) continue;
+      const dir = expand(val);
+      if (looksLikePlaywrightBrowsersDir(dir)) return dir;
+    }
+  }
+  const candidates = [
+    process.env.XDG_CACHE_HOME ? path.join(process.env.XDG_CACHE_HOME, "ms-playwright") : "",
+    path.join(home, ".cache", "ms-playwright"),
+    path.join(home, "Library", "Caches", "ms-playwright"),
+    path.join(home, "AppData", "Local", "ms-playwright"),
+  ];
+  for (const dir of candidates) {
+    if (dir && looksLikePlaywrightBrowsersDir(dir)) return dir;
+  }
+  return null;
+}
+
 /** Child env for the chat pi subprocess: the server's environment with
  *  PI_OFFLINE set (pi's startup network ops are skipped — see spawnChat), plus
- *  two PATH additions. (1) The pi binary's own directory, so the agent-team
- *  extension running INSIDE that pi process can spawn further `pi` subprocesses
- *  (subagents, the memory summarizer) by their bare name from the inherited
- *  environment — desktop/GUI launches often leave the pnpm global bin dir off
- *  PATH and those nested spawns then die with ENOENT ("<agent> failed to
- *  start"). (2) The server's own node binary's directory: `pi` is usually a
- *  pnpm shim shell script whose final fallback is `exec node <cli.js>`, so it
- *  needs a `node` on PATH. The bundled AppImage server runs under a portable
- *  Node that lives in resources/ (never on PATH), and the GUI session that
- *  launched it may not have nvm's node dir either — without this the shim dies
- *  instantly with "exec: node: not found" (stderr) and every chat fails with
- *  the generic "process closed". */
-function chatChildEnv(): NodeJS.ProcessEnv {
+ *  PATH additions so the spawned pi sees everything the user's terminal would.
+ *  In order, prepended before the inherited PATH:
+ *
+ *  1. The workspace's Python venv bin dirs (see venvBinDirs) — tools like
+ *     web-fetch that need the venv's `playwright` keep working in Chat.
+ *  2. SCOPE_EXTRA_PATH (colon-separated) — explicit user override, e.g.
+ *     `SCOPE_EXTRA_PATH=~/.pyenv/versions/3.12/bin apps/scope-launcher/run.sh`.
+ *  3. The pi binary's own directory, so the agent-team extension running INSIDE
+ *     that pi process can spawn further `pi` subprocesses (subagents, the
+ *     memory summarizer) by their bare name from the inherited environment —
+ *     desktop/GUI launches often leave the pnpm global bin dir off PATH and
+ *     those nested spawns then die with ENOENT ("<agent> failed to start").
+ *  4. The server's own node binary's directory: `pi` is usually a pnpm shim
+ *     shell script whose final fallback is `exec node <cli.js>`, so it needs a
+ *     `node` on PATH. The bundled AppImage server runs under a portable Node
+ *     that lives in resources/ (never on PATH), and the GUI session that
+ *     launched it may not have nvm's node dir either — without this the shim
+ *     dies instantly with "exec: node: not found" (stderr) and every chat
+ *     fails with the generic "process closed".
+ *
+ *  Beyond PATH, PLAYWRIGHT_BROWSERS_PATH is restored from the user's shell rc
+ *  (see resolvePlaywrightBrowsersPath) so pi's web-fetch-style tools find the
+ *  Chromium binaries exactly like they do in the terminal. */
+function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, PI_OFFLINE: "1" };
   const parts = String(env.PATH || "").split(path.delimiter).filter(Boolean);
+  const prepend = (dir: string) => {
+    if (dir && !parts.includes(dir)) parts.unshift(dir);
+  };
+  // Workspace venv first so `python`/`playwright` resolve from it, mirroring
+  // what `source .venv/bin/activate` does in the terminal.
+  for (const dir of venvBinDirs(cwd)) prepend(dir);
+  // Explicit user-configured dirs (SCOPE_EXTRA_PATH), e.g. a non-standard venv
+  // or a pyenv/conda env the auto-detect can't find. A leading `~` is expanded
+  // so `SCOPE_EXTRA_PATH=~/.venv/bin` works from any shell.
+  for (const dir of String(process.env.SCOPE_EXTRA_PATH || "").split(path.delimiter).filter(Boolean)) {
+    const d = dir.trim();
+    prepend(d === "~" ? os.homedir() : d.startsWith("~/") ? path.join(os.homedir(), d.slice(2)) : d);
+  }
   // The server's own node (bundled portable Node when packaged) so pnpm-shim
-  // pi binaries can find `node`. Prepend before anything else so pi runs under
-  // the same Node version the server itself uses.
-  const nodeDir = path.dirname(process.execPath);
-  if (!parts.includes(nodeDir)) parts.unshift(nodeDir);
-  const binDir = PI_BIN.includes("/") ? path.dirname(PI_BIN) : "";
-  if (binDir && !parts.includes(binDir)) parts.unshift(binDir);
+  // pi binaries can find `node`.
+  prepend(path.dirname(process.execPath));
+  if (PI_BIN.includes("/")) prepend(path.dirname(PI_BIN));
   env.PATH = parts.join(path.delimiter);
+  // Playwright browser binaries (pi's web-fetch / crawl tools): the GUI
+  // session that launched the server never sources the user's shell rc, so a
+  // PLAYWRIGHT_BROWSERS_PATH exported there (e.g. a custom ~/playwright-browsers
+  // instead of the default ~/.cache/ms-playwright) is missing from the child
+  // env. Without it playwright can import fine (venv PATH fix above) but cannot
+  // find Chromium, so web-fetch fails in Chat while working in the terminal.
+  const pwBrowsers = resolvePlaywrightBrowsersPath();
+  if (pwBrowsers) env.PLAYWRIGHT_BROWSERS_PATH = pwBrowsers;
   return env;
 }
 
@@ -282,7 +413,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatS
   // in-flight check throws a stale-ctx error that kills the whole subprocess.
   const proc = spawn(PI_BIN, ["--mode", "rpc", "--model", model], {
     cwd,
-    env: chatChildEnv(),
+    env: chatChildEnv(cwd),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh };

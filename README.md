@@ -301,6 +301,13 @@ Full flag/env and event reference: [`extension/README.md`](extension/README.md).
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
 | `SCOPE_SETTINGS_JSON` | `~/.pi/agent/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
 | `SCOPE_SKILLS_DIR` | `~/.pi/agent/skills` | Override the skills directory scanned for the agent-team sidebar |
+| `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. a non-standard venv: `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
+
+Chat-spawned `pi` subprocesses also get the workspace venv bin dirs prepended to
+`PATH`, and `PLAYWRIGHT_BROWSERS_PATH` restored from the user's shell rc files
+(or Playwright's default cache dirs) when the server env lacks it — so
+`web-fetch` finds its Chromium browser even when the server was launched from a
+GUI session that never sourced the shell rc.
 
 The full HTTP API (all endpoints, auth rules, and the SSE stream) is documented in
 [`apps/scope/README.md`](apps/scope/README.md).

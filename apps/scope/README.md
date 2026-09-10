@@ -26,6 +26,14 @@ SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
 | `SCOPE_SETTINGS_JSON` | `~/.pi/agent/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
 | `SCOPE_SKILLS_DIR` | `~/.pi/agent/skills` | Override the skills directory scanned for the agent-team sidebar |
+| `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
+
+Chat-spawned `pi` subprocesses additionally get the workspace's Python venv bin
+dirs prepended to `PATH`, and `PLAYWRIGHT_BROWSERS_PATH` restored from the
+user's shell rc files (or Playwright's default cache dirs) when the server env
+lacks it — so tools like `web-fetch` find the venv's `playwright` and its
+Chromium browser exactly as they do in the terminal, even when the server was
+launched from a GUI session that never sourced the shell rc.
 
 ## Herdr cwd integration
 
