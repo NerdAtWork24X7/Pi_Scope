@@ -203,6 +203,8 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     disabledAgents: [],
     orchestratorSkills: [],
     subagentSkills: [],
+    skipOrchestratorTools: [],
+    tools: [],
     skills: [],
     extensions: [],
     enabledModels: [],
@@ -228,6 +230,7 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     out.disabledAgents = cfg.disabledAgents || [];
     out.orchestratorSkills = cfg.orchestratorSkills || [];
     out.subagentSkills = cfg.subagentSkills || [];
+    out.skipOrchestratorTools = cfg.skipOrchestratorTools || [];
     // Chat view workspaces: directories the user added explicitly, plus
     // session-derived workspaces the user removed from the list. Stored in
     // the project's own agent-team-config.json (per-project, like pi).
@@ -253,7 +256,43 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     subagent: subSet.has(s.dir),
   }));
   out.extensions = discoverExtensions();
+
+  // Orchestrator tools: the web server can't query pi's live tool registry, so
+  // the list is rebuilt from (a) tool names observed in captured llm_request
+  // events — pi sends its ACTIVE allowlist with every provider request, so the
+  // union across captures ≈ pi's allTools() — and (b) the configured skip
+  // denylist (real tool names even if never observed, e.g. on a fresh machine).
+  // The internal dispatch routing tools are excluded, mirroring pi's allTools().
+  const ROUTING_TOOLS = new Set(["dispatch_agent", "dispatch_agents"]);
+  const toolNames = new Map<string, string>(); // lowercased key → display name
+  const addTool = (n: string) => {
+    const key = String(n).toLowerCase();
+    if (key && !ROUTING_TOOLS.has(key) && !toolNames.has(key)) toolNames.set(key, String(n));
+  };
+  for (const t of observedOrchestratorTools()) addTool(t);
+  for (const t of out.skipOrchestratorTools) addTool(t);
+  out.tools = Array.from(toolNames.values()).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
   return out;
+}
+
+/** Tool names seen in captured llm_request events (pi's active allowlist per
+ *  provider request). Returns [] when the DB is unavailable or has no captures. */
+function observedOrchestratorTools(): string[] {
+  const tools: string[] = [];
+  try {
+    const rows = (db.prepare(
+      `SELECT payload_json FROM events WHERE type = 'llm_request'`
+    ).all() as Array<{ payload_json: string }>);
+    for (const row of rows) {
+      try {
+        const p = JSON.parse(row.payload_json ?? "{}");
+        if (Array.isArray(p.tools)) {
+          for (const t of p.tools) if (typeof t === "string" && t.trim()) tools.push(t);
+        }
+      } catch { /* malformed payload — skip */ }
+    }
+  } catch { /* DB unavailable */ }
+  return tools;
 }
 
 // ─── Settings snapshot (consolidated pi + agent-team config) ────────────────
@@ -1657,6 +1696,21 @@ async function handle(req: Request): Promise<Response> {
             const set = new Set(arr);
             if (set.has(dir)) set.delete(dir); else set.add(dir);
             cfg[key] = Array.from(set);
+          });
+          break;
+        }
+        case "toggleTool": {
+          // Enable/disable an orchestrator tool (mirrors pi's sidebar
+          // toggleOrchestratorTool): off = added to skipOrchestratorTools,
+          // on = removed from it. Case-insensitive, like pi's denylist checks.
+          const name = String(body.tool || "").trim();
+          if (!name) return jsonResponse({ error: "missing tool" }, 400);
+          const key = name.toLowerCase();
+          updateAgentConfig(proj, (cfg) => {
+            const arr: string[] = Array.isArray(cfg.skipOrchestratorTools) ? cfg.skipOrchestratorTools : [];
+            const i = arr.findIndex((t) => String(t).toLowerCase() === key);
+            if (i >= 0) arr.splice(i, 1); else arr.push(name);
+            cfg.skipOrchestratorTools = arr;
           });
           break;
         }

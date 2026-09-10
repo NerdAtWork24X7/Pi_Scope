@@ -810,7 +810,7 @@
   // Persist a sidebar toggle via POST /agent-team, then reload the snapshot.
   // Toggles write the CURRENT chat workspace's project config (cwd) — pi's
   // agent-team config is per project now.
-  async function postTeam(body) {
+  async function postTeam(body, opts) {
     let ok = false;
     try {
       const { res, data } = await window.SCOPE.api("/agent-team", {}, { ...body, cwd: CH.workspace || "" });
@@ -821,7 +821,7 @@
       }
     } catch { /* server unreachable — keep last snapshot */ }
     renderAgents();
-    if (ok) rearmChatAfterConfigChange();
+    if (ok) rearmChatAfterConfigChange(opts);
   }
 
   // Team/mode/memory/skills toggles only affect a pi subprocess that boots
@@ -835,25 +835,37 @@
   //     settings apply in place without killing the thread — harness-level
   //     settings (mode/memory/team) that pi only reads at boot still land on
   //     the next new session, which we surface in the hint.
-  function rearmChatAfterConfigChange() {
+  // Tool toggles are the exception: the agent-team extension inside the running
+  // pi subprocess watches agent-team-config.json and re-applies its active tool
+  // allowlist when skipOrchestratorTools changes (opts.liveConfig), so they
+  // apply in place on the next turn — no respawn, no new session.
+  function rearmChatAfterConfigChange(opts) {
+    opts = opts || {};
     if (!CH.workspace) return;
     if (CH.chatBusy || CH.chatHistory.length) {
       if (CH.chatSessionId) {
-        // Refresh the composer footer first (it re-reads settings.json's new
-        // default model/thinking), so the push reflects the freshly written
-        // default when the user hasn't overridden it in the composer.
-        void (async () => {
-          await fetchChatFooter(true);
-          renderComposerThinking();
-          await pushLivePrefs(CH.chatModel, CH.thinkingLevel);
-        })();
-        if (el.hint) setHint("⚙ model/thinking applied to this chat; mode/team settings land on a new session", "");
+        if (opts.liveConfig) {
+          // Tools are re-applied by the extension inside the running
+          // subprocess; nothing to push or restart.
+          if (el.hint) setHint("⚙ tools updated — applies on the next turn", "");
+        } else {
+          // Refresh the composer footer first (it re-reads settings.json's new
+          // default model/thinking), so the push reflects the freshly written
+          // default when the user hasn't overridden it in the composer.
+          void (async () => {
+            await fetchChatFooter(true);
+            renderComposerThinking();
+            await pushLivePrefs(CH.chatModel, CH.thinkingLevel);
+          })();
+          if (el.hint) setHint("⚙ model/thinking applied to this chat; mode/team settings land on a new session", "");
+        }
       } else if (el.hint) {
         setHint("⚙ team settings apply to a new chat session", "");
       }
       return;
     }
     if (!CH.chatSessionId) return; // nothing pre-spawned — next send spawns fresh anyway
+    if (opts.liveConfig) return; // idle pre-spawn picks the change up live too — no respawn needed
     void (async () => {
       await killCurrentChatSession();
       ensureChatSession();
@@ -983,6 +995,29 @@
       (skills.length ? `<div class="at-chips">` + skillGroupsBody("orchestrator") + `</div>` : "")
     );
 
+    // Orchestrator tools (what the orchestrator may call), mirroring the pi
+    // sidebar's Tools section. Each chip toggles membership in the
+    // skipOrchestratorTools denylist (agent-team-config.json); the list itself
+    // is rebuilt server-side from captured llm_request tool lists + the denylist.
+    const skipTools = new Set((td.skipOrchestratorTools || []).map((t) => String(t).toLowerCase()));
+    const tools = td.tools || [];
+    const toolItem = (name) => {
+      const on = !skipTools.has(String(name).toLowerCase());
+      return (
+        `<div class="at-chip${on ? " on" : ""}" data-tool="${esc(name)}" title="${esc(name)} — ${on ? "enabled for orchestrator" : "skipped by orchestrator"}">` +
+        `<span class="at-chip-dot"></span>` +
+        `<span class="at-chip-name">${esc(name)}</span>` +
+        `</div>`
+      );
+    };
+    const toolsBody = tools.length
+      ? `<div class="at-chips">` + tools.map(toolItem).join("") + `</div>`
+      : `<div class="at-dim">No tools observed yet — run a chat to build the list</div>`;
+    html += atSection("tools", "Tools", toolsBody, {
+      count: tools.length,
+      hint: "Tools the orchestrator may call. Click to toggle on/off.",
+    });
+
     html += atSection("mode", "Mode & Memory",
       `<div class="at-mm">` +
       `<div class="at-card mode" data-action="toggleMode" title="Click to toggle mode" role="button" tabindex="0">` +
@@ -1086,6 +1121,12 @@
     );
     el.agents.querySelectorAll(".at-chip[data-dir]").forEach((n) =>
       n.addEventListener("click", () => postTeam({ action: "toggleSkill", group: n.dataset.group, dir: n.dataset.dir }))
+    );
+    // Clicking a tool chip toggles it in the orchestrator's skip denylist. The
+    // agent-team extension applies the change live to the running subprocess,
+    // so this is a live-config toggle (no respawn, applies next turn).
+    el.agents.querySelectorAll(".at-chip[data-tool]").forEach((n) =>
+      n.addEventListener("click", () => postTeam({ action: "toggleTool", tool: n.dataset.tool }, { liveConfig: true }))
     );
     el.agents.querySelectorAll(".at-chip[data-path]").forEach((n) =>
       n.addEventListener("click", () => postTeam({ action: "toggleExtension", path: n.dataset.path }))

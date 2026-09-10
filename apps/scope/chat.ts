@@ -247,22 +247,30 @@ function handleLine(sess: ChatSession, line: string) {
 }
 
 /** Child env for the chat pi subprocess: the server's environment with
- *  PI_OFFLINE set (pi's startup network ops are skipped — see spawnChat), and
- *  the pi binary's own directory prepended to PATH. The agent-team extension
- *  running INSIDE that pi process spawns further `pi` subprocesses (subagents,
- *  the memory summarizer) by their bare name from the inherited environment.
- *  Desktop/GUI launches often leave the pnpm global bin dir off PATH — we
- *  resolved the top-level binary by absolute path, but those nested spawns use
- *  plain `pi` and die with ENOENT ("<agent> failed to start") even though the
- *  same dispatch works from a terminal whose PATH includes the bin dir. */
+ *  PI_OFFLINE set (pi's startup network ops are skipped — see spawnChat), plus
+ *  two PATH additions. (1) The pi binary's own directory, so the agent-team
+ *  extension running INSIDE that pi process can spawn further `pi` subprocesses
+ *  (subagents, the memory summarizer) by their bare name from the inherited
+ *  environment — desktop/GUI launches often leave the pnpm global bin dir off
+ *  PATH and those nested spawns then die with ENOENT ("<agent> failed to
+ *  start"). (2) The server's own node binary's directory: `pi` is usually a
+ *  pnpm shim shell script whose final fallback is `exec node <cli.js>`, so it
+ *  needs a `node` on PATH. The bundled AppImage server runs under a portable
+ *  Node that lives in resources/ (never on PATH), and the GUI session that
+ *  launched it may not have nvm's node dir either — without this the shim dies
+ *  instantly with "exec: node: not found" (stderr) and every chat fails with
+ *  the generic "process closed". */
 function chatChildEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, PI_OFFLINE: "1" };
+  const parts = String(env.PATH || "").split(path.delimiter).filter(Boolean);
+  // The server's own node (bundled portable Node when packaged) so pnpm-shim
+  // pi binaries can find `node`. Prepend before anything else so pi runs under
+  // the same Node version the server itself uses.
+  const nodeDir = path.dirname(process.execPath);
+  if (!parts.includes(nodeDir)) parts.unshift(nodeDir);
   const binDir = PI_BIN.includes("/") ? path.dirname(PI_BIN) : "";
-  if (binDir) {
-    const parts = String(env.PATH || "").split(path.delimiter).filter(Boolean);
-    if (!parts.includes(binDir)) parts.unshift(binDir);
-    env.PATH = parts.join(path.delimiter);
-  }
+  if (binDir && !parts.includes(binDir)) parts.unshift(binDir);
+  env.PATH = parts.join(path.delimiter);
   return env;
 }
 
