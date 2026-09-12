@@ -90,6 +90,110 @@ describe("chat workspaces", () => {
     assert.ok(!/from session/.test(await hint()));
   });
 
+  test("REGRESSION: selecting a workspace focuses the composer so typing works without an extra click", async () => {
+    // Reported flow: clear/leave a session in the Single view, switch to Chat,
+    // click a workspace, then type. The rail row is a plain div (not focusable),
+    // so without an explicit focus the caret stayed on the now-hidden Single
+    // view and keystrokes went nowhere — the composer looked normal but ignored
+    // input.
+    await boot({ sessions: [makeSession(SESS_A), makeSession(SESS_B)] });
+    await page.evaluate(() => window.setView("single"));
+    await page.evaluate(() => window.setView("chat"));
+    await wsRow(page, WS_B).click();
+    await page.waitForFunction(() => document.activeElement?.id === "chat-input", undefined, { timeout: 4000 });
+    await page.keyboard.type("typed without clicking");
+    assert.equal(await page.inputValue("#chat-input"), "typed without clicking", "keyboard reaches the composer");
+  });
+
+  test("REGRESSION: the Chat button hard-reloads with a cache-bust marker", async () => {
+    // Clicking Chat must not run a renderer-cached copy of the chat JS/CSS: it
+    // navigates to the chat view with ?_=<ts> so the server tags the page's
+    // local assets with the same marker and they are fetched fresh.
+    await boot({ sessions: [makeSession(SESS_A)] });
+    await page.evaluate(() => window.setView("single"));
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: "domcontentloaded" }),
+      page.click("#btn-chat"),
+    ]);
+    const u = new URL(page.url());
+    assert.equal(u.searchParams.get("view"), "chat", "Chat button targets the chat view");
+    assert.ok(u.searchParams.get("_"), "a cache-bust marker is present");
+    assert.equal(u.hash, "#view=chat", "the reloaded app lands on Chat");
+    await page.waitForSelector("#chat-workspaces");
+  });
+
+  test("REGRESSION: a native dialog leaves the composer caret desynced — regaining focus forces a real caret cycle", async () => {
+    // Reported flow: delete a workspace/session (confirm() dialog), return to
+    // Chat — the box glows but no blinking caret shows; the caret only came back
+    // after adding a workspace. Electron/Chromium can return from confirm() with
+    // the composer still the activeElement but its caret desynced, and focus()
+    // on the already-active element is a no-op. The window-focus handler must
+    // therefore force a real blur→focus cycle. Count focus events: a second one
+    // (while already active) proves the cycle ran and the caret is repainted.
+    await boot({ sessions: [makeSession(SESS_A)] });
+    await wsRow(page, WS_A).click();
+    await page.waitForFunction(() => document.activeElement?.id === "chat-input", undefined, { timeout: 4000 });
+
+    await page.evaluate(() => {
+      window.__composerFocuses = 0;
+      document.getElementById("chat-input").addEventListener("focus", () => { window.__composerFocuses++; });
+    });
+    // Simulate the window regaining focus after the native dialog while the
+    // composer is still the activeElement (the desynced case).
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.waitForFunction(() => window.__composerFocuses >= 1, undefined, { timeout: 2000 });
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "chat-input", "composer stays focused");
+  });
+
+  test("REGRESSION: clicking an empty workspace re-arms a pi session without a New-session click", async () => {
+    // Reported flow: delete a workspace's session in the Single page, return to
+    // Chat. The workspace is still the active one, so re-clicking it goes
+    // through showFreeConversation (not selectWorkspace) — which used to skip
+    // ensureChatSession. The box appeared but no session was armed behind it, so
+    // nothing happened until the user clicked "New session".
+    const starts = () => mock.requestsFor("/chat/start", "POST").length;
+    const waitForStart = async (above, ms = 4000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (starts() > above) return;
+        await sleep(50);
+      }
+      throw new Error(`no /chat/start after re-clicking the empty workspace (still ${starts()})`);
+    };
+
+    await boot({ sessions: [], team: defaultTeam({ chatWorkspaces: [WS_A] }) });
+    await wsRow(page, WS_A).click();
+    await waitForStart(0);
+
+    // Chat a turn; pi records it as sess-a and the workspace thread adopts it
+    // (the same thread is then keyed under both free:<cwd> and sess-a).
+    const turn = await send(page, mock, "hello");
+    await reply(turn, "hi", { sessionId: "sess-a" });
+    // Wait for the turn to finalize: adoption (below) refuses a still-busy
+    // thread, so the alias must exist before we delete its row.
+    await page.waitForFunction(() => !document.getElementById("chat-stop").classList.contains("show"));
+    await applySessions(page, mock, [makeSession({ session_id: "sess-a", cwd: WS_A, agent_name: "orchestrator", first_msg: "hello" })]);
+    await page.waitForSelector('.ws-sess[data-sid="sess-a"]', { state: "visible" });
+
+    page.on("dialog", (d) => d.accept());
+    await page.evaluate(() => window.setView("single"));
+    await page.evaluate(() => window.SCOPE.deleteSession("sess-a"));
+    await page.waitForFunction(() => window.__SCOPE_STATE.sessions.length === 0);
+    await page.evaluate(() => window.setView("chat"));
+
+    // Re-click the now-empty workspace (still the active row). Deleting the
+    // adopted session dropped the thread's key, so it must arm a fresh session
+    // on its own instead of leaving the box inert until "New session" is hit.
+    const before = starts();
+    await wsRow(page, WS_A).click();
+    await waitForStart(before);
+
+    // And the composer works immediately — no "New session" detour.
+    await page.click("#chat-input");
+    await page.keyboard.type("ready to type");
+    assert.equal(await page.inputValue("#chat-input"), "ready to type");
+  });
+
   test("the caret expands/collapses a workspace's sessions and persists the choice", async () => {
     await boot({ sessions: [makeSession(SESS_A)] });
     await page.waitForSelector(`.chat-ws[data-cwd="${WS_A}"]`);
@@ -177,6 +281,92 @@ describe("chat workspaces", () => {
     assert.equal(await foldRow(page, "o1").count(), 0);
   });
 
+  test("REGRESSION: a main session keeps running status while its subagent is live", async () => {
+    // The moment a main session dispatches work its own last_ts goes stale, so
+    // the row used to flip to "waiting" while the subagent was still running.
+    const parent = makeSession({
+      session_id: "p1", cwd: WS_A, first_msg: "dispatch",
+      last_ts: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const child = makeSession({ session_id: "c1", cwd: WS_A, first_msg: "child", parent_session_id: "p1", agent_name: "builder" });
+    await boot({ sessions: [parent, child], seed: { "scope-chat-ws-expanded": JSON.stringify([WS_A]) } });
+    await page.waitForSelector('.ws-sess[data-sid="p1"]');
+
+    assert.equal(
+      await page.getAttribute('.ws-sess[data-sid="p1"] .status-dot', "class"),
+      "status-dot green",
+      "main session shows running while a descendant is green"
+    );
+    assert.match(await page.getAttribute('.ws-sess[data-sid="p1"]', "title"), /working/);
+
+    // Once the subagent is stale too, the main session returns to "waiting".
+    const stale = makeSession({
+      session_id: "c1", cwd: WS_A, first_msg: "child", parent_session_id: "p1", agent_name: "builder",
+      last_ts: new Date(Date.now() - 60_000).toISOString(),
+    });
+    await applySessions(page, mock, [parent, stale]);
+    await page.waitForFunction(() =>
+      document.querySelector('.ws-sess[data-sid="p1"] .status-dot')?.className === "status-dot orange");
+    assert.match(await page.getAttribute('.ws-sess[data-sid="p1"]', "title"), /waiting/);
+  });
+
+  test("REGRESSION: a stopped main session is never masked by a live subagent", async () => {
+    const parent = makeSession({
+      session_id: "p1", cwd: WS_A, first_msg: "dispatch", has_shutdown: true,
+      last_ts: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const child = makeSession({ session_id: "c1", cwd: WS_A, first_msg: "child", parent_session_id: "p1", agent_name: "builder" });
+    await boot({ sessions: [parent, child], seed: { "scope-chat-ws-expanded": JSON.stringify([WS_A]) } });
+    await page.waitForSelector('.ws-sess[data-sid="p1"]');
+
+    assert.equal(await page.getAttribute('.ws-sess[data-sid="p1"] .status-dot', "class"), "status-dot red");
+    assert.match(await page.getAttribute('.ws-sess[data-sid="p1"]', "title"), /stopped/);
+  });
+
+  test("REGRESSION: a session runs from turn_start until turn_end, not on a recency window", async () => {
+    // A stale last_ts must NOT flip an open turn to "waiting": a long tool call
+    // or a wait on a dispatched subagent keeps the turn open.
+    const running = makeSession({
+      session_id: "r1", cwd: WS_A, first_msg: "long tool call",
+      last_ts: new Date(Date.now() - 3_600_000).toISOString(),
+      last_turn_event: "turn_start",
+    });
+    // A closed turn is "waiting" for the next prompt even though it just spoke.
+    const waiting = makeSession({ session_id: "w1", cwd: WS_A, first_msg: "answered", last_turn_event: "turn_end" });
+    await boot({ sessions: [running, waiting], seed: { "scope-chat-ws-expanded": JSON.stringify([WS_A]) } });
+    await page.waitForSelector('.ws-sess[data-sid="r1"]');
+
+    assert.equal(await page.getAttribute('.ws-sess[data-sid="r1"] .status-dot', "class"), "status-dot green");
+    assert.match(await page.getAttribute('.ws-sess[data-sid="r1"]', "title"), /working/);
+    assert.equal(await page.getAttribute('.ws-sess[data-sid="w1"] .status-dot', "class"), "status-dot orange");
+    assert.match(await page.getAttribute('.ws-sess[data-sid="w1"]', "title"), /waiting/);
+
+    // A session with no captured turn events still falls back to recency.
+    const legacy = makeSession({ session_id: "l1", cwd: WS_A, first_msg: "legacy", last_ts: new Date(Date.now() - 3_600_000).toISOString() });
+    await applySessions(page, mock, [running, waiting, legacy]);
+    await page.waitForFunction(() =>
+      document.querySelector('.ws-sess[data-sid="l1"] .status-dot')?.className === "status-dot orange"
+    );
+    assert.equal(await page.getAttribute('.ws-sess[data-sid="r1"] .status-dot', "class"), "status-dot green");
+  });
+
+  test("REGRESSION: a live turn_start SSE flips a session from waiting to running", async () => {
+    const s = makeSession({
+      session_id: "s1", cwd: WS_A, first_msg: "resumed after a long wait",
+      last_ts: new Date(Date.now() - 3_600_000).toISOString(),
+      last_turn_event: "turn_end",
+    });
+    await boot({ sessions: [s], seed: { "scope-chat-ws-expanded": JSON.stringify([WS_A]) } });
+    await page.waitForSelector('.ws-sess[data-sid="s1"]');
+    assert.equal(await page.getAttribute('.ws-sess[data-sid="s1"] .status-dot', "class"), "status-dot orange");
+
+    mock.broadcastSSE({ event_id: "e-start", session_id: "s1", seq: 999, ts: new Date().toISOString(), type: "turn_start" });
+    await page.waitForFunction(() => {
+      const sess = window.__SCOPE_STATE.sessions.find((x) => x.session_id === "s1");
+      return sess?.last_turn_event === "turn_start" && window.SCOPE.subagentStatus(sess) === "green";
+    });
+  });
+
   test("a subagent neither vanishes nor duplicates when it shares an agent name with a sibling", async () => {
     // Reproduces a real workspace: two `searcher` and two `file_reader` sessions
     // dispatched by one orchestrator.
@@ -260,16 +450,54 @@ describe("chat workspaces", () => {
     assert.ok(posted.some((r) => r.body.action === "addWorkspace" && r.body.path === NEW), "addWorkspace posted");
   });
 
-  test("removing the active workspace clears the canvas back to the picker", async () => {
+  test("removing the active workspace force-reloads the app and clears the canvas", async () => {
     await boot({ sessions: [makeSession(SESS_A)] });
     page.on("dialog", (d) => d.accept());
     await wsRow(page, WS_A).click();
     await page.waitForSelector(".chat-ws.active");
 
+    // Removing a workspace rewrites per-project config read at boot, so the app
+    // reloads itself. Wait for that navigation, then assert the reloaded app.
+    const reloaded = page.waitForEvent("load", { timeout: 5000 });
     await wsRow(page, WS_A).locator(".chat-ws-remove").click();
+    await reloaded;
+    await page.waitForFunction(() => window.__SCOPE_STATE?.sessionsLoaded === true);
     await page.waitForFunction((cwd) => !document.querySelector(`.chat-ws[data-cwd="${cwd}"]`), WS_A);
     assert.match(await canvas(), /Chat with your coding agent/);
     assert.equal(await page.locator("#chat-composer").isVisible(), false);
+  });
+
+  test("REGRESSION: removing a workspace from Settings force-reloads the app", async () => {
+    await boot({ sessions: [], team: defaultTeam({ chatWorkspaces: [WS_A, WS_B] }) });
+    page.on("dialog", (d) => d.accept());
+    await page.evaluate(() => window.setView("settings"));
+    await page.waitForSelector('.settings-nav-item[data-sec="workspaces"]');
+    await page.click('.settings-nav-item[data-sec="workspaces"]');
+    await page.waitForSelector(`[data-remove-ws="${WS_A}"]`);
+
+    const reloaded = page.waitForEvent("load", { timeout: 5000 });
+    await page.click(`[data-remove-ws="${WS_A}"]`);
+    await reloaded;
+    await page.waitForFunction(() => window.__SCOPE_STATE?.sessionsLoaded === true);
+    // After the reload the removed workspace is gone from the config.
+    await page.waitForSelector('.settings-nav-item[data-sec="workspaces"]');
+    await page.click('.settings-nav-item[data-sec="workspaces"]');
+    await page.waitForSelector(`[data-remove-ws="${WS_B}"]`);
+    assert.equal(await page.locator(`[data-remove-ws="${WS_A}"]`).count(), 0, "removed workspace stays gone");
+  });
+
+  test("REGRESSION: a removed workspace stays removed after a reload even if another project lists it", async () => {
+    // The rail is a union of every project's chatWorkspaces, but a removal is
+    // written only to the ACTIVE project's config — so another project may still
+    // list the workspace. The union merge must not resurrect it (reported: the
+    // removed workspace shows again after the automatic reload).
+    await boot({
+      sessions: [],
+      team: defaultTeam({ chatWorkspaces: [WS_A] }),
+      seed: { "scope-chat-custom-ws": JSON.stringify({ list: [], removed: [WS_A] }) },
+    });
+    await page.waitForSelector("#chat-workspaces");
+    assert.equal(await wsRow(page, WS_A).count(), 0, "another project's listing does not resurrect a removed workspace");
   });
 
   test("deleting a session row removes it from the rail", async () => {
@@ -383,6 +611,74 @@ describe("chat streaming", () => {
     turn.send({ type: "done", sessionId: "live-2" });
     turn.end();
     await page.waitForFunction(() => !document.getElementById("chat-stop").classList.contains("show"));
+  });
+
+  test("REGRESSION: opening a streaming conversation's own session row keeps the live turn and Stop", async () => {
+    // Reported flow: a chat turn is streaming; switching to the session row pi
+    // recorded for that same conversation showed a fresh, idle transcript with
+    // no Stop button, so the run could not be aborted. The busy free thread must
+    // be aliased to its OWN row (never an older same-prompt one).
+    await boot({ sessions: [], team: defaultTeam({ chatWorkspaces: [WS_A] }) });
+    await wsRow(page, WS_A).click();
+    const turn = await send(page, mock, "hello");
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "text", delta: "LIVE-STREAM-TEXT" });
+    await page.waitForFunction(() => document.getElementById("chat-messages").textContent.includes("LIVE-STREAM-TEXT"));
+
+    // pi records this conversation's own row while the turn is still running.
+    const now = new Date().toISOString();
+    await applySessions(page, mock, [
+      makeSession({ session_id: "s-own", cwd: WS_A, first_msg: "hello", first_ts: now, last_ts: now }),
+    ]);
+    await page.waitForSelector('.ws-sess[data-sid="s-own"]', { state: "visible", timeout: 4000 });
+    await sessRow(page, "s-own").click();
+    await sleep(150);
+
+    assert.ok((await canvas()).includes("LIVE-STREAM-TEXT"), "the live turn stays on screen");
+    assert.equal(await page.locator("#chat-stop").isVisible(), true, "Stop is available for the streaming session");
+    await page.click("#chat-stop");
+    const stop = mock.requestsFor("/chat/stop", "POST").at(-1);
+    assert.ok(stop && stop.body.sessionId, "Stop targets the live session's subprocess");
+
+    turn.send({ type: "done", sessionId: "pre-1" });
+    turn.end();
+  });
+
+  test("REGRESSION: clearing sessions from the Single page resets a stuck chat and re-arms a session", async () => {
+    // Reported flow: a chat turn was streaming, then the user cleared all
+    // sessions from the Single page. Chat kept the thread's stuck "busy" flag
+    // and its orphaned subprocess key, so Stop stayed on, New stayed disabled
+    // and every message queued to a conversation that no longer existed — only
+    // removing and re-adding the workspace recovered.
+    await boot({ sessions: [makeSession(SESS_A)], team: defaultTeam({ chatWorkspaces: [WS_A] }) });
+    await wsRow(page, WS_A).click();
+    const turn = await send(page, mock, "long task");
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "text", delta: "working" });
+    await page.waitForFunction(() => !!document.querySelector(".chat-text.chat-stream-text"));
+    assert.equal(await page.locator("#chat-stop").isVisible(), true);
+
+    page.on("dialog", (d) => d.accept());
+    await page.evaluate(() => window.setView("single"));
+    await page.evaluate(() => document.getElementById("btn-clear-all").click());
+    await page.waitForFunction(() => window.__SCOPE_STATE.sessions.length === 0);
+    await page.evaluate(() => window.setView("chat"));
+    // Landing on Chat after the clear must place the caret in the composer.
+    await page.waitForFunction(() => document.activeElement?.id === "chat-input", undefined, { timeout: 4000 });
+    await wsRow(page, WS_A).click();
+    await page.waitForFunction(() => document.activeElement?.id === "chat-input", undefined, { timeout: 4000 });
+
+    await page.waitForFunction(() => !document.getElementById("chat-stop").classList.contains("show"));
+    assert.equal(await page.locator("#chat-new").isDisabled(), false, "New session button is enabled");
+    assert.equal(await page.locator("#chat-composer").isVisible(), true, "composer is usable");
+    assert.equal(await page.locator(".chat-msg").count(), 0, "the dead stream was dropped");
+    assert.ok(mock.requestsFor("/chat/start", "POST").length >= 2, "a fresh pi session was auto-created");
+
+    // A new prompt opens a real turn again.
+    const turn2 = await send(page, mock, "fresh start");
+    await reply(turn2, "ok");
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live)");
+    turn.end();
   });
 
   test("REGRESSION: a mid-stream view switch preserves text and keeps streaming", async () => {

@@ -38,10 +38,22 @@ export interface SessionSummary {
   event_count: number;
   tags: string[];
   has_shutdown?: boolean;
+  /** Type of the most recent turn lifecycle event, `'turn_start'` or
+   *  `'turn_end'`, or undefined when a session recorded none. A session is
+   *  "running" from `turn_start` until `turn_end`; only after `turn_end` is it
+   *  waiting for the next user prompt. Used for the running/waiting status dot
+   *  so a long tool call or a wait on a subagent no longer flips the row to
+   *  "waiting" after the recency window elapses. */
+  last_turn_event?: string;
   /** First user message sent to the LLM in this session (truncated preview). */
   first_msg?: string;
   /** Session that spawned this one. Exact value recorded from the
    *  SCOPE_PARENT_SESSION env var by the pi-scope extension; falls back to a
    *  heuristic inference from spawn-ish tool_call events when absent. */
   parent_session_id?: string;
+  /** Authoritative context window (in tokens) resolved server-side from the
+   *  model metadata store for `<provider>/<model>`. 0/absent when the model is
+   *  unknown — the client then falls back to its own heuristic table. Used as
+   *  the denominator for the Single-view context-utilization bar. */
+  context_window?: number;
 }

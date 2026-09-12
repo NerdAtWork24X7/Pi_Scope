@@ -181,7 +181,12 @@ function computeAgentInfo(sid) {
     if (latestInput != null && latestPrefillMs != null && latestOutputTps != null) break;
   }
 
-  const contextTotal = window.SCOPE.getContextWindow(s.model);
+  // Prefer the authoritative per-model window resolved server-side from the
+  // model metadata store (keyed "<provider>/<model>"). The regex table in
+  // getContextWindow() only knows a handful of families and grossly mis-sizes
+  // the alias models pi actually runs (e.g. opencode-go/deepseek-v4.1-flash is
+  // 1M, not 64k), so it is now only a fallback when the server has no metadata.
+  const contextTotal = s.context_window || window.SCOPE.getContextWindow(s.model);
   const contextUsed = latestInput || 0;
   const contextRemaining = Math.max(0, contextTotal - contextUsed);
   const contextRemainingPct = contextTotal ? Math.round((contextRemaining / contextTotal) * 100) : 0;
@@ -364,6 +369,19 @@ window.setView = function(mode) {
   saveURLState();
 };
 
+// Hard-reload onto the Chat view with a cache-bust marker (`?_=<ts>`). Clicking
+// the Chat button must never run Electron's renderer-cached copy of the chat
+// JS/CSS, so navigate instead of an in-place SPA switch: the new document URL
+// makes the HTML no-store, and the server tags every local asset in it with the
+// same marker (see serveIndex) so chat.js / styles.css are fetched from the
+// network rather than revalidated. The hash keeps the reloaded app on Chat.
+window.reloadChat = function() {
+  const p = new URLSearchParams(location.search);
+  p.set("view", "chat");
+  p.set("_", String(Date.now()));
+  location.replace(`${location.pathname}?${p.toString()}#view=chat`);
+};
+
 // ─── Sessions ───────────────────────────────────────────────────────────────
 
 async function fetchSessions() {
@@ -447,6 +465,11 @@ function clearAllSessions() {
         STATE.expandedGroups.clear();
         clearSelectedSession();
         renderSessions();
+        // Chat keeps its own thread/subprocess state; without this a streaming
+        // turn stayed stuck "busy" (Stop shown, New disabled) and messages
+        // queued to sessions that no longer existed until the workspace was
+        // removed and re-added.
+        window.__chatOnSessionsCleared?.();
       } else {
         alert("Failed to clear agents: " + (data?.error ?? "unknown error"));
       }
@@ -467,6 +490,9 @@ function deleteSession(sid) {
         delete STATE.sessionStats[sid];
         if (STATE.selectedSessionId === sid) clearSelectedSession();
         renderSessions();
+        // Let Chat forget the thread + pi subprocess behind this session too,
+        // wherever it was deleted from (Single view sidebar, chat rail, …).
+        window.__chatOnSessionDeleted?.(sid);
       } else {
         alert("Failed to delete session: " + (data?.error ?? "unknown error"));
       }
@@ -727,9 +753,14 @@ function buildSessionItem(s) {
   info.append(name, cost);
   el.appendChild(info);
 
-  if (STATE.view === "single" || STATE.view === "trajectory") {
-    el.addEventListener("click", () => selectSession(s.session_id));
-  }
+  // Bind unconditionally. Rows are reconciled by key and reused across view
+  // switches, so gating the listener on the view *at build time* left every row
+  // built under chat/terminal/files/git unclickable after switching to Single
+  // (the node is never recreated). Selecting is only meaningful in these two
+  // views, so gate inside the handler instead of at bind time.
+  el.addEventListener("click", () => {
+    if (STATE.view === "single" || STATE.view === "trajectory") selectSession(s.session_id);
+  });
 
   // Filled through the same updater the reconciler uses, so a freshly built row
   // and an in-place patched one can never drift apart.
@@ -781,9 +812,11 @@ function buildMiniSessionItem(s) {
   dot.className = "mini-dot";
   el.appendChild(dot);
 
-  if (STATE.view === "single" || STATE.view === "trajectory") {
-    el.addEventListener("click", () => selectSession(s.session_id));
-  }
+  // See buildSessionItem: bind unconditionally so a reconciled row stays
+  // clickable after the view switches to Single/Trajectory.
+  el.addEventListener("click", () => {
+    if (STATE.view === "single" || STATE.view === "trajectory") selectSession(s.session_id);
+  });
 
   // Right-click (or long-press) to delete in collapsed mode
   el.addEventListener("contextmenu", (e) => {
@@ -1472,6 +1505,9 @@ function patchSessionFromSSE(evt) {
   // Lifecycle events update has_shutdown.
   if (evt.type === "session_start") session.has_shutdown = false;
   if (evt.type === "session_shutdown") session.has_shutdown = true;
+  // Track the turn lifecycle so a session reads "running" from turn_start
+  // until turn_end, then "waiting" — see subagentStatus().
+  if (evt.type === "turn_start" || evt.type === "turn_end") session.last_turn_event = evt.type;
   // Advance last_ts so the subagentStatus() green window stays current.
   if (evt.ts) session.last_ts = evt.ts;
 }

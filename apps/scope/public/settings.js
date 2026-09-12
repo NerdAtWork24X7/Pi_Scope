@@ -1038,7 +1038,13 @@
       b.addEventListener("click", () => {
         const w = b.dataset.removeWs;
         if (!confirm(`Remove this workspace?\n\n${w}\n\nIts recorded sessions and events are permanently deleted from the database. This cannot be undone.`)) return;
-        postTeam("removeWorkspace", { path: w });
+        postTeam("removeWorkspace", { path: w }).then((ok) => {
+          // Removing a workspace rewrites per-project config the whole app reads
+          // at boot; reload so every view starts from the new state (and any
+          // updated static assets — they are served no-cache, so a plain reload
+          // revalidates them).
+          if (ok) location.reload();
+        });
       })
     );
     const addWsInput = $("#set-add-ws");
@@ -1266,6 +1272,13 @@
 
   window.__settingsOnView = onView;
   window.__settingsRetry = function () { loaded = false; onView(); };
+
+  // app.js restores the initial view with setView(STATE.view) while it executes,
+  // which is BEFORE this file is parsed — so its __settingsOnView call was a
+  // no-op and a boot that lands directly on Settings sat on "Loading settings…"
+  // forever. Re-issue that notification now that the hook exists (this matters
+  // for the automatic reload after removing a workspace from Settings).
+  if (state?.view === "settings") onView();
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

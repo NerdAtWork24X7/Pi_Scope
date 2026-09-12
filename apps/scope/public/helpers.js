@@ -89,8 +89,17 @@
   }
 
   // Subagent status for the expanded session list: red=stopped, orange=waiting, green=running.
+  // The session's turn lifecycle is the ground truth for "still working": a
+  // turn stays open from turn_start until turn_end, so a long tool call or a
+  // wait on a dispatched subagent keeps the row green instead of flipping to
+  // "waiting" when the 10s activity window lapses. Only after turn_end (the
+  // agent finished and is waiting for the next prompt) does it turn orange.
   function subagentStatus(s) {
     if (s?.has_shutdown) return "red";
+    if (s?.last_turn_event === "turn_start") return "green";
+    if (s?.last_turn_event === "turn_end") return "orange";
+    // Sessions with no captured turn events (older harnesses, capture-only
+    // sessions) fall back to the recency heuristic.
     if (!s?.last_ts) return "orange";
     const ageS = (Date.now() - new Date(s.last_ts).getTime()) / 1000;
     if (ageS <= 10) return "green";

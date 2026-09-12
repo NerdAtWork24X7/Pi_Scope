@@ -76,23 +76,19 @@
   }
   // Fold a project's config snapshot into the union (no-op when already known).
   // chatWorkspaces / chatWorkspacesRemoved are stored PER PROJECT, but the
-  // sidebar is a UNION of every project's list we have seen. A removal recorded
-  // in ONE project's config must therefore not hide a workspace that ANOTHER
-  // project still lists — previously mono-pi-extension's removal of Pi_Scope
-  // made Pi_Scope vanish from the rail everywhere, even though Pi_Scope's own
-  // config lists it (the reported "empty workspace gets overwritten" bug).
-  // Rule: a workspace explicitly listed by any seen project stays visible;
-  // a removal is honored only while no seen project lists it.
+  // sidebar is a UNION of every project's list we have seen. A removal must
+  // therefore be authoritative across the union: if a listing from any project
+  // could clear it, a workspace the user removed reappears on the next reload
+  // as soon as another project still lists it (reported: the removed workspace
+  // comes back after the reload that follows removing it). Only an explicit
+  // re-add clears a removal (addWorkspace / submitAddWorkspace), so a listing
+  // adds a workspace only while it is not marked removed.
   function mergeCustomWs(data) {
     if (!data) return;
     let changed = false;
     for (const w of data.chatWorkspaces || []) {
+      if (CH.customWs.removed.includes(w)) continue; // an explicit removal wins
       if (!CH.customWs.list.includes(w)) { CH.customWs.list.push(w); changed = true; }
-      // A listing anywhere beats a removal recorded elsewhere.
-      if (CH.customWs.removed.includes(w)) {
-        CH.customWs.removed = CH.customWs.removed.filter((r) => r !== w);
-        changed = true;
-      }
     }
     for (const w of data.chatWorkspacesRemoved || []) {
       if (!CH.customWs.list.includes(w) && !CH.customWs.removed.includes(w)) {
@@ -236,6 +232,13 @@
   // that began much earlier cannot be the one a prompt typed just now belongs
   // to, even if it shares the opening line.
   const ADOPT_FRESH_MS = 60 * 60 * 1000;
+  // While a turn is still streaming, its row must be the conversation's OWN
+  // recording — and that row is created by the conversation's first prompt, so
+  // its first event can never sit meaningfully before the send. A small
+  // tolerance absorbs event/clock jitter; an older same-prompt session is
+  // rejected. Idle adoption keeps the looser ADOPT_FRESH_MS window because a
+  // restored conversation's in-memory start can sit well before its row.
+  const ADOPT_NOT_OLDER_MS = 5000;
   // The opening prompt of a free thread (the text pi records as first_msg).
   function threadFirstPrompt(t) {
     return (t.history.find((m) => m.role === "user")?.text || t.firstPrompt || "")
@@ -247,7 +250,13 @@
   // Matching by list order alone could adopt an unrelated same-prompt session,
   // which then showed the live conversation as that session's transcript (and
   // sent its prompts to the wrong session file).
-  function matchRecordedRow(t) {
+  //
+  // `requireNotOlder` is the streaming-turn mode: a live thread may only bind a
+  // row that did not start before the conversation (see ADOPT_NOT_OLDER_MS),
+  // which is exactly its own recording. Without it, a streaming turn could be
+  // aliased to an older same-prompt session because the real row had not been
+  // polled in yet.
+  function matchRecordedRow(t, requireNotOlder = false) {
     const want = threadFirstPrompt(t);
     if (!want) return null;
     const started = t.history[0]?.ts || 0;
@@ -260,11 +269,15 @@
       const claimed = CH.threads.get(s.session_id);
       if (claimed && claimed !== t) continue;
       const ft = Date.parse(s.first_ts || "") || 0;
-      // A session that clearly predates this live conversation cannot be its
-      // recording, even when it opens with the same prompt. Without this gate,
-      // when the real row had not been polled in yet, an older same-prompt
-      // session was adopted and the live stream showed up under ITS row.
-      if (started && ft && Math.abs(ft - started) > ADOPT_FRESH_MS) continue;
+      if (requireNotOlder) {
+        // No timestamps means we cannot prove this row belongs to the live
+        // conversation, so it is left to a dedicated session thread.
+        if (!started || !ft || ft < started - ADOPT_NOT_OLDER_MS) continue;
+      } else if (started && ft && Math.abs(ft - started) > ADOPT_FRESH_MS) {
+        // A session that clearly predates this conversation cannot be its
+        // recording, even when it opens with the same prompt.
+        continue;
+      }
       const score = started && ft ? Math.abs(ft - started) : 0;
       if (score < bestScore) { best = s; bestScore = score; }
     }
@@ -286,14 +299,14 @@
     if (row.parent_session_id) return null;
     if (!String(row.first_msg || "").trim()) return null;
     for (const t of CH.threads.values()) {
-      // A thread that is mid-run is never aliased: its recording row is either
-      // not written yet or ambiguous, and binding it here is how one session's
-      // live stream appeared in another session's window when the user switched
-      // rows while a turn was streaming. It can be adopted on a later poll,
-      // once the turn settles.
-      if (t.kind !== "free" || t.adopted || t.busy) continue;
+      // A streaming thread may still be aliased to the row pi just recorded for
+      // it — but ONLY that row. This is what keeps the Stop button (and the live
+      // turn) attached when the user opens the streaming session's row: the
+      // thread's own row sits at/after its first prompt, while an older
+      // same-prompt session is rejected (see matchRecordedRow).
+      if (t.kind !== "free" || t.adopted) continue;
       if (t.workspace !== row.cwd) continue;
-      if (matchRecordedRow(t)?.session_id !== sid) continue;
+      if (matchRecordedRow(t, t.busy)?.session_id !== sid) continue;
       t.adopted = true;
       t.sid = sid;
       t.resumeFile = row.session_file || t.resumeFile;
@@ -304,14 +317,16 @@
   }
   // Called on every poll: match un-adopted free threads to the session row pi
   // recorded for them, so opening that row continues the SAME thread/subprocess
-  // instead of spawning a second pi on the same session file.
+  // instead of spawning a second pi on the same session file. A busy thread is
+  // matched strictly (its own row only) so its live stream and Stop button stay
+  // reachable from the row while the turn is still running.
   function adoptFreeThreads() {
     const seen = new Set();
     for (const t of CH.threads.values()) {
       if (seen.has(t)) continue;
       seen.add(t);
-      if (t.kind !== "free" || t.adopted || t.busy) continue;
-      const row = matchRecordedRow(t);
+      if (t.kind !== "free" || t.adopted) continue;
+      const row = matchRecordedRow(t, t.busy);
       if (!row) continue;
       if (CH.threads.has(row.session_id)) continue;
       t.adopted = true;
@@ -488,6 +503,9 @@
     renderChat();
     attemptRestore();
     refreshOpenSession();
+    // Returning to the Chat view should land ready to type: the view switch is
+    // an explicit user action, and the composer is the primary surface here.
+    if (CH.workspace) focusComposer();
   }
 
   // ─── Workspace rail (left) ────────────────────────────────────────────────
@@ -594,9 +612,16 @@
   // The row stays minimal (status dot + first message); the session message
   // and status live in the hover tooltip, and the model / token usage / time
   // are shown in the composer status line below the input.
-  function renderWsSession(s, isNested) {
+  // `groupActive` is true when one of this session's descendant subagents is
+  // still running: the moment a main session hands work to a subagent it stops
+  // emitting its own events, so `last_ts` goes stale and the row would flip to
+  // "waiting" while the tree is in fact still working. Keep reporting
+  // "running" then — but never for a stopped (red) session, which a lingering
+  // child must not mask.
+  function renderWsSession(s, isNested, groupActive) {
     const name = s.agent_name ?? s.cwd?.split("/").pop() ?? S.shortId(s.session_id);
-    const st = S.subagentStatus(s);
+    const own = S.subagentStatus(s);
+    const st = groupActive && own !== "red" ? "green" : own;
     const stMeta = piStatusMeta(st);
     const stats = state.sessionStats[s.session_id];
     const hasErr = (stats?.error_count || 0) > 0;
@@ -693,11 +718,13 @@
     const level = (s, nested) => {
       if (rendered.has(s.session_id)) return ""; // cycle guard (defensive)
       rendered.add(s.session_id);
-      const rows = renderWsSession(s, nested);
+      // Computed once and shared by the row dot and the fold indicator: a
+      // parent keeps its "running" status while any descendant is live.
+      const running = runningUnder(s.session_id);
+      const rows = renderWsSession(s, nested, running);
       const kids = subs.get(s.session_id) || [];
       if (!kids.length) return rows;
       const open = CH.subOpen.has(s.session_id);
-      const running = runningUnder(s.session_id);
       const label = `${kids.length} sub-session${kids.length === 1 ? "" : "s"}`;
       return (
         rows +
@@ -764,7 +791,13 @@
     renderChat();
     attachThread(t); // resume live streaming if this thread is still running
     if (wasSessionView) setConversationHint(t);
-    if (el.input) el.input.focus();
+    // Clicking a workspace is a request to chat there — including when it is
+    // already the active row. Make sure a pi session is armed: the workspace's
+    // session may have been dropped (e.g. its recorded session was deleted from
+    // the Single view), and without this the box showed with nothing behind it
+    // until the user clicked "New session". Idempotent while one is live.
+    ensureChatSession();
+    focusComposer();
   }
 
   // Ask the host file manager for a directory (Electron only).
@@ -847,48 +880,89 @@
     if (typeof window.setView === "function") window.setView("single");
   }
 
-  // Delete a session from the workspace rail. Reuses the app's deleteSession
-  // (confirm + DELETE + main-sidebar re-render); on success, clears any open
-  // transcript and re-renders both chat rails immediately.
+  // Delete a session from the workspace rail. The actual delete (confirm +
+  // DELETE + main-sidebar re-render) lives in the app; on success the app calls
+  // __chatOnSessionDeleted, which runs forgetChatSession below.
   function deleteChatSession(sid) {
     if (typeof window.SCOPE?.deleteSession !== "function") return;
-    const p = window.SCOPE.deleteSession(sid);
-    if (!p) return; // canceled by the user
-    p.then(() => {
-      const cur = curThread();
-      const visible = !!cur && cur.openSid === sid;
-      // Kill the deleted session's pi subprocess and forget its thread wherever
-      // it lives. This used to happen only when the session was the one on
-      // screen, so a background thread (or an adopted free thread aliased to
-      // it) kept streaming a conversation that no longer exists.
-      const dead = CH.threads.get(sid);
-      killChatKey(dead?.key);
-      CH.threads.delete(sid);
-      // A workspace conversation can be aliased to this row (pi recorded it
-      // under this id). Unbind it instead of leaving it stuck on a session that
-      // no longer exists: it is the workspace's own conversation again, with no
-      // subprocess and no resume target, so it can re-adopt to the next row pi
-      // records for it rather than forking a second pi on the same file.
-      if (dead && dead.kind === "free") {
-        dead.sid = null;
-        dead.adopted = false;
-        dead.key = null;
-        dead.resumeFile = null;
-        if (curThread() === dead) syncCurThread();
-      }
-      if (visible) {
-        // The deleted session was on screen: drop the canvas back to the
-        // workspace's blank conversation.
-        killChatKey(cur.key);
-        CH.threads.delete(cur.id);
-        bindThread(freeThread(CH.workspace));
-        renderChat();
-      }
-      CH.sessions = (state.sessions || []).filter(isChatSession);
-      railSig = chatRailSig();
-      renderWorkspaces();
-      renderAgents();
-    });
+    void window.SCOPE.deleteSession(sid);
+  }
+
+  // Forget a recorded session that was deleted anywhere in the UI (the rail
+  // here, or the Single view's sidebar). Idempotent — safe to run twice.
+  // Clears any open transcript, kills the session's pi subprocess and drops its
+  // thread so a deleted conversation can't keep streaming into the UI.
+  function forgetChatSession(sid) {
+    if (!sid) return;
+    const cur = curThread();
+    const visible = !!cur && cur.openSid === sid;
+    const dead = CH.threads.get(sid);
+    killChatKey(dead?.key);
+    CH.threads.delete(sid);
+    // A workspace conversation can be aliased to this row (pi recorded it under
+    // this id). Unbind it instead of leaving it stuck on a session that no
+    // longer exists: it is the workspace's own conversation again, with no
+    // subprocess and no resume target, so it can re-adopt to the next row pi
+    // records for it rather than forking a second pi on the same file.
+    if (dead && dead.kind === "free") {
+      dead.sid = null;
+      dead.adopted = false;
+      dead.key = null;
+      dead.resumeFile = null;
+      if (curThread() === dead) syncCurThread();
+    }
+    if (visible) {
+      // The deleted session was on screen: drop the canvas back to the
+      // workspace's blank conversation and re-arm a fresh pi session so the
+      // composer is immediately usable instead of pointed at a dead key.
+      killChatKey(cur.key);
+      CH.threads.delete(cur.id);
+      bindThread(freeThread(CH.workspace));
+      renderChat();
+      updateHeader();
+      ensureChatSession();
+    }
+    CH.sessions = (state.sessions || []).filter(isChatSession);
+    railSig = chatRailSig();
+    renderWorkspaces();
+    renderAgents();
+  }
+
+  // Every recorded session was just wiped from the store (the Single view's
+  // "Clear all agents"). Chat holds its own thread/subprocess state, so the
+  // streaming turn's stuck "busy" flag and its now-orphaned subprocess key used
+  // to keep the composer hostage — New disabled and every message queued to a
+  // conversation that no longer existed. Kill the subprocesses, forget every
+  // thread and re-arm the open workspace's own fresh conversation.
+  function forgetAllChatSessions() {
+    for (const t of new Set(CH.threads.values())) killChatKey(t.key);
+    CH.threads.clear();
+    clearSnapshot();
+    if (CH.workspace) {
+      const t = freeThread(CH.workspace);
+      bindThread(t);
+      ensureChatSession();
+      renderChat();
+      updateHeader();
+      renderChatFooter();
+      focusComposer();
+    } else {
+      CH.curId = null;
+      CH.chatHistory = [];
+      CH.chatSessionId = null;
+      CH.resumeFile = null;
+      CH.chatBusy = false;
+      CH.suppressLive = false;
+      CH.openSid = null;
+      CH.loadingSid = null;
+      CH.lastOpenCount = null;
+      renderChat();
+      updateHeader();
+    }
+    CH.sessions = (state.sessions || []).filter(isChatSession);
+    railSig = chatRailSig();
+    renderWorkspaces();
+    renderAgents();
   }
 
   async function submitAddWorkspace(picked) {
@@ -981,6 +1055,12 @@
     }
     renderWorkspaces();
     renderAgents();
+    // Deleting a workspace rewrites per-project config the whole app reads at
+    // boot (Agent Team, the shared cwd used by Files/Git/Terminal, and the saved
+    // workspace list), so reload instead of sitting on a half-updated state. A
+    // plain reload is enough to pick up fresh JS too: static assets are served
+    // cache-control: no-cache with an ETag, so the browser revalidates them.
+    location.reload();
   }
 
   // ─── Agent-team rail (right) ─────────────────────────────────────────────
@@ -1408,6 +1488,12 @@
     // their session row is clicked). Nothing is restored before a selection.
     attemptRestore();
     ensureChatSession();
+    // Selecting a workspace is a request to type here: put the caret in the
+    // composer so the keyboard works immediately, without an extra click. The
+    // click target is a plain div (not focusable), so without this focus stays
+    // wherever it was before the view switch — e.g. a now-hidden Single-view
+    // button — and keystrokes go nowhere.
+    focusComposer();
     // NB: no clearSnapshot() here — attemptRestore() validates the stored
     // snapshot's workspace and restores the conversation, so wiping it here
     // would defeat reload persistence.
@@ -1648,6 +1734,14 @@
     }
     updateHeader();
     renderChatFooter();
+    // The spawn/response settled after the workspace click; re-assert focus so
+    // the caret is painted even if the pane only finished laying out meanwhile.
+    // Only when nothing else has deliberately taken focus (don't yank the user
+    // out of another field if they moved on during the round-trip).
+    if (document.body.classList.contains("layout-chat")) {
+      const ae = document.activeElement;
+      if (!ae || ae === document.body || ae === el.input) focusComposer();
+    }
   }
 
   // ─── Rendering helpers: markdown-lite ─────────────────────────────────────
@@ -2736,6 +2830,39 @@
     el.hint.classList.toggle("err", kind === "err");
   }
 
+  // True while an IME composition is in flight in the composer. focusComposer()
+  // must not blur the field then — blur would commit/abort the composition.
+  let inputComposing = false;
+
+  // Focus the message box and put the caret at the end. The extra passes matter
+  // after a view switch / session clear: the composer becomes visible in the
+  // same task the focus is requested, and some engines only paint the blinking
+  // caret once the newly-shown pane has laid out. Without the retry the box
+  // looked normal but had no text cursor until the user clicked it (or reloaded).
+  function focusComposer() {
+    let cycled = false;
+    const apply = () => {
+      if (!el.input || el.input.disabled) return;
+      // A native confirm()/alert() (the delete / clear dialogs) can hand the
+      // window back with the composer STILL the activeElement but its blinking
+      // caret desynced: the box shows its focus ring yet no caret, and a second
+      // focus() is a no-op. Blur first (a no-op when it isn't focused) so the
+      // following focus() is always a real focus transition that repaints the
+      // caret. Skipped mid-IME composition (blur() would abort it).
+      if (!cycled && !inputComposing) {
+        cycled = true;
+        try { el.input.blur(); } catch { /* ignore */ }
+      }
+      try { el.input.focus({ preventScroll: true }); } catch { try { el.input.focus(); } catch {} }
+      try {
+        const n = el.input.value.length;
+        el.input.setSelectionRange(n, n);
+      } catch { /* setSelectionRange unsupported — focus alone is enough */ }
+    };
+    apply();
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(apply);
+  }
+
   function setComposerEnabled(on) {
     if (!el.input || !el.send || !el.model) return;
     el.input.disabled = !on;
@@ -2790,7 +2917,11 @@
       el.liveDot.title = busy ? "pi is working…" : st === "green" ? "agent running" : "idle";
     }
     if (el.btnNew) {
-      el.btnNew.disabled = busy || (!CH.chatHistory.length && !CH.loadingSid);
+      // "Start a new session" is available whenever a workspace is open and no
+      // turn is running. It used to also require existing history, which left
+      // the button dead on an empty/freshly-cleared conversation exactly when
+      // the user needed it to (re)arm a session.
+      el.btnNew.disabled = busy;
       el.btnNew.title = "Start a new session";
     }
     if (el.btnOpen) {
@@ -4113,7 +4244,18 @@
         }
       });
       el.input.addEventListener("input", () => autoGrow(el.input));
+      el.input.addEventListener("compositionstart", () => { inputComposing = true; });
+      el.input.addEventListener("compositionend", () => { inputComposing = false; });
     }
+    // A native dialog (the delete/clear confirm) can drop focus onto <body>, or
+    // return it to the composer with the caret desynced. When the window regains
+    // focus on the Chat view, put the caret back in the composer so the user can
+    // type immediately instead of clicking the box.
+    window.addEventListener("focus", () => {
+      if (!document.body.classList.contains("layout-chat") || !CH.workspace) return;
+      const ae = document.activeElement;
+      if (!ae || ae === document.body || ae === el.input) focusComposer();
+    });
 
     CH.sessions = (state.sessions || []).filter(isChatSession);
     loadAgentTeam();
@@ -4137,6 +4279,11 @@
   // Expose hooks for app.js
   window.__chatOnView = onView;
   window.__chatOnSessions = onSessions;
+  // The app deletes sessions from outside Chat (Single view's Clear-all button
+  // and per-row ✕); these let it hand the change to Chat for thread/subprocess
+  // cleanup instead of leaving stale, streaming threads behind.
+  window.__chatOnSessionDeleted = forgetChatSession;
+  window.__chatOnSessionsCleared = forgetAllChatSessions;
   // TEMP DEBUG (removed before completion): inspect thread identity/aliasing.
   window.__chatDebug = () => ({
     curId: CH.curId,

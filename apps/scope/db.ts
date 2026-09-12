@@ -149,6 +149,14 @@ export function prepare(db: DatabaseSync): PreparedQueries {
       tags_json,
       EXISTS (SELECT 1 FROM events WHERE events.session_id = sessions.session_id AND events.type = 'session_shutdown') AS has_shutdown,
       COALESCE(
+        (SELECT e.type FROM events e
+         WHERE e.session_id = sessions.session_id
+           AND e.type IN ('turn_start', 'turn_end')
+         ORDER BY e.seq DESC
+         LIMIT 1),
+        ''
+      ) AS last_turn_event,
+      COALESCE(
         (SELECT substr(json_extract(e.payload_json, '$.text'), 1, 200)
          FROM events e
          WHERE e.session_id = sessions.session_id
@@ -521,6 +529,7 @@ export function rowToSession(row: any): SessionSummary {
     has_shutdown: !!row.has_shutdown,
     first_msg: row.first_msg || undefined,
     parent_session_id: row.parent_session_id || undefined,
+    last_turn_event: row.last_turn_event || undefined,
   };
 }
 

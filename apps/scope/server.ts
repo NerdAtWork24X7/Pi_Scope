@@ -1010,6 +1010,35 @@ function serveStatic(relPath: string, req?: Request): Response | null {
   });
 }
 
+/**
+ * Serve index.html, propagating a cache-bust marker to the page's local assets.
+ *
+ * The Chat button hard-reloads the app with `?_=<ts>` so a stale Electron
+ * renderer can never keep running old chat JS/CSS. Adding the marker to the
+ * document URL alone is not enough — subresources keep their own URLs and would
+ * still be served from cache — so every local `src=`/`href=` in the HTML is
+ * tagged with the same marker. That makes each one a URL the browser has never
+ * cached, forcing a network fetch. The HTML itself is `no-store` for the same
+ * reason. Without the marker this is a plain (ETag-revalidated) static read.
+ */
+async function serveIndex(req: Request, url: URL): Promise<Response | null> {
+  const bust = url.searchParams.get("_");
+  if (!bust) return serveStatic("index.html", req);
+  const base = serveStatic("index.html");
+  if (!base) return null;
+  const html = (await base.text()).replace(
+    /\b(src|href)="([^"#?]+)"/g,
+    (m, attr, val) =>
+      // Leave absolute paths, protocol-relative and scheme URLs (data:, http:…) alone.
+      /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i.test(val)
+        ? m
+        : `${attr}="${val}?_=${encodeURIComponent(bust)}"`,
+  );
+  return new Response(html, {
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
 // ─── File diff helpers (git working-tree vs HEAD) ──────────────────────
 
 /** Resolve `file` against `cwd`, refusing anything that escapes `cwd`. */
@@ -1276,7 +1305,7 @@ async function handle(req: Request): Promise<Response> {
   }
 
   if (pathname === "/" || pathname === "/index.html") {
-    return serveStatic("index.html", req) ?? textResponse("not found", 404, "text/plain");
+    return (await serveIndex(req, url)) ?? textResponse("not found", 404, "text/plain");
   }
 
   if (pathname.match(/\.(js|css|svg|png|ico|ttf|woff2?)$/)) {
@@ -2210,6 +2239,16 @@ async function handle(req: Request): Promise<Response> {
       const sessions = rows
         .filter((r) => !since || r.last_ts >= since)
         .map(rowToSession);
+
+      // Annotate each session with the authoritative context window from the
+      // model metadata store, keyed "<provider>/<model>" — the same source the
+      // Chat footer gauge uses. The UI context bar otherwise falls back to a
+      // small regex table that mis-sizes the alias models pi actually runs.
+      const modelMeta = buildModelMeta();
+      for (const s of sessions) {
+        const key = s.provider && s.model ? `${s.provider}/${s.model}` : "";
+        s.context_window = (key && modelMeta[key]?.contextWindow) || 0;
+      }
 
       // Spawn linkage for subagent nesting in the UI. The exact parent is
       // stored on the session row (recorded by the extension from the

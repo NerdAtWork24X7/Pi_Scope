@@ -228,6 +228,13 @@ export async function startMockBackend() {
     if (pathname === "/sessions" && method === "GET") {
       return sendJSON(res, { sessions: state.sessions });
     }
+    if (pathname === "/sessions" && method === "DELETE") {
+      const deleted = { sessions: state.sessions.length, events: Object.values(state.eventsBySid).reduce((n, e) => n + e.length, 0) };
+      state.sessions = [];
+      state.eventsBySid = {};
+      state.stats = {};
+      return sendJSON(res, { ok: true, deleted });
+    }
     if (pathname === "/sessions/stats" && method === "GET") {
       const ids = String(parsed.searchParams.get("ids") || "").split(",").filter(Boolean);
       const stats = {};
@@ -347,7 +354,7 @@ export async function startMockBackend() {
       return;
     }
 
-    if (pathname === "/settings") return sendJSON(res, { pi: {}, agentTeam: snapshotTeam() });
+    if (pathname === "/settings") return sendJSON(res, { pi: {}, settingsRaw: {}, ...snapshotTeam() });
 
     return sendJSON(res, { error: `mock: unhandled ${method} ${pathname}` }, 404);
   });

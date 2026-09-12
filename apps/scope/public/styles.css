@@ -4400,11 +4400,22 @@
       border-color: var(--accent);
     }
     .chat-ws-caret {
-      width: 12px;
-      font-size: 9px;
+      width: 18px;
+      height: 22px;
+      font-size: 13px;
+      line-height: 1;
       color: var(--muted);
       text-align: center;
-      transition: transform 0.12s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      border-radius: 5px;
+      transition: background 0.12s ease, color 0.12s ease, transform 0.12s ease;
+    }
+    .chat-ws:hover .chat-ws-caret {
+      background: var(--row-hover);
+      color: var(--fg);
     }
     .chat-ws.active .chat-ws-caret {
       color: var(--accent);
@@ -4543,14 +4554,26 @@
       color: var(--text);
     }
     .ws-sess-fold-caret {
-      width: 12px;
-      font-size: 9px;
+      width: 18px;
+      height: 22px;
+      font-size: 13px;
+      line-height: 1;
       text-align: center;
       color: var(--muted);
       flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 5px;
+      transition: color 0.12s ease, background 0.12s ease;
+    }
+    .ws-sess-fold:hover .ws-sess-fold-caret {
+      background: var(--row-hover);
+      color: var(--text);
     }
     .ws-sess-fold.open .ws-sess-fold-caret {
       color: var(--accent);
+      background: var(--accent-soft);
     }
     .ws-sess-fold-label {
       font-weight: 600;
@@ -5858,6 +5881,7 @@
       border-radius: 18px 18px 0 0;
       background: transparent;
       color: var(--text);
+      caret-color: var(--text);
       font-size: 14px;
       font-family: inherit;
       padding: 13px 16px 6px;
