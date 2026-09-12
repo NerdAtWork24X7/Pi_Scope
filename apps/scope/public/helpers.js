@@ -29,9 +29,11 @@
   }
 
   function hashString(s) {
+    // Coerce once — the old loop called String(s) on every iteration.
+    const str = String(s);
     let h = 2166136261;
-    for (let i = 0; i < String(s).length; i++) {
-      h ^= String(s).charCodeAt(i);
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
       h = Math.imul(h, 16777619);
     }
     return h >>> 0;
@@ -110,8 +112,40 @@
   // ended. Tries text first, then thinking, then falls back to tool_result
   // content (subagents often have tool-call-only assistant messages).  Returns
   // empty string when nothing was captured.
+  // ── Memo for the two backward scans below ────────────────────────────────
+  // turnFinalResponse / agentFinalResponse walk the WHOLE event list backwards,
+  // and the Single view calls them once or twice per rendered row — a long
+  // session therefore re-scanned thousands of events per row, which is O(n²)
+  // over a render (and over the event stream while a search filter is on).
+  //
+  // The cache is keyed by the event-list identity plus its length and last
+  // event: any append changes that key, so nothing stale can outlive new
+  // events. Results only depend on events up to the row's own seq, which later
+  // (higher-seq) appends can never change — recomputation after an append is
+  // merely wasted, never wrong.
+  const finalResponseCache = new WeakMap();
+  function finalResponseCacheFor(events) {
+    const last = events.length ? events[events.length - 1] : null;
+    const key = events.length + "|" + (last?.event_id || last?.seq || "");
+    let holder = finalResponseCache.get(events);
+    if (!holder || holder.key !== key) {
+      holder = { key, turn: new Map(), agent: new Map() };
+      finalResponseCache.set(events, holder);
+    }
+    return holder;
+  }
+
   function turnFinalResponse(turnEnd, events) {
     if (!events || !events.length) return "";
+    const cache = finalResponseCacheFor(events);
+    const ck = `${turnEnd.session_id}|${turnEnd.payload?.turn_index ?? ""}|${turnEnd.seq}`;
+    if (cache.turn.has(ck)) return cache.turn.get(ck);
+    const out = turnFinalResponseUncached(turnEnd, events);
+    cache.turn.set(ck, out);
+    return out;
+  }
+
+  function turnFinalResponseUncached(turnEnd, events) {
     const sid = turnEnd.session_id;
     const ti = turnEnd.payload?.turn_index;
 
@@ -157,6 +191,15 @@
   // the turn_index filter.
   function agentFinalResponse(agentEnd, events) {
     if (!events || !events.length) return "";
+    const cache = finalResponseCacheFor(events);
+    const ck = `${agentEnd.session_id}|${agentEnd.seq}`;
+    if (cache.agent.has(ck)) return cache.agent.get(ck);
+    const out = agentFinalResponseUncached(agentEnd, events);
+    cache.agent.set(ck, out);
+    return out;
+  }
+
+  function agentFinalResponseUncached(agentEnd, events) {
     const sid = agentEnd.session_id;
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];

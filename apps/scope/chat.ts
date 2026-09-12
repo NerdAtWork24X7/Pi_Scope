@@ -26,6 +26,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { readStoredKeys } from "./api-keys.ts";
 
 const ENCODER = new TextEncoder();
 
@@ -247,12 +248,12 @@ function handleLine(sess: ChatSession, line: string) {
 }
 
 /** Venv bin directories to expose to the chat pi subprocess, most specific
- *  first. The Chat view spawns pi directly (no shell, no profile sourcing), so
- *  it inherits the server's env — which, unlike the in-browser Terminal (a real
- *  interactive bash that sources ~/.bashrc), never has the project's Python
- *  venv activated. pi's web-fetch-style tools then fail with "cannot find
- *  playwright" even though it is installed in the venv. Mirror what activating
- *  the venv in a terminal does: prepend the venv's bin dir to PATH.
+ *  first. Pi is spawned inside the user's interactive shell (see spawnChat), so
+ *  their rc files are sourced — but activating a project's Python venv is a manual
+ *  step nobody puts in an rc, so the venv is still absent from PATH and pi's
+ *  web-fetch-style tools fail with "cannot find playwright" even though it is
+ *  installed there. Mirror what `source .venv/bin/activate` does in a terminal:
+ *  prepend the venv's bin dir to PATH.
  *
  *  Only existing dirs that actually look like a venv (have a bin/{activate,
  *  python, python3}) are added; a workspace-local venv wins over the home one. */
@@ -372,7 +373,12 @@ function resolvePlaywrightBrowsersPath(): string | null {
  *
  *  Beyond PATH, PLAYWRIGHT_BROWSERS_PATH is restored from the user's shell rc
  *  (see resolvePlaywrightBrowsersPath) so pi's web-fetch-style tools find the
- *  Chromium binaries exactly like they do in the terminal. */
+ *  Chromium binaries exactly like they do in the terminal.
+ *
+ *  API keys saved on the Settings page are injected too (see readStoredKeys),
+ *  so pi extensions that read process.env (omni-router, kilo,
+ *  speech-to-text, …) work without the key having to live in a shell profile
+ *  the GUI launch never sources. A stored key overrides the inherited value. */
 function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, PI_OFFLINE: "1" };
   const parts = String(env.PATH || "").split(path.delimiter).filter(Boolean);
@@ -402,23 +408,102 @@ function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
   // find Chromium, so web-fetch fails in Chat while working in the terminal.
   const pwBrowsers = resolvePlaywrightBrowsersPath();
   if (pwBrowsers) env.PLAYWRIGHT_BROWSERS_PATH = pwBrowsers;
+  // API keys entered on the Settings page — applied last so a value the user
+  // saved there wins over whatever the launcher's environment carried.
+  for (const [name, value] of Object.entries(readStoredKeys())) env[name] = value;
   return env;
 }
 
+/** Single-quote a value for `sh -c` (bash/zsh): safe for spaces, quotes, and
+ *  shell metacharacters in paths/assets. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The user's interactive shell, used to spawn pi with the environment their
+ *  terminal would have. Prefers $SHELL when it is bash/zsh (so the user's own
+ *  shell rc is the one sourced), then bash, then zsh. Null when neither is
+ *  installed — spawnChat then falls back to a direct spawn. */
+function resolveInteractiveShell(): string | null {
+  const candidates: string[] = [];
+  const fromEnv = (process.env.SHELL || "").trim();
+  if (fromEnv) candidates.push(fromEnv);
+  candidates.push("bash", "zsh");
+  for (const candidate of candidates) {
+    const base = path.basename(candidate);
+    if (base !== "bash" && base !== "zsh") continue;
+    if (candidate.includes("/")) {
+      try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch { continue; }
+    }
+    const dirs = [...(process.env.PATH || "").split(":").filter(Boolean), "/bin", "/usr/bin"];
+    for (const dir of dirs) {
+      const p = path.join(dir, candidate);
+      try { fs.accessSync(p, fs.constants.X_OK); return p; } catch { /* next dir */ }
+    }
+  }
+  return null;
+}
+const CHAT_SHELL = resolveInteractiveShell();
+console.log(`  Chat: pi spawn shell: ${CHAT_SHELL ?? "(direct)"}`);
+
+/** Directories chatChildEnv adds to PATH, as a delimiter-joined prefix. Re-applied
+ *  inside the shell because an rc file that reassigns PATH (rather than
+ *  prepending to it) would otherwise drop the venv / node / pi-bin dirs. */
+function chatPathPrefix(cwd: string): string {
+  const child = String(chatChildEnv(cwd).PATH || "").split(path.delimiter).filter(Boolean);
+  const inherited = new Set(String(process.env.PATH || "").split(path.delimiter).filter(Boolean));
+  return child.filter((dir) => !inherited.has(dir)).join(path.delimiter);
+}
+
 function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatSession {
+  const args = ["--mode", "rpc", "--model", model];
   // PI_OFFLINE=1 tells pi (and its pi-updater extension) to skip startup network
   // operations. Without it, pi-updater fires async version checks on
   // session_start; when the user resumes a recorded session and the scope server
   // issues switch_session mid-flight, pi invalidates the extension ctx and the
   // in-flight check throws a stale-ctx error that kills the whole subprocess.
-  const proc = spawn(PI_BIN, ["--mode", "rpc", "--model", model], {
-    cwd,
-    env: chatChildEnv(cwd),
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const env = chatChildEnv(cwd);
+  let proc: ChildProcess;
+  let out: NodeJS.ReadableStream;
+
+  if (CHAT_SHELL) {
+    // Spawn pi through the user's INTERACTIVE shell (`-ic`) so it gets the
+    // environment their terminal would: ~/.bashrc (bash) or ~/.zshrc (zsh) is
+    // sourced, which is where API keys, PATH entries and tool versions are
+    // usually exported. `-i` without `-l` is deliberate — the login profile
+    // files (~/.bash_profile, ~/.profile, ~/.zprofile) are skipped, so a login
+    // shell's slower startup or interactive-only banners can't delay or corrupt
+    // the RPC handshake. The server itself is often launched from a desktop
+    // session that never reads any of this — chatChildEnv patches the few vars
+    // we know about, but a shell is what makes the rest correct.
+    //
+    // Two details matter:
+    //   • pi speaks NDJSON on stdout, and rc files print banners/escape codes
+    //     there. So pi's output is redirected to fd 3 (the pipe we read as the
+    //     RPC stream) and the shell's own stdout goes to /dev/null.
+    //   • `exec` replaces the shell with pi, so the pid we hold stays pi itself —
+    //     signals, killing and the idle reaper keep working.
+    const pathPrefix = chatPathPrefix(cwd);
+    const cmd =
+      (pathPrefix ? `export PATH=${shellQuote(pathPrefix + ":")}"$PATH"; ` : "") +
+      // An rc file may have changed directory; put pi back in the workspace.
+      `cd ${shellQuote(cwd)} || exit 1; ` +
+      `exec ${[PI_BIN, ...args].map(shellQuote).join(" ")} 1>&3`;
+    proc = spawn(CHAT_SHELL, ["-ic", cmd], {
+      cwd,
+      env,
+      stdio: ["pipe", "ignore", "pipe", "pipe"],
+    });
+    // fd 3 is pi's stdout; fd 1 (shell/rc noise) was discarded, fd 2 is stderr.
+    out = proc.stdio[3] as NodeJS.ReadableStream;
+  } else {
+    proc = spawn(PI_BIN, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    out = proc.stdout as NodeJS.ReadableStream;
+  }
+
   const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh };
 
-  proc.stdout.on("data", (d: Buffer) => {
+  out.on("data", (d: Buffer) => {
     sess.buffer += d.toString();
     let idx: number;
     while ((idx = sess.buffer.indexOf("\n")) >= 0) {

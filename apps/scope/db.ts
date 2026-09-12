@@ -58,6 +58,7 @@ export interface PreparedQueries {
   getSessionEventsSince: StatementSync;
   getMaxSeq: StatementSync;
   getEventById: StatementSync;
+  getSessionByFile: StatementSync;
   getSessionStats: StatementSync;
   getSessionContext: StatementSync;
   getSessionParents: StatementSync;
@@ -66,6 +67,8 @@ export interface PreparedQueries {
   clearEvents: StatementSync;
   deleteSessionEvents: StatementSync;
   deleteSessionRow: StatementSync;
+  deleteSessionEventsByCwd: StatementSync;
+  deleteSessionRowsByCwd: StatementSync;
   getBatchStats: StatementSync;
 }
 
@@ -215,6 +218,16 @@ export function prepare(db: DatabaseSync): PreparedQueries {
   // ── Event lookup by id (distinguishes idempotent retries from seq collisions) ──
   const getEventById = db.prepare(`
     SELECT event_id FROM events WHERE event_id = $event_id
+  `);
+
+  // ── The session that owns a pi session file (one file == one conversation) ──
+  // Oldest first so a session that was split by a resumed subprocess keeps
+  // mapping to the row the user originally opened, not the newer duplicate.
+  const getSessionByFile = db.prepare(`
+    SELECT session_id FROM sessions
+    WHERE session_file = $session_file
+    ORDER BY first_ts ASC
+    LIMIT 1
   `);
 
   // ── Session stats (cost, tokens, errors) ──────────────────────────────
@@ -397,6 +410,19 @@ export function prepare(db: DatabaseSync): PreparedQueries {
   const deleteSessionEvents = db.prepare(`DELETE FROM events WHERE session_id = $session_id`);
   const deleteSessionRow = db.prepare(`DELETE FROM sessions WHERE session_id = $session_id`);
 
+  // ── Delete every session + its events for one workspace (cwd) ──────────
+  // Used when a chat workspace is removed from the rail: the row and the
+  // telemetry behind it are removed together, so re-adding the directory
+  // starts from a clean slate instead of replaying conversations that were
+  // cleared. The rail labels a session with no cwd as "(unknown)", which is
+  // why that sentinel also matches NULL/empty cwd rows.
+  const cwdMatch = `(cwd = $cwd OR ($cwd = '(unknown)' AND (cwd IS NULL OR cwd = '')))`;
+  const deleteSessionEventsByCwd = db.prepare(`
+    DELETE FROM events
+    WHERE session_id IN (SELECT session_id FROM sessions WHERE ${cwdMatch})
+  `);
+  const deleteSessionRowsByCwd = db.prepare(`DELETE FROM sessions WHERE ${cwdMatch}`);
+
   return {
     insertEvent,
     upsertSession,
@@ -406,6 +432,7 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     getSessionEventsSince,
     getMaxSeq,
     getEventById,
+    getSessionByFile,
     getSessionStats,
     getSessionModelTokens,
     getSessionContext,
@@ -416,11 +443,30 @@ export function prepare(db: DatabaseSync): PreparedQueries {
     clearEvents,
     deleteSessionEvents,
     deleteSessionRow,
+    deleteSessionEventsByCwd,
+    deleteSessionRowsByCwd,
     getBatchStats,
   };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Attribute an event to the session that owns its pi session file.
+ *
+ * pi can assign a fresh session id when a chat subprocess resumes a recorded
+ * file (`switch_session`): the continued turns then POST with a brand-new
+ * session_id while still writing to the SAME file. Left alone, that created a
+ * second rail row for one conversation — so a prompt sent in a resumed session
+ * showed up under "another session". A pi session file is the conversation's
+ * identity, so every event maps to the row that first claimed its file.
+ */
+export function canonicalSessionId(q: PreparedQueries, event: ObsEvent): string {
+  const file = event.session_file;
+  if (!file) return event.session_id;
+  const row = q.getSessionByFile.get({ $session_file: file }) as { session_id?: string } | undefined;
+  return row?.session_id || event.session_id;
+}
 
 export function toRow(e: ObsEvent): Record<string, unknown> {
   return {

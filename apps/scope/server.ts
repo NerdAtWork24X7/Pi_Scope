@@ -10,11 +10,13 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import { Readable } from "node:stream";
-import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent } from "./db.ts";
+import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent, canonicalSessionId } from "./db.ts";
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { attachTerminal } from "./terminal.ts";
 import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs } from "./chat.ts";
+import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
+import { keyEntries, maskSecret, setStoredKey, clearStoredKey, isValidKeyName, MAX_KEY_LENGTH } from "./api-keys.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -131,6 +133,12 @@ function resolveProjectDir(cwdRaw?: string | null, remember = true): string | nu
   return proj;
 }
 
+/** Team names are written as teams.yaml top-level keys and member names as
+ *  `name:` values, so validate both: anything with a newline or colon could
+ *  break the file structure. Keep the accepted set identical to the parser's. */
+const TEAM_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const MEMBER_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+
 /** Minimal parser for the teams.yaml format used by the agent-team harness. */
 function parseTeamsYaml(raw: string): { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean } {
   const teams: Record<string, any[]> = {};
@@ -153,6 +161,10 @@ function parseTeamsYaml(raw: string): { teams: Record<string, any[]>; memoryMode
       } else {
         inMemory = false;
         curTeam = top[1];
+        // A team with no members still exists: an empty team is valid (the
+        // Settings page can create one before adding subagents), so materialize
+        // its empty list here or it would vanish on the next read.
+        if (!teams[curTeam]) teams[curTeam] = [];
       }
       continue;
     }
@@ -310,6 +322,19 @@ function readAgentConfig(proj?: string | null): Record<string, any> {
   try { return JSON.parse(fs.readFileSync(readAgentConfigPathFor(proj || TERMINAL_CWD), "utf8")); } catch { return {}; }
 }
 
+/** API-key rows for the Settings page: every known key plus custom stored ones.
+ *  Groq's provenance comes from stt.ts, which owns that key's full resolution
+ *  (Settings → env → shell rc → speech-to-text.json) — without it a key that
+ *  only lives in speech-to-text.json would look unset here. Secrets are masked. */
+function apiKeysSnapshot(proj?: string | null): Record<string, any>[] {
+  const entries = keyEntries();
+  return entries.map((entry) => {
+    if (entry.name !== "GROQ_API_KEY") return entry;
+    const stt = loadSttConfig(proj || TERMINAL_CWD);
+    return { ...entry, source: stt.apiKeySource, masked: stt.apiKey ? maskSecret(stt.apiKey) : "" };
+  });
+}
+
 /** Full, normalized settings snapshot for the Settings page: everything the
  *  agent-team rail knows ADD the raw config fields and model metadata that are
  *  only meaningful in a fuller settings surface. A single endpoint keeps the
@@ -320,6 +345,8 @@ function loadSettingsSnapshot(proj?: string | null): Record<string, any> {
   const cfg = readAgentConfig(proj);
   return {
     ...team,
+    // API keys (stored in <agentDir>/api-keys.json; masked previews only)
+    apiKeys: apiKeysSnapshot(proj),
     // settings.json
     settingsRaw: {
       defaultModel: settings.defaultModel,
@@ -368,6 +395,14 @@ function setSettingsNested(paths: string[], value: unknown): void {
     }
     node[paths[paths.length - 1]] = value;
   });
+}
+
+/** Parse the teams.yaml a project resolves to (project-local when present, else
+ *  the global agent-dir copy). Used by the team editor to validate a write
+ *  before mutating, since updateTeamsYaml's callback can't abort the request. */
+function readTeams(proj: string | null): { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean } {
+  try { return parseTeamsYaml(fs.readFileSync(readTeamsPathFor(proj || TERMINAL_CWD), "utf8")); }
+  catch { return { teams: {} }; }
 }
 
 /** Set a list-valued agent-team-config.json field (destructiveTools / skipOrchestratorTools). */
@@ -727,14 +762,27 @@ function removeSubscriber(id: number) {
   subscribers.delete(id);
 }
 
+// One encoder for the process — this used to allocate a TextEncoder on every
+// push, for every subscriber, for every event.
+const sseEncoder = new TextEncoder();
+
+// A backlog this deep means the client stopped draining (dead socket, frozen
+// tab). `desiredSize` reports against the stream's 1-chunk high-water mark and
+// goes negative as soon as a *burst* queues a second chunk, so the previous
+// `desiredSize < 0` test dropped healthy subscribers mid-burst — the live
+// stream disappeared and had to reconnect. Only a genuinely abandoned socket is
+// evicted now.
+const SSE_MAX_BACKLOG = 4096;
+
 /** Push an SSE-formatted event to one subscriber. Returns false if closed. */
 function pushSSE(sub: SSESubscriber, data: string): boolean {
   try {
-    if (sub.controller.desiredSize !== null && sub.controller.desiredSize < 0) {
+    const size = sub.controller.desiredSize;
+    if (size !== null && size < -SSE_MAX_BACKLOG) {
       removeSubscriber(sub.id);
       return false;
     }
-    sub.controller.enqueue(new TextEncoder().encode(data));
+    sub.controller.enqueue(sseEncoder.encode(data));
     return true;
   } catch {
     removeSubscriber(sub.id);
@@ -798,11 +846,16 @@ function checkAuth(req: Request): boolean {
 }
 
 /**
- * Ingest a single event: insert into DB, upsert session, broadcast to SSE.
+ * Ingest a single event: insert into DB, upsert session, broadcast to SSE (or
+ * hand the stored event to a batch's `emit` callback — see ingestBatch).
  * Returns the event_id if ingested, null if duplicate.
  */
-function ingestEvent(event: ObsEvent): string | null {
-  let effective = event;
+function ingestEvent(event: ObsEvent, emit?: (e: ObsEvent) => void): string | null {
+  // pi can hand a resumed conversation a fresh session id while it keeps writing
+  // to the SAME session file — attribute the event to the row that owns that
+  // file, so a resumed session's turns never appear under a second session.
+  const canonical = canonicalSessionId(q, event);
+  let effective = canonical !== event.session_id ? { ...event, session_id: canonical } : event;
   let result = q.insertEvent.run(toRow(effective));
 
   // A no-op insert means (session_id, seq) already exists. Two cases:
@@ -814,11 +867,16 @@ function ingestEvent(event: ObsEvent): string | null {
   //      dropped (previously they were, leaving transcripts stuck at the
   //      original data).
   if (result.changes === 0) {
-    const dup = q.getEventById.get({ $event_id: event.event_id });
+    const dup = q.getEventById.get({ $event_id: effective.event_id });
     if (dup) return null;
-    const maxRow: any = q.getMaxSeq.get({ $session_id: event.session_id });
+    const maxRow: any = q.getMaxSeq.get({ $session_id: effective.session_id });
     const next = (maxRow?.max_seq ?? -1) + 1;
-    effective = { ...event, seq: next };
+    // Keep `effective` (not the raw `event`): re-expanding from the original
+    // event here dropped the canonical session id, so a seq-collision retry on
+    // a resumed subprocess filed the continued turn under the subprocess's own
+    // fresh session id instead of the row that owns its session file — a
+    // second, phantom session showing another session's messages.
+    effective = { ...effective, seq: next };
     result = q.insertEvent.run(toRow(effective));
   }
 
@@ -829,10 +887,37 @@ function ingestEvent(event: ObsEvent): string | null {
   q.upsertSession.run(toSessionRow(effective, isNew));
 
   if (isNew) {
-    broadcastEvent(effective);
+    // Inside a batch the caller collects events and broadcasts them after
+    // COMMIT, so a failed transaction can never publish what it didn't store.
+    if (emit) emit(effective);
+    else broadcastEvent(effective);
   }
 
   return isNew ? effective.event_id : null;
+}
+
+/**
+ * Run a multi-event ingest inside ONE SQLite transaction.
+ *
+ * Every statement otherwise commits on its own: in WAL mode each commit is its
+ * own durable write, so a full 50-event batch from the extension cost up to
+ * 100 commits. The whole batch is a single one now, and its SSE frames are
+ * emitted only after the transaction lands.
+ *
+ * The callback MUST be synchronous — nothing else may interleave on the shared
+ * connection while the transaction is open.
+ */
+function ingestBatch(fn: (emit: (e: ObsEvent) => void) => void): void {
+  const pending: ObsEvent[] = [];
+  db.exec("BEGIN");
+  try {
+    fn((e) => { pending.push(e); });
+    db.exec("COMMIT");
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* connection already unwound */ }
+    throw err;
+  }
+  for (const e of pending) broadcastEvent(e);
 }
 
 // ─── Request body reader with size cap ─────────────────────────────────────
@@ -858,18 +943,70 @@ const MIME: Record<string, string> = {
   ".ttf": "font/ttf",
 };
 
-function serveStatic(pathname: string): Response | null {
+/**
+ * In-memory cache for static assets, validated per request by mtime + size.
+ *
+ * This runs on every page load and used to read each file from disk (the two
+ * vendor fonts plus the xterm bundle are ~1.5 MB) and answer with no validator
+ * at all, so a browser re-downloaded the lot every time. The body is now read
+ * once and re-read only when the file actually changes — the dev server runs
+ * under `node --watch`, so edits are still picked up immediately — and every
+ * response carries an ETag + `no-cache`, so a reload costs one revalidation
+ * instead of a full body transfer.
+ */
+type StaticEntry = { body: Uint8Array; mime: string; mtimeMs: number; size: number };
+const staticCache = new Map<string, StaticEntry>();
+
+function serveStatic(relPath: string, req?: Request): Response | null {
   // Remove leading slash and strip path-traversal segments (defense in depth).
-  const safe = pathname.replace(/^\/+/, "").replace(/\.\./g, "");
+  const safe = relPath.replace(/^\/+/, "").replace(/\.\./g, "");
   const publicRoot = path.resolve(import.meta.dirname, "public");
   const filePath = path.resolve(publicRoot, safe);
   // Refuse anything that escapes the public root.
   if (filePath !== publicRoot && !filePath.startsWith(publicRoot + path.sep)) return null;
-  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return null;
-  const data = fs.readFileSync(filePath);
-  const mimeKey = safe.slice(safe.lastIndexOf(".")) || ".html";
-  return new Response(data, {
-    headers: { "content-type": MIME[mimeKey] ?? "application/octet-stream" },
+
+  // One stat replaces the old existsSync + statSync pair, and carries the
+  // size/mtime the cache and the validators are keyed on.
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+  if (!st.isFile()) return null;
+
+  // (size, mtime) is enough to identify the representation: byte-exact for any
+  // given pair, and it changes the moment a file is rewritten (including by a
+  // `node --watch` restart-editing editor).
+  const etag = `"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
+  const baseHeaders: Record<string, string> = {
+    etag,
+    "cache-control": "no-cache",
+    "last-modified": st.mtime.toUTCString(),
+    "access-control-allow-origin": "*",
+  };
+
+  if (req) {
+    const inm = req.headers.get("if-none-match");
+    if (inm && inm.split(",").some((v) => v.trim() === etag)) {
+      return new Response(null, { status: 304, headers: baseHeaders });
+    }
+  }
+
+  let entry = staticCache.get(filePath);
+  if (!entry || entry.mtimeMs !== st.mtimeMs || entry.size !== st.size) {
+    entry = {
+      body: fs.readFileSync(filePath),
+      // extname, not lastIndexOf("."): a dot in a directory name (e.g.
+      // "vendor/x.term/app.js") used to select the wrong MIME type.
+      mime: MIME[path.extname(safe) || ".html"] ?? "application/octet-stream",
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+    };
+    staticCache.set(filePath, entry);
+  }
+  return new Response(entry.body, {
+    headers: { ...baseHeaders, "content-type": entry.mime },
   });
 }
 
@@ -1065,6 +1202,9 @@ function gracefulShutdown(): void {
   // Kill any lingering pi chat subprocesses.
   shutdownChatSessions();
 
+  // Stop a live microphone capture before the process exits.
+  abortStt();
+
   // Checkpoint and close the SQLite database.
   try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
   try { db.close(); } catch {}
@@ -1136,11 +1276,11 @@ async function handle(req: Request): Promise<Response> {
   }
 
   if (pathname === "/" || pathname === "/index.html") {
-    return serveStatic("index.html") ?? textResponse("not found", 404, "text/plain");
+    return serveStatic("index.html", req) ?? textResponse("not found", 404, "text/plain");
   }
 
   if (pathname.match(/\.(js|css|svg|png|ico|ttf|woff2?)$/)) {
-    return serveStatic(pathname.replace(/^\//, "")) ?? textResponse("not found", 404, "text/plain");
+    return serveStatic(pathname.replace(/^\//, ""), req) ?? textResponse("not found", 404, "text/plain");
   }
 
   // ── Auth wall ──────────────────────────────────────────────────────────
@@ -1181,24 +1321,28 @@ async function handle(req: Request): Promise<Response> {
     const ingested: string[] = [];
     const rejected: string[] = [];
 
-    for (const evt of events) {
-      if (!evt || typeof evt !== "object" || !evt.event_id || !evt.type) {
-        rejected.push(evt?.event_id ?? "unknown");
-        continue;
-      }
-      // Normalize defaults
-      evt.pool = evt.pool ?? "default";
-      evt.tags = evt.tags ?? [];
-      evt.seq = typeof evt.seq === "number" ? evt.seq : 0;
-      evt.cwd = evt.cwd ?? "";
+    // The extension posts batches of up to 50 events; ingest them in a single
+    // transaction instead of 100 individual commits.
+    ingestBatch((emit) => {
+      for (const evt of events) {
+        if (!evt || typeof evt !== "object" || !evt.event_id || !evt.type) {
+          rejected.push(evt?.event_id ?? "unknown");
+          continue;
+        }
+        // Normalize defaults
+        evt.pool = evt.pool ?? "default";
+        evt.tags = evt.tags ?? [];
+        evt.seq = typeof evt.seq === "number" ? evt.seq : 0;
+        evt.cwd = evt.cwd ?? "";
 
-      const ingestedId = ingestEvent(evt as ObsEvent);
-      if (ingestedId) {
-        ingested.push(ingestedId);
-      } else {
-        rejected.push(evt.event_id);
+        const ingestedId = ingestEvent(evt as ObsEvent, emit);
+        if (ingestedId) {
+          ingested.push(ingestedId);
+        } else {
+          rejected.push(evt.event_id);
+        }
       }
-    }
+    });
 
     return jsonResponse({ ingested: ingested.length, rejected });
   }
@@ -1593,6 +1737,24 @@ async function handle(req: Request): Promise<Response> {
           updateTeamsYaml(proj, (p) => { p.memoryModel = model || undefined; });
           break;
         }
+        // API keys: stored in <agentDir>/api-keys.json (0600) and applied to the
+        // pi subprocess env + speech-to-text env. An empty value clears it.
+        case "setApiKey": {
+          const v = (value ?? {}) as { name?: unknown; value?: unknown };
+          const name = String(v.name ?? "").trim();
+          const secret = String(v.value ?? "").trim();
+          if (!isValidKeyName(name)) return jsonResponse({ error: "invalid key name" }, 400);
+          if (secret.length > MAX_KEY_LENGTH) return jsonResponse({ error: "key is too long" }, 400);
+          setStoredKey(name, secret);
+          break;
+        }
+        case "clearApiKey": {
+          const v = (value ?? {}) as { name?: unknown };
+          const name = String(v.name ?? "").trim();
+          if (!isValidKeyName(name)) return jsonResponse({ error: "invalid key name" }, 400);
+          clearStoredKey(name);
+          break;
+        }
         default:
           return jsonResponse({ error: `unknown settings action: ${action}` }, 400);
       }
@@ -1684,6 +1846,87 @@ async function handle(req: Request): Promise<Response> {
               const mem = (members as any[]).find((m) => (m.name || "").toLowerCase() === key.toLowerCase());
               if (mem) { if (model) mem.model = model; else delete mem.model; }
             }
+          });
+          break;
+        }
+        // ── Team editor: create / rename / delete teams and their members ──
+        // Writes go to the project's own .pi/settings/agents/teams.yaml, the
+        // same file pi's agent-team extension reads back.
+        case "addTeam": {
+          const name = String(body.team || "").trim();
+          if (!TEAM_NAME_RE.test(name)) {
+            return jsonResponse({ error: "team names may use letters, digits, '-' and '_'" }, 400);
+          }
+          if (readTeams(proj).teams[name]) return jsonResponse({ error: `team already exists: ${name}` }, 400);
+          updateTeamsYaml(proj, (p) => {
+            p.teams = p.teams || {};
+            p.teams[name] = [];
+          });
+          // A team the user just created is the one they want to work on.
+          updateAgentConfig(proj, (cfg) => { cfg.activeTeam = name; });
+          break;
+        }
+        case "renameTeam": {
+          const from = String(body.team || "").trim();
+          const to = String(body.to || "").trim();
+          if (!from) return jsonResponse({ error: "missing team" }, 400);
+          if (!TEAM_NAME_RE.test(to)) {
+            return jsonResponse({ error: "team names may use letters, digits, '-' and '_'" }, 400);
+          }
+          if (from === to) break;
+          const current = readTeams(proj).teams;
+          if (!current[from]) return jsonResponse({ error: `no such team: ${from}` }, 400);
+          if (current[to]) return jsonResponse({ error: `team already exists: ${to}` }, 400);
+          updateTeamsYaml(proj, (p) => {
+            // Rebuild the map in place so the renamed team keeps its position
+            // in the sidebar order (teamsOrder follows the file's key order).
+            const next: Record<string, any[]> = {};
+            for (const [key, members] of Object.entries(p.teams || {})) next[key === from ? to : key] = members;
+            p.teams = next;
+          });
+          updateAgentConfig(proj, (cfg) => { if (cfg.activeTeam === from) cfg.activeTeam = to; });
+          break;
+        }
+        case "removeTeam": {
+          const name = String(body.team || "").trim();
+          if (!name) return jsonResponse({ error: "missing team" }, 400);
+          updateTeamsYaml(proj, (p) => { if (p.teams) delete p.teams[name]; });
+          // Never leave activeTeam pointing at a team that no longer exists.
+          const remaining = Object.keys(readTeams(proj).teams);
+          updateAgentConfig(proj, (cfg) => {
+            if (cfg.activeTeam !== name) return;
+            if (remaining.length) cfg.activeTeam = remaining[0];
+            else delete cfg.activeTeam;
+          });
+          break;
+        }
+        case "addMember": {
+          const team = String(body.team || "").trim();
+          const name = String(body.name || "").trim();
+          if (!team) return jsonResponse({ error: "missing team" }, 400);
+          if (!MEMBER_NAME_RE.test(name)) return jsonResponse({ error: "invalid subagent name" }, 400);
+          if (!readTeams(proj).teams[team]) return jsonResponse({ error: `no such team: ${team}` }, 400);
+          updateTeamsYaml(proj, (p) => {
+            const teams = (p.teams = p.teams || {});
+            const members = (teams[team] = teams[team] || []);
+            // Names are unique within a team; adding an existing one is a no-op
+            // so the UI can be clicked twice safely.
+            if (members.some((m) => (m.name || "").toLowerCase() === name.toLowerCase())) return;
+            const entry: Record<string, any> = { name };
+            const model = String(body.model || "").trim();
+            if (model) entry.model = model;
+            members.push(entry);
+          });
+          break;
+        }
+        case "removeMember": {
+          const team = String(body.team || "").trim();
+          const name = String(body.name || "").trim();
+          if (!team || !name) return jsonResponse({ error: "missing team or name" }, 400);
+          // Per-team: a member may legitimately exist in several teams.
+          updateTeamsYaml(proj, (p) => {
+            const members = p.teams && p.teams[team];
+            if (members) p.teams[team] = members.filter((m) => (m.name || "").toLowerCase() !== name.toLowerCase());
           });
           break;
         }
@@ -1795,6 +2038,15 @@ async function handle(req: Request): Promise<Response> {
               if (!removed.includes(key)) removed.push(key);
               cfg.chatWorkspacesRemoved = removed;
             });
+          }
+          // Removing a workspace also clears its recorded telemetry: the rail
+          // row and the sessions/events behind it go together, so re-adding the
+          // directory starts clean instead of replaying conversations the user
+          // just cleared. Delete by the resolved path AND the raw one, since a
+          // session's stored cwd is whatever the agent reported.
+          for (const cwdKey of new Set([key, raw])) {
+            q.deleteSessionEventsByCwd.run({ $cwd: cwdKey });
+            q.deleteSessionRowsByCwd.run({ $cwd: cwdKey });
           }
           break;
         }
@@ -1912,6 +2164,36 @@ async function handle(req: Request): Promise<Response> {
       cancelled: parsed.cancelled === true,
     });
     return jsonResponse({ ok, sessionId });
+  }
+
+  // ── GET /chat/stt/status (dictation availability for the composer mic) ──
+  // Reports whether a host recorder and a Groq key are available, plus whether
+  // a recording is live. The Chat view uses this to explain a greyed-out mic.
+  if (pathname === "/chat/stt/status" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    const absCwd = (cwd && validateCwd(cwd)) || TERMINAL_CWD;
+    return jsonResponse(sttStatus(absCwd));
+  }
+
+  // ── POST /chat/stt/start (record the host microphone) ──────────────────
+  // Mirrors the pi `speech-to-text` extension: capture on the host with
+  // sox/arecord/ffmpeg, then transcribe with Groq Whisper on stop.
+  if (pathname === "/chat/stt/start" && method === "POST") {
+    let bodyText: string;
+    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
+    let parsed: any;
+    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    return jsonResponse(startStt(absCwd));
+  }
+
+  // ── POST /chat/stt/stop (stop recording + transcribe via Groq) ─────────
+  // Returns { ok, text } — the transcript to splice into the composer.
+  if (pathname === "/chat/stt/stop" && method === "POST") {
+    return jsonResponse(await stopStt());
   }
 
   // ── GET /sessions ──────────────────────────────────────────────────────

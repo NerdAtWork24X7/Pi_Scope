@@ -106,9 +106,6 @@
   // ─── Chat state ───────────────────────────────────────────────────────────
   const CH = {
     workspace: null,   // selected cwd
-    agentId: null,     // selected session_id (legacy, kept for compat)
-    model: "all",
-    query: "",
     chatModel: null,   // model used for the live chat
     chatSessionId: null,
     resumeFile: null,  // pi session file to continue (set when a recorded session is opened)
@@ -116,11 +113,9 @@
     suppressLive: false, // live preview frozen because the user browsed away mid-run
     chatHistory: [],   // [{role:'user'|'assistant', text, thinking, tools, usage, model, ts, streaming}]
     adding: false,     // inline "add workspace" input is open
-    events: [],
     sessions: [],
     teamData: null,    // /agent-team snapshot (teams.yaml + config.json)
     team: null,        // which team's subagents are shown in the right rail
-    lastEventCount: -1,
     loadingSid: null,  // session whose events are being fetched into the window
     openSid: null,     // session_id whose transcript is currently shown (timeline target)
     lastOpenCount: null, // event_count of the open session at last load — refetch when it grows
@@ -133,6 +128,16 @@
     showThinking: loadBool("scope-chat-show-thinking", false), // global fold/unfold of thought blocks
     expandTools: loadBool("scope-chat-expand-tools", false),   // fold chips vs. show tool calls with results
     steer: loadBool("scope-chat-steer", false), // send next message mid-run (steer) vs queue until done
+    listening: false,   // dictation (speech to text) is recording on the host
+    sttInFlight: false, // a stop/transcribe request is pending
+    sttTimer: null,     // interval id driving the recording clock
+    sttStartedAt: 0,    // ms epoch the current recording began
+    sttMaxSeconds: 120, // server clip cap — the client auto-stops just after it
+    sttInfo: null,      // /chat/stt/status snapshot (hasApiKey, recorderAvailable…)
+    sttInfoCwd: null,   // workspace that snapshot was fetched for
+    sttFetching: false,
+    listenBase: "",     // composer text before the dictated span
+    listenTail: "",     // composer text after the dictated span
     customWs: loadCustomWs(), // union of chat workspaces seen across projects (sidebar display cache)
     threads: new Map(),   // thread id → thread (one per chat conversation, keyed by session id or "free:<cwd>")
     curId: null,          // id of the thread currently shown in the canvas
@@ -167,6 +172,7 @@
       openSid: null,     // recorded session shown (== sid for session threads)
       lastOpenCount: null,
       loadingSid: null,
+      loadGen: 0,        // transcript-load generation (a newer load supersedes an older response)
     };
   }
   function curThread() {
@@ -225,27 +231,74 @@
     CH.loadingSid = t.loadingSid;
     CH.lastOpenCount = t.lastOpenCount;
   }
-  // Find the thread serving a recorded session: an existing session thread, a
-  // free thread whose conversation got recorded under that id (matched by the
-  // first prompt text + workspace), or an alias already established.
+  // How far a recorded session's start may sit from a live conversation's first
+  // message for it to still count as that conversation's recording. A session
+  // that began much earlier cannot be the one a prompt typed just now belongs
+  // to, even if it shares the opening line.
+  const ADOPT_FRESH_MS = 60 * 60 * 1000;
+  // The opening prompt of a free thread (the text pi records as first_msg).
+  function threadFirstPrompt(t) {
+    return (t.history.find((m) => m.role === "user")?.text || t.firstPrompt || "")
+      .slice(0, 200).trim();
+  }
+  // The recorded row that IS a free thread's conversation: same workspace, not
+  // a subagent, same opening prompt — and when several sessions share that
+  // prompt, whichever STARTED closest to when this conversation was sent.
+  // Matching by list order alone could adopt an unrelated same-prompt session,
+  // which then showed the live conversation as that session's transcript (and
+  // sent its prompts to the wrong session file).
+  function matchRecordedRow(t) {
+    const want = threadFirstPrompt(t);
+    if (!want) return null;
+    const started = t.history[0]?.ts || 0;
+    let best = null;
+    let bestScore = Infinity;
+    for (const s of CH.sessions) {
+      if (s.cwd !== t.workspace || s.parent_session_id) continue;
+      if (String(s.first_msg || "").slice(0, 200).trim() !== want) continue;
+      // A row already serving another thread is taken.
+      const claimed = CH.threads.get(s.session_id);
+      if (claimed && claimed !== t) continue;
+      const ft = Date.parse(s.first_ts || "") || 0;
+      // A session that clearly predates this live conversation cannot be its
+      // recording, even when it opens with the same prompt. Without this gate,
+      // when the real row had not been polled in yet, an older same-prompt
+      // session was adopted and the live stream showed up under ITS row.
+      if (started && ft && Math.abs(ft - started) > ADOPT_FRESH_MS) continue;
+      const score = started && ft ? Math.abs(ft - started) : 0;
+      if (score < bestScore) { best = s; bestScore = score; }
+    }
+    return best;
+  }
+  // Find the thread serving a recorded session: an existing session thread, or
+  // a free thread whose conversation got recorded under that id. Only aliases
+  // when THIS row is genuinely the recording of that conversation (see
+  // matchRecordedRow) — otherwise the caller builds a dedicated session thread.
   function threadForSid(sid) {
     if (!sid) return null;
     if (CH.threads.has(sid)) return CH.threads.get(sid);
     const row = CH.sessions.find((s) => s.session_id === sid);
     if (!row) return null;
-    const want = String(row.first_msg || "").slice(0, 200).trim();
-    if (!want) return null;
+    // A subagent session is never a free thread's own conversation — the
+    // match below is by first prompt, and a subagent can share it. Return null
+    // so the caller creates a dedicated session thread instead of aliasing
+    // (and overwriting) a workspace conversation.
+    if (row.parent_session_id) return null;
+    if (!String(row.first_msg || "").trim()) return null;
     for (const t of CH.threads.values()) {
-      if (t.kind !== "free" || t.adopted) continue;
+      // A thread that is mid-run is never aliased: its recording row is either
+      // not written yet or ambiguous, and binding it here is how one session's
+      // live stream appeared in another session's window when the user switched
+      // rows while a turn was streaming. It can be adopted on a later poll,
+      // once the turn settles.
+      if (t.kind !== "free" || t.adopted || t.busy) continue;
       if (t.workspace !== row.cwd) continue;
-      const first = (t.history.find((m) => m.role === "user")?.text || t.firstPrompt || "").slice(0, 200).trim();
-      if (first && first === want) {
-        t.adopted = true;
-        t.sid = sid;
-        t.resumeFile = row.session_file || t.resumeFile;
-        CH.threads.set(sid, t);
-        return t;
-      }
+      if (matchRecordedRow(t)?.session_id !== sid) continue;
+      t.adopted = true;
+      t.sid = sid;
+      t.resumeFile = row.session_file || t.resumeFile;
+      CH.threads.set(sid, t);
+      return t;
     }
     return null;
   }
@@ -253,22 +306,30 @@
   // recorded for them, so opening that row continues the SAME thread/subprocess
   // instead of spawning a second pi on the same session file.
   function adoptFreeThreads() {
+    const seen = new Set();
     for (const t of CH.threads.values()) {
-      if (t.kind !== "free" || t.adopted || !t.firstPrompt) continue;
-      const want = String(t.firstPrompt).slice(0, 200).trim();
-      if (!want) continue;
-      const row = CH.sessions.find((s) =>
-        s.cwd === t.workspace && !s.parent_session_id &&
-        String(s.first_msg || "").slice(0, 200).trim() === want
-      );
+      if (seen.has(t)) continue;
+      seen.add(t);
+      if (t.kind !== "free" || t.adopted || t.busy) continue;
+      const row = matchRecordedRow(t);
       if (!row) continue;
-      // Never overwrite a session thread that already exists (e.g. the user
-      // already opened the row) — that one is authoritative for the session.
       if (CH.threads.has(row.session_id)) continue;
       t.adopted = true;
       t.sid = row.session_id;
       t.resumeFile = row.session_file || t.resumeFile;
       CH.threads.set(row.session_id, t);
+    }
+  }
+  // Drop the session-id aliases a free thread picked up (see threadForSid /
+  // adoptFreeThreads). pi records a free conversation under a session id and
+  // the rail maps BOTH keys to this ONE thread, so once the thread is reset to a
+  // brand-new conversation the stale session key still points at it: reopening
+  // that session row showed the new conversation, and prompts sent to either
+  // appeared in both. The session row then rebuilds as its own thread.
+  function dropThreadAliases(t) {
+    if (!t) return;
+    for (const [key, val] of [...CH.threads]) {
+      if (val === t && key !== t.id) CH.threads.delete(key);
     }
   }
   // (Re)resolve the live DOM pointers of an attached busy thread after the
@@ -311,7 +372,11 @@
   }
 
   const el = {};
-  let restoreAttempted = false; // conversation snapshot restored once per page load
+  // Workspaces whose saved conversation has already been considered for
+  // restore. A fresh page load starts with NO workspace selected (the user
+  // picks one from the rail), so the snapshot is restored when they pick the
+  // workspace it belongs to — never for a different one.
+  const restoreTried = new Set();
 
   function cache() {
     el.ws = $("#chat-workspaces");
@@ -340,6 +405,7 @@
     el.thinking = $("#chat-thinking");
     el.steer = $("#chat-steer");
     el.stop = $("#chat-stop");
+    el.listen = $("#chat-listen");
   }
 
   // ─── Selectors / data ─────────────────────────────────────────────────────
@@ -372,6 +438,10 @@
   // Cheap signature of the session list + active team, used to skip full rail
   // rebuilds when the poll has nothing new to show.
   let railSig = null;
+  // Last markup written to each rail — a re-render that produces identical HTML
+  // is skipped entirely (an innerHTML swap re-creates every node for nothing).
+  let wsRailHtml = null;
+  let agentsRailHtml = null;
   function chatRailSig() {
     const ss = CH.sessions;
     let h = ss.length;
@@ -404,10 +474,6 @@
     // through explicit actions / streams, which re-render on their own.
     updateHeader();
     updateScrollDown();
-    if (!CH.workspace) {
-      const ws = workspaces();
-      if (ws.length) selectWorkspace(preferredWorkspace(ws));
-    }
     attemptRestore();
     refreshOpenSession();
   }
@@ -416,10 +482,6 @@
     CH.sessions = (state.sessions || []).filter(isChatSession);
     adoptFreeThreads();
     loadAgentTeam();
-    if (!CH.workspace) {
-      const ws = workspaces();
-      if (ws.length) selectWorkspace(preferredWorkspace(ws));
-    }
     renderWorkspaces();
     renderAgents();
     renderComposerModel();
@@ -469,10 +531,12 @@
         `</div>`;
     }
     if (!ws.length && !CH.adding) {
-      el.ws.innerHTML =
+      const empty =
         '<div class="chat-rail-empty">No workspaces yet.<br>Add a directory or run a pi agent to start streaming.</div>' +
         html;
-      wireWorkspaces();
+      if (wsRailHtml === empty) return;
+      wsRailHtml = empty;
+      el.ws.innerHTML = empty;
       return;
     }
     for (const cwd of ws) {
@@ -507,8 +571,23 @@
       const tree = buildWsSessionTree(sessions);
       html += `<div class="chat-ws-children"${expanded ? "" : ' style="display:none"'}>` + renderWsSessionTree(tree) + `</div>`;
     }
+    // Skip the write when the markup is identical (the poll re-renders the
+    // rail every 10s): an innerHTML swap would throw away every node — and
+    // with it the focus ring on the inline add-row input — for nothing.
+    if (wsRailHtml === html) return;
+    // The add-row's typed value lives only in the DOM (not in the markup), so
+    // carry it across the swap — a background session event changing the rail
+    // while the user types a path used to wipe what they had entered.
+    const prevAdd = CH.adding ? document.getElementById("chat-ws-add-input")?.value : null;
+    wsRailHtml = html;
     el.ws.innerHTML = html;
-    wireWorkspaces();
+    if (CH.adding) {
+      const inp = document.getElementById("chat-ws-add-input");
+      if (inp) {
+        if (prevAdd) inp.value = prevAdd;
+        inp.focus();
+      }
+    }
   }
 
   // One session row under a workspace — clicking loads it in the chat window.
@@ -548,15 +627,48 @@
   // render newest-first within their group). A session whose parent isn't in
   // the same workspace list is a root, so orphans never vanish.
   function buildWsSessionTree(sessions) {
-    const ids = new Set(sessions.map((s) => s.session_id));
+    const byId = new Map(sessions.map((s) => [s.session_id, s]));
     const subs = new Map(); // parent session_id → child sessions
+    const parentOf = new Map(); // session_id → parent session_id
     const roots = [];
     for (const s of sessions) {
-      if (s.parent_session_id && ids.has(s.parent_session_id)) {
-        if (!subs.has(s.parent_session_id)) subs.set(s.parent_session_id, []);
-        subs.get(s.parent_session_id).push(s);
+      const p = s.parent_session_id;
+      // A parent link is only an edge when the parent is present here and isn't
+      // the session itself (a self-parented row is a root, not its own child).
+      if (p && p !== s.session_id && byId.has(p)) {
+        if (!subs.has(p)) subs.set(p, []);
+        subs.get(p).push(s);
+        parentOf.set(s.session_id, p);
       } else {
         roots.push(s);
+      }
+    }
+    // Nothing reaches a session trapped in a parent cycle (a→b→a, or a chain
+    // hanging off one) — it used to be dropped from the rail entirely. Promote
+    // the first unreachable session to a root and cut its back-edge, repeating
+    // until every session is reachable, so cycles render without looping.
+    const reachable = new Set();
+    const mark = (s) => {
+      if (reachable.has(s.session_id)) return;
+      reachable.add(s.session_id);
+      for (const k of subs.get(s.session_id) || []) mark(k);
+    };
+    for (const r of roots) mark(r);
+    if (reachable.size < sessions.length) {
+      for (const s of sessions) {
+        if (reachable.has(s.session_id)) continue;
+        const p = parentOf.get(s.session_id);
+        if (p) {
+          const arr = subs.get(p);
+          if (arr) {
+            const i = arr.indexOf(s);
+            if (i >= 0) arr.splice(i, 1);
+            if (!arr.length) subs.delete(p);
+          }
+          parentOf.delete(s.session_id);
+        }
+        roots.push(s);
+        mark(s);
       }
     }
     return { roots, subs };
@@ -567,26 +679,40 @@
   // Groups default to collapsed — subagents fold under their main session and
   // are revealed on demand instead of always cluttering the rail.
   function renderWsSessionTree({ roots, subs }) {
-    let html = "";
-    for (const r of roots) {
-      html += renderWsSession(r, false);
-      const kids = subs.get(r.session_id) || [];
-      if (!kids.length) continue;
-      const open = CH.subOpen.has(r.session_id);
-      const running = kids.some((k) => S.subagentStatus(k) === "green");
+    const rendered = new Set();
+    // A group counts as running when any DESCENDANT subagent is — a nested
+    // chain must not hide that activity behind a collapsed parent.
+    const runningUnder = (sid) => {
+      for (const k of subs.get(sid) || []) {
+        if (S.subagentStatus(k) === "green" || runningUnder(k.session_id)) return true;
+      }
+      return false;
+    };
+    // Recursive: a subagent that spawned its own subagents renders its rows and
+    // then its own fold group, so arbitrarily deep chains appear in full.
+    const level = (s, nested) => {
+      if (rendered.has(s.session_id)) return ""; // cycle guard (defensive)
+      rendered.add(s.session_id);
+      const rows = renderWsSession(s, nested);
+      const kids = subs.get(s.session_id) || [];
+      if (!kids.length) return rows;
+      const open = CH.subOpen.has(s.session_id);
+      const running = runningUnder(s.session_id);
       const label = `${kids.length} sub-session${kids.length === 1 ? "" : "s"}`;
-      html +=
-        `<div class="ws-sess-fold ws-sess-sub${open ? " open" : ""}" data-fold="${esc(r.session_id)}"` +
+      return (
+        rows +
+        `<div class="ws-sess-fold ws-sess-sub${open ? " open" : ""}" data-fold="${esc(s.session_id)}"` +
         ` title="${esc(running ? "a subagent is still running" : "click to expand or collapse the sub-sessions")}">` +
         `<span class="ws-sess-fold-caret">${open ? "▾" : "▸"}</span>` +
         `<span class="ws-sess-fold-label">${esc(label)}</span>` +
         (running ? `<span class="ws-sess-fold-dot green" title="a subagent is running"></span>` : "") +
         `</div>` +
         `<div class="ws-sess-subs"${open ? "" : ' style="display:none"'}>` +
-        kids.map((k) => renderWsSession(k, true)).join("") +
-        `</div>`;
-    }
-    return html;
+        kids.map((k) => level(k, true)).join("") +
+        `</div>`
+      );
+    };
+    return roots.map((r) => level(r, false)).join("");
   }
 
   // Expand/collapse a main session's subagent group (default: collapsed).
@@ -598,6 +724,31 @@
     renderWorkspaces();
   }
 
+  // Drop a thread's recorded-session view so the canvas shows that thread's own
+  // conversation instead of a transcript. pi records a free conversation under a
+  // session id, and the rail aliases both keys to this ONE thread — so a
+  // workspace click could rebind a thread still sitting in "viewing session S"
+  // mode and reopen that transcript, which is exactly what selecting a
+  // workspace must never do. The messages and the resume file are kept: an
+  // adopted free thread IS the recorded conversation, and the next prompt has to
+  // keep continuing it rather than fork a second pi on the same session file.
+  // Returns whether a session view was actually dropped.
+  function clearSessionView(t) {
+    if (!t || t.openSid == null) return false;
+    t.openSid = null;
+    t.loadingSid = null;
+    t.lastOpenCount = null;
+    return true;
+  }
+
+  // Replace a hint left over from a transcript ("N messages from session")
+  // with one that describes the conversation now on screen.
+  function setConversationHint(t) {
+    if (!el.hint) return;
+    const n = t.history.length;
+    setHint(n ? `${n} message${n === 1 ? "" : "s"} in this conversation — type to continue` : "", "");
+  }
+
   // Return the canvas to a workspace's own conversation (its free thread) —
   // e.g. after browsing a recorded session, clicking the active workspace row
   // brings you back to the chat you were having there, resuming its live
@@ -606,70 +757,84 @@
     const prev = curThread();
     const t = freeThread(cwd);
     if (prev && prev !== t) detachThread(prev);
+    const wasSessionView = clearSessionView(t);
     bindThread(t);
+    renderAgents(); // the open-session highlight follows the canvas
     updateHeader();
     renderChat();
     attachThread(t); // resume live streaming if this thread is still running
+    if (wasSessionView) setConversationHint(t);
     if (el.input) el.input.focus();
   }
 
-  function wireWorkspaces() {
-    el.ws.querySelectorAll(".chat-ws").forEach((n) =>
-      n.addEventListener("click", (e) => {
-        if (e.target.closest(".chat-ws-remove")) return; // handled by its own listener
-        if (e.target.closest(".chat-ws-caret")) return; // the caret owns collapse
-        const cwd = n.dataset.cwd;
+  // Ask the host file manager for a directory (Electron only).
+  async function browseForWorkspace() {
+    if (typeof window.scopeNative?.pickDirectory !== "function") return;
+    try {
+      const dir = await window.scopeNative.pickDirectory();
+      if (dir) submitAddWorkspace(dir);
+    } catch { /* dialog failed — fall back to manual entry */ }
+  }
+
+  // ─── Rail interaction (event delegation) ──────────────────────────────────
+  // Both rails are rebuilt whenever their data changes. Wiring per-node
+  // listeners on every rebuild allocated a closure per row and ran a
+  // querySelector pass per selector, and had to be re-run on each write; one
+  // delegated listener per rail container does the same dispatch and is
+  // attached exactly once, so a rail render is a single innerHTML write.
+  // Most specific target first — session rows and the fold row sit inside the
+  // children container, and the remove/caret affordances inside the workspace
+  // row (previously guarded with stopPropagation).
+  function wireRailDelegation() {
+    if (el.ws) {
+      el.ws.addEventListener("click", (e) => {
+        const del = e.target.closest(".ws-sess-del");
+        if (del) { deleteChatSession(del.dataset.del); return; }
+        const sess = e.target.closest(".ws-sess");
+        if (sess) { loadSessionChat(sess.dataset.sid); return; }
+        const fold = e.target.closest(".ws-sess-fold");
+        if (fold) { toggleSubs(fold.dataset.fold); return; }
+        const remove = e.target.closest(".chat-ws-remove");
+        if (remove) { removeWorkspace(remove.dataset.remove); return; }
+        const caret = e.target.closest(".chat-ws-caret");
+        if (caret) { toggleWs(caret.closest(".chat-ws")?.dataset.cwd); return; }
+        if (e.target.closest("#chat-ws-browse")) { void browseForWorkspace(); return; }
+        const row = e.target.closest(".chat-ws");
+        if (!row) return;
+        const cwd = row.dataset.cwd;
         if (CH.workspace !== cwd) selectWorkspace(cwd);
         else showFreeConversation(cwd);
-      })
-    );
-    el.ws.querySelectorAll(".chat-ws-caret").forEach((n) =>
-      n.addEventListener("click", (e) => {
-        e.stopPropagation();
-        toggleWs(n.closest(".chat-ws")?.dataset.cwd);
-      })
-    );
-    el.ws.querySelectorAll(".chat-ws-remove").forEach((n) =>
-      n.addEventListener("click", (e) => {
-        e.stopPropagation();
-        removeWorkspace(n.dataset.remove);
-      })
-    );
-    el.ws.querySelectorAll(".ws-sess").forEach((n) =>
-      n.addEventListener("click", (e) => {
-        e.stopPropagation();
-        loadSessionChat(n.dataset.sid);
-      })
-    );
-    el.ws.querySelectorAll(".ws-sess-fold").forEach((n) =>
-      n.addEventListener("click", (e) => {
-        e.stopPropagation();
-        toggleSubs(n.dataset.fold);
-      })
-    );
-    el.ws.querySelectorAll(".ws-sess-del").forEach((n) =>
-      n.addEventListener("click", (e) => {
-        e.stopPropagation();
-        deleteChatSession(n.dataset.del);
-      })
-    );
-    const input = document.getElementById("chat-ws-add-input");
-    if (input) {
-      input.focus();
-      input.addEventListener("keydown", (e) => {
+      });
+      el.ws.addEventListener("keydown", (e) => {
+        if (!e.target.closest("#chat-ws-add-input")) return;
         if (e.key === "Enter") { e.preventDefault(); submitAddWorkspace(); }
         else if (e.key === "Escape") { e.preventDefault(); CH.adding = false; renderWorkspaces(); }
       });
     }
-    const browse = document.getElementById("chat-ws-browse");
-    if (browse) {
-      browse.addEventListener("click", async (e) => {
-        e.preventDefault();
-        if (typeof window.scopeNative?.pickDirectory !== "function") return;
-        try {
-          const dir = await window.scopeNative.pickDirectory();
-          if (dir) submitAddWorkspace(dir);
-        } catch { /* dialog failed — fall back to manual entry */ }
+    if (el.agents) {
+      el.agents.addEventListener("click", (e) => {
+        const head = e.target.closest(".at-sec-head");
+        if (head) { toggleSection(head.dataset.sec); return; }
+        const team = e.target.closest(".at-chip[data-team]");
+        if (team) { CH.team = team.dataset.team; postTeam({ action: "setTeam", team: team.dataset.team }); return; }
+        // The card wraps a decorative toggle button; either hit toggles it.
+        const card = e.target.closest(".at-card[data-action]");
+        if (card) { postTeam({ action: card.dataset.action }); return; }
+        const tool = e.target.closest(".at-chip[data-tool]");
+        if (tool) { postTeam({ action: "toggleTool", tool: tool.dataset.tool }, { liveConfig: true }); return; }
+        const skill = e.target.closest(".at-chip[data-dir]");
+        if (skill) { postTeam({ action: "toggleSkill", group: skill.dataset.group, dir: skill.dataset.dir }); return; }
+        const ext = e.target.closest(".at-chip[data-path]");
+        if (ext) { postTeam({ action: "toggleExtension", path: ext.dataset.path }); return; }
+        const sub = e.target.closest(".at-chip.sub[data-agent]");
+        if (sub) {
+          const name = sub.dataset.agent || "";
+          const off = new Set(CH.teamData?.disabledAgents || []).has(name.toLowerCase());
+          postTeam({ action: "toggleAgent", agent: name, disabled: !off });
+          return;
+        }
+        const sidChip = e.target.closest(".at-chip[data-sid]");
+        if (sidChip) loadSessionChat(sidChip.dataset.sid);
       });
     }
   }
@@ -691,21 +856,32 @@
     if (!p) return; // canceled by the user
     p.then(() => {
       const cur = curThread();
-      if (cur && cur.openSid === sid) {
-        // The deleted session was on screen: reset its thread to a blank
-        // conversation (the subprocess, if any, was keyed to it — kill it so a
-        // stale pi can't linger on a deleted session).
-        if (cur.key) {
-          fetch(window.apiUrl("/chat/kill"), {
-            method: "POST",
-            headers: { ...window.authHeaders(), "content-type": "application/json" },
-            body: JSON.stringify({ sessionId: cur.key }),
-          }).catch(() => {});
-        }
+      const visible = !!cur && cur.openSid === sid;
+      // Kill the deleted session's pi subprocess and forget its thread wherever
+      // it lives. This used to happen only when the session was the one on
+      // screen, so a background thread (or an adopted free thread aliased to
+      // it) kept streaming a conversation that no longer exists.
+      const dead = CH.threads.get(sid);
+      killChatKey(dead?.key);
+      CH.threads.delete(sid);
+      // A workspace conversation can be aliased to this row (pi recorded it
+      // under this id). Unbind it instead of leaving it stuck on a session that
+      // no longer exists: it is the workspace's own conversation again, with no
+      // subprocess and no resume target, so it can re-adopt to the next row pi
+      // records for it rather than forking a second pi on the same file.
+      if (dead && dead.kind === "free") {
+        dead.sid = null;
+        dead.adopted = false;
+        dead.key = null;
+        dead.resumeFile = null;
+        if (curThread() === dead) syncCurThread();
+      }
+      if (visible) {
+        // The deleted session was on screen: drop the canvas back to the
+        // workspace's blank conversation.
+        killChatKey(cur.key);
         CH.threads.delete(cur.id);
-        CH.threads.delete(sid);
-        const ft = freeThread(CH.workspace);
-        bindThread(ft);
+        bindThread(freeThread(CH.workspace));
         renderChat();
       }
       CH.sessions = (state.sessions || []).filter(isChatSession);
@@ -749,6 +925,16 @@
   }
 
   async function removeWorkspace(cwd) {
+    const sessions = wsSessions(cwd);
+    const name = (cwd || "").split("/").filter(Boolean).pop() || cwd;
+    // Removing a workspace also deletes its sessions + events from the store
+    // (the server does it in the same request), so confirm the destructive part
+    // once up front.
+    if (sessions.length && !confirm(
+      `Remove "${name}"?\n\n` +
+      `This permanently deletes its ${sessions.length} recorded session${sessions.length === 1 ? "" : "s"} ` +
+      `and events from the database. This cannot be undone.`
+    )) return;
     try {
       const { res, data } = await window.SCOPE.api("/agent-team", {}, { action: "removeWorkspace", path: cwd, cwd: CH.workspace || "" });
       if (res.ok && data) {
@@ -761,12 +947,37 @@
       if (!CH.customWs.removed.includes(cwd)) CH.customWs.removed.push(cwd);
       saveCustomWs();
     } catch { /* server unreachable — re-render from local state below */ }
+    // Stop any pi subprocesses that were running here and forget their threads,
+    // so a session that was just deleted can't keep streaming into the UI.
+    for (const s of sessions) {
+      killChatKey(CH.threads.get(s.session_id)?.key);
+      CH.threads.delete(s.session_id);
+    }
+    killChatKey(CH.threads.get("free:" + cwd)?.key);
+    CH.threads.delete("free:" + cwd);
+    // The workspace's sessions are gone from the DB — drop them from the local
+    // snapshot and forget a saved conversation that belonged to this cwd.
+    CH.sessions = CH.sessions.filter((s) => (s.cwd || "(unknown)") !== cwd);
+    try {
+      const snap = JSON.parse(localStorage.getItem(SNAP_KEY) || "null");
+      if (snap && snap.cwd === cwd) clearSnapshot();
+    } catch {}
     if (CH.workspace === cwd) {
-      const ws = workspaces();
+      // Back to the "Select a workspace" state — the user picks the next one
+      // rather than having one loaded for them.
       CH.workspace = null;
-      if (ws.length) { selectWorkspace(ws[0]); return; }
-      resetChat();
+      CH.curId = null;
+      CH.chatHistory = [];
+      CH.chatSessionId = null;
+      CH.resumeFile = null;
+      CH.chatBusy = false;
+      CH.suppressLive = false;
+      CH.openSid = null;
+      CH.loadingSid = null;
+      CH.lastOpenCount = null;
+      persistWorkspace();
       updateHeader();
+      renderChat();
     }
     renderWorkspaces();
     renderAgents();
@@ -774,19 +985,20 @@
 
   // ─── Agent-team rail (right) ─────────────────────────────────────────────
   let teamFetchedAt = 0;
-  // Serialized signature of the last team snapshot we rendered from. Rails only
-  // rebuild when this (or the session list) actually changes, so the per-poll
-  // agent-team throttle never re-renders identical DOM.
-  let teamJsonSig = null;
+  // The team snapshot object the rails were last rendered from. Comparing the
+  // reference is O(1); this used to JSON.stringify the whole snapshot on every
+  // poll just to detect a replacement that the assignment sites already know
+  // about.
+  let teamDataRef = null;
   async function loadAgentTeam() {
     // The /agent-team snapshot changes rarely; throttle the fetch so the poll
     // doesn't hammer the server.
     const now = Date.now();
     if (teamFetchedAt && now - teamFetchedAt < 15000) {
-      // Still pick up external edits to the team config without touching DOM
-      // when nothing changed.
-      if (CH.teamData && teamJsonSig !== JSON.stringify(CH.teamData)) {
-        teamJsonSig = JSON.stringify(CH.teamData);
+      // A writer replaced the snapshot since the last render (add/remove
+      // workspace, a team toggle) — refresh the rails without re-fetching.
+      if (CH.teamData && CH.teamData !== teamDataRef) {
+        teamDataRef = CH.teamData;
         renderAgents();
         renderWorkspaces();
       }
@@ -802,7 +1014,7 @@
       CH.teamData = data;
       mergeCustomWs(data);
     }
-    teamJsonSig = JSON.stringify(CH.teamData || null);
+    teamDataRef = CH.teamData || null;
     renderAgents();
     renderWorkspaces();
   }
@@ -945,6 +1157,9 @@
     const td = CH.teamData;
     const teamsOn = teamHarnessOn(td);
     applyRailHeader(teamsOn);
+    // The dictation mic is gated on the speech-to-text extension's enable
+    // state, which lives in this same snapshot.
+    renderSttButton();
     if (!td || !teamsOn || !td.teamsOrder || !td.teamsOrder.length) {
       renderAgentSessions();
       return;
@@ -1059,11 +1274,22 @@
     if (!members.length) subBody = `<div class="at-dim">No agents loaded</div>`;
     else {
       for (const m of members) {
-        const sess = wsSessionsArr.find((s) => (s.agent_name || "").toLowerCase() === (m.name || "").toLowerCase());
-        const isDisabled = disabled.has((m.name || "").toLowerCase());
+        const lname = (m.name || "").toLowerCase();
+        // A role can own several sessions (repeated dispatches). The chip speaks
+        // for the most recently active one, and is highlighted when ANY of them
+        // is the transcript on screen — binding to the first name match used to
+        // miss the open session whenever an older same-role session sorted
+        // first in the poll.
+        const roleSessions = wsSessionsArr.filter((s) => (s.agent_name || "").toLowerCase() === lname);
+        const sess = roleSessions
+          .slice()
+          .sort((a, b) => (Date.parse(b.last_ts) || 0) - (Date.parse(a.last_ts) || 0))[0];
+        const isDisabled = disabled.has(lname);
         const enabled = !isDisabled;
         const st = sess ? S.subagentStatus(sess) : "gray";
-        const isActive = sess && CH.agentId === sess.session_id;
+        // The subagent whose transcript is on screen. (This used to read
+        // CH.agentId, which was never assigned — so it never highlighted.)
+        const isActive = roleSessions.some((s) => CH.openSid === s.session_id);
         const statusLabel = st === "green" ? "running" : st === "orange" ? "waiting" : st === "red" ? "stopped" : "idle";
         subBody +=
           `<div class="at-chip sub${enabled ? " on" : ""}${isActive ? " active" : ""}" data-agent="${esc(m.name)}" title="${esc(m.name)} — ${statusLabel}${enabled ? "" : " (disabled)"}">` +
@@ -1097,40 +1323,9 @@
     }
     html += atSection("extensions", "Extensions", `<div class="at-chips">` + extBody + `</div>`, { count: exts.length });
 
+    if (agentsRailHtml === html) return; // same markup — keep the live DOM
+    agentsRailHtml = html;
     el.agents.innerHTML = html;
-
-    el.agents.querySelectorAll(".at-sec-head").forEach((n) =>
-      n.addEventListener("click", () => toggleSection(n.dataset.sec))
-    );
-    el.agents.querySelectorAll(".at-chip[data-team]").forEach((n) =>
-      n.addEventListener("click", () => {
-        const team = n.dataset.team;
-        CH.team = team;
-        postTeam({ action: "setTeam", team });
-      })
-    );
-    el.agents.querySelectorAll(".at-card[data-action]").forEach((n) =>
-      n.addEventListener("click", () => postTeam({ action: n.dataset.action }))
-    );
-    // Clicking a subagent chip toggles it on/off (original card behavior).
-    el.agents.querySelectorAll(".at-chip.sub[data-agent]").forEach((n) =>
-      n.addEventListener("click", () => {
-        const name = n.dataset.agent;
-        postTeam({ action: "toggleAgent", agent: name, disabled: !disabled.has((name || "").toLowerCase()) });
-      })
-    );
-    el.agents.querySelectorAll(".at-chip[data-dir]").forEach((n) =>
-      n.addEventListener("click", () => postTeam({ action: "toggleSkill", group: n.dataset.group, dir: n.dataset.dir }))
-    );
-    // Clicking a tool chip toggles it in the orchestrator's skip denylist. The
-    // agent-team extension applies the change live to the running subprocess,
-    // so this is a live-config toggle (no respawn, applies next turn).
-    el.agents.querySelectorAll(".at-chip[data-tool]").forEach((n) =>
-      n.addEventListener("click", () => postTeam({ action: "toggleTool", tool: n.dataset.tool }, { liveConfig: true }))
-    );
-    el.agents.querySelectorAll(".at-chip[data-path]").forEach((n) =>
-      n.addEventListener("click", () => postTeam({ action: "toggleExtension", path: n.dataset.path }))
-    );
   }
 
   // Fallback: plain session list for the workspace (no agent-team config).
@@ -1139,25 +1334,29 @@
     sessions = sessions.slice().sort((a, b) => new Date(b.last_ts) - new Date(a.last_ts));
     if (el.agentCount) el.agentCount.textContent = sessions.length;
     if (!sessions.length) {
-      el.agents.innerHTML = '<div class="chat-rail-empty">No agents in this workspace</div>';
+      const empty = '<div class="chat-rail-empty">No agents in this workspace</div>';
+      if (agentsRailHtml === empty) return;
+      agentsRailHtml = empty;
+      el.agents.innerHTML = empty;
       return;
     }
     let html = "";
     for (const s of sessions) {
-      const active = CH.agentId === s.session_id ? " active" : "";
+      // Highlight the session whose transcript is open in the canvas.
+      const active = CH.openSid === s.session_id ? " on active" : "";
       const name = s.agent_name ?? s.cwd?.split("/").pop() ?? S.shortId(s.session_id);
       const st = S.subagentStatus(s);
       const statusLabel = st === "green" ? "running" : st === "orange" ? "waiting" : st === "red" ? "stopped" : "idle";
       html +=
-        `<div class="at-chip sub${active ? " on active" : ""}" data-sid="${s.session_id}" title="${esc(name)} — ${statusLabel}">` +
+        `<div class="at-chip sub${active}" data-sid="${s.session_id}" title="${esc(name)} — ${statusLabel}">` +
         `<span class="status-dot ${st}"></span>` +
         `<span class="at-chip-name">${esc(name)}</span>` +
         `</div>`;
     }
-    el.agents.innerHTML = `<div class="at-chips">` + html + `</div>`;
-    el.agents.querySelectorAll(".at-chip[data-sid]").forEach((n) =>
-      n.addEventListener("click", () => loadSessionChat(n.dataset.sid))
-    );
+    const full = `<div class="at-chips">` + html + `</div>`;
+    if (agentsRailHtml === full) return;
+    agentsRailHtml = full;
+    el.agents.innerHTML = full;
   }
 
   // ─── Selection ────────────────────────────────────────────────────────────
@@ -1167,12 +1366,17 @@
     CH.expandedWs.add(cwd);
     saveExpandedWs();
     // Switching workspaces never kills or resets other sessions' threads — it
-    // just shows this workspace's own conversation (its free thread, or the
-    // last session you were viewing here), which keeps running in the
-    // background when you're elsewhere.
+    // just shows this workspace's own conversation (its free thread), which
+    // keeps running in the background when you're elsewhere. Recorded sessions
+    // keep running too; their transcripts reopen only from their own row.
     const prev = curThread();
     const t = freeThread(cwd);
     t.workspace = cwd;
+    // Selecting a workspace always lands on the workspace's OWN conversation —
+    // never on a recorded session (see clearSessionView: the rail aliases a
+    // recorded session onto this same thread, so the old code could reopen that
+    // transcript here).
+    const wasSessionView = clearSessionView(t);
     if (prev && prev !== t) detachThread(prev); // freeze the old preview, decline its open questions
     bindThread(t);
     renderWorkspaces();
@@ -1192,12 +1396,21 @@
     CH.footerFetchedAt = 0;
     CH.footerGoRetry = false;
     fetchChatFooter(true);
+    // Give the composer a sensible model the first time a workspace is opened
+    // (nothing is auto-selected, so this can't happen before a click).
+    if (!CH.chatModel) CH.chatModel = defaultChatModel();
+    renderComposerModel();
     renderChat();
     attachThread(t); // re-attach this workspace's thread if it's still streaming
+    if (wasSessionView) setConversationHint(t);
+    // The user picked this workspace from the rail — bring back the workspace's
+    // OWN conversation (never a recorded session: transcripts open only when
+    // their session row is clicked). Nothing is restored before a selection.
+    attemptRestore();
     ensureChatSession();
-    // NB: no clearSnapshot() here — attemptRestore() (called right after boot
-    // auto-select) validates the stored snapshot's workspace and restores the
-    // conversation, so wiping it here would defeat reload persistence.
+    // NB: no clearSnapshot() here — attemptRestore() validates the stored
+    // snapshot's workspace and restores the conversation, so wiping it here
+    // would defeat reload persistence.
   }
 
   function persistWorkspace() {
@@ -1207,18 +1420,16 @@
     } catch {}
   }
 
-  function preferredWorkspace(list) {
-    let saved = "";
-    try { saved = localStorage.getItem("scope-chat-workspace") || ""; } catch {}
-    if (saved && list.includes(saved)) return saved;
-    return list[0];
-  }
-
   // ─── Conversation persistence (last workspace + its chat thread) ─────────
   // The visible conversation — live replies or a session transcript — is kept
   // as a lightweight per-workspace snapshot, so a page reload brings it back
   // verbatim and ready to type in (never a read-only replay).
   const SNAP_KEY = "scope-chat-snapshot";
+  // Bumped when the snapshot shape changes. A snapshot written by an older
+  // build can't be trusted to describe the workspace's own live conversation
+  // (before v2 it carried no "was a session on screen" flag), so it is ignored
+  // once rather than risk reopening a recorded session on a workspace click.
+  const SNAP_VERSION = 2;
   const SNAP_MAX = 80;
   const SNAP_CAP = 8000;
   // In-memory cap for the live conversation. The visible thread is bounded so a
@@ -1246,14 +1457,19 @@
             model: m.model || "",
             ts: m.ts,
           }));
-        const t = curThread();
+        // Store the workspace, its messages, the thread they belong to, the pi
+        // session file to continue, and — crucially — whether a recorded
+        // session was on screen when this was written. attemptRestore() refuses
+        // any snapshot that isn't the workspace's OWN live conversation, so a
+        // snapshot taken while browsing a session transcript is never restored
+        // as if it were the workspace's chat (see attemptRestore).
         localStorage.setItem(SNAP_KEY, JSON.stringify({
+          v: SNAP_VERSION,
           cwd: CH.workspace,
           msgs,
-          openSid: CH.openSid,
           resumeFile: CH.resumeFile || "",
           threadId: CH.curId || "",
-          sid: t?.sid || (t?.kind === "session" ? t.sid : "") || "",
+          openSid: CH.openSid || "",
         }));
       } catch {}
     }, 800);
@@ -1262,26 +1478,45 @@
     try { localStorage.removeItem(SNAP_KEY); } catch {}
   }
 
-  // After a reload, restore the conversation that was on screen for this
-  // workspace as editable history, into the same thread it belonged to.
+  // Restore the workspace's own conversation as editable history. Runs when the
+  // workspace is selected (nothing is auto-selected on a fresh page load), and
+  // is attempted at most once per workspace. A snapshot that was written while
+  // a recorded session was on screen belongs to that SESSION, not to the
+  // workspace, and is deliberately not restored — selecting a workspace shows
+  // the workspace's own conversation until the user clicks a session row.
   function attemptRestore() {
-    if (restoreAttempted || CH.chatBusy || !CH.workspace) return;
-    if (CH.chatHistory.length) { restoreAttempted = true; return; } // keep the live thread
-    restoreAttempted = true;
+    if (CH.chatBusy || !CH.workspace || restoreTried.has(CH.workspace)) return;
+    if (CH.chatHistory.length) { restoreTried.add(CH.workspace); return; } // keep the live thread
+    restoreTried.add(CH.workspace);
     let snap = null;
     try { snap = JSON.parse(localStorage.getItem(SNAP_KEY) || "null"); } catch {}
-    if (!snap || snap.cwd !== CH.workspace || !Array.isArray(snap.msgs) || !snap.msgs.length) {
-      if (snap) clearSnapshot();
+    // A legacy (unversioned) snapshot can't be trusted to be the workspace's
+    // own conversation, and the snapshot belongs to ONE workspace — selecting a
+    // different workspace must neither restore it nor discard it, so both
+    // mismatches just bail.
+    if (!snap || snap.v !== SNAP_VERSION || snap.cwd !== CH.workspace ||
+        !Array.isArray(snap.msgs) || !snap.msgs.length) {
       return;
     }
-    // Restore into the thread the conversation belonged to (a recorded session
-    // thread or the workspace's free thread).
-    let t = null;
-    if (snap.threadId) t = CH.threads.get(snap.threadId) || null;
-    if (!t && snap.sid) t = threadForSid(snap.sid) || null;
-    if (!t) t = freeThread(CH.workspace);
+    // Only the workspace's free thread qualifies. Two checks guard against
+    // re-opening a session on a plain workspace click:
+    //   • snap.openSid — the snapshot was written while a session transcript
+    //     was on screen (the thread was in session view), so its messages and
+    //     resume file belong to that session, not to the workspace's chat.
+    //     This is the case that slipped through before: pi records a free
+    //     conversation under a session id and the rail aliases both keys onto
+    //     ONE thread, so threadId could equal freeThreadId() even while a
+    //     transcript was visible.
+    //   • snap.threadId must be this workspace's free thread — a snapshot
+    //     carrying a recorded-session thread id was taken elsewhere.
+    // Clicking a workspace therefore leaves the canvas on the workspace's own
+    // conversation; the transcript comes back only via its own session row
+    // (loadSessionChat, which refetches it from the server).
+    if (snap.openSid) return;
+    if (snap.threadId !== freeThreadId()) return;
+    const t = CH.threads.get(snap.threadId) || freeThread(CH.workspace);
     t.history = snap.msgs;
-    t.openSid = snap.openSid || (t.kind === "session" ? t.sid : null) || null;
+    t.openSid = null; // a free conversation never has a recorded session on screen
     t.resumeFile = snap.resumeFile || t.resumeFile || null;
     t.loadingSid = null;
     t.lastOpenCount = null; // point-in-time copy — refetch on next poll
@@ -1300,6 +1535,10 @@
   function refreshOpenSession() {
     const t = curThread();
     if (!t || !t.openSid || t.busy || t.loadingSid) return;
+    // A free thread shows its OWN live conversation, not a transcript (see
+    // loadSessionChat), so refetching its recorded events every poll would be a
+    // discarded round-trip.
+    if (t.kind === "free") return;
     const s = CH.sessions.find((x) => x.session_id === t.openSid);
     if (!s) return;
     const count = s.event_count ?? 0;
@@ -1353,6 +1592,10 @@
   // fresh pre-spawn. Other sessions' threads are untouched and keep running.
   async function resetChat() {
     const t = freeThread(CH.workspace);
+    // Forget any recorded-session alias this thread was adopted into: the reset
+    // makes it a NEW conversation, and keeping the alias would leave the old
+    // session row bound to it (showing the new chat, and sharing prompts).
+    dropThreadAliases(t);
     if (t.key) {
       try {
         await fetch(window.apiUrl("/chat/kill"), {
@@ -1515,6 +1758,24 @@
     return h.join("");
   }
 
+  // Bounded memo for fmtMarkdown. The canvas re-renders the WHOLE transcript on
+  // a workspace switch, on every session re-fetch (the poll refetches a viewed
+  // session as it grows), and on each turn's finalize — without this, every
+  // unchanged message pays the full regex + block-parse cost again. Keyed by
+  // the raw text, which is all the formatter reads; the map is dropped
+  // wholesale once it gets large, so memory stays bounded with no bookkeeping.
+  const MD_CACHE_MAX = 512;
+  const mdCache = new Map();
+  function markdownHtml(raw) {
+    const src = String(raw == null ? "" : raw);
+    const hit = mdCache.get(src);
+    if (hit !== undefined) return hit;
+    const html = fmtMarkdown(src);
+    if (mdCache.size >= MD_CACHE_MAX) mdCache.clear();
+    mdCache.set(src, html);
+    return html;
+  }
+
   // Inline line icons (24px viewBox, stroke = currentColor) so every icon on
   // the chat canvas renders crisply in the theme and never falls back to a
   // platform font. `ico(paths, size, sw)` wraps a set of paths in an <svg>.
@@ -1625,8 +1886,11 @@
   function renderToolsHtml(tools) {
     if (!tools || !tools.length) return "";
     if (!CH.expandTools) {
+      // data-name lets the live stream resolve a chip after a mid-run re-render
+      // (streamToolEnd looks it up by name) — without it, a chip already drawn
+      // from history stayed "running" for the rest of the turn.
       return `<div class="chat-tools">` + tools.map((t) =>
-        `<span class="chat-tool ${esc(t.state || "")}"><span class="chat-tool-icon">${toolIcon(t.name)}</span>` +
+        `<span class="chat-tool ${esc(t.state || "")}" data-name="${esc(t.name)}"><span class="chat-tool-icon">${toolIcon(t.name)}</span>` +
         `<span class="chat-tool-name">${esc(t.name)}</span><span class="chat-tool-dot"></span></span>`
       ).join("") + `</div>`;
     }
@@ -1687,6 +1951,7 @@
   }
 
   function applyThinkingState() {
+    if (!el.msg) return;
     el.msg.querySelectorAll("details.chat-thinking").forEach((d) => { d.open = CH.showThinking; });
     updateToggleButtons();
   }
@@ -1700,6 +1965,7 @@
   // Re-render each message's tool activity in the current display mode without
   // rebuilding the whole list (which would disrupt an in-flight stream).
   function refreshToolDisplay() {
+    if (!el.msg) return;
     el.msg.querySelectorAll(".chat-msg").forEach((node) => {
       const i = node.dataset.i;
       const m = CH.chatHistory[Number(i)];
@@ -1753,7 +2019,7 @@
       ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre>${esc(m.thinking)}</pre></details>`
       : "";
     const body = m.text
-      ? `<div class="chat-text">${fmtMarkdown(m.text)}</div>`
+      ? `<div class="chat-text">${markdownHtml(m.text)}</div>`
       : (!m.streaming && !m.thinking && !(m.tools || []).length
           ? `<div class="chat-msg-time">(no text response)</div>`
           : "");
@@ -1799,8 +2065,11 @@
     updateHeader();
     // The composer is free whenever a workspace is selected: a prompt always
     // targets the CURRENT thread (queuing within it when it's busy), so other
-    // sessions streaming in the background never lock the input.
+    // sessions streaming in the background never lock the input. With no
+    // workspace there is nowhere to send a prompt, so the box is hidden
+    // entirely (the canvas hero tells the user to pick one).
     setComposerEnabled(!!CH.workspace);
+    if (el.composer) el.composer.style.display = CH.workspace ? "" : "none";
     // Preserve the user's reading position across re-renders (session polls
     // call renderChat every few seconds). When pinned near the bottom we stay
     // stuck to the newest message; otherwise we keep the relative offset.
@@ -1852,24 +2121,41 @@
     }
     let html = "";
     const curT = curThread();
+    const showLive = !!(curT && curT.busy && curT.live);
     for (let idx = 0; idx < CH.chatHistory.length; idx++) {
       const m = CH.chatHistory[idx];
       // A busy thread's in-flight assistant message renders as the live
       // placeholder so incoming deltas stream into it (also after switching
       // back to a session that is still running).
-      if (curT && curT.busy && curT.live && m === curT.live.m) html += renderChatMsgLivePlaceholder(m, idx);
+      if (showLive && m === curT.live.m) html += renderChatMsgLivePlaceholder(m, idx);
       else html += renderChatMsg(m, idx);
     }
     el.msg.innerHTML = html;
     if (stickBottom) scrollToBottom(true);
     else if (prevHeight > 1) el.msg.scrollTop = Math.round((prevTop / prevHeight) * el.msg.scrollHeight);
+    // Rebuilding the canvas detaches every node the live stream was writing
+    // into. Re-resolve the body pointer so deltas keep landing in the new DOM
+    // (previously the stream kept writing into removed nodes — invisible until
+    // the turn finalized — e.g. after switching away from and back to Chat).
+    if (showLive) attachLiveDom(curT);
     updateScrollDown();
   }
 
   function renderChatMsgLivePlaceholder(m, idx) {
-    // Empty assistant row that streaming events fill in-place.
+    // The in-flight assistant bubble that streaming events fill in-place. It
+    // renders whatever has already arrived (thinking / tools / text) as well as
+    // the typing dots, because the canvas is rebuilt from history on re-render
+    // (view switch, workspace toggle). Without this, a mid-run re-render drew an
+    // empty bubble and the text streamed so far vanished until the turn ended.
+    // The shapes match what the streaming helpers look for, so they extend
+    // these nodes rather than creating duplicates.
     const dataIdx = idx != null ? idx : CH.chatHistory.length - 1;
     const copyAttr = esc(m.text || "");
+    const thinking = m.thinking
+      ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre>${esc(m.thinking)}</pre></details>`
+      : "";
+    const tools = renderToolsHtml(m.tools || []);
+    const text = m.text ? `<div class="chat-text chat-stream-text">${esc(m.text)}</div>` : "";
     return (
       `<div class="chat-msg chat-ai chat-ai-live" data-i="${dataIdx}">` +
       `<div class="chat-msg-avatar">π</div>` +
@@ -1880,6 +2166,9 @@
       `<span class="chat-msg-time">${esc(fmtTs(m.ts))}</span>` +
       `<span class="chat-msg-actions"><button type="button" class="chat-act" data-copy="${copyAttr}" title="Copy message">${ico(ICON_COPY, 13)}</button></span>` +
       `</div>` +
+      thinking +
+      tools +
+      text +
       `<div class="chat-typing"><span></span><span></span><span></span></div>` +
       `</div></div>`
     );
@@ -1902,6 +2191,19 @@
     footerRenderFrame = requestAnimationFrame(() => {
       footerRenderFrame = 0;
       renderChatFooter();
+    });
+  }
+
+  // Same coalescing for the follow-the-bottom pin. A turn emits hundreds of
+  // deltas and `nearBottom()` reads scrollHeight (a forced layout), so pinning
+  // on every event thrashed layout + paint for no visible gain: one frame of
+  // latency is imperceptible, a per-token reflow is not.
+  let scrollFrame = 0;
+  function scheduleScrollToBottom() {
+    if (scrollFrame) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      if (nearBottom()) scrollToBottom(true);
     });
   }
 
@@ -1943,8 +2245,12 @@
       t.className = "chat-text chat-stream-text";
       livePrependTextNode(body, t, null);
     }
-    // Keep a trailing caret while streaming.
-    t.textContent = m.text;
+    // Append the delta to ONE text node instead of re-assigning textContent:
+    // re-copying the whole message on every token is O(n²) over a long reply
+    // (and re-created the node, dropping the caret position mid-stream).
+    let tn = t.firstChild;
+    if (!tn || tn.nodeType !== 3) tn = t.appendChild(document.createTextNode(""));
+    tn.appendData(delta);
   }
 
   function toolChip(body, name) {
@@ -1954,6 +2260,10 @@
 
   function streamToolStart(body, m, name, args) {
     m.tools = m.tools || [];
+    // Recorded ONCE: this used to push a second time after the DOM branch, so
+    // every attached tool call was duplicated — the final re-render drew the
+    // chip twice and the extra copy stayed "live" forever (tool_end only
+    // resolves the first match).
     m.tools.push({ name, args, state: "live" });
     if (!body) return; // background thread — model only
     clearLiveTyping(body);
@@ -1963,7 +2273,6 @@
       toolsEl.className = CH.expandTools ? "chat-tools chat-tools-expanded" : "chat-tools";
       livePrependTextNode(body, toolsEl, ".chat-text, .chat-usage");
     }
-    m.tools.push({ name, args, state: "live" });
     if (CH.expandTools) {
       const det = document.createElement("details");
       det.className = "chat-tool-call live";
@@ -2334,7 +2643,7 @@
           ? el.msg.children[mIdx].querySelector(".chat-msg-body")
           : null;
         t.live = { body: newBody || t.live.body, m: m2, isFirst: false, queue: t.live.queue, after: t.live.after };
-        if (attached && nearBottom()) scrollToBottom();
+        if (attached) scheduleScrollToBottom();
         break;
       }
       case "run_start": {
@@ -2387,21 +2696,21 @@
         break;
       case "final": {
         // Authoritative snapshot (some providers only deliver it on message_end).
-        if (ev.text !== undefined) {
-          m.text = ev.text || "";
+        // Only a NON-EMPTY snapshot is applied: message_end for a provider whose
+        // content array is empty arrives as text:"" and used to wipe the text
+        // that already streamed into this bubble.
+        if (typeof ev.text === "string" && ev.text) {
+          m.text = ev.text;
           if (body) {
             const elt = body.querySelector(".chat-text.chat-stream-text");
             if (elt) elt.textContent = m.text;
           }
         }
-        if (ev.thinking !== undefined) {
-          m.thinking = ev.thinking || "";
+        if (typeof ev.thinking === "string" && ev.thinking) {
+          m.thinking = ev.thinking;
           if (body) {
             const det = body.querySelector("details.chat-thinking");
-            if (det) {
-              det.querySelector("pre").textContent = m.thinking;
-              if (!m.thinking) det.remove();
-            }
+            if (det) det.querySelector("pre").textContent = m.thinking;
           }
         }
         break;
@@ -2412,7 +2721,7 @@
       default:
         break;
     }
-    if (attached && nearBottom()) scrollToBottom();
+    if (attached) scheduleScrollToBottom();
     // Keep the composer footer in lockstep with the VISIBLE live turn — the
     // usage / final snapshots are exactly what its token + cost numbers are
     // derived from. Coalesced to one render per frame so a burst of usage
@@ -2436,11 +2745,20 @@
     // Keep Send enabled while a turn streams so the user can steer / queue a
     // follow-up; the stop button appears in its place of action.
     el.send.disabled = !on;
+    // Losing the composer (workspace cleared) must not leave the host mic open.
+    if (!on && CH.listening) void finishListening();
+    updateListenButton();
     if (el.stop) el.stop.classList.toggle("show", CH.chatBusy);
     if (el.input) el.input.placeholder = "Message the pi coding agent…";
   }
 
   function updateHeader() {
+    // The Stop button is shown while the VISIBLE thread is streaming. It used
+    // to be toggled only inside setComposerEnabled, which sendPrompt calls
+    // before CH.chatBusy is synced — so the button never appeared during the
+    // first turn (nothing else re-ran it mid-stream). Keep it in lockstep here;
+    // updateHeader runs at turn start and on every poll.
+    if (el.stop) el.stop.classList.toggle("show", CH.chatBusy);
     if (!el.name) return;
     const base = currentWorkspaceName();
     if (!CH.workspace) {
@@ -2525,6 +2843,12 @@
       const o = sel.options[sel.selectedIndex];
       if (!o) { sel.style.width = ""; continue; }
       const cs = getComputedStyle(sel);
+      // Measuring the label forces layout, and renderComposerModel() runs on
+      // every poll — so skip the measurement + style write when the label, its
+      // font and the available width are all unchanged (the common case).
+      const fitKey = `${maxW}|${o.text}|${cs.fontFamily}|${cs.fontSize}|${cs.fontWeight}|${cs.letterSpacing}`;
+      if (sel.dataset.fitKey === fitKey) continue;
+      sel.dataset.fitKey = fitKey;
       if (!fitProbe) {
         fitProbe = document.createElement("span");
         fitProbe.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;pointer-events:none;left:-9999px;top:0";
@@ -2562,7 +2886,10 @@
     for (const lvl of opts) {
       html += `<option value="${esc(lvl)}"${lvl === current ? " selected" : ""}>${esc(lvl)}</option>`;
     }
-    el.thinking.innerHTML = html;
+    // Same guard as the model select below: this runs on every poll, and an
+    // unconditional innerHTML swap resets the element — closing an open
+    // dropdown and dropping focus mid-interaction.
+    if (el.thinking.innerHTML !== html) el.thinking.innerHTML = html;
   }
 
   // ─── Composer footer (pi custom-footer port) ────────────────────────────
@@ -2698,9 +3025,15 @@
     return `$${n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
   }
 
+  let footerHtml = null; // last markup written to the composer footer
   function renderChatFooter() {
     if (!el.footer) return;
-    if (!CH.workspace) { el.footer.innerHTML = ""; return; }
+    if (!CH.workspace) {
+      if (footerHtml === "") return;
+      footerHtml = "";
+      el.footer.innerHTML = "";
+      return;
+    }
     const sep = `<span class="cf-sep">·</span>`;
     const sid = CH.openSid || CH.chatSessionId;
     const s = CH.sessions.find((x) => x.session_id === sid);
@@ -2817,18 +3150,224 @@
       );
     }
 
-    el.footer.innerHTML =
+    const html =
       `<div class="cf-row cf-main">` +
       `<span class="cf-chips">${chips.join("")}</span>` +
       (metaParts.length ? `<span class="cf-meta">${metaParts.join(sep)}</span>` : "") +
       `</div>` +
       (sub.length ? `<div class="cf-row cf-sub">${sub.join(sep)}</div>` : "");
+    // The footer is rebuilt once per frame while a turn streams and on a 30s
+    // tick otherwise; skip the DOM write when the rendered values are the same
+    // (a usage event that doesn't move the formatted chips, an idle tick).
+    if (footerHtml === html) return;
+    footerHtml = html;
+    el.footer.innerHTML = html;
   }
 
   function autoGrow(textarea) {
     if (!textarea) return;
     textarea.style.height = "auto";
     textarea.style.height = Math.min(200, textarea.scrollHeight) + "px";
+  }
+
+  // ─── Dictation (speech to text) ───────────────────────────────────────────
+  // Dictation mirrors the pi `speech-to-text` extension: the SCOPE server
+  // records the host microphone (sox/arecord/ffmpeg) and transcribes the clip
+  // with Groq Whisper. The browser never speaks to a speech service itself, so
+  // this needs no Web-Speech/Google connection. The mic is only shown while
+  // that extension is enabled in the pi settings, since it is the pipeline the
+  // button drives (`GROQ_API_KEY` + speech-to-text.json).
+  function sttExtensionOn() {
+    const exts = CH.teamData?.extensions || [];
+    return exts.some((ex) =>
+      ex.enabled && ex.available && /speech-to-text|stt/i.test(ex.name || ex.path || "")
+    );
+  }
+
+  function updateListenButton() {
+    if (!el.listen) return;
+    const on = sttExtensionOn();
+    el.listen.style.display = on ? "" : "none";
+    el.listen.classList.toggle("on", CH.listening);
+    el.listen.setAttribute("aria-pressed", CH.listening ? "true" : "false");
+    if (CH.listening) {
+      el.listen.disabled = false;
+      el.listen.title = "Stop dictation and insert the transcript";
+      return;
+    }
+    if (CH.sttInFlight) {
+      el.listen.disabled = true;
+      el.listen.title = "Transcribing…";
+      return;
+    }
+    const info = CH.sttInfo;
+    const noKey = !!info && !info.hasApiKey;
+    const noRec = !!info && !info.recorderAvailable;
+    el.listen.disabled = !on || !CH.workspace || noKey || noRec;
+    el.listen.title = noKey
+      ? "Speech to text needs GROQ_API_KEY — export it in your shell profile (~/.bashrc, ~/.zshrc) or add \"apiKey\" to speech-to-text.json"
+      : noRec
+        ? "No audio recorder found (install sox, alsa-utils or ffmpeg)"
+        : "Dictate a message (speech to text)";
+  }
+
+  // Ask the server whether the host can record and transcribe. Cached per
+  // workspace — the config it reads (<project>/.pi/speech-to-text.json) is
+  // per project, so switching workspaces re-checks.
+  async function refreshSttStatus() {
+    const cwd = CH.workspace;
+    if (!cwd || CH.sttFetching) return;
+    CH.sttFetching = true;
+    try {
+      const { res, data } = await window.SCOPE.api("/chat/stt/status", { cwd });
+      if (res.ok && cwd === CH.workspace) { CH.sttInfo = data; CH.sttInfoCwd = cwd; }
+    } catch { /* server unreachable — leave the mic disabled */ }
+    CH.sttFetching = false;
+    updateListenButton();
+  }
+
+  // Re-evaluate the mic whenever the team snapshot changes (enable/disable the
+  // speech-to-text extension, switch workspace).
+  function renderSttButton() {
+    if (sttExtensionOn() && CH.workspace && CH.sttInfoCwd !== CH.workspace && !CH.sttFetching) {
+      void refreshSttStatus();
+    }
+    updateListenButton();
+  }
+
+  // Level-meter cadence and the quiet period after which we prompt "no signal?"
+  // (mirrors the pi extension's footer meter).
+  const STT_LEVEL_MS = 150;
+  const STT_NO_SIGNAL_MS = 2500;
+  const STT_METER_SEGMENTS = 8;
+
+  function stopSttTicker() {
+    if (CH.sttTimer) { clearTimeout(CH.sttTimer); CH.sttTimer = null; }
+  }
+
+  function sttLevelBar(level) {
+    const filled = Math.max(0, Math.min(STT_METER_SEGMENTS, Math.round((level || 0) * STT_METER_SEGMENTS)));
+    return "█".repeat(filled) + "░".repeat(STT_METER_SEGMENTS - filled);
+  }
+
+  // The recording hint carries a level bar, which only lines up in a monospace
+  // font — so it is written as HTML (setHint sets text and would not style the
+  // bar). Same busy/err classes as setHint so the states stay consistent.
+  function setSttHint(bar, clock, note) {
+    if (!el.hint) return;
+    el.hint.innerHTML =
+      `<span class="chat-stt-bar">${esc(bar)}</span>` +
+      `<span class="chat-stt-clock">${esc(clock)}</span>` +
+      (note ? `<span class="chat-stt-note">${esc(note)}</span>` : "");
+    el.hint.classList.add("busy");
+    el.hint.classList.remove("err");
+  }
+
+  // Recording clock + live level meter. Each tick asks the server for the RMS
+  // level of the audio it is capturing (the browser can't see the host's mic)
+  // and redraws the hint as `████░░░░ 0:05`. Self-scheduling, so a slow reply
+  // just skips a frame instead of stacking requests. The server caps a clip at
+  // maxDurationSeconds and auto-transcribes; the client finishes at the same
+  // mark so a transcript still lands if the user walked away.
+  function startSttTicker() {
+    stopSttTicker();
+    let level = 0;
+    let silentMs = 0;
+    const paint = (transcribing) => {
+      const secs = Math.floor((Date.now() - CH.sttStartedAt) / 1000);
+      const clock = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+      if (transcribing) {
+        setSttHint(sttLevelBar(0), clock, "transcribing…");
+        return;
+      }
+      setSttHint(
+        sttLevelBar(level),
+        clock,
+        silentMs > STT_NO_SIGNAL_MS ? "no signal? — click the mic to stop" : "click the mic to stop"
+      );
+    };
+    const step = async () => {
+      if (!CH.listening) return;
+      const secs = Math.floor((Date.now() - CH.sttStartedAt) / 1000);
+      if (secs > CH.sttMaxSeconds) { void finishListening(); return; }
+      let status = null;
+      try {
+        status = (await window.SCOPE.api("/chat/stt/status", { cwd: CH.workspace })).data;
+      } catch { /* server unreachable — keep the last level */ }
+      if (!CH.listening) return; // the user stopped while the request was in flight
+      // The server auto-stopped (clip cap) and has the transcript ready.
+      if (status && status.recording === false) { void finishListening(); return; }
+      if (status) { level = status.level || 0; silentMs = status.silentMs || 0; }
+      paint(secs >= CH.sttMaxSeconds);
+      CH.sttTimer = setTimeout(() => { void step(); }, STT_LEVEL_MS);
+    };
+    CH.sttTimer = setTimeout(() => { void step(); }, 0);
+  }
+
+  // Splice the transcript into the composer at the caret it was recorded from,
+  // preserving whatever the user typed before and after the recording started.
+  function insertDictation(text) {
+    if (!el.input || !text) return;
+    let spoken = text.trim();
+    if (!spoken) return;
+    const base = CH.listenBase || "";
+    const tail = CH.listenTail || "";
+    if (base && !/\s$/.test(base)) spoken = " " + spoken;
+    if (tail && !/^\s/.test(tail)) spoken += " ";
+    el.input.value = base + spoken + tail;
+    const caret = (base + spoken).length;
+    try { el.input.setSelectionRange(caret, caret); } catch { /* not focusable */ }
+    autoGrow(el.input);
+  }
+
+  async function startListening() {
+    if (CH.listening || CH.sttInFlight || !CH.workspace || !sttExtensionOn()) return;
+    const input = el.input;
+    const selStart = input ? input.selectionStart : 0;
+    const selEnd = input ? input.selectionEnd : selStart;
+    CH.listenBase = input ? input.value.slice(0, selStart) : "";
+    CH.listenTail = input ? input.value.slice(selEnd) : "";
+    try {
+      const { res, data } = await window.SCOPE.api("/chat/stt/start", {}, { cwd: CH.workspace });
+      if (!res.ok || !data?.ok) {
+        setHint(data?.error || `could not start recording (HTTP ${res.status})`, "err");
+        return;
+      }
+      CH.listening = true;
+      CH.sttStartedAt = Date.now();
+      CH.sttMaxSeconds = data.maxDurationSeconds || 120;
+      updateListenButton();
+      startSttTicker();
+    } catch (e) {
+      setHint(String(e?.message || e), "err");
+    }
+  }
+
+  // Stop the host recording and insert its transcript. The ticker's auto-finish
+  // and a manual mic click can't double-insert: the first call clears
+  // CH.listening, and the server returns a finished clip only once.
+  async function finishListening() {
+    if (!CH.listening) return;
+    CH.listening = false;
+    stopSttTicker();
+    CH.sttInFlight = true;
+    updateListenButton();
+    setHint("transcribing…", "busy");
+    let data = null;
+    try {
+      data = (await window.SCOPE.api("/chat/stt/stop", {}, {})).data;
+    } catch (e) {
+      data = { error: String(e?.message || e) };
+    }
+    CH.sttInFlight = false;
+    updateListenButton();
+    if (data?.ok && data.text) {
+      insertDictation(data.text);
+      setHint("", "");
+      el.input?.focus();
+    } else {
+      setHint(data?.error || "transcription failed", "err");
+    }
   }
 
   // ─── Sending ──────────────────────────────────────────────────────────────
@@ -2848,14 +3387,23 @@
     if (el.scrollDown) el.scrollDown.classList.toggle("show", !nearBottom());
   }
 
-  // Kill the current pi subprocess (if any) so a new conversation cannot leak
-  // the previous one's context. Best-effort: the session map entry is removed
-  // server-side, so the next /chat/start or /chat spawns a fresh `pi` process
-  // with no memory of earlier chats. Resolves once the kill request is sent
-  // (callers that need ordering — e.g. re-pre-spawning after a config change —
-  // can await it before issuing a new /chat/start).
+  // Fire-and-forget kill of a server-side pi subprocess by chat key. Used by
+  // the cleanup paths (deleting a session / removing a workspace) that have
+  // already dropped the local thread and only want the process gone.
+  function killChatKey(key) {
+    if (!key) return;
+    fetch(window.apiUrl("/chat/kill"), {
+      method: "POST",
+      headers: { ...window.authHeaders(), "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: key }),
+    }).catch(() => { /* server unreachable — nothing more we can do */ });
+  }
+
   // Kill the CURRENT thread's pi subprocess (if any) so a fresh one can be
-  // spawned with no memory of earlier chats. Best-effort.
+  // spawned with no memory of earlier chats. Best-effort: the server drops the
+  // session map entry, so the next /chat/start (or prompt) spawns a fresh `pi`.
+  // Callers that need ordering — e.g. re-pre-spawning after a config change —
+  // await it before issuing the new /chat/start.
   async function killCurrentChatSession() {
     const t = curThread();
     const sid = t?.key;
@@ -2969,6 +3517,11 @@
     const streamingBehavior = CH.steer ? "steer" : "followUp";
     const userMsg = { role: "user", text, ts: Date.now() };
     t.history.push(userMsg);
+    // Same bound as a fresh turn so a long steer-heavy conversation can't grow
+    // without limit in RAM.
+    if (t.history.length > CHAT_HISTORY_MAX) {
+      t.history.splice(0, t.history.length - CHAT_HISTORY_MAX);
+    }
     syncCurThread();
     el.input.value = "";
     autoGrow(el.input);
@@ -3036,6 +3589,10 @@
 
   async function sendPrompt() {
     const text = el.input.value.trim();
+    // Enter while dictating stops the recording and inserts the transcript
+    // instead of sending a half-spoken message. Checked before the empty-value
+    // guard so Enter always ends an in-progress recording.
+    if (CH.listening) { void finishListening(); return; }
     if (!text) return;
     if (!CH.workspace) { el.input.focus(); return; }
     let t = curThread();
@@ -3147,15 +3704,6 @@
     addWorkspaceRow();
   }
 
-  // Abandon the current thread's live preview (used when browsing away). With
-  // per-session threads the composer stays free — the thread just keeps
-  // updating its model in the background, and reopening it resumes streaming.
-  function abandonLivePreview() {
-    detachThread(curThread());
-    syncCurThread();
-    updateHeader();
-  }
-
   // ─── Loading a session transcript into the chat window ───────────────────
   // Clicking a session row (under a workspace, or in the fallback agent list)
   // shows that session's conversation here with the composer enabled. Sessions
@@ -3165,10 +3713,22 @@
     if (!sid) return;
     const row = CH.sessions.find((x) => x.session_id === sid) || null;
     // Chatting in a session means resuming pi's own session file in THAT
-    // project — follow the session's workspace.
+    // project — follow the session's workspace, with the same side effects as a
+    // workspace click (shared cwd for Files/Git/Terminal, per-project team
+    // config, footer). Without these, opening a session from another workspace
+    // left the rails on the old project and the footer showing the old branch.
     if (row && row.cwd && row.cwd !== CH.workspace) {
       CH.workspace = row.cwd;
+      CH.team = null;
       persistWorkspace();
+      if (typeof window.__setCwd === "function") window.__setCwd(row.cwd);
+      teamFetchedAt = 0;
+      void loadAgentTeam();
+      CH.footer = null;
+      CH.footerFetchedAt = 0;
+      CH.footerGoRetry = false;
+      fetchChatFooter(true);
+      renderWorkspaces();
     }
     let t = threadForSid(sid);
     if (!t) {
@@ -3180,6 +3740,7 @@
     const prev = curThread();
     if (prev && prev !== t) detachThread(prev);
     bindThread(t);
+    renderAgents(); // highlight the subagent role that owns the open session
     if (t.loadingSid === sid) {
       // A transcript fetch for this thread is already in flight — bind to it
       // and show the current state; the in-flight fetch renders when done.
@@ -3210,33 +3771,56 @@
     t.openSid = sid;
     t.loadingSid = sid;
     t.lastOpenCount = null;
+    // Generation token for THIS thread's transcript loads. A newer load (or a
+    // re-click that supersedes it) owns the thread's state; a late response
+    // therefore can neither apply stale content nor — as it used to — leave the
+    // thread permanently "loading" after the user browsed away mid-fetch.
+    const loadGen = ++t.loadGen;
+    renderAgents();
     if (!silent) renderChat(); // show the loading hero on first open only
     try {
       const { res, data } = await window.SCOPE.api(`/sessions/${encodeURIComponent(sid)}/events`, { limit: 1000 });
-      if (curThread() !== t || t.loadingSid !== sid) return; // user moved on
-      const msgs = res.ok && Array.isArray(data?.events) ? buildSessionMsgs(data.events, row) : [];
+      if (t.loadGen !== loadGen) return; // a newer load on this thread superseded us
+      // This response is still the latest for the thread, so the thread is no
+      // longer "loading" — clear the flag BEFORE the visibility check. Doing it
+      // after (and only when the thread is on screen) is what stranded a
+      // session: browsing away mid-fetch left loadingSid set forever, so
+      // reopening it showed "Loading…" and never fetched its own events.
+      t.loadingSid = null;
+      // A free thread's history IS the workspace's own live conversation, and
+      // the rail aliases a recorded session onto that same thread (pi records a
+      // free conversation under a session id). Replacing its history with the
+      // fetched transcript would leave session content sitting in the
+      // workspace's thread — so a later workspace click would show a transcript
+      // even though no session row was clicked. Adopt the resume target and
+      // keep the conversation the thread already owns.
+      if (t.kind !== "free") {
+        t.history = (res.ok && Array.isArray(data?.events) ? buildSessionMsgs(data.events, row, sid) : [])
+          .slice(-CHAT_HISTORY_MAX);
+      }
       // Continuing in this session means resuming pi's own session file, so the
       // agent picks up the full conversation context on the next prompt.
-      t.history = msgs.slice(-CHAT_HISTORY_MAX);
       t.resumeFile = row?.session_file || t.resumeFile;
-      t.loadingSid = null;
       t.lastOpenCount = row?.event_count ?? t.history.length;
       syncCurThread();
+      if (curThread() !== t) return; // applied to the model, not the visible thread
       persistConversation();
       renderChat();
       renderChatFooter();
       if (el.hint) {
+        const n = t.history.length;
         setHint(
-          msgs.length
-            ? `${msgs.length} message${msgs.length === 1 ? "" : "s"} from session — type to continue`
+          n
+            ? `${n} message${n === 1 ? "" : "s"}${t.kind === "free" ? " in this conversation" : " from session"} — type to continue`
             : "no readable conversation in this session — type to start fresh",
           ""
         );
       }
       if (el.input && !silent) el.input.focus();
     } catch (e) {
-      if (curThread() !== t || t.loadingSid !== sid) return;
+      if (t.loadGen !== loadGen) return; // a newer load owns the state now
       t.loadingSid = null;
+      if (curThread() !== t) return; // user moved on — nothing to show here
       if (!silent) {
         t.openSid = null;
         syncCurThread();
@@ -3249,23 +3833,32 @@
   // Fold a session's raw events into chat bubbles: user messages, assistant
   // replies (with markdown text, thinking and usage), and tool calls rendered
   // as chips attached to the reply they belong to.
-  function buildSessionMsgs(events, s) {
+  //
+  // `sid` is the session whose transcript is being built. Only events that
+  // carry that session id are folded in — each session's window shows its own
+  // messages and nothing else. The server already filters by session_id; this
+  // is the client-side guarantee against a mis-keyed row or a resumed
+  // subprocess whose events were attributed to another session. Events with no
+  // session id (older recordings, fixtures) pass through unchanged.
+  function buildSessionMsgs(events, s, sid) {
     const msgs = [];
     let pendingTools = [];
     let pendingThinking = "";
     const model = s?.model || "";
     for (const ev of events) {
+      if (sid && ev.session_id && ev.session_id !== sid) continue;
       const p = ev.payload || {};
+      const evSid = sid || ev.session_id || null;
       if (ev.type === "user_message") {
         const text = p.text || "";
-        if (text) msgs.push({ role: "user", text, ts: ev.ts, recorded: true });
+        if (text) msgs.push({ role: "user", text, ts: ev.ts, recorded: true, sid: evSid });
       } else if (ev.type === "assistant_message") {
         const thinking = p.thinking || pendingThinking || "";
         pendingThinking = "";
         const tools = pendingTools;
         pendingTools = [];
         const text = p.text || p.content || "";
-        msgs.push({ role: "assistant", text, thinking, tools, usage: p.usage, model: p.model || model, ts: ev.ts, recorded: true });
+        msgs.push({ role: "assistant", text, thinking, tools, usage: p.usage, model: p.model || model, ts: ev.ts, recorded: true, sid: evSid });
       } else if (ev.type === "thinking") {
         // Thinking arrives as a series of events. Some producers send chunked
         // deltas, others send a growing snapshot of the full thought — so
@@ -3309,7 +3902,7 @@
         if (pendingTools.length) last.tools = (last.tools || []).concat(pendingTools);
         if (pendingThinking && !last.thinking) last.thinking = pendingThinking;
       } else if (pendingThinking || pendingTools.length) {
-        msgs.push({ role: "assistant", text: "", thinking: pendingThinking || "", tools: pendingTools, model, ts: null, recorded: true });
+        msgs.push({ role: "assistant", text: "", thinking: pendingThinking || "", tools: pendingTools, model, ts: null, recorded: true, sid: sid || null });
       }
     }
     return msgs;
@@ -3410,6 +4003,8 @@
         if (rail.classList.contains("folded")) setRailVisible(side, true);
       });
     });
+    // Row/chip interactions for both rails — attached once, survives renders.
+    wireRailDelegation();
 
     // Delegated clicks: copy buttons (message + code), hero suggestion chips,
     // hero add-workspace CTA.
@@ -3454,6 +4049,7 @@
         updateHeader();
         renderChatFooter();
         renderComposerThinking();
+        fitComposerSelects(); // re-hug the pill to the newly selected label
         // The server respawns the idle pi subprocess when the requested model
         // differs, and pi honors --model when switch_session resumes a recorded
         // file — so the new model applies to this conversation from the next
@@ -3481,13 +4077,14 @@
         fitComposerSelects();
       });
     }
-    if (el.model) {
-      // Keep the model pill hugging its text when the window resizes.
-      el.model.addEventListener("change", () => fitComposerSelects());
-    }
+    // Keep the model pill hugging its text when the window resizes.
     window.addEventListener("resize", () => fitComposerSelects());
     if (el.send) {
       el.send.addEventListener("click", sendPrompt);
+    }
+    if (el.listen) {
+      el.listen.addEventListener("click", () => (CH.listening ? void finishListening() : void startListening()));
+      renderSttButton();
     }
     if (el.steer) {
       el.steer.addEventListener("click", () => {
@@ -3540,6 +4137,25 @@
   // Expose hooks for app.js
   window.__chatOnView = onView;
   window.__chatOnSessions = onSessions;
+  // TEMP DEBUG (removed before completion): inspect thread identity/aliasing.
+  window.__chatDebug = () => ({
+    curId: CH.curId,
+    openSid: CH.openSid,
+    chatSessionId: CH.chatSessionId,
+    threads: [...CH.threads].map(([k, t]) => ({
+      k,
+      id: t.id,
+      kind: t.kind,
+      sid: t.sid,
+      key: t.key,
+      resumeFile: t.resumeFile,
+      openSid: t.openSid,
+      adopted: t.adopted,
+      busy: t.busy,
+      n: t.history.length,
+      texts: t.history.map((m) => (m.text || "").slice(0, 20)),
+    })),
+  });
   // Exposed so the Settings page can re-arm the running pi chat session after a
   // team-setting change (settings toggles only affect a subprocess that boots
   // after the write, so an idle pre-spawn is killed and re-pre-spawned).

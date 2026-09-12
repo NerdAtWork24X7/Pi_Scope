@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "node --watch server.ts",
-    "start": "node server.ts"
+    "start": "node server.ts",
+    "test": "node --test test/chat.e2e.test.mjs"
   }
 }

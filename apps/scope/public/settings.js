@@ -32,6 +32,7 @@
 
   // ─── Persistent view state ───────────────────────────────────────────────
   let activeSec = "agent";
+  let editingTeam = null;  // team name being renamed inline in the Teams section
   let SET = null;          // latest /settings snapshot
   let loaded = false;      // first/only fetch done
   let fetching = false;
@@ -336,6 +337,7 @@
     models: () => renderModels(),
     skills: () => renderSkills(),
     extensions: () => renderExtensions(),
+    keys: () => renderKeys(),
     workspaces: () => renderWorkspaces(),
     pi: () => renderPi(),
   };
@@ -460,12 +462,29 @@
         const members = teams[tn] || [];
         const isActive = tn === activeTeam;
         const activeCount = members.filter((m) => m.active !== false && !disabled.has((m.name || "").toLowerCase())).length;
+        // Renaming happens inline: the name swaps for an input, and the rest of
+        // the head is replaced by Save/Cancel so the row can't be misclicked.
+        const head = editingTeam === tn
+          ? `<div class="set-team-head">` +
+            `<input type="text" class="set-input set-team-rename" value="${esc(tn)}" data-team-rename="${esc(tn)}" ` +
+            `aria-label="New name for ${esc(tn)}" spellcheck="false">` +
+            `<button type="button" class="btn-sm" data-team-rename-save="${esc(tn)}">Save</button>` +
+            `<button type="button" class="btn-sm" data-team-rename-cancel="1">Cancel</button>` +
+            `</div>`
+          : `<div class="set-team-head">` +
+            `<span class="set-team-name">${esc(tn)}</span>` +
+            `<button type="button" class="btn-sm set-team-edit" data-team-edit="${esc(tn)}" title="Rename this team">Edit</button>` +
+            `<button type="button" class="btn-sm set-team-del" data-team-del="${esc(tn)}" title="Delete this team">Remove</button>` +
+            `<span class="set-team-actions">` +
+            `<span class="set-team-count">${activeCount}/${members.length} active</span>` +
+            (isActive
+              ? `<span class="set-team-pill">active</span>`
+              : `<button type="button" class="btn-sm set-team-select" data-select="${esc(tn)}">Activate</button>`) +
+            `</span>` +
+            `</div>`;
         teamHtml +=
           `<div class="set-team${isActive ? " active" : ""}" data-team="${esc(tn)}">` +
-          `<div class="set-team-head"><span class="set-team-name">${esc(tn)}</span>` +
-          `<span class="set-team-count">${activeCount}/${members.length} active</span>` +
-          (isActive ? `<span class="set-team-pill">active</span>` : `<button type="button" class="btn-sm set-team-select" data-select="${esc(tn)}">Activate</button>`) +
-          `</div>` +
+          head +
           `<div class="set-members">` +
           members.map((m) => {
             const name = m.name || "";
@@ -477,9 +496,16 @@
               `<span class="set-toggle-track sm"><span class="set-toggle-knob"></span></span></label>` +
               `<span class="set-member-name">${esc(name)}</span>` +
               `<input type="text" class="set-input set-member-model" value="${esc(model)}" placeholder="model (e.g. provider/model)" data-member-model="${esc(name)}">` +
+              `<button type="button" class="set-member-x" data-member-del="${esc(name)}" data-member-team="${esc(tn)}" ` +
+              `title="Remove ${esc(name)} from ${esc(tn)}" aria-label="Remove ${esc(name)}">&times;</button>` +
               `</div>`
             );
           }).join("") +
+          `<div class="set-member-add">` +
+          `<input type="text" class="set-input" placeholder="add a subagent (e.g. web_fetch)" data-member-add="${esc(tn)}" ` +
+          `spellcheck="false" aria-label="Add a subagent to ${esc(tn)}">` +
+          `<button type="button" class="btn-sm" data-member-add-btn="${esc(tn)}">Add</button>` +
+          `</div>` +
           `</div></div>`;
       }
     }
@@ -488,8 +514,17 @@
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Teams</div>` +
       `<h2 class="settings-group-title">agent teams ${scopeBadge("project")}</h2>` +
-      `<div class="settings-intro">Teams come from <code>~/.pi/agent/agents/teams.yaml</code>. Activate a team, toggle which subagents are enabled, and set a per-agent model. Members without an explicit <code>active: false</code> are on.</div>` +
+      `<div class="settings-intro">Teams live in this workspace's ` +
+      `<code>.pi/settings/agents/teams.yaml</code>. Create, rename and delete teams, add or remove their subagents, ` +
+      `activate one, and set a per-agent model. Members without an explicit ` +
+      `<code>active: false</code> are on.</div>` +
       teamHtml +
+      `<div class="settings-group-div"></div>` +
+      field("New team", "starts empty — add subagents to it above",
+        `<span class="set-input-wrap">` +
+        `<input type="text" class="set-input" id="set-add-team" placeholder="my-team" spellcheck="false" autocomplete="off">` +
+        `<button type="button" class="btn-sm" id="set-add-team-btn">Add team</button>` +
+        `</span>`) +
       `<div class="settings-group-div"></div>` +
       `<div class="settings-group-kicker">Tool policy</div>` +
       `<div class="settings-intro">Tools the agent team may not invoke (left) and tools the orchestrator skips before dispatching to subagents (right). One comma-separated list each.</div>` +
@@ -652,6 +687,76 @@
     );
   }
 
+  // ─── API keys ─────────────────────────────────────────────────────────────
+  // Keys for app features (Groq speech-to-text) and for pi extensions that read
+  // process.env. They are stored in ~/.pi/agent/api-keys.json (mode 0600) and
+  // injected into the environment of every pi chat the server launches, so a
+  // key no longer has to be exported in the shell the server was started from —
+  // a desktop/GUI launch never sources the shell profile, which is exactly why
+  // env-only keys were invisible. Secrets are never sent to the browser: rows
+  // show a masked preview plus where the effective value comes from.
+  function renderKeys() {
+    const keys = strList(SET.apiKeys);
+    const sourceBadge = (source) =>
+      source === "settings"
+        ? `<span class="set-scope set-scope-project" title="Stored in api-keys.json — overrides the environment">Settings</span>`
+        : source === "env"
+          ? `<span class="set-scope set-scope-global" title="Inherited from the server's environment">Environment</span>`
+          : source === "shell"
+            ? `<span class="set-scope set-scope-global" title="Found in your shell profile (~/.bashrc, ~/.zshrc)">Shell profile</span>`
+            : source === "config"
+              ? `<span class="set-scope set-scope-project" title="From the speech-to-text extension's speech-to-text.json">Extension config</span>`
+              : `<span class="set-scope set-scope-none" title="No value found for this key">Not set</span>`;
+
+    const row = (k) => {
+      const desc = esc(k.description) +
+        (k.url ? ` <a href="${esc(k.url)}" target="_blank" rel="noopener">Get a key</a>` : "");
+      const control =
+        `<span class="set-input-wrap">` +
+        `<input type="password" class="set-input" data-key="${esc(k.name)}" autocomplete="off" spellcheck="false" ` +
+        `aria-label="${esc(k.name)}" placeholder="${k.masked ? esc(k.masked) : "paste " + esc(k.name)}">` +
+        `<button type="button" class="btn-sm" data-key-save="${esc(k.name)}">Save</button>` +
+        (k.source === "settings"
+          ? `<button type="button" class="btn-sm" data-key-clear="${esc(k.name)}" ` +
+            `title="Remove the stored value (falls back to the environment, if any)">Clear</button>`
+          : "") +
+        `</span>`;
+      return field(
+        esc(k.label) + " " + sourceBadge(k.source),
+        `<code>${esc(k.name)}</code> — ${desc}`,
+        control
+      );
+    };
+
+    const known = keys.filter((k) => k.known);
+    const custom = keys.filter((k) => !k.known);
+
+    return (
+      `<div class="settings-group">` +
+      `<div class="settings-group-kicker">Credentials</div>` +
+      `<h2 class="settings-group-title">API keys ${scopeBadge("global")}</h2>` +
+      `<div class="settings-intro">Saved to <code>~/.pi/agent/api-keys.json</code> (owner-only) and injected ` +
+      `into the environment of every pi chat the server launches — those chats run under your interactive shell ` +
+      `(which sources <code>~/.bashrc</code> / <code>~/.zshrc</code>), so keys exported there reach them too. A saved key overrides the ` +
+      `launcher's environment; Clear falls back to it.</div>` +
+      known.map(row).join("") +
+      (custom.length
+        ? `<div class="settings-group-div"></div>` +
+          `<div class="settings-group-kicker">Custom</div>` +
+          custom.map(row).join("")
+        : "") +
+      `<div class="settings-group-div"></div>` +
+      field("Add a custom key", "any environment variable a pi extension reads",
+        `<span class="set-input-wrap">` +
+        `<input type="text" class="set-input key-name" id="set-key-name" placeholder="MY_API_KEY" spellcheck="false" autocomplete="off">` +
+        `<input type="password" class="set-input" id="set-key-value" placeholder="value" autocomplete="off" aria-label="key value">` +
+        `<button type="button" class="btn-sm" id="set-key-add-btn">Add</button>` +
+        `</span>`,
+        "Stored keys are handed to pi by name, so the name must be a valid environment variable (A-Z, 0-9, _).") +
+      `</div>`
+    );
+  }
+
   // ─── Workspaces ───────────────────────────────────────────────────────────
   function renderWorkspaces() {
     const ws = strList(SET.chatWorkspaces);
@@ -660,7 +765,7 @@
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Workspaces</div>` +
       `<h2 class="settings-group-title">chat workspaces ${scopeBadge("project")}</h2>` +
-      `<div class="settings-intro">Directories available in the Chat view's workspace rail. Session-derived workspaces you remove are remembered in <code>chatWorkspacesRemoved</code>.</div>` +
+      `<div class="settings-intro">Directories available in the Chat view's workspace rail. Removing one also deletes its recorded sessions and events from the database. Session-derived workspaces you remove are remembered in <code>chatWorkspacesRemoved</code>.</div>` +
       `<div class="set-ws-list">` +
       ws.map((w) =>
         `<div class="set-ws"><span class="set-ws-path">${esc(w)}</span>` +
@@ -702,9 +807,123 @@
   }
 
   // ─── Wiring ───────────────────────────────────────────────────────────────
+  // API-key rows: Save (button, or Enter in the field), Clear, and the custom
+  // add row. Saving an empty value is rejected here rather than silently
+  // clearing the key — Clear is the explicit way to do that.
+  function wireKeys(panel) {
+    const saveByName = (name) => {
+      const input = panel.querySelector(`input[data-key="${name}"]`);
+      const value = input ? input.value.trim() : "";
+      if (!value) { toast("Paste a key first", true); return; }
+      postSettings("setApiKey", { name, value }, `${name} saved`);
+    };
+    panel.querySelectorAll("input[data-key]").forEach((node) =>
+      node.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); saveByName(node.dataset.key); }
+      })
+    );
+    panel.querySelectorAll("[data-key-save]").forEach((b) =>
+      b.addEventListener("click", () => saveByName(b.dataset.keySave))
+    );
+    panel.querySelectorAll("[data-key-clear]").forEach((b) =>
+      b.addEventListener("click", () => postSettings("clearApiKey", { name: b.dataset.keyClear }, `${b.dataset.keyClear} cleared`))
+    );
+    const addBtn = panel.querySelector("#set-key-add-btn");
+    if (addBtn) {
+      addBtn.addEventListener("click", () => {
+        const name = (panel.querySelector("#set-key-name")?.value || "").trim();
+        const value = (panel.querySelector("#set-key-value")?.value || "").trim();
+        if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name)) { toast("Name must look like MY_API_KEY", true); return; }
+        if (!value) { toast("Paste a key first", true); return; }
+        postSettings("setApiKey", { name, value }, `${name} saved`);
+      });
+    }
+  }
+
+  // Teams editor: inline rename, delete, per-team member add/remove, and the
+  // new-team row. Every write goes through POST /agent-team (the single writer
+  // shared with the Chat rail) and the section re-renders from the snapshot it
+  // returns, so the UI always reflects what actually landed on disk.
+  function wireTeams(panel) {
+    const rerender = () => setSection(activeSec, true);
+
+    panel.querySelectorAll("[data-team-edit]").forEach((b) =>
+      b.addEventListener("click", () => { editingTeam = b.dataset.teamEdit; rerender(); })
+    );
+    panel.querySelectorAll("[data-team-rename-cancel]").forEach((b) =>
+      b.addEventListener("click", () => { editingTeam = null; rerender(); })
+    );
+    const renameInput = panel.querySelector("input[data-team-rename]");
+    if (renameInput) {
+      renameInput.focus();
+      renameInput.select();
+      const commit = async () => {
+        const from = renameInput.dataset.teamRename;
+        const to = renameInput.value.trim();
+        editingTeam = null;
+        // Unchanged/empty just leaves edit mode; the server validates the name
+        // and its error toast is the single source of truth for collisions.
+        if (!to || to === from) { rerender(); return; }
+        await postTeam("renameTeam", { team: from, to });
+      };
+      renameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); void commit(); }
+        else if (e.key === "Escape") { e.preventDefault(); editingTeam = null; rerender(); }
+      });
+      panel.querySelectorAll("[data-team-rename-save]").forEach((b) =>
+        b.addEventListener("click", () => void commit())
+      );
+    }
+
+    panel.querySelectorAll("[data-team-del]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const tn = b.dataset.teamDel;
+        if (!confirm(`Delete team "${tn}"?\n\nIts subagent list is removed from teams.yaml. Members stay available in other teams.`)) return;
+        postTeam("removeTeam", { team: tn });
+      })
+    );
+
+    const addMember = (team) => {
+      const input = panel.querySelector(`input[data-member-add="${team}"]`);
+      const name = input ? input.value.trim() : "";
+      if (!name) { toast("Type a subagent name first", true); return; }
+      postTeam("addMember", { team, name });
+    };
+    panel.querySelectorAll("input[data-member-add]").forEach((node) =>
+      node.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); addMember(node.dataset.memberAdd); }
+      })
+    );
+    panel.querySelectorAll("[data-member-add-btn]").forEach((b) =>
+      b.addEventListener("click", () => addMember(b.dataset.memberAddBtn))
+    );
+    // Removing a subagent only drops it from this team — a member may (and
+    // usually does) belong to several teams.
+    panel.querySelectorAll("[data-member-del]").forEach((b) =>
+      b.addEventListener("click", () => postTeam("removeMember", { team: b.dataset.memberTeam, name: b.dataset.memberDel }))
+    );
+
+    const addTeamBtn = panel.querySelector("#set-add-team-btn");
+    const teamInput = panel.querySelector("#set-add-team");
+    if (addTeamBtn) {
+      const add = () => {
+        const name = (teamInput ? teamInput.value : "").trim();
+        if (!name) { toast("Type a team name first", true); return; }
+        postTeam("addTeam", { team: name });
+      };
+      addTeamBtn.addEventListener("click", add);
+      if (teamInput) teamInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); add(); }
+      });
+    }
+  }
+
   function wireSection(sec) {
     const panel = el.content.querySelector(".settings-panel");
     if (!panel) return;
+
+    if (sec === "keys") wireKeys(panel);
+    if (sec === "teams") wireTeams(panel);
 
     // Selects and number inputs commit on change.
     panel.querySelectorAll("select[data-act]").forEach((node) =>
@@ -813,9 +1032,14 @@
       addModelInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addModel(); } });
     }
 
-    // Workspace remove + add.
+    // Workspace remove + add. Removing also clears that workspace's recorded
+    // sessions/events (server-side), so confirm the destructive part first.
     panel.querySelectorAll("[data-remove-ws]").forEach((b) =>
-      b.addEventListener("click", () => postTeam("removeWorkspace", { path: b.dataset.removeWs }))
+      b.addEventListener("click", () => {
+        const w = b.dataset.removeWs;
+        if (!confirm(`Remove this workspace?\n\n${w}\n\nIts recorded sessions and events are permanently deleted from the database. This cannot be undone.`)) return;
+        postTeam("removeWorkspace", { path: w });
+      })
     );
     const addWsInput = $("#set-add-ws");
     const addWsBtn = $("#set-add-ws-btn");

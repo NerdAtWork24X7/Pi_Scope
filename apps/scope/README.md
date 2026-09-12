@@ -27,13 +27,34 @@ SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 | `SCOPE_SETTINGS_JSON` | `~/.pi/agent/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
 | `SCOPE_SKILLS_DIR` | `~/.pi/agent/skills` | Override the skills directory scanned for the agent-team sidebar |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
+| `SCOPE_KEYS_JSON` | `~/.pi/agent/api-keys.json` | API keys entered in Settings → API Keys (owner-only file, mode 0600) |
 
-Chat-spawned `pi` subprocesses additionally get the workspace's Python venv bin
-dirs prepended to `PATH`, and `PLAYWRIGHT_BROWSERS_PATH` restored from the
-user's shell rc files (or Playwright's default cache dirs) when the server env
-lacks it — so tools like `web-fetch` find the venv's `playwright` and its
-Chromium browser exactly as they do in the terminal, even when the server was
-launched from a GUI session that never sourced the shell rc.
+Chat-spawned `pi` subprocesses are launched through the user's **interactive
+shell** (`bash -ic` / `zsh -ic`, preferring `$SHELL`), so the environment they see
+is the one a terminal would give them: `~/.bashrc` (bash) or `~/.zshrc` (zsh) is
+sourced. This matters because the desktop launcher starts the server from a
+session that never reads those files. The login flag is deliberately omitted:
+login-only profile files are skipped, so a slow or banner-printing login shell
+can't delay or corrupt the chat protocol. The shell's own stdout is discarded and
+pi's NDJSON stream is routed to a dedicated fd, so rc banners or prompt themes
+can't corrupt the RPC stream either.
+
+On top of that they get the workspace's Python venv bin dirs prepended to `PATH`,
+and `PLAYWRIGHT_BROWSERS_PATH` restored from the user's shell rc files (or
+Playwright's default cache dirs) when the server env lacks it — so tools like
+`web-fetch` find the venv's `playwright` and its Chromium browser exactly as they
+do in the terminal, even when the server was launched from a GUI session that
+never sourced the shell rc. The `PATH` prefix is re-applied inside the shell too,
+so an rc file that reassigns `PATH` instead of prepending to it doesn't drop
+those dirs.
+
+API keys entered in **Settings → API Keys** are stored in
+`~/.pi/agent/api-keys.json` (mode 0600) and injected into the environment of
+every chat-spawned `pi` subprocess, so an extension that reads `process.env`
+(e.g. the speech-to-text extension's `GROQ_API_KEY`) works without the key
+living in a shell profile. A stored key overrides the inherited environment; the
+Settings page shows each key's effective source. Secrets never leave the server
+— the UI only receives a masked preview.
 
 ## Herdr cwd integration
 
@@ -56,6 +77,21 @@ SCOPE_AUTH_TOKEN=dev_token node server.ts
 
 # Terminal 2: check health (expect HTTP 200)
 curl -i http://127.0.0.1:43190/health
+```
+
+## End-to-end tests
+
+The Chat view has a headless-browser suite that runs the **real** `public/` assets
+against a mock backend (`test/mock-backend.mjs`) — no SQLite, no `pi` subprocess,
+no network. `test/chat.e2e.test.mjs` drives workspace selection / restore / add /
+remove / subagent nesting and the streaming + click flows; `test/harness.mjs` holds
+the shared Playwright helpers.
+
+```bash
+# from apps/scope (Playwright + Chromium come from the repo's root install)
+npm test
+# or pick a subset:
+node --test --test-name-pattern="workspace" test/chat.e2e.test.mjs
 ```
 
 ## API

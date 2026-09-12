@@ -5811,6 +5811,22 @@
     .chat-composer-hint.busy {
       color: var(--accent);
     }
+    /* Dictation level meter — the bar only lines up in a monospace face, and
+       tabular numerals keep the clock from shifting as the seconds tick. */
+    .chat-stt-bar {
+      font-family: var(--mono, monospace);
+      font-size: 11px;
+      letter-spacing: 1px;
+      flex-shrink: 0;
+    }
+    .chat-stt-clock {
+      font-family: var(--mono, monospace);
+      font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+    .chat-stt-note {
+      opacity: 0.85;
+    }
     .chat-composer-hint.busy::before {
       opacity: 1;
     }
@@ -6022,6 +6038,48 @@
     .chat-steer:disabled {
       opacity: 0.55;
       cursor: default;
+    }
+    /* Listen button — dictation (speech to text) for the composer. Off, it is a
+       quiet neutral circle matching the send button's size; on, it turns red
+       and pulses so an open microphone is unmistakable. */
+    .chat-listen {
+      width: 34px;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface-2);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      cursor: pointer;
+      flex-shrink: 0;
+      padding: 0;
+      transition: all 0.14s ease;
+    }
+    .chat-listen:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .chat-listen:focus-visible {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(65, 118, 230, 0.16);
+      outline: none;
+    }
+    .chat-listen:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .chat-listen.on {
+      background: var(--red);
+      border-color: var(--red);
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(239, 68, 68, 0.32);
+      animation: chat-listen-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes chat-listen-pulse {
+      0%, 100% { box-shadow: 0 2px 8px rgba(239, 68, 68, 0.32); }
+      50% { box-shadow: 0 0 0 5px rgba(239, 68, 68, 0.16); }
     }
     /* Stop button — red circle, hidden until a prompt is streaming. It aborts
        the agent's current run without killing the session. */
@@ -7304,6 +7362,12 @@ body.layout-settings #sidebar-resizer {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
 }
+/* Neutral badge for a value that is simply absent (an unset API key). */
+.set-scope-none {
+  color: var(--muted);
+  background: var(--pill-bg);
+  border: 1px solid var(--border);
+}
 .settings-intro {
   font-size: 13px;
   line-height: 1.6;
@@ -7370,16 +7434,24 @@ body.layout-settings #sidebar-resizer {
 }
 .set-input-wrap { display: flex; gap: 8px; width: 100%; }
 .set-input-wrap .set-input { flex: 1; }
+/* Custom-key row: the variable name only needs the left third. */
+.set-input-wrap .set-input.key-name { flex: 0 0 200px; }
 
 /* Toggle switches */
-.set-toggle {
+/* Member rows in the Teams section carry their own label class (the member
+   on/off wiring binds input[data-agent] separately from the labeled toggles),
+   but render the same switch — keep both selectors in lockstep so the track
+   lays out and the knob stays inside it. */
+.set-toggle,
+.set-member-toggle {
   display: inline-flex;
   align-items: center;
   gap: 10px;
   cursor: pointer;
   user-select: none;
 }
-.set-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.set-toggle input,
+.set-member-toggle input { position: absolute; opacity: 0; pointer-events: none; }
 .set-toggle-track {
   width: 40px; height: 22px;
   border-radius: 11px;
@@ -7397,21 +7469,25 @@ body.layout-settings #sidebar-resizer {
   background: var(--muted);
   transition: transform .18s ease, background .18s ease;
 }
-.set-toggle input:checked + .set-toggle-track {
+.set-toggle input:checked + .set-toggle-track,
+.set-member-toggle input:checked + .set-toggle-track {
   background: var(--accent);
   border-color: var(--accent);
 }
-.set-toggle input:checked + .set-toggle-track .set-toggle-knob {
+.set-toggle input:checked + .set-toggle-track .set-toggle-knob,
+.set-member-toggle input:checked + .set-toggle-track .set-toggle-knob {
   transform: translateX(18px);
   background: #fff;
 }
-.set-toggle input:focus-visible + .set-toggle-track {
+.set-toggle input:focus-visible + .set-toggle-track,
+.set-member-toggle input:focus-visible + .set-toggle-track {
   box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 3px var(--accent);
 }
 .set-toggle-label { font-size: 13px; color: var(--text); min-width: 40px; }
 .set-toggle-track.sm { width: 32px; height: 18px; }
 .set-toggle-track.sm .set-toggle-knob { width: 12px; height: 12px; }
-.set-toggle input:checked + .set-toggle-track.sm .set-toggle-knob { transform: translateX(14px); }
+.set-toggle input:checked + .set-toggle-track.sm .set-toggle-knob,
+.set-member-toggle input:checked + .set-toggle-track.sm .set-toggle-knob { transform: translateX(14px); }
 
 /* Teams */
 .set-team {
@@ -7430,6 +7506,21 @@ body.layout-settings #sidebar-resizer {
 }
 .set-team-name { font-size: 14px; font-weight: 700; color: var(--text); }
 .set-team-count { font-size: 12px; color: var(--muted); margin-left: auto; }
+/* Right-hand group (count + active state) owns the single auto margin, so the
+   head doesn't split its free space across two margin-left:auto elements. */
+.set-team-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.set-team-actions .set-team-count,
+.set-team-actions .set-team-select { margin-left: 0; }
+.set-team-rename { flex: 1; min-width: 0; }
+.set-team-del:hover { color: var(--red); border-color: var(--red); }
+.set-member-x {
+  border: 0; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px;
+  border-radius: 4px; flex-shrink: 0;
+}
+.set-member-x:hover { color: var(--red); }
+.set-member-add { display: flex; gap: 8px; margin-top: 2px; }
+.set-member-add .set-input { flex: 1; font-size: 12px; padding: 5px 8px; }
 .set-team-pill {
   font-size: 10.5px; font-weight: 700;
   text-transform: uppercase; letter-spacing: .6px;
@@ -7447,6 +7538,7 @@ body.layout-settings #sidebar-resizer {
   border-radius: 6px;
   background: var(--surface-2);
 }
+.set-member-toggle { flex-shrink: 0; }
 .set-member-name { font-size: 13px; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .set-member-model { width: 220px; flex-shrink: 0; font-size: 12px; padding: 5px 8px; }
 

@@ -305,8 +305,9 @@ window.setTheme = function(theme) {
   try { localStorage.setItem("scope-theme", theme); } catch {}
   window.__terminalSetTheme?.();
   // Tool-name pills and other per-row tints are theme-dependent — re-render
-  // the visible surfaces so their colors follow the new theme.
-  renderSessions();
+  // the visible surfaces so their colors follow the new theme. Forced, because
+  // the reconciler only rewrites rows whose rendered content changed.
+  renderSessions(true);
   if (STATE.view === "single" && STATE.selectedSessionId) {
     renderAllEvents();
     renderAgentSubnav();
@@ -489,26 +490,162 @@ function clearSelectedSession() {
   saveURLState();
 }
 
-function renderSessions() {
-  sessionList.innerHTML = "";
+// ─── Sidebar reconciliation ─────────────────────────────────────────────────
+// The sidebar used to be rebuilt from scratch (`sessionList.innerHTML = ""`)
+// on every data change — which is every 10s while an agent is running. That
+// threw away every row and every listener each time, reset the list's scroll
+// position, and flickered the whole column. Rows are reconciled by key now: a
+// row that survives an update keeps its node (and its listeners), and its
+// content is only rewritten when it actually changed — each row caches a
+// signature of what it rendered.
+
+/** Bumped to invalidate every row signature (theme swaps re-tint rows). */
+let sidebarEpoch = 0;
+
+/**
+ * Reconcile `container`'s children against `keys`, reusing the existing node
+ * whose `keyOf(node)` matches. `create(key)` must return a node whose key is
+ * `key`. Unkeyed and leftover nodes are dropped; only genuinely moved rows are
+ * re-inserted, so a stable list costs zero DOM mutations.
+ */
+function reconcileChildren(container, keys, keyOf, create) {
+  const spare = new Map();
+  for (const child of [...container.children]) {
+    const k = keyOf(child);
+    if (k != null && !spare.has(k)) spare.set(k, child);
+    else child.remove(); // unkeyed placeholder, or a duplicate from a mode switch
+  }
+  let prev = null;
+  for (const key of keys) {
+    let node = spare.get(key);
+    if (node) spare.delete(key);
+    else node = create(key);
+    const next = prev ? prev.nextSibling : container.firstChild;
+    if (node !== next) container.insertBefore(node, next);
+    prev = node;
+  }
+  for (const node of spare.values()) node.remove();
+}
+
+// ─── Row content (shared by the builders and the in-place updaters) ─────────
+function sessionName(s) {
+  return s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id.slice(0, 8);
+}
+function sessionModelHtml(s) {
+  return s.model ? ` <span class="name-model">- ${window.SCOPE.escapeHtml(s.model)}</span>` : "";
+}
+function isSidebarSelected(sid) {
+  return (STATE.view === "single" || STATE.view === "trajectory") && sid === STATE.selectedSessionId;
+}
+function miniTitle(s, stats) {
+  const costStr = stats ? ` · $${stats.total_cost.toFixed(4)}` : "";
+  return `${sessionName(s)}\n${s.session_id.slice(0, 8)} · ${s.event_count} events · ${window.SCOPE.fmtRel(s.last_ts)}${costStr}`;
+}
+// Everything an expanded row renders. One string compare decides whether the
+// row needs rewriting at all.
+function sessionRowSig(s) {
+  const stats = STATE.sessionStats[s.session_id];
+  return [
+    sidebarEpoch, sessionName(s), s.model || "", window.SCOPE.subagentStatus(s),
+    isSidebarSelected(s.session_id) ? "sel" : "",
+    stats ? `${stats.total_tokens}:${stats.total_cost}:${stats.error_count}` : "",
+    STATE.ackd.has(s.session_id) ? "ackd" : "",
+  ].join("\u0001");
+}
+function miniRowSig(s) {
+  const stats = STATE.sessionStats[s.session_id];
+  return [
+    sidebarEpoch, miniTitle(s, stats), window.SCOPE.agentLetter(s),
+    window.SCOPE.activityStatus(s), isSidebarSelected(s.session_id) ? "sel" : "",
+    s.last_ts || "",
+  ].join("\u0001");
+}
+
+function updateSessionItem(el, s) {
+  const sig = sessionRowSig(s);
+  if (el.__sig === sig) return; // nothing this row renders has changed
+  el.__sig = sig;
+  el.classList.toggle("selected", isSidebarSelected(s.session_id));
+  const name = el.querySelector(".info .name");
+  if (name) {
+    name.innerHTML =
+      `<span class="status-dot ${window.SCOPE.subagentStatus(s)}"></span>` +
+      `<span class="name-text">${window.SCOPE.escapeHtml(sessionName(s))}</span>` +
+      sessionModelHtml(s) +
+      `<span class="err-dot">●</span>`;
+  }
+  applySessionStatsToItem(el, STATE.sessionStats[s.session_id], s);
+  const del = el.querySelector(".sess-delete");
+  if (del) del.title = `Delete this session (${s.session_id.slice(0, 8)}…)`;
+}
+
+function updateMiniSessionItem(el, s) {
+  const sig = miniRowSig(s);
+  if (el.__sig === sig) return;
+  el.__sig = sig;
+  el.classList.toggle("selected", isSidebarSelected(s.session_id));
+  el.title = miniTitle(s, STATE.sessionStats[s.session_id]);
+  // The letter lives in the item's own text node — never overwrite textContent
+  // here, that would take the status dot with it.
+  const letter = window.SCOPE.agentLetter(s);
+  const first = el.firstChild;
+  if (first && first.nodeType === 3) {
+    if (first.nodeValue !== letter) first.nodeValue = letter;
+  } else {
+    el.insertBefore(document.createTextNode(letter), el.firstChild);
+  }
+  const dot = el.querySelector(".mini-dot");
+  if (dot) dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
+}
+
+function updateSessionGroup(el, group) {
+  const children = el.querySelector(".session-group-children");
+  const bySid = new Map(group.subagents.map((s) => [s.session_id, s]));
+  reconcileChildren(children, group.subagents.map((s) => s.session_id),
+    (node) => node.dataset.sid,
+    (sid) => buildSessionItem(bySid.get(sid)));
+  for (const node of children.children) updateSessionItem(node, bySid.get(node.dataset.sid));
+
+  // Head state: expansion (owned by the click handler / STATE) + member count.
+  const head = el.querySelector(".session-group-head");
+  const expanded = STATE.expandedGroups.has(group.cwd);
+  const sig = `${expanded ? 1 : 0}|${group.subagents.length}`;
+  if (head.__sig === sig) return;
+  head.__sig = sig;
+  head.classList.toggle("collapsed", !expanded);
+  head.querySelector(".session-group-caret").textContent = expanded ? "▾" : "▸";
+  head.querySelector(".session-group-count").textContent =
+    `${group.subagents.length} subagent${group.subagents.length === 1 ? "" : "s"}`;
+  children.style.display = expanded ? "" : "none";
+}
+
+function renderSessions(force) {
+  if (force) sidebarEpoch++; // invalidate every row signature
   const filtered = visibleSessions();
   if (STATE.sessionsLoaded && STATE.view === "single" && STATE.selectedSessionId && !filtered.some(s => s.session_id === STATE.selectedSessionId)) {
     clearSelectedSession();
     return;
   }
   if (!filtered.length) {
-    if (!STATE.sidebarCollapsed) {
-      sessionList.innerHTML = '<div style="padding:10px;color:var(--muted);font-size:11px">no sessions</div>';
-    }
+    sessionList.innerHTML = STATE.sidebarCollapsed
+      ? ""
+      : '<div style="padding:10px;color:var(--muted);font-size:11px">no sessions</div>';
     return;
   }
   if (STATE.sidebarCollapsed) {
-    for (const s of filtered) sessionList.appendChild(buildMiniSessionItem(s));
+    const bySid = new Map(filtered.map((s) => [s.session_id, s]));
+    reconcileChildren(sessionList, filtered.map((s) => s.session_id),
+      (el) => el.dataset.sid,
+      (sid) => buildMiniSessionItem(bySid.get(sid)));
+    for (const el of sessionList.children) updateMiniSessionItem(el, bySid.get(el.dataset.sid));
     return;
   }
-  for (const group of groupSessionsByCwd(filtered)) {
-    sessionList.appendChild(buildSessionGroup(group));
-  }
+  const groups = groupSessionsByCwd(filtered);
+  const byCwd = new Map(groups.map((g) => [g.cwd, g]));
+  reconcileChildren(sessionList, groups.map((g) => g.cwd),
+    (el) => el.dataset.cwd,
+    (cwd) => buildSessionGroup(byCwd.get(cwd)));
+  for (const el of sessionList.children) updateSessionGroup(el, byCwd.get(el.dataset.cwd));
 }
 
 // Group sessions by working directory. Each group is one "session" (the shared
@@ -527,31 +664,26 @@ function groupSessionsByCwd(sessions) {
 function buildSessionGroup(group) {
   const wrap = document.createElement("div");
   wrap.className = "session-group";
-
-  const expanded = STATE.expandedGroups.has(group.cwd);
+  wrap.dataset.cwd = group.cwd; // reconciliation key
 
   const head = document.createElement("div");
-  head.className = "session-group-head" + (expanded ? "" : " collapsed");
+  head.className = "session-group-head";
 
   const caret = document.createElement("span");
   caret.className = "session-group-caret";
-  caret.textContent = expanded ? "▾" : "▸";
 
   const title = document.createElement("span");
   title.className = "session-group-title";
   title.textContent = sessionGroupName(group.cwd);
-  title.title = group.cwd;
+  title.title = group.cwd; // derived from the key — constant for this node
 
   const count = document.createElement("span");
   count.className = "session-group-count";
-  count.textContent = `${group.subagents.length} subagent${group.subagents.length === 1 ? "" : "s"}`;
 
   head.append(caret, title, count);
 
   const children = document.createElement("div");
   children.className = "session-group-children";
-  children.style.display = expanded ? "" : "none";
-  for (const s of group.subagents) children.appendChild(buildSessionItem(s));
 
   head.addEventListener("click", () => {
     const collapsed = head.classList.toggle("collapsed");
@@ -563,6 +695,8 @@ function buildSessionGroup(group) {
 
   wrap.appendChild(head);
   wrap.appendChild(children);
+  // Head state + member rows come from the same updater the reconciler calls.
+  updateSessionGroup(wrap, group);
   return wrap;
 }
 
@@ -574,39 +708,32 @@ function sessionGroupName(cwd) {
 
 function buildSessionItem(s) {
   const el = document.createElement("div");
-  const isSel = (STATE.view === "single" || STATE.view === "trajectory")
-    ? s.session_id === STATE.selectedSessionId
-    : false;
-  el.className = "session-item" + (isSel ? " selected" : "");
-  el.dataset.sid = s.session_id;
-  const shortId = s.session_id.slice(0, 8);
-  const name = s.agent_name ?? s.cwd?.split("/").pop() ?? shortId;
-
-  const modelHtml = s.model ? ` <span class="name-model">- ${window.SCOPE.escapeHtml(s.model)}</span>` : "";
-  const info = document.createElement("div");
-  info.className = "info";
-  info.innerHTML = `<div class="name"><span class="status-dot ${window.SCOPE.subagentStatus(s)}"></span><span class="name-text">${window.SCOPE.escapeHtml(name)}</span>${modelHtml}<span class="err-dot">●</span></div>`;
-
-  const cost = document.createElement("div");
-  cost.className = "cost";
-  info.appendChild(cost);
-
-  applySessionStatsToItem(el, STATE.sessionStats[s.session_id], s);
-
-  if (STATE.view === "single" || STATE.view === "trajectory") {
-    el.addEventListener("click", () => selectSession(s.session_id));
-  }
+  el.className = "session-item";
+  el.dataset.sid = s.session_id; // reconciliation key
 
   // Per-session delete cross icon
   const delBtn = document.createElement("span");
   delBtn.className = "sess-delete";
   delBtn.textContent = "✕";
-  delBtn.title = `Delete this session (${shortId}…)`;
   delBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteSession(s.session_id); });
   el.appendChild(delBtn);
 
+  const info = document.createElement("div");
+  info.className = "info";
+  const name = document.createElement("div");
+  name.className = "name";
+  const cost = document.createElement("div");
+  cost.className = "cost";
+  info.append(name, cost);
   el.appendChild(info);
 
+  if (STATE.view === "single" || STATE.view === "trajectory") {
+    el.addEventListener("click", () => selectSession(s.session_id));
+  }
+
+  // Filled through the same updater the reconciler uses, so a freshly built row
+  // and an in-place patched one can never drift apart.
+  updateSessionItem(el, s);
   return el;
 }
 
@@ -644,19 +771,16 @@ function patchSessionStats(sid) {
 
 function buildMiniSessionItem(s) {
   const el = document.createElement("div");
-  const isSel = (STATE.view === "single" || STATE.view === "trajectory")
-    ? s.session_id === STATE.selectedSessionId
-    : false;
-  el.className = "session-mini" + (isSel ? " selected" : "");
-  el.dataset.sid = s.session_id;
-  const name = s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id;
-  const stats = STATE.sessionStats[s.session_id];
-  const costStr = stats ? ` · $${stats.total_cost.toFixed(4)}` : "";
-  el.title = `${name}\n${s.session_id.slice(0, 8)} · ${s.event_count} events · ${window.SCOPE.fmtRel(s.last_ts)}${costStr}`;
-  el.textContent = window.SCOPE.agentLetter(s);
+  el.className = "session-mini";
+  el.dataset.sid = s.session_id; // reconciliation key
+
+  // The agent letter is its own text node so the updater can rewrite it in
+  // place; the status dot is appended after it.
+  el.appendChild(document.createTextNode(""));
   const dot = document.createElement("span");
-  dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
+  dot.className = "mini-dot";
   el.appendChild(dot);
+
   if (STATE.view === "single" || STATE.view === "trajectory") {
     el.addEventListener("click", () => selectSession(s.session_id));
   }
@@ -667,16 +791,28 @@ function buildMiniSessionItem(s) {
     deleteSession(s.session_id);
   });
 
+  updateMiniSessionItem(el, s);
   return el;
 }
 
-// 2 s tick to refresh the activity-window dot color without re-rendering the
+// Shared lookup for the two status tickers below. They run twice a second and
+// used to do a linear STATE.sessions.find() *per row* (O(rows × sessions)) on
+// every tick; one Map makes each row a hash hit instead.
+function sessionIndex() {
+  const byId = new Map();
+  for (const s of STATE.sessions) byId.set(s.session_id, s);
+  return byId;
+}
+
+// 500 ms tick to refresh the activity-window dot color without re-rendering the
 // entire sidebar. Cheap DOM patch — only touches the dot's class list.
 setInterval(() => {
   if (document.hidden || !STATE.sessions.length || !STATE.sidebarCollapsed) return;
-  document.querySelectorAll(".session-mini").forEach(el => {
-    const sid = el.dataset.sid;
-    const s = STATE.sessions.find(x => x.session_id === sid);
+  const rows = document.querySelectorAll(".session-mini");
+  if (!rows.length) return; // the collapsed rail isn't the live layout
+  const byId = sessionIndex();
+  rows.forEach(el => {
+    const s = byId.get(el.dataset.sid);
     if (!s) return;
     const dot = el.querySelector(".mini-dot");
     if (dot) {
@@ -690,10 +826,11 @@ setInterval(() => {
 // Same pattern as mini-dots — cheap DOM patch without full re-render.
 setInterval(() => {
   if (document.hidden || !STATE.sessions.length || STATE.sidebarCollapsed) return;
-  document.querySelectorAll(".session-item .status-dot").forEach(el => {
-    const sid = el.closest(".session-item")?.dataset.sid;
-    if (!sid) return;
-    const s = STATE.sessions.find(x => x.session_id === sid);
+  const rows = document.querySelectorAll(".session-item .status-dot");
+  if (!rows.length) return;
+  const byId = sessionIndex();
+  rows.forEach(el => {
+    const s = byId.get(el.closest(".session-item")?.dataset.sid);
     if (!s) return;
     const cls = "status-dot " + window.SCOPE.subagentStatus(s);
     if (el.className !== cls) el.className = cls;
@@ -711,6 +848,11 @@ function selectSession(sid) {
   STATE.focusedIdx = -1;
   STATE.renderDirty = true;
   STATE.seenIds = new Set();
+  // Reflect the selection in the sidebar right away. This was left to the next
+  // rebuild, so clicking a session never highlighted it (deselecting did) until
+  // some unrelated data change came along — up to 10s later. With row
+  // reconciliation this is a one-row patch, so it belongs here.
+  renderSessions();
 
   // Reset auto-scroll and hide pause toast on agent switch
   STATE.autoScroll = true;
