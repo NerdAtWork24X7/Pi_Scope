@@ -31,3 +31,6 @@ squashfs-root/
 # paths, so these are generated per-machine and never committed)
 Pi Scope.desktop
 apps/scope-launcher/pi-scope.desktop
+
+# Per-machine launcher settings (may pin SCOPE_HOST=0.0.0.0 / a fixed token)
+apps/scope-launcher/scope.env

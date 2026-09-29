@@ -26,6 +26,13 @@ import { WebSocket } from "ws";
 
 const PORT = parseInt(process.env.SCOPE_PORT ?? "43190", 10);
 const HOST = process.env.SCOPE_HOST ?? "127.0.0.1";
+// A wildcard bind (0.0.0.0 / ::) makes the server reachable from the LAN — e.g. a
+// phone opening the Chat view on the same Wi-Fi. Several routes below skip the
+// auth wall on the premise that "only a local process can reach me", which only
+// holds while the bind is loopback. LAN_EXPOSED turns that premise off: those
+// exemptions then apply to loopback peers only, and every other caller must
+// present the token.
+const LAN_EXPOSED = !["127.0.0.1", "::1", "localhost"].includes(HOST);
 // Resolve database path: if SCOPE_DB_PATH env is set, use it as is.
 // Otherwise, default to the "db/scope.db" directory relative to the project root.
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "../..");
@@ -55,6 +62,23 @@ const ALLOWED_ORIGINS = new Set([
 function corsOrigin(req: Request): string {
   const o = req.headers.get("origin");
   return o && ALLOWED_ORIGINS.has(o) ? o : `http://127.0.0.1:${PORT}`;
+}
+
+// Internal header carrying the real TCP peer address (set in the Node server
+// shim below, never from the client). Used only to decide whether the
+// loopback-trusted producer exemption still applies on a LAN bind.
+const PEER_HEADER = "x-scope-peer";
+function peerIsLoopback(req: Request): boolean {
+  const addr = (req.headers.get(PEER_HEADER) ?? "")
+    // Node reports IPv4 clients on a dual-stack socket as IPv4-mapped IPv6.
+    .replace(/^::ffff:/i, "")
+    // Drop any zone id ("fe80::1%eth0").
+    .replace(/%.*$/, "")
+    .trim();
+  // An empty/unknown peer address is NOT loopback — fail closed so a request
+  // that somehow loses its peer info can never claim the local-producer trust.
+  if (addr === "") return false;
+  return addr === "::1" || addr.startsWith("127.");
 }
 
 // Persist the effective token to a local, owner-only file so other local
@@ -728,11 +752,36 @@ secureDbFile(DB_PATH);
 const q = prepare(db);
 const startTime = Date.now();
 
+// External IPv4 addresses a phone on the same Wi-Fi could actually reach.
+// Filters out loopback/internal and non-IPv4 interfaces, and prefers a
+// routable-looking address over docker/bridge ranges when several exist.
+function lanIpv4Addrs(): string[] {
+  const all = Object.values(os.networkInterfaces())
+    .flatMap((ifaces) => ifaces ?? [])
+    .filter((i) => i.family === "IPv4" && !i.internal && !i.address.startsWith("169.254."));
+  const isVirtual = (ip: string) => ip.startsWith("172.17.") || ip.startsWith("192.168.56.") || ip.startsWith("10.0.2.");
+  return [...new Set([...all.filter((i) => !isVirtual(i.address)), ...all.filter((i) => isVirtual(i.address))])]
+    .map((i) => i.address);
+}
+
 const tokenMasked = AUTH_TOKEN.length > 8 ? `${AUTH_TOKEN.slice(0,4)}…${AUTH_TOKEN.slice(-4)}` : "****";
 console.log(`\n  pi-scope server v${VERSION}`);
 console.log(`  UI:    ${OPEN_URL}`);
 console.log(`  Token: ${tokenMasked}`);
-console.log(`  DB:    ${DB_PATH}\n`);
+console.log(`  DB:    ${DB_PATH}`);
+if (LAN_EXPOSED) {
+  // A wildcard bind prints a useless 0.0.0.0 URL, so resolve a real LAN address
+  // for the phone. Skip internal/loopback and non-IPv4 interfaces — a phone
+  // cannot route to 127.0.0.1 or a docker bridge.
+  const lanIps = lanIpv4Addrs();
+  if (lanIps.length === 0) {
+    console.log("  LAN:   no external IPv4 interface found — reachable on loopback only.");
+  } else {
+    console.log(`  LAN:   ${lanIps.map((ip) => `http://${ip}:${PORT}/?token=${encodeURIComponent(AUTH_TOKEN)}`).join("\n         ")}`);
+    console.log("         (open on a phone on the same Wi-Fi; token required)");
+  }
+}
+console.log("");
 
 // ─── SSE subscriber registry ────────────────────────────────────────────────
 
@@ -1292,8 +1341,16 @@ async function handle(req: Request): Promise<Response> {
     }
   }
 
-  // ── POST /shutdown (graceful, loopback-only) ───────────────────────
+  // ── POST /shutdown (graceful; loopback-trusted, token-gated on LAN) ──
   if (pathname === "/shutdown" && method === "POST") {
+    // This sits above the auth wall because /health above it must stay open for
+    // the launcher's readiness poll — so it carries its own gate. On a loopback
+    // bind the only possible caller is this machine (stop.sh, the launcher); on
+    // a LAN bind an unauthenticated caller could kill the server, so the token
+    // becomes mandatory.
+    if (LAN_EXPOSED && !checkAuth(req)) {
+      return jsonResponse({ error: "unauthorized" }, 401);
+    }
     const response = jsonResponse({ ok: true, message: "shutting down" });
     // Defer shutdown so the caller receives the response before we close.
     setImmediate(() => gracefulShutdown());
@@ -1313,21 +1370,45 @@ async function handle(req: Request): Promise<Response> {
   }
 
   // ── Auth wall ──────────────────────────────────────────────────────────
-  // POST /events is the local producer path. The server only binds loopback
-  // (HOST defaults to 127.0.0.1), so any sender is already a trusted local
-  // process. Skipping the token check here removes the token-file race that
-  // otherwise 401s every POST across server restarts / source-vs-packaged
-  // builds. All reads (sessions, SSE, files, checkpoints) stay token-gated.
+  // POST /events is the local producer path. With a loopback bind (HOST
+  // defaults to 127.0.0.1) any sender is already a trusted local process, so
+  // skipping the token check here removes the token-file race that otherwise
+  // 401s every POST across server restarts / source-vs-packaged builds. That
+  // exemption is scoped to loopback *peers*: once the server is LAN-bound the
+  // same routes would otherwise accept forged events from any device on the
+  // Wi-Fi, so they fall back to the token. All reads (sessions, SSE, files,
+  // checkpoints) stay token-gated either way.
   const isLocalProducer =
     (pathname === "/events" && method === "POST") ||
     pathname === "/capture/llm-request" ||
     pathname === "/capture/llm-response" ||
     // Loopback seq-seed probe (used by the extension to continue a resumed
-    // session's event sequence). Same trust model as POST /events: the server
-    // binds loopback only, so any sender is already a trusted local process.
+    // session's event sequence). Same trust model as POST /events.
     (method === "GET" && matchSessionSeq(pathname) !== null);
-  if (!isLocalProducer && !checkAuth(req)) {
+  const isTrustedProducer = isLocalProducer && (!LAN_EXPOSED || peerIsLoopback(req));
+  if (!isTrustedProducer && !checkAuth(req)) {
     return jsonResponse({ error: "unauthorized" }, 401);
+  }
+
+  // ── GET /lan (phone pairing) ─────────────────────────────────────────────
+  // Backs the "scan from your phone" QR panel. Token-gated like every other
+  // read: the response contains the auth token itself, so it must never be
+  // handed to an unauthenticated caller.
+  if (pathname === "/lan" && method === "GET") {
+    const ips = lanIpv4Addrs();
+    return jsonResponse({
+      lan_exposed: LAN_EXPOSED,
+      port: PORT,
+      bind_host: HOST,
+      // Always report the machine's real IPv4s so the panel can name the exact
+      // address to rebind to — but only advertise scannable URLs when the
+      // server is genuinely reachable off-box. A 127.0.0.1 QR would scan fine
+      // on the desktop and then open nothing at all on the phone.
+      ips,
+      urls: LAN_EXPOSED
+        ? ips.map((ip) => `http://${ip}:${PORT}/?token=${encodeURIComponent(AUTH_TOKEN)}`)
+        : [],
+    });
   }
 
   // ── POST /events ───────────────────────────────────────────────────────
@@ -3313,6 +3394,10 @@ const server = http.createServer(async (req, res) => {
     if (k === "transfer-encoding" || k === "connection") continue;
     headers[k] = Array.isArray(v) ? v.join(", ") : v;
   }
+  // Carry the TCP peer address into the Web Request so the auth layer can tell a
+  // loopback caller from a LAN one. Assigned AFTER the copy loop on purpose: a
+  // client-supplied `x-scope-peer` header must never be able to spoof this.
+  headers[PEER_HEADER] = req.socket.remoteAddress ?? "";
   const request = new Request(url, {
     method: req.method ?? "GET",
     headers,

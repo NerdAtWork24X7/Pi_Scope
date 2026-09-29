@@ -38,6 +38,8 @@
       </div>
     </div>
     <div id="header-right">
+      <button id="btn-phone" title="Open Pi Scope on your phone — scan the QR on this screen"
+        aria-label="Open on phone"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2.5"/><line x1="11" y1="18.5" x2="13" y2="18.5"/></svg></button>
       <button id="btn-theme" title="Toggle light / dark theme" onclick="toggleTheme()">☀</button>
       <div id="live-indicator">
         <span id="live-dot" class="red"></span>
@@ -421,8 +423,22 @@
     </div>
   </div>
 
+  <!-- Phone pairing modal (body-level so its fixed positioning stays viewport-relative) -->
+  <div id="phone-modal" class="cp-modal" style="display:none">
+    <div class="cp-modal-box phone-box">
+      <div class="cp-modal-title">Open on your phone</div>
+      <div id="phone-status" class="phone-status"></div>
+      <div id="phone-body"></div>
+      <div class="cp-modal-actions">
+        <button id="phone-close" class="btn-sm" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script src="helpers.js"></script>
   <script src="app.js"></script>
+  <script src="vendor/qrcode-generator.js"></script>
+  <script src="phone.js"></script>
   <script src="vendor/xterm.js"></script>
   <script src="vendor/addon-fit.js"></script>
   <script src="terminal.js"></script>

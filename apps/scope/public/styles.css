@@ -2433,6 +2433,158 @@
       gap: 8px;
     }
 
+    /* ─── Phone pairing panel (QR) ────────────────────────────────────── */
+    #btn-phone {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+      padding: 3px 6px;
+      border-radius: 3px;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    #btn-phone:hover {
+      color: var(--text);
+      border-color: var(--accent)
+    }
+
+    #btn-phone:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px
+    }
+
+    .phone-box {
+      width: min(400px, 92vw);
+      padding: 20px;
+    }
+
+    .phone-status {
+      font-size: 12.5px;
+      color: var(--muted);
+      margin: 4px 0 10px;
+      min-height: 1em;
+    }
+
+    .phone-qr-wrap {
+      display: flex;
+      justify-content: center;
+      padding: 14px;
+      background: #fff;
+      /* Round the white quiet-zone card so it reads as a deliberate object
+         rather than a raw image dump. */
+      border-radius: 10px;
+      margin-bottom: 12px;
+    }
+
+    .phone-qr-wrap svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-width: 248px;
+    }
+
+    .phone-qr-fallback {
+      color: #555;
+      font-size: 13px;
+      padding: 40px 0;
+    }
+
+    .phone-url-row {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+      margin-bottom: 10px;
+    }
+
+    .phone-url {
+      flex: 1;
+      min-width: 0;
+      font-family: monospace, var(--emoji);
+      font-size: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 7px 8px;
+      color: var(--text);
+      /* The URL is one long unbreakable token; wrap it instead of letting the
+         row push the modal wider. */
+      word-break: break-all;
+      overflow-wrap: anywhere;
+      display: flex;
+      align-items: center;
+    }
+
+    .phone-picker {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .phone-chip {
+      font-family: monospace, var(--emoji);
+      font-size: 12px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .phone-chip:hover {
+      color: var(--text);
+      border-color: var(--accent)
+    }
+
+    .phone-chip.active {
+      color: var(--accent);
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+
+    .phone-hint {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
+    .phone-note {
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--text);
+    }
+
+    .phone-note p {
+      margin: 8px 0;
+      color: var(--muted);
+    }
+
+    .phone-note code {
+      font-family: monospace, var(--emoji);
+      font-size: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 1px 5px;
+    }
+
+    .phone-cmd {
+      font-family: monospace, var(--emoji);
+      font-size: 12.5px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 9px 10px;
+      color: var(--text);
+      overflow-x: auto;
+      white-space: pre;
+      margin: 8px 0;
+    }
+
     /* ─── Trajectory view: turn-aware event ledger ─────────────────────── */
     #trajectory-pane {
       display: none;

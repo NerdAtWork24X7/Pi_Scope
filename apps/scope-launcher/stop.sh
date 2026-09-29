@@ -26,8 +26,18 @@ echo "Stopping Pi Scope server on ${HOST}:${PORT}…"
 if ! curl -sf --max-time 3 "http://${HOST}:${PORT}/health" > /dev/null 2>&1; then
   echo "  No server listening on ${HOST}:${PORT}."
 else
+  # A LAN-bound server (SCOPE_HOST=0.0.0.0) token-gates /shutdown, so send the
+  # token when we can find it. On a loopback bind the gate is inert and this is
+  # harmless.
+  TOKEN_ARGS=()
+  if [ -r "$TOKEN_FILE" ]; then
+    TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+    [ -n "$TOKEN" ] && TOKEN_ARGS=(-H "Authorization: Bearer ${TOKEN}")
+  fi
+
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     --max-time 5 \
+    "${TOKEN_ARGS[@]}" \
     -X POST "$SHUTDOWN_URL" 2>/dev/null || echo "000")
 
   if [ "$HTTP_CODE" = "200" ]; then
@@ -51,7 +61,7 @@ fi
 # ── Fallback: find and kill the server process ──────────────────────────────
 
 # Try to find the PID by the port it's listening on.
-PID=$(ss -tlnp 2>/dev/null | grep -E "127\\.0\\.0\\.1:${PORT}\\b" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | head -1 || true)
+PID=$(ss -tlnp 2>/dev/null | grep -E "(127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\]|\\[::\\]):${PORT}\\b" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | head -1 || true)
 if [ -z "$PID" ]; then
   PID=$(lsof -ti "tcp:${PORT}" -sTCP:LISTEN 2>/dev/null || true)
 fi

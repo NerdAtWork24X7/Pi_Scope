@@ -290,12 +290,43 @@ Full flag/env and event reference: [`extension/README.md`](extension/README.md).
   compactions, and branch navigation.
 
 
+### 📱 Use it from your phone
+
+Pi Scope can bind every interface so a phone on the same Wi-Fi can open the **Chat** view
+live, alongside the desktop.
+
+**1. Bind to the LAN.** Copy the settings template and turn the bind on:
+
+```bash
+cp apps/scope-launcher/scope.env.example apps/scope-launcher/scope.env
+# then uncomment:  SCOPE_HOST=0.0.0.0
+```
+
+`scope.env` is read at launch, so this works from the desktop icon too (which inherits no
+shell environment). Real environment variables still win, so `SCOPE_HOST=0.0.0.0 ./run.sh`
+overrides the file.
+
+**2. Start Pi Scope and click the phone icon** in the header. A QR appears — point your
+phone's camera at it and the Chat view opens. The QR already carries this run's auth token,
+so bookmark it rather than sharing it. If the machine has more than one network interface
+(wifi, ethernet, docker), pick the address the phone can actually reach.
+
+> ⚠️ **This exposes a shell.** With `SCOPE_HOST=0.0.0.0` anyone on that network who knows
+> the token gets the full UI — including **Terminal**, a real shell on the host — plus file
+> edits and git operations. Only do this on a network you trust. The token is minted
+> randomly at boot; pin `SCOPE_AUTH_TOKEN` in `scope.env` if you want a stable URL.
+
+Running from source instead of the launcher? `SCOPE_HOST=0.0.0.0 npm start` in
+`apps/scope` works the same way; the boot banner prints the phone URL.
+
+---
+
 ### 🌐 Server environment variables
 
 | Var | Default | Description |
 |-----|---------|-------------|
 | `SCOPE_PORT` | `43190` | HTTP port |
-| `SCOPE_HOST` | `127.0.0.1` | Bind address (loopback = private) |
+| `SCOPE_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` also serves your LAN — see [Use it from your phone](#-use-it-from-your-phone) |
 | `SCOPE_DB_PATH` | `db/scope.db` | SQLite database path |
 | `SCOPE_AUTH_TOKEN` | random UUID | Bearer token for auth |
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |

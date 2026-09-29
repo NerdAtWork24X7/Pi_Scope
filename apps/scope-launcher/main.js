@@ -33,7 +33,7 @@ async function launch() {
   }
   serverProc = result.proc;
   const { cfg } = result;
-  const uiUrl = `http://${cfg.host}:${cfg.port}/?token=${encodeURIComponent(cfg.token)}`;
+  const uiUrl = `http://${cfg.displayHost}:${cfg.port}/?token=${encodeURIComponent(cfg.token)}`;
 
   const win = new BrowserWindow({
     width: 1280,

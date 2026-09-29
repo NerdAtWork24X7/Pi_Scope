@@ -6,6 +6,7 @@ const http = require("node:http");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
+const crypto = require("node:crypto");
 const { app } = require("electron");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
@@ -18,12 +19,52 @@ function readTokenFile() {
   try { return fs.readFileSync(tf, "utf8").trim(); } catch { return null; }
 }
 
+// Optional `apps/scope-launcher/scope.env` for settings that must survive a
+// desktop-icon launch (which inherits no shell env). Plain KEY=VALUE lines;
+// `#` comments and blank lines ignored. This is how the server is pinned to
+// 0.0.0.0 so a phone on the same Wi-Fi can reach it — see README. Real
+// environment variables always win, so this never overrides an explicit
+// `SCOPE_HOST=... ./run.sh`.
+function readEnvFile() {
+  const out = {};
+  let raw;
+  try { raw = fs.readFileSync(path.join(__dirname, "scope.env"), "utf8"); } catch { return out; }
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("=");
+    if (eq < 1) continue;
+    const key = t.slice(0, eq).trim();
+    let val = t.slice(eq + 1).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    // Strip matching surrounding quotes so values may contain spaces.
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    out[key] = val;
+  }
+  return out;
+}
+const FILE_ENV = readEnvFile();
+// Precedence: explicit override > real process env > scope.env file.
+const setting = (key, overrides, envVal) => overrides?.[key] ?? envVal ?? FILE_ENV[key];
+
 function config(overrides = {}) {
-  const port = parseInt(overrides.SCOPE_PORT ?? process.env.SCOPE_PORT ?? "43190", 10);
-  const host = overrides.SCOPE_HOST ?? process.env.SCOPE_HOST ?? "127.0.0.1";
-  const DEFAULT_AUTH_TOKEN = "dev_token";
-  const token = overrides.SCOPE_AUTH_TOKEN ?? process.env.SCOPE_AUTH_TOKEN ?? readTokenFile() ?? DEFAULT_AUTH_TOKEN;
-  return { port, host, token, healthUrl: `http://${host}:${port}/health` };
+  const port = parseInt(setting("SCOPE_PORT", overrides, process.env.SCOPE_PORT) ?? "43190", 10);
+  const host = setting("SCOPE_HOST", overrides, process.env.SCOPE_HOST) ?? "127.0.0.1";
+  // Never fall back to a hardcoded token: it gates the /terminal WebSocket,
+  // i.e. a full shell on this machine. When the server is LAN-bound that is
+  // reachable by anything on the Wi-Fi, so mint a random one per run instead.
+  // readTokenFile() still wins so a re-launched app adopts the already-running
+  // server's token; server.ts persists whatever we hand it to 0600.
+  const token =
+    setting("SCOPE_AUTH_TOKEN", overrides, process.env.SCOPE_AUTH_TOKEN) ??
+    readTokenFile() ??
+    crypto.randomUUID();
+  // A wildcard bind is not a usable browser target — point the in-app window at
+  // loopback. The LAN URL is printed by the server's own boot banner.
+  const displayHost = ["0.0.0.0", "::"].includes(host) ? "127.0.0.1" : host;
+  return { port, host, displayHost, token, healthUrl: `http://${displayHost}:${port}/health` };
 }
 
 function waitForHealth(healthUrl, { timeoutMs = 20000, intervalMs = 300 } = {}) {
