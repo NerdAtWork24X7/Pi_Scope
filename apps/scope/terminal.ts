@@ -212,6 +212,22 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
             pushCwd();
             return;
           }
+          if (ctrl.type === "cd" && typeof ctrl.cwd === "string" && ctrl.cwd) {
+            // Guarded `cd` from the workspace rail: never inject into a PTY
+            // owned by another program (that would type into pi's prompt, a
+            // pager, an editor, …), and never into Herdr (its panes drive the
+            // cwd). Ctrl-U clears any half-typed line first so the injected
+            // command can't concatenate with the user's pending input.
+            if (selectedShell !== "herdr" && shellAtPrompt(term.pid)) {
+              term.write("\x15cd -- " + shq(ctrl.cwd) + "\r");
+            } else if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: "cdBlocked", cwd: ctrl.cwd,
+                reason: selectedShell === "herdr" ? "herdr" : "busy",
+              }));
+            }
+            return;
+          }
         } catch {}
       }
       term.write(raw);
@@ -269,6 +285,31 @@ function getShellCwd(pid: number): string | null {
     }
   } catch {}
   return null;
+}
+
+// Is the PTY's shell currently in the foreground (sitting at a prompt with no
+// foreground job)? This guards `cd` injection from the sidebar workspace rail:
+// writing a command into the PTY while a full-screen program owns the terminal
+// (pi, vim, a REPL, …) lands in that program's input box instead of the shell.
+// `tpgid` is the foreground process group of the controlling terminal; when it
+// equals the shell's own pgid the shell itself is the foreground process.
+// Unknown / unsupported platforms fail closed (return false → never inject).
+function shellAtPrompt(pid: number): boolean {
+  try {
+    const out = execFileSync("ps", ["-o", "tpgid=", "-o", "pgid=", "-p", String(pid)], {
+      encoding: "utf8",
+    }).trim();
+    const [tpgid, pgid] = out.split(/\s+/).map((v) => parseInt(v, 10));
+    if (!Number.isFinite(tpgid) || !Number.isFinite(pgid)) return false;
+    return tpgid === pgid;
+  } catch {
+    return false;
+  }
+}
+
+// POSIX single-quote escaping for a shell argument.
+function shq(s: string): string {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
 }
 
 const herdrDescendantCache = new Map<number, { result: boolean; at: number }>();

@@ -21,6 +21,10 @@
  */
 (function () {
   const S = window.SCOPE;
+  // Shared Workspaces-rail primitives (markup, status model, session tree). The
+  // global sidebar (rail.js) renders the same rail for the non-chat views; both
+  // sides call into one implementation so they cannot drift.
+  const Rail = S.WorkspaceRail;
   const state = window.__SCOPE_STATE;
   const $ = (s) => document.querySelector(s);
   const esc = S.escapeHtml;
@@ -509,45 +513,14 @@
   }
 
   // ─── Workspace rail (left) ────────────────────────────────────────────────
-  // Human-readable pi status + colors for a subagent-status value.
-  function piStatusMeta(st) {
-    return st === "green"
-      ? { word: "working", dot: "green", cls: "live" }
-      : st === "orange"
-        ? { word: "waiting", dot: "orange", cls: "warn" }
-        : st === "red"
-          ? { word: "stopped", dot: "red", cls: "off" }
-          : { word: "idle", dot: "gray", cls: "off" };
-  }
-
-  // Aggregate status for a workspace: any live agent wins, then waiting,
-  // then stopped; otherwise idle.
-  function wsPiStatus(sessions) {
-    const seen = new Set(sessions.map((s) => S.subagentStatus(s)));
-    let st = "gray";
-    if (seen.has("green")) st = "green";
-    else if (seen.has("orange")) st = "orange";
-    else if (seen.has("red")) st = "red";
-    return piStatusMeta(st);
-  }
-
+  // pi status helpers + the workspace/session markup live in rail.js
+  // (SCOPE.WorkspaceRail.*) and are shared with the global sidebar rail.
   function renderWorkspaces() {
     if (!el.ws) return;
     const ws = workspaces();
     const canBrowse = typeof window.scopeNative?.pickDirectory === "function";
     let html = "";
-    if (CH.adding) {
-      html +=
-        `<div class="chat-ws-add-row">` +
-        `<div class="chat-ws-add-fields">` +
-        `<input class="chat-ws-add-input" id="chat-ws-add-input" type="text" placeholder="/path/to/workspace" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off" />` +
-        (canBrowse
-          ? `<button class="chat-ws-browse" id="chat-ws-browse" type="button" title="Browse for a directory">Browse…</button>`
-          : "") +
-        `</div>` +
-        `<div class="chat-ws-add-err" id="chat-ws-add-err"></div>` +
-        `</div>`;
-    }
+    if (CH.adding) html += Rail.renderAddRow("chat", canBrowse);
     if (!ws.length && !CH.adding) {
       const empty =
         '<div class="chat-rail-empty">No workspaces yet.<br>Add a directory or run a pi agent to start streaming.</div>' +
@@ -559,35 +532,17 @@
     }
     for (const cwd of ws) {
       const sessions = wsSessions(cwd);
-      const name = cwd.split("/").filter(Boolean).pop() || cwd;
-      const active = CH.workspace === cwd ? " active" : "";
-      const pst = wsPiStatus(sessions);
-      const hasErr = sessions.some((s) => (state.sessionStats?.[s.session_id]?.error_count || 0) > 0);
       const expanded = CH.expandedWs.has(cwd);
-      const letter = esc((name.charAt(0) || "?").toUpperCase());
-      const meta = [
-        pst.word + (hasErr ? " · ⚠ review" : ""),
-        sessions.length ? `${sessions.length} session${sessions.length === 1 ? "" : "s"}` : "no sessions",
-      ].join(" · ");
-      html +=
-        `<div class="chat-ws${active}" data-cwd="${esc(cwd)}" title="${esc(cwd)}">` +
-        `<span class="chat-ws-caret">${expanded ? "▾" : "▸"}</span>` +
-        `<span class="chat-ws-icon">${letter}</span>` +
-        `<div class="chat-ws-body">` +
-        `<div class="chat-ws-name">${esc(name)}</div>` +
-        `<div class="chat-ws-meta ${pst.cls}">${esc(meta)}</div>` +
-        `</div>` +
-        `<span class="chat-ws-dot ${pst.dot}" title="${esc(pst.word)}"></span>` +
-        `<span class="chat-ws-remove" data-remove="${esc(cwd)}" title="Remove workspace">&times;</span>` +
-        `</div>`;
+      html += Rail.renderWorkspaceRow({ cwd, sessions, active: CH.workspace === cwd, expanded });
       // Build the parent/child tree straight from the workspace's sessions.
       // No pre-nesting pass: ordering children after a parent that sorts
       // earlier in the poll (active subagents have newer last_ts than the
       // orchestrator) used to emit each child TWICE — once in its own right
       // and again under the parent — doubling the fold rows while a run
-      // streamed. buildWsSessionTree groups by parent id itself.
-      const tree = buildWsSessionTree(sessions);
-      html += `<div class="chat-ws-children"${expanded ? "" : ' style="display:none"'}>` + renderWsSessionTree(tree) + `</div>`;
+      // streamed. buildSessionTree groups by parent id itself.
+      const tree = Rail.buildSessionTree(sessions);
+      html += `<div class="chat-ws-children"${expanded ? "" : ' style="display:none"'}>` +
+        Rail.renderSessionTree(tree, { subOpen: CH.subOpen }) + `</div>`;
     }
     // Skip the write when the markup is identical (the poll re-renders the
     // rail every 10s): an innerHTML swap would throw away every node — and
@@ -608,138 +563,12 @@
     }
   }
 
-  // One session row under a workspace — clicking loads it in the chat window.
-  // The row stays minimal (status dot + first message); the session message
-  // and status live in the hover tooltip, and the model / token usage / time
-  // are shown in the composer status line below the input.
-  // `groupActive` is true when one of this session's descendant subagents is
-  // still running: the moment a main session hands work to a subagent it stops
-  // emitting its own events, so `last_ts` goes stale and the row would flip to
-  // "waiting" while the tree is in fact still working. Keep reporting
-  // "running" then — but never for a stopped (red) session, which a lingering
-  // child must not mask.
-  function renderWsSession(s, isNested, groupActive) {
-    const name = s.agent_name ?? s.cwd?.split("/").pop() ?? S.shortId(s.session_id);
-    const own = S.subagentStatus(s);
-    const st = groupActive && own !== "red" ? "green" : own;
-    const stMeta = piStatusMeta(st);
-    const stats = state.sessionStats[s.session_id];
-    const hasErr = (stats?.error_count || 0) > 0;
-    const row1 = s.first_msg ? S.trunc(s.first_msg, 46) : name;
-    const statusText = stMeta.word + (hasErr ? " ⚠ needs review" : "");
-    const tip = (s.first_msg ? s.first_msg : name) + (statusText ? " — " + statusText : "") +
-      (isNested && s.parent_session_id ? " — spawned by session " + S.shortId(s.parent_session_id) : "");
-    return (
-      `<div class="ws-sess${isNested ? " ws-sess-sub" : ""}" data-sid="${esc(s.session_id)}" title="${esc(tip)}">` +
-      `<span class="status-dot ${st}"></span>` +
-      `<div class="ws-sess-body">` +
-      `<div class="ws-sess-name" title="${s.first_msg ? esc(s.first_msg) : esc(name)}">${esc(row1)}</div>` +
-      `</div>` +
-      `<span class="ws-sess-del" data-del="${esc(s.session_id)}" title="Delete this session">&times;</span>` +
-      `</div>`
-    );
-  }
-
+  // Expand/collapse a workspace's session list (its caret).
   function toggleWs(cwd) {
     if (CH.expandedWs.has(cwd)) CH.expandedWs.delete(cwd);
     else CH.expandedWs.add(cwd);
     saveExpandedWs();
     renderWorkspaces();
-  }
-
-  // Split a workspace's session list into { roots, subs }: main sessions plus
-  // the subagent sessions each spawned (children keep the poll order, so they
-  // render newest-first within their group). A session whose parent isn't in
-  // the same workspace list is a root, so orphans never vanish.
-  function buildWsSessionTree(sessions) {
-    const byId = new Map(sessions.map((s) => [s.session_id, s]));
-    const subs = new Map(); // parent session_id → child sessions
-    const parentOf = new Map(); // session_id → parent session_id
-    const roots = [];
-    for (const s of sessions) {
-      const p = s.parent_session_id;
-      // A parent link is only an edge when the parent is present here and isn't
-      // the session itself (a self-parented row is a root, not its own child).
-      if (p && p !== s.session_id && byId.has(p)) {
-        if (!subs.has(p)) subs.set(p, []);
-        subs.get(p).push(s);
-        parentOf.set(s.session_id, p);
-      } else {
-        roots.push(s);
-      }
-    }
-    // Nothing reaches a session trapped in a parent cycle (a→b→a, or a chain
-    // hanging off one) — it used to be dropped from the rail entirely. Promote
-    // the first unreachable session to a root and cut its back-edge, repeating
-    // until every session is reachable, so cycles render without looping.
-    const reachable = new Set();
-    const mark = (s) => {
-      if (reachable.has(s.session_id)) return;
-      reachable.add(s.session_id);
-      for (const k of subs.get(s.session_id) || []) mark(k);
-    };
-    for (const r of roots) mark(r);
-    if (reachable.size < sessions.length) {
-      for (const s of sessions) {
-        if (reachable.has(s.session_id)) continue;
-        const p = parentOf.get(s.session_id);
-        if (p) {
-          const arr = subs.get(p);
-          if (arr) {
-            const i = arr.indexOf(s);
-            if (i >= 0) arr.splice(i, 1);
-            if (!arr.length) subs.delete(p);
-          }
-          parentOf.delete(s.session_id);
-        }
-        roots.push(s);
-        mark(s);
-      }
-    }
-    return { roots, subs };
-  }
-
-  // Render a workspace's sessions as a tree: each main (root) session row is
-  // followed by a fold row that expands/collapses its spawned subagent rows.
-  // Groups default to collapsed — subagents fold under their main session and
-  // are revealed on demand instead of always cluttering the rail.
-  function renderWsSessionTree({ roots, subs }) {
-    const rendered = new Set();
-    // A group counts as running when any DESCENDANT subagent is — a nested
-    // chain must not hide that activity behind a collapsed parent.
-    const runningUnder = (sid) => {
-      for (const k of subs.get(sid) || []) {
-        if (S.subagentStatus(k) === "green" || runningUnder(k.session_id)) return true;
-      }
-      return false;
-    };
-    // Recursive: a subagent that spawned its own subagents renders its rows and
-    // then its own fold group, so arbitrarily deep chains appear in full.
-    const level = (s, nested) => {
-      if (rendered.has(s.session_id)) return ""; // cycle guard (defensive)
-      rendered.add(s.session_id);
-      // Computed once and shared by the row dot and the fold indicator: a
-      // parent keeps its "running" status while any descendant is live.
-      const running = runningUnder(s.session_id);
-      const rows = renderWsSession(s, nested, running);
-      const kids = subs.get(s.session_id) || [];
-      if (!kids.length) return rows;
-      const open = CH.subOpen.has(s.session_id);
-      const label = `${kids.length} sub-session${kids.length === 1 ? "" : "s"}`;
-      return (
-        rows +
-        `<div class="ws-sess-fold ws-sess-sub${open ? " open" : ""}" data-fold="${esc(s.session_id)}"` +
-        ` title="${esc(running ? "a subagent is still running" : "click to expand or collapse the sub-sessions")}">` +
-        `<span class="ws-sess-fold-caret">${open ? "▾" : "▸"}</span>` +
-        `<span class="ws-sess-fold-label">${esc(label)}</span>` +
-        (running ? `<span class="ws-sess-fold-dot green" title="a subagent is running"></span>` : "") +
-        `</div>` +
-        `<div class="ws-sess-subs"${open ? "" : ' style="display:none"'}>` +
-        kids.map((k) => level(k, true)).join("") +
-        `</div>`
-      );
-    };
-    return roots.map((r) => level(r, false)).join("");
   }
 
   // Expand/collapse a main session's subagent group (default: collapsed).
@@ -4289,6 +4118,14 @@
   // cleanup instead of leaving stale, streaming threads behind.
   window.__chatOnSessionDeleted = forgetChatSession;
   window.__chatOnSessionsCleared = forgetAllChatSessions;
+  // Resume a recorded session in the Chat canvas. The global sidebar rail calls
+  // this when a session row is clicked while Chat is the active view, so the
+  // rail never blind-jumps to the Single page.
+  window.__chatOpenSession = function (sid) {
+    if (!sid) return;
+    if (typeof window.setView === "function" && state.view !== "chat") window.setView("chat");
+    void loadSessionChat(sid);
+  };
   // TEMP DEBUG (removed before completion): inspect thread identity/aliasing.
   window.__chatDebug = () => ({
     curId: CH.curId,

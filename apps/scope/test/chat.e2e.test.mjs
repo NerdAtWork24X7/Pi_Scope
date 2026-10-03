@@ -1227,3 +1227,62 @@ describe("thread aliasing", () => {
     );
   });
 });
+
+// ─── Global sidebar: Workspaces rail (non-chat views) ───────────────────────
+// The <aside> now hosts the same Workspaces rail as the Chat view for Single /
+// Trajectory / Terminal / Review / Checkpoints / Git (rail.js). These tests pin
+// the page-aware wiring: a workspace click switches the shared cwd, a session
+// click acts on the ACTIVE page, and the sidebar never blind-jumps to Single.
+describe("global sidebar workspace rail", () => {
+  const asideWs = (p, cwd) => p.locator(`#session-list .chat-ws[data-cwd="${cwd}"]`);
+  const asideSess = (p, sid) => p.locator(`#session-list .ws-sess[data-sid="${sid}"]`);
+
+  test("renders on non-chat views and clears on Chat (no duplicate rows)", async () => {
+    await boot({ sessions: [makeSession(SESS_A)] });
+    // Chat owns its own rail; the sidebar must be empty to avoid a hidden copy.
+    assert.equal(await page.locator("#session-list .chat-ws").count(), 0, "aside empty on Chat");
+
+    await page.evaluate(() => window.setView("single"));
+    await page.waitForSelector(`#session-list .chat-ws[data-cwd="${WS_A}"]`);
+    assert.equal(await page.locator("#session-list .chat-ws").count(), 1, "workspace rendered in the aside");
+
+    await page.evaluate(() => window.setView("chat"));
+    await page.waitForFunction(() => document.querySelectorAll("#session-list .chat-ws").length === 0);
+  });
+
+  test("clicking a workspace switches the shared cwd without changing views", async () => {
+    await boot({ sessions: [makeSession(SESS_A)] });
+    await page.evaluate(() => window.setView("single"));
+    await asideWs(page, WS_A).click();
+    await page.waitForFunction((cwd) => window.__SCOPE_STATE.cwd === cwd, WS_A);
+    assert.equal(await page.evaluate(() => window.__SCOPE_STATE.view), "single", "no view jump");
+    assert.equal(await page.locator("#session-list .chat-ws.active").getAttribute("data-cwd"), WS_A);
+  });
+
+  test("a session click acts on the active page and never jumps to Single", async () => {
+    // Single: select the session (that pane renders timelines).
+    await boot({ sessions: [makeSession(SESS_A)], seed: { "scope-chat-ws-expanded": JSON.stringify([WS_A]) } });
+    await page.evaluate(() => window.setView("single"));
+    await page.waitForSelector(`#session-list .ws-sess[data-sid="sess-a"]`, { state: "visible" });
+    await asideSess(page, "sess-a").click();
+    await page.waitForFunction(() => window.__SCOPE_STATE.selectedSessionId === "sess-a");
+    assert.equal(await page.evaluate(() => window.__SCOPE_STATE.view), "single");
+
+    // Review (files): switch the workspace to the session's cwd, stay put.
+    await page.evaluate(() => window.setView("files"));
+    await page.waitForSelector("#session-list .chat-ws");
+    await asideSess(page, "sess-a").click();
+    await page.waitForFunction((cwd) => window.__SCOPE_STATE.cwd === cwd, WS_A);
+    assert.equal(await page.evaluate(() => window.__SCOPE_STATE.view), "files", "no blind jump to Single");
+  });
+
+  test("a collapsed sidebar renders one workspace chip and they stay clickable", async () => {
+    await boot({ sessions: [makeSession(SESS_A), makeSession(SESS_B)] });
+    await page.evaluate(() => window.setView("single"));
+    await page.evaluate(() => window.toggleSidebar());
+    await page.waitForSelector("#session-list .ws-mini");
+    assert.equal(await page.locator("#session-list .ws-mini").count(), 2, "one chip per workspace");
+    await page.locator(`#session-list .ws-mini[data-cwd="${WS_B}"]`).click();
+    await page.waitForFunction((cwd) => window.__SCOPE_STATE.cwd === cwd, WS_B);
+  });
+});

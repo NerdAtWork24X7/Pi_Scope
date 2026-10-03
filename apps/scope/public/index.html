@@ -61,7 +61,21 @@
           title="Permanently delete ALL agents and their events from the database. Cannot be undone."
           aria-label="Clear all agents"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg></button>
       </div>
-      <div id="session-list"></div>
+      <!-- Workspaces rail — shared with the Chat view's left rail (see rail.js).
+           Replaces the old session list on every non-chat view: a workspace
+           click switches the shared working directory (Terminal cds its shell),
+           and a session row acts on the active page (Single/Trajectory select
+           it; Terminal/Review/Checkpoints/Git switch to its workspace). -->
+      <div class="chat-rail sidebar-rail" id="sidebar-rail">
+        <div class="chat-rail-head">
+          <span class="chat-rail-title">Workspaces</span>
+          <div class="chat-rail-head-actions">
+            <button class="chat-ws-add-btn" id="sidebar-ws-add" type="button"
+              title="Add workspace directory">＋ Add</button>
+          </div>
+        </div>
+        <div class="chat-rail-scroll" id="session-list"></div>
+      </div>
     </aside>
 
     <div id="sidebar-resizer" title="Drag to resize sidebar"></div>
@@ -460,6 +474,7 @@
   </div>
 
   <script src="helpers.js"></script>
+  <script src="rail.js"></script>
   <script src="app.js"></script>
   <script src="vendor/qrcode-generator.js"></script>
   <script src="phone.js"></script>

@@ -20,8 +20,6 @@ const STATE = {
   sseReconnectDelay: 1000, maxReconnectDelay: 10_000,
   renderDirty: true, seenIds: new Set(),
   sessionStats: {}, // sid → {total_cost,total_tokens,error_count,models:[]}
-  ackd: new Set(),
-  expandedGroups: new Set(), // cwd keys of currently-expanded session groups
   sessionsSig: "",
 };
 
@@ -40,7 +38,7 @@ function loadURLState() {
   const p = new URLSearchParams(h);
   if (p.has("view")) STATE.view = p.get("view");
   if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat", "settings"].includes(STATE.view)) STATE.view = "chat";
-  if (p.has("sid")) { STATE.selectedSessionId = p.get("sid"); STATE.ackd.add(STATE.selectedSessionId); }
+  if (p.has("sid")) STATE.selectedSessionId = p.get("sid");
 }
 
 function saveURLState() {
@@ -55,7 +53,6 @@ function saveURLState() {
 
 const $ = s => document.querySelector(s);
 const sessionSubnav = document.querySelector("#session-subnav");
-const sessionList = $("#session-list");
 const eventView = $("#event-view");
 const paneLabel = $("#pane-label");
 const liveDot = $("#live-dot");
@@ -309,9 +306,8 @@ window.setTheme = function(theme) {
   if (btnTheme) btnTheme.textContent = theme === "dark" ? "🌙" : "☀";
   try { localStorage.setItem("scope-theme", theme); } catch {}
   window.__terminalSetTheme?.();
-  // Tool-name pills and other per-row tints are theme-dependent — re-render
-  // the visible surfaces so their colors follow the new theme. Forced, because
-  // the reconciler only rewrites rows whose rendered content changed.
+  // Per-row tints are theme-dependent; re-render the visible surfaces so their
+  // colors follow the new theme (the rail uses CSS vars, so this is cheap).
   renderSessions(true);
   if (STATE.view === "single" && STATE.selectedSessionId) {
     renderAllEvents();
@@ -425,10 +421,12 @@ async function fetchBatchSessionStats(sids) {
     var stats = data.stats || {};
     for (var sid in stats) {
       STATE.sessionStats[sid] = stats[sid];
-      patchSessionStats(sid);
       if (STATE.view === "trajectory") window.__trajectoryStatsUpdate?.(sid, stats[sid]);
       if (sid === STATE.selectedSessionId) scheduleAgentSubnav();
     }
+    // Stats can flip a workspace's "⚠ review" flag — refresh the rail once for
+    // the whole batch (the rail's own memo skips an unchanged write).
+    renderSessions();
   } catch { /* ignore */ }
 }
 
@@ -439,17 +437,10 @@ async function fetchSessionStats(sid) {
     if (!res.ok) return;
     const stats = await res.json();
     STATE.sessionStats[sid] = stats;
-    // Patch just this session's row in place. The boot fan-out fetches stats
-    // for every session, so a full rebuild here would tear down and recreate the
-    // sidebar dozens of times; a tiny text/dot update is effectively free.
-    patchSessionStats(sid);
+    renderSessions(); // stats can flip the workspace "⚠ review" flag
     if (STATE.view === "trajectory") window.__trajectoryStatsUpdate?.(sid, stats);
     if (sid === STATE.selectedSessionId) scheduleAgentSubnav();
   } catch { /* ignore */ }
-}
-
-function visibleSessions() {
-  return [...STATE.sessions];
 }
 
 // Permanently delete every session and its events from the DB. Destructive —
@@ -462,7 +453,6 @@ function clearAllSessions() {
       if (data && data.ok) {
         STATE.sessions = [];
         STATE.sessionStats = {};
-        STATE.expandedGroups.clear();
         clearSelectedSession();
         renderSessions();
         // Chat keeps its own thread/subprocess state; without this a streaming
@@ -516,362 +506,67 @@ function clearSelectedSession() {
   saveURLState();
 }
 
-// ─── Sidebar reconciliation ─────────────────────────────────────────────────
-// The sidebar used to be rebuilt from scratch (`sessionList.innerHTML = ""`)
-// on every data change — which is every 10s while an agent is running. That
-// threw away every row and every listener each time, reset the list's scroll
-// position, and flickered the whole column. Rows are reconciled by key now: a
-// row that survives an update keeps its node (and its listeners), and its
-// content is only rewritten when it actually changed — each row caches a
-// signature of what it rendered.
+// ─── Sidebar (Workspaces rail) ──────────────────────────────────────────────
+// The global aside renders the SAME Workspaces rail as the Chat view
+// (apps/scope/public/rail.js), replacing the old per-cwd session list. app.js
+// stays the owner of session selection, so the rail calls back into
+// selectSession / deleteSession rather than touching the store itself.
 
-/** Bumped to invalidate every row signature (theme swaps re-tint rows). */
-let sidebarEpoch = 0;
-
-/**
- * Reconcile `container`'s children against `keys`, reusing the existing node
- * whose `keyOf(node)` matches. `create(key)` must return a node whose key is
- * `key`. Unkeyed and leftover nodes are dropped; only genuinely moved rows are
- * re-inserted, so a stable list costs zero DOM mutations.
- */
-function reconcileChildren(container, keys, keyOf, create) {
-  const spare = new Map();
-  for (const child of [...container.children]) {
-    const k = keyOf(child);
-    if (k != null && !spare.has(k)) spare.set(k, child);
-    else child.remove(); // unkeyed placeholder, or a duplicate from a mode switch
-  }
-  let prev = null;
-  for (const key of keys) {
-    let node = spare.get(key);
-    if (node) spare.delete(key);
-    else node = create(key);
-    const next = prev ? prev.nextSibling : container.firstChild;
-    if (node !== next) container.insertBefore(node, next);
-    prev = node;
-  }
-  for (const node of spare.values()) node.remove();
-}
-
-// ─── Row content (shared by the builders and the in-place updaters) ─────────
-function sessionName(s) {
-  return s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id.slice(0, 8);
-}
-function sessionModelHtml(s) {
-  return s.model ? ` <span class="name-model">- ${window.SCOPE.escapeHtml(s.model)}</span>` : "";
-}
-function isSidebarSelected(sid) {
-  return (STATE.view === "single" || STATE.view === "trajectory") && sid === STATE.selectedSessionId;
-}
-function miniTitle(s, stats) {
-  const costStr = stats ? ` · $${stats.total_cost.toFixed(4)}` : "";
-  return `${sessionName(s)}\n${s.session_id.slice(0, 8)} · ${s.event_count} events · ${window.SCOPE.fmtRel(s.last_ts)}${costStr}`;
-}
-// Everything an expanded row renders. One string compare decides whether the
-// row needs rewriting at all.
-function sessionRowSig(s) {
-  const stats = STATE.sessionStats[s.session_id];
-  return [
-    sidebarEpoch, sessionName(s), s.model || "", window.SCOPE.subagentStatus(s),
-    isSidebarSelected(s.session_id) ? "sel" : "",
-    stats ? `${stats.total_tokens}:${stats.total_cost}:${stats.error_count}` : "",
-    STATE.ackd.has(s.session_id) ? "ackd" : "",
-  ].join("\u0001");
-}
-function miniRowSig(s) {
-  const stats = STATE.sessionStats[s.session_id];
-  return [
-    sidebarEpoch, miniTitle(s, stats), window.SCOPE.agentLetter(s),
-    window.SCOPE.activityStatus(s), isSidebarSelected(s.session_id) ? "sel" : "",
-    s.last_ts || "",
-  ].join("\u0001");
-}
-
-function updateSessionItem(el, s) {
-  const sig = sessionRowSig(s);
-  if (el.__sig === sig) return; // nothing this row renders has changed
-  el.__sig = sig;
-  el.classList.toggle("selected", isSidebarSelected(s.session_id));
-  const name = el.querySelector(".info .name");
-  if (name) {
-    name.innerHTML =
-      `<span class="status-dot ${window.SCOPE.subagentStatus(s)}"></span>` +
-      `<span class="name-text">${window.SCOPE.escapeHtml(sessionName(s))}</span>` +
-      sessionModelHtml(s) +
-      `<span class="err-dot">●</span>`;
-  }
-  applySessionStatsToItem(el, STATE.sessionStats[s.session_id], s);
-  const del = el.querySelector(".sess-delete");
-  if (del) del.title = `Delete this session (${s.session_id.slice(0, 8)}…)`;
-}
-
-function updateMiniSessionItem(el, s) {
-  const sig = miniRowSig(s);
-  if (el.__sig === sig) return;
-  el.__sig = sig;
-  el.classList.toggle("selected", isSidebarSelected(s.session_id));
-  el.title = miniTitle(s, STATE.sessionStats[s.session_id]);
-  // The letter lives in the item's own text node — never overwrite textContent
-  // here, that would take the status dot with it.
-  const letter = window.SCOPE.agentLetter(s);
-  const first = el.firstChild;
-  if (first && first.nodeType === 3) {
-    if (first.nodeValue !== letter) first.nodeValue = letter;
-  } else {
-    el.insertBefore(document.createTextNode(letter), el.firstChild);
-  }
-  const dot = el.querySelector(".mini-dot");
-  if (dot) dot.className = "mini-dot " + window.SCOPE.activityStatus(s);
-}
-
-function updateSessionGroup(el, group) {
-  const children = el.querySelector(".session-group-children");
-  const bySid = new Map(group.subagents.map((s) => [s.session_id, s]));
-  reconcileChildren(children, group.subagents.map((s) => s.session_id),
-    (node) => node.dataset.sid,
-    (sid) => buildSessionItem(bySid.get(sid)));
-  for (const node of children.children) updateSessionItem(node, bySid.get(node.dataset.sid));
-
-  // Head state: expansion (owned by the click handler / STATE) + member count.
-  const head = el.querySelector(".session-group-head");
-  const expanded = STATE.expandedGroups.has(group.cwd);
-  const sig = `${expanded ? 1 : 0}|${group.subagents.length}`;
-  if (head.__sig === sig) return;
-  head.__sig = sig;
-  head.classList.toggle("collapsed", !expanded);
-  head.querySelector(".session-group-caret").textContent = expanded ? "▾" : "▸";
-  head.querySelector(".session-group-count").textContent =
-    `${group.subagents.length} subagent${group.subagents.length === 1 ? "" : "s"}`;
-  children.style.display = expanded ? "" : "none";
-}
-
-function renderSessions(force) {
-  if (force) sidebarEpoch++; // invalidate every row signature
-  const filtered = visibleSessions();
-  if (STATE.sessionsLoaded && STATE.view === "single" && STATE.selectedSessionId && !filtered.some(s => s.session_id === STATE.selectedSessionId)) {
+function renderSessions() {
+  // A selected session that has left the store must not linger on the Single
+  // pane (it was deleted or cleared elsewhere). clearSelectedSession re-enters.
+  if (STATE.sessionsLoaded && STATE.view === "single" && STATE.selectedSessionId &&
+      !STATE.sessions.some(s => s.session_id === STATE.selectedSessionId)) {
     clearSelectedSession();
     return;
   }
-  if (!filtered.length) {
-    sessionList.innerHTML = STATE.sidebarCollapsed
-      ? ""
-      : '<div style="padding:10px;color:var(--muted);font-size:11px">no sessions</div>';
-    return;
-  }
-  if (STATE.sidebarCollapsed) {
-    const bySid = new Map(filtered.map((s) => [s.session_id, s]));
-    reconcileChildren(sessionList, filtered.map((s) => s.session_id),
-      (el) => el.dataset.sid,
-      (sid) => buildMiniSessionItem(bySid.get(sid)));
-    for (const el of sessionList.children) updateMiniSessionItem(el, bySid.get(el.dataset.sid));
-    return;
-  }
-  const groups = groupSessionsByCwd(filtered);
-  const byCwd = new Map(groups.map((g) => [g.cwd, g]));
-  reconcileChildren(sessionList, groups.map((g) => g.cwd),
-    (el) => el.dataset.cwd,
-    (cwd) => buildSessionGroup(byCwd.get(cwd)));
-  for (const el of sessionList.children) updateSessionGroup(el, byCwd.get(el.dataset.cwd));
+  window.SCOPE.WorkspaceRail?.render();
 }
 
-// Group sessions by working directory. Each group is one "session" (the shared
-// cwd) whose "subagents" are the individual agent sessions that ran there.
-function groupSessionsByCwd(sessions) {
-  const groups = new Map();
-  for (const s of sessions) {
-    const cwd = (s.cwd || "").trim();
-    if (!groups.has(cwd)) groups.set(cwd, []);
-    groups.get(cwd).push(s);
-  }
-  // Preserve the server's last_ts DESC ordering for both groups and members.
-  return [...groups.entries()].map(([cwd, subagents]) => ({ cwd, subagents }));
-}
-
-function buildSessionGroup(group) {
-  const wrap = document.createElement("div");
-  wrap.className = "session-group";
-  wrap.dataset.cwd = group.cwd; // reconciliation key
-
-  const head = document.createElement("div");
-  head.className = "session-group-head";
-
-  const caret = document.createElement("span");
-  caret.className = "session-group-caret";
-
-  const title = document.createElement("span");
-  title.className = "session-group-title";
-  title.textContent = sessionGroupName(group.cwd);
-  title.title = group.cwd; // derived from the key — constant for this node
-
-  const count = document.createElement("span");
-  count.className = "session-group-count";
-
-  head.append(caret, title, count);
-
-  const children = document.createElement("div");
-  children.className = "session-group-children";
-
-  head.addEventListener("click", () => {
-    const collapsed = head.classList.toggle("collapsed");
-    caret.textContent = collapsed ? "▸" : "▾";
-    children.style.display = collapsed ? "none" : "";
-    if (collapsed) STATE.expandedGroups.delete(group.cwd);
-    else STATE.expandedGroups.add(group.cwd);
-  });
-
-  wrap.appendChild(head);
-  wrap.appendChild(children);
-  // Head state + member rows come from the same updater the reconciler calls.
-  updateSessionGroup(wrap, group);
-  return wrap;
-}
-
-function sessionGroupName(cwd) {
-  if (!cwd) return "unknown cwd";
-  const parts = cwd.split("/").filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : cwd;
-}
-
-function buildSessionItem(s) {
-  const el = document.createElement("div");
-  el.className = "session-item";
-  el.dataset.sid = s.session_id; // reconciliation key
-
-  // Per-session delete cross icon
-  const delBtn = document.createElement("span");
-  delBtn.className = "sess-delete";
-  delBtn.textContent = "✕";
-  delBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteSession(s.session_id); });
-  el.appendChild(delBtn);
-
-  const info = document.createElement("div");
-  info.className = "info";
-  const name = document.createElement("div");
-  name.className = "name";
-  const cost = document.createElement("div");
-  cost.className = "cost";
-  info.append(name, cost);
-  el.appendChild(info);
-
-  // Bind unconditionally. Rows are reconciled by key and reused across view
-  // switches, so gating the listener on the view *at build time* left every row
-  // built under chat/terminal/files/git unclickable after switching to Single
-  // (the node is never recreated). Selecting is only meaningful in these two
-  // views, so gate inside the handler instead of at bind time.
-  el.addEventListener("click", () => {
-    if (STATE.view === "single" || STATE.view === "trajectory") selectSession(s.session_id);
-  });
-
-  // Filled through the same updater the reconciler uses, so a freshly built row
-  // and an in-place patched one can never drift apart.
-  updateSessionItem(el, s);
-  return el;
-}
-
-// Set a session item's cost text and error-dot state from its stats. Shared by
-// the initial build and the boot fan-out patch so both use one code path.
-function applySessionStatsToItem(el, stats, s) {
-  const cost = el.querySelector(".cost");
-  if (cost) {
-    cost.textContent = stats
-      ? `${window.SCOPE.fmtTokens(stats.total_tokens)} tk · $${stats.total_cost.toFixed(4)}`
-      : "";
-  }
-  const dot = el.querySelector(".err-dot");
-  if (dot) {
-    const hasErr = stats && stats.error_count > 0;
-    dot.classList.toggle("noerr", !hasErr);
-    dot.classList.toggle("ackd", STATE.ackd.has(s.session_id));
-  }
-}
-
-// In-place update for one session after its stats arrive, avoiding a full
-// sidebar rebuild. Mirrors the cost into the collapsed mini-item tooltip too.
-function patchSessionStats(sid) {
-  const s = STATE.sessions.find(x => x.session_id === sid);
-  const stats = STATE.sessionStats[sid];
-  if (!s || !stats) return;
-  const item = sessionList.querySelector(`.session-item[data-sid="${CSS.escape(sid)}"]`);
-  if (item) applySessionStatsToItem(item, stats, s);
-  const mini = sessionList.querySelector(`.session-mini[data-sid="${CSS.escape(sid)}"]`);
-  if (mini) {
-    const name = s.agent_name ?? s.cwd?.split("/").pop() ?? s.session_id;
-    mini.title = `${name}\n${sid.slice(0, 8)} · ${s.event_count} events · ${window.SCOPE.fmtRel(s.last_ts)} · $${stats.total_cost.toFixed(4)}`;
-  }
-}
-
-function buildMiniSessionItem(s) {
-  const el = document.createElement("div");
-  el.className = "session-mini";
-  el.dataset.sid = s.session_id; // reconciliation key
-
-  // The agent letter is its own text node so the updater can rewrite it in
-  // place; the status dot is appended after it.
-  el.appendChild(document.createTextNode(""));
-  const dot = document.createElement("span");
-  dot.className = "mini-dot";
-  el.appendChild(dot);
-
-  // See buildSessionItem: bind unconditionally so a reconciled row stays
-  // clickable after the view switches to Single/Trajectory.
-  el.addEventListener("click", () => {
-    if (STATE.view === "single" || STATE.view === "trajectory") selectSession(s.session_id);
-  });
-
-  // Right-click (or long-press) to delete in collapsed mode
-  el.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    deleteSession(s.session_id);
-  });
-
-  updateMiniSessionItem(el, s);
-  return el;
-}
-
-// Shared lookup for the two status tickers below. They run twice a second and
-// used to do a linear STATE.sessions.find() *per row* (O(rows × sessions)) on
-// every tick; one Map makes each row a hash hit instead.
+// Shared lookup for the status ticker below. The tick runs twice a second and
+// used a linear STATE.sessions.find() per row; one Map makes each row a hash
+// hit instead.
 function sessionIndex() {
   const byId = new Map();
   for (const s of STATE.sessions) byId.set(s.session_id, s);
   return byId;
 }
 
-// 500 ms tick to refresh the activity-window dot color without re-rendering the
-// entire sidebar. Cheap DOM patch — only touches the dot's class list.
+// 500 ms tick that re-tints live status dots (session rows, workspace rows and
+// collapsed workspace chips) without rebuilding the rail. The per-workspace
+// aggregate is computed once per tick, so this stays O(sessions + rows).
 setInterval(() => {
-  if (document.hidden || !STATE.sessions.length || !STATE.sidebarCollapsed) return;
-  const rows = document.querySelectorAll(".session-mini");
-  if (!rows.length) return; // the collapsed rail isn't the live layout
+  if (document.hidden || !STATE.sessions.length) return;
   const byId = sessionIndex();
-  rows.forEach(el => {
-    const s = byId.get(el.dataset.sid);
-    if (!s) return;
-    const dot = el.querySelector(".mini-dot");
-    if (dot) {
-      const cls = "mini-dot " + window.SCOPE.activityStatus(s);
-      if (dot.className !== cls) dot.className = cls; // skip identical writes
-    }
-  });
-}, 500);
-
-// 500 ms tick to refresh subagent status dots in the expanded session list.
-// Same pattern as mini-dots — cheap DOM patch without full re-render.
-setInterval(() => {
-  if (document.hidden || !STATE.sessions.length || STATE.sidebarCollapsed) return;
-  const rows = document.querySelectorAll(".session-item .status-dot");
-  if (!rows.length) return;
-  const byId = sessionIndex();
-  rows.forEach(el => {
-    const s = byId.get(el.closest(".session-item")?.dataset.sid);
+  const rank = { green: 3, orange: 2, red: 1, gray: 0 };
+  const wsDot = new Map(); // cwd → aggregate dot class
+  for (const s of STATE.sessions) {
+    const st = window.SCOPE.subagentStatus(s);
+    const cwd = s.cwd || "(unknown)";
+    const cur = wsDot.get(cwd);
+    if (!cur || rank[st] > rank[cur]) wsDot.set(cwd, st);
+  }
+  document.querySelectorAll(".ws-sess .status-dot").forEach(el => {
+    const s = byId.get(el.closest(".ws-sess")?.dataset.sid);
     if (!s) return;
     const cls = "status-dot " + window.SCOPE.subagentStatus(s);
     if (el.className !== cls) el.className = cls;
   });
+  document.querySelectorAll(".chat-ws").forEach(el => {
+    const dot = el.querySelector(".chat-ws-dot");
+    if (!dot) return;
+    const cls = "chat-ws-dot " + (wsDot.get(el.dataset.cwd) || "gray");
+    if (dot.className !== cls) dot.className = cls;
+  });
+  document.querySelectorAll(".ws-mini").forEach(el => {
+    const dot = el.querySelector(".mini-dot");
+    if (!dot) return;
+    const cls = "mini-dot " + (wsDot.get(el.dataset.cwd) || "gray");
+    if (dot.className !== cls) dot.className = cls;
+  });
 }, 500);
 
 function selectSession(sid) {
-  STATE.ackd.add(sid);
   if (STATE.selectedSessionId === sid) {
     clearSelectedSession();
     return;
@@ -1552,6 +1247,9 @@ window.__setCwd = function (cwd) {
   if (inp && document.activeElement === inp) return; // don't fight live typing
   setCwd(cwd);
 };
+// Mount the global Workspaces rail into the aside (rail.js); setView() below
+// triggers its first render alongside the session fetch.
+window.SCOPE.WorkspaceRail?.mount();
 setView(STATE.view);
 applySidebarCollapsed();
 fetchSessions();
@@ -1570,6 +1268,9 @@ function setCwd(cwd) {
   if (STATE.view === "files") window.__filesOnView?.();
   else if (STATE.view === "checkpoints") window.__checkpointsOnView?.();
   else if (STATE.view === "git") window.__gitOnView?.();
+  // The rail highlights the shared cwd as the active workspace — keep it in
+  // step when the cwd arrives from the shell / health probe rather than a click.
+  renderSessions();
 }
 async function initCwd() {
   const inp = document.getElementById("terminal-cwd");
@@ -1584,6 +1285,7 @@ async function initCwd() {
       if (STATE.view === "files") window.__filesOnView?.();
       else if (STATE.view === "checkpoints") window.__checkpointsOnView?.();
       else if (STATE.view === "git") window.__gitOnView?.();
+      renderSessions();
     }
   } catch {}
 }

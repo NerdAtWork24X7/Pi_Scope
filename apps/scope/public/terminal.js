@@ -10,6 +10,7 @@
   let ctxMenuMousedownHandler = null, ctxMenuKeydownHandler = null, ctxMenuResizeHandler = null;
   let ctxContainerContextMenuHandler = null, ctxContainerScrollHandler = null;
   let isConnected = false;
+  let cdHintTimer = null;
 
   function token() { return new URLSearchParams(location.search).get("token") || ""; }
   function wsUrl() {
@@ -161,6 +162,16 @@
           const m = JSON.parse(data);
           if (m && m.type === "cwd" && typeof m.cwd === "string") {
             if (window.__setCwd) window.__setCwd(m.cwd);
+            return;
+          }
+          if (m && m.type === "cdBlocked") {
+            // The workspace rail asked to cd, but another program owns the PTY
+            // (pi, an editor, a pager, …) — injecting would type into it. Say so
+            // in the status line instead of corrupting its input.
+            setStatus("working dir not changed — a program owns the terminal", isConnected);
+            clearTimeout(cdHintTimer);
+            cdHintTimer = setTimeout(
+              () => setStatus(isConnected ? "connected" : "disconnected", isConnected), 3500);
             return;
           }
           if (m && m.type === "herdr" && typeof m.detected === "boolean") {
@@ -331,6 +342,16 @@
     // so it can mirror Herdr's focused pane instead.
     sendFocus(false);
     // Only tear down fully on unload.
+  };
+  // Change the live shell's working directory — used by the sidebar workspace
+  // rail when a workspace is picked on the Terminal view. Routed through the
+  // server (control frame), which injects `cd` ONLY when the shell is at a
+  // prompt; if another program owns the PTY (pi, an editor, …) it replies
+  // `cdBlocked` so we never type into that program's input box. No-op unless
+  // the socket is open.
+  window.__terminalCd = function (cwd) {
+    if (!cwd || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "cd", cwd: String(cwd) }));
   };
   window.addEventListener("beforeunload", disconnect);
 

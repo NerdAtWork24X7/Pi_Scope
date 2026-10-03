@@ -8664,3 +8664,93 @@ body.set-cost-resizing * { user-select: none; }
   #header-center { order: 3; flex-basis: 100%; justify-content: flex-start; flex-wrap: wrap; }
   .view-toggle { flex-wrap: wrap; overflow: visible; border-radius: 6px; }
 }
+
+/* ── Global sidebar: Workspaces rail (rail.js) ─────────────────────────────
+ * The aside now hosts the same Workspaces rail as the Chat view. Reuse the
+ * chat rail chrome (header + scroll) and let it fill the column; the resizer
+ * and collapse behaviour above still own the width. */
+.sidebar-rail {
+  flex: 1;
+  width: auto;
+  min-height: 0;
+  background: transparent;
+}
+.sidebar-rail .chat-rail-head {
+  padding: 8px 10px 9px;
+}
+.sidebar-rail .chat-rail-scroll {
+  padding: 6px;
+}
+/* The active workspace's sessions get a little more breathing room in the
+ * wider sidebar than in the 260px chat rail. */
+.sidebar-rail .chat-ws-children {
+  margin-left: 22px;
+}
+/* Selected session row (Single / Trajectory callers set .selected). */
+.ws-sess.selected {
+  background: var(--accent-soft);
+}
+.ws-sess.selected .ws-sess-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+/* Collapsed sidebar: hide the rail header; rail.js renders one chip per
+ * workspace (`.ws-mini`) into the same scroll container. */
+body.sidebar-collapsed .sidebar-rail .chat-rail-head {
+  display: none;
+}
+body.sidebar-collapsed .sidebar-rail {
+  width: auto;
+}
+.ws-mini {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin: 3px auto;
+  border-radius: 7px;
+  background: var(--pill-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: monospace, var(--emoji);
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.1s, background 0.1s;
+}
+.ws-mini:hover {
+  border-color: var(--accent);
+  background: var(--row-hover);
+}
+.ws-mini.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.ws-mini .mini-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--bg);
+  transition: background 0.5s ease, box-shadow 0.5s ease;
+}
+.ws-mini .mini-dot.green {
+  background: var(--green);
+  box-shadow: 0 0 5px var(--green);
+}
+.ws-mini .mini-dot.orange {
+  background: var(--orange);
+  box-shadow: 0 0 5px var(--orange);
+}
+.ws-mini .mini-dot.red {
+  background: var(--red);
+}
+.ws-mini .mini-dot.gray {
+  background: var(--muted);
+}
