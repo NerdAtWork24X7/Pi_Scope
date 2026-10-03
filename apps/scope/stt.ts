@@ -517,7 +517,8 @@ export function startStt(cwd: string): SttStartInfo {
   try {
     handle = startRecorder(config, file);
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    console.error("Failed to start STT recorder:", err);
+    return { ok: false, error: "failed to start audio recorder" };
   }
 
   const state: ActiveStt = {
