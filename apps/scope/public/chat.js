@@ -540,7 +540,7 @@
       html +=
         `<div class="chat-ws-add-row">` +
         `<div class="chat-ws-add-fields">` +
-        `<input class="chat-ws-add-input" id="chat-ws-add-input" type="text" placeholder="/path/to/workspace" spellcheck="false" autocomplete="off" />` +
+        `<input class="chat-ws-add-input" id="chat-ws-add-input" type="text" placeholder="/path/to/workspace" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off" />` +
         (canBrowse
           ? `<button class="chat-ws-browse" id="chat-ws-browse" type="button" title="Browse for a directory">Browse…</button>`
           : "") +
@@ -2552,7 +2552,7 @@
       `<button type="button" class="chat-ask-x" title="Decline — pi is told you dismissed the question">&times;</button></div>` +
       (opts.length ? `<div class="chat-ask-opts">${optHtml}</div>` : "") +
       `<div class="chat-ask-custom-row" hidden>` +
-      `<input class="chat-ask-input" type="text" placeholder="Type your own answer…" autocomplete="off" spellcheck="false" />` +
+      `<input class="chat-ask-input" type="text" placeholder="Type your own answer…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />` +
       `<button type="button" class="chat-ask-send">Send</button></div>` +
       `<div class="chat-ask-note">pi is waiting for your answer</div>`;
     body.appendChild(card);
@@ -2650,7 +2650,7 @@
       `<div class="chat-ask-q">${esc(title)}</div>` +
       `<button type="button" class="chat-ask-x" title="Decline — pi is told you dismissed the question">&times;</button></div>` +
       `<div class="chat-ask-input-row">` +
-      `<textarea class="chat-ask-input" rows="2" placeholder="${esc(dlg.placeholder || "Type your answer…")}" spellcheck="false"></textarea>` +
+      `<textarea class="chat-ask-input" rows="2" placeholder="${esc(dlg.placeholder || "Type your answer…")}" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>` +
       `<button type="button" class="chat-ask-send">Send</button></div>` +
       `<div class="chat-ask-note">pi is waiting for your answer</div>`;
     body.appendChild(card);
@@ -4238,7 +4238,12 @@
     }
     if (el.input) {
       el.input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
+        // Enter has two jobs: confirming an IME candidate mid-composition, and
+        // sending. Without the isComposing guard the confirmation keystroke
+        // sends a half-finished word — very visible on Android, where Enter
+        // accepts the Gboard suggestion. keyCode 229 is the legacy signal some
+        // IMEs still send instead of a composing keydown.
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
           e.preventDefault();
           sendPrompt();
         }

@@ -115,6 +115,7 @@ The SSE endpoint also accepts `?token=<token>` (browsers can't set headers on Ev
 | GET | `/events/stream` | SSE stream (pool/tag/session_id/?token=) |
 | GET | `/files/modified` | Git status (porcelain) for a cwd |
 | GET | `/files/diff` | HEAD vs working-tree diff for one file |
+| GET | `/files/graph` | File/module dependency graph + change overlay for a cwd |
 | POST | `/files/save` | Write a working-tree file |
 | POST | `/checkpoints/create` | Git-backed working-tree snapshot |
 | GET | `/checkpoints/list` | List checkpoints for a cwd |

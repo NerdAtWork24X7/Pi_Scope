@@ -52,6 +52,29 @@
   let session = null; // session summary object
   let costStr = "";
   let selectedIndex = null; // cell.index of the record open in the inspector
+  let loading = false;      // a family load is in flight
+
+  // ─── Agent-family state ───────────────────────────────────────────────────
+  // The view follows the workspace the user is in (the terminal cwd) and shows
+  // the newest session there WITH everything it spawned, so subagents no longer
+  // have to be selected one by one.
+  let familyRoot = null;       // root session whose whole tree is shown
+  let familyMeta = [];         // [{ sid, session, depth }] root first, then descendants
+  let familySids = new Set();  // every sid in the shown family (root + subagents)
+  let subEvents = new Map();   // sid -> events[] for subagent sessions
+  let loadToken = 0;           // guards out-of-order family loads
+  let renderQueued = false;    // rAF-batched live re-render
+
+  // Subagent sections the user collapsed (persisted; expanded by default).
+  const collapsedAgents = loadCollapsedAgents();
+  function loadCollapsedAgents() {
+    try { return new Set(JSON.parse(localStorage.getItem("scope-trajectory-collapsed-agents") || "[]")); }
+    catch { return new Set(); }
+  }
+  function saveCollapsedAgents() {
+    try { localStorage.setItem("scope-trajectory-collapsed-agents", JSON.stringify([...collapsedAgents])); }
+    catch { /* storage unavailable — collapse state is best-effort */ }
+  }
 
   // ─── Small helpers ────────────────────────────────────────────────────────
 
@@ -86,6 +109,7 @@
       case "request": return "Request";
       case "compacted": return "Compacted";
       case "context": return "Context";
+      case "dispatch": return "Dispatch";
       default: return kind;
     }
   }
@@ -470,7 +494,43 @@
     return cls.join(" ");
   }
 
+  /** A dispatch_agent(s) call renders as a row of chips — one per subagent it
+   *  spawned — that jump straight to that subagent's section below. */
+  function buildDispatchRow(cell) {
+    const row = document.createElement("div");
+    row.className = "traj-row traj-dispatch";
+    row.dataset.index = cell.index;
+    const chips = cell.subs.map((s) =>
+      `<button type="button" class="traj-disp-chip" data-goto="${escapeHtml(s.sid)}"`
+      + ` title="${escapeHtml(s.task || s.sid)}">↳ ${escapeHtml(s.name)}</button>`
+    ).join("");
+    row.innerHTML = `
+      <span class="traj-col-idx">#${cell.index}</span>
+      <span class="traj-col-kind">Dispatch</span>
+      <span class="traj-col-content traj-disp-list">${chips}</span>
+      <span class="traj-col-time"></span>
+      <span class="traj-col-cost"></span>
+      <span class="traj-col-in"></span>
+      <span class="traj-col-out"></span>
+    `;
+    row.querySelectorAll(".traj-disp-chip").forEach((btn) => {
+      btn.addEventListener("click", (e) => { e.stopPropagation(); gotoAgent(btn.dataset.goto); });
+    });
+    return row;
+  }
+
+  /** Scroll to a subagent's section (expanding it first) and flash it. */
+  function gotoAgent(sid) {
+    const el = ledger.querySelector(`.traj-agent[data-sid="${sid}"]`);
+    if (!el) return;
+    if (el.classList.contains("collapsed")) el.querySelector(".traj-agent-head")?.click();
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.classList.add("flash");
+    setTimeout(() => el.classList.remove("flash"), 1200);
+  }
+
   function buildRow(cell) {
+    if (cell.kind === "dispatch") return buildDispatchRow(cell);
     let cost = "";
     if (cell.kind === "message" && cell.sourceEvt?.payload?.usage?.cost_total != null) {
       cost = "$" + cell.sourceEvt.payload.usage.cost_total.toFixed(5);
@@ -611,36 +671,132 @@
 
   function updateLabel() {
     if (!label) return;
-    const name = session?.agent_name ?? session?.cwd?.split("/").pop() ?? (selectedSid ? shortId(selectedSid) : "");
-    label.textContent = name ? name + " · trajectory" : "trajectory";
-    label.title = selectedSid ?? "";
+    const ws = session?.cwd || currentWorkspace();
+    const base = ws ? (ws.split("/").filter(Boolean).pop() || ws) : "trajectory";
+    const n = familyMeta.length;
+    label.textContent = n > 1 ? `${base} · ${n} agents` : `${base} · trajectory`;
+    label.title = familyRoot
+      ? familyRoot + (n > 1 ? ` (+${n - 1} subagent${n - 1 === 1 ? "" : "s"})` : "")
+      : "";
   }
 
-  function render() {
-    if (!ledger) return;
-    const layout = deriveTrajectoryLayout(evts);
-    const allCells = layout.flatMap((t) => t.groups.flatMap((g) => g.cells));
-    buildOverview(allCells);
+  /** Re-index one session's cells with globally unique numbers (root + subs
+   *  share one inspector, so `#N` must stay unique across the whole family). */
+  function indexLayout(layout, sid, agentName, counter) {
+    for (const turn of layout) {
+      for (const g of turn.groups) {
+        for (const c of g.cells) {
+          c.index = ++counter.n;
+          c.agentSid = sid;
+          c.agentName = agentName;
+        }
+      }
+    }
+    return layout;
+  }
 
-    const q = search.trim().toLowerCase();
+  function layoutCells(layout) {
+    return layout.flatMap((t) => t.groups.flatMap((g) => g.cells));
+  }
+
+  /** Append a layout's turn/group/row rows, honouring search + kind filters. */
+  function appendLayoutRows(container, layout, q) {
     let visible = 0;
-    let total = allCells.length;
-
-    const frag = document.createDocumentFragment();
-    frag.appendChild(buildColumnHeader());
     for (const turn of layout) {
       const matchingGroups = turn.groups
         .map((g) => ({ group: g, cells: g.cells.filter((c) => matchesSearch(c, q) && !hideKinds.has(c.kind)) }))
         .filter((x) => x.cells.length);
       if (!matchingGroups.length) continue;
-      frag.appendChild(buildTurnHead(turn));
+      container.appendChild(buildTurnHead(turn));
       for (const { group, cells } of matchingGroups) {
-        frag.appendChild(buildGroupHead(group));
-        for (const cell of cells) {
-          visible++;
-          frag.appendChild(buildRow(cell));
-        }
+        container.appendChild(buildGroupHead(group));
+        for (const cell of cells) { visible++; container.appendChild(buildRow(cell)); }
       }
+    }
+    return visible;
+  }
+
+  /** One collapsible subagent section: header (agent · model · counts) + its
+   *  own turn/step ledger, rendered inline under the parent session. */
+  function buildAgentSection(meta, layout, q, counts) {
+    const s = meta.session;
+    const cells = layoutCells(layout);
+    const shown = cells.filter((c) => matchesSearch(c, q) && !hideKinds.has(c.kind)).length;
+    if (!shown && (q || hideKinds.size)) return null; // filtered out entirely
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "traj-agent";
+    wrapper.dataset.sid = meta.sid;
+    if (meta.depth > 1) wrapper.style.marginLeft = Math.min(meta.depth - 1, 4) * 16 + "px";
+    const collapsed = collapsedAgents.has(meta.sid);
+    wrapper.classList.toggle("collapsed", collapsed);
+
+    const times = cells.filter((c) => c.startedAt != null && Number.isFinite(c.startedAt)).map((c) => c.startedAt);
+    const dur = times.length >= 2 ? fmtOwn((Math.max(...times) - Math.min(...times)) / 1000) : "";
+    const stats = STATE.sessionStats?.[meta.sid];
+    const metaParts = [
+      s?.model || "",
+      shown + (shown !== cells.length ? ` / ${cells.length}` : "") + " records",
+      stats ? fmtTokens(stats.total_tokens) + " tk" : "",
+      dur,
+    ].filter(Boolean);
+
+    const head = document.createElement("div");
+    head.className = "traj-agent-head " + (O.subagentStatus ? O.subagentStatus(s) : "gray");
+    head.setAttribute("role", "button");
+    head.setAttribute("tabindex", "0");
+    head.setAttribute("aria-expanded", String(!collapsed));
+    head.title = meta.sid;
+    head.innerHTML =
+      `<span class="traj-agent-caret">${collapsed ? "▸" : "▾"}</span>` +
+      `<span class="traj-agent-name">${escapeHtml(agentLabel(s, meta.sid))}</span>` +
+      `<span class="traj-agent-tag">subagent${meta.depth > 1 ? " · depth " + meta.depth : ""}</span>` +
+      `<span class="traj-agent-meta">${escapeHtml(metaParts.join(" · "))}</span>`;
+    head.addEventListener("click", () => {
+      const now = wrapper.classList.toggle("collapsed");
+      head.setAttribute("aria-expanded", String(!now));
+      const caret = head.querySelector(".traj-agent-caret");
+      if (caret) caret.textContent = now ? "▸" : "▾";
+      if (now) collapsedAgents.add(meta.sid); else collapsedAgents.delete(meta.sid);
+      saveCollapsedAgents();
+    });
+    head.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); head.click(); }
+    });
+
+    const body = document.createElement("div");
+    body.className = "traj-agent-body";
+    counts.visible += appendLayoutRows(body, layout, q);
+
+    wrapper.appendChild(head);
+    wrapper.appendChild(body);
+    return wrapper;
+  }
+
+  function render() {
+    if (!ledger) return;
+    linkDispatches();
+    const counter = { n: 0 };
+    const rootLayout = indexLayout(injectDispatchRows(deriveTrajectoryLayout(evts)), familyRoot, agentLabel(session, familyRoot), counter);
+    const agentLayouts = [];
+    for (const m of familyMeta) {
+      if (m.sid === familyRoot) continue;
+      const sub = subEvents.get(m.sid) || [];
+      if (!sub.length) continue;
+      agentLayouts.push({ meta: m, layout: indexLayout(deriveTrajectoryLayout(sub), m.sid, agentLabel(m.session, m.sid), counter) });
+    }
+    const allCells = layoutCells(rootLayout).concat(agentLayouts.flatMap((a) => layoutCells(a.layout)));
+    buildTimeline(allCells);
+
+    const q = search.trim().toLowerCase();
+    const counts = { visible: 0, total: allCells.length };
+
+    const frag = document.createDocumentFragment();
+    frag.appendChild(buildColumnHeader());
+    counts.visible += appendLayoutRows(frag, rootLayout, q);
+    for (const a of agentLayouts) {
+      const sec = buildAgentSection(a.meta, a.layout, q, counts);
+      if (sec) frag.appendChild(sec);
     }
 
     ledger.innerHTML = "";
@@ -648,97 +804,374 @@
     refreshInspector(allCells);
 
     if (statsEl) {
-      const records = q ? `${visible} / ${total} records` : `${total} records`;
-      statsEl.textContent = costStr ? `${costStr} · ${records}` : records;
+      const records = q ? `${counts.visible} / ${counts.total} records` : `${counts.total} records`;
+      const agents = familyMeta.length > 1 ? ` · ${familyMeta.length} agents` : "";
+      statsEl.textContent = (costStr ? costStr + " · " : "") + records + agents;
     }
     updateLabel();
     if (stickToBottom) scrollToBottom();
     updateEmpty();
   }
 
-  // ─── Timeline overview ────────────────────────────────────────────────────
+  // ─── Timeline (one lane per agent) ────────────────────────────────────────
+  // The orchestrator and every subagent get their own horizontal lane on a
+  // shared time axis, so it is immediately clear who was working when and how
+  // long each agent ran. Bars are colour-coded by record kind and a dispatch
+  // call draws a line down to the lane of each subagent it spawned.
 
-  function buildOverview(cells) {
+  const LANE_H = 20;
+  const LANE_LABEL_W = 108;
+  const TL_PAD = 6;
+
+  function buildTimeline(cells) {
     if (!overview) return;
     const timed = cells.filter((c) => c.startedAt != null && Number.isFinite(c.startedAt));
     if (!timed.length) { overview.innerHTML = ""; overview.style.display = "none"; return; }
     overview.style.display = "";
 
+    // Lane order: orchestrator (root) first, then subagents in family order.
+    const order = [];
+    const seen = new Set();
+    for (const sid of [familyRoot, ...familyMeta.map((m) => m.sid)]) {
+      if (sid && !seen.has(sid)) { seen.add(sid); order.push(sid); }
+    }
+    const lanes = new Map();
+    for (const sid of order) lanes.set(sid, []);
+    for (const c of timed) {
+      const sid = c.agentSid || familyRoot;
+      if (!lanes.has(sid)) { lanes.set(sid, []); order.push(sid); }
+      lanes.get(sid).push(c);
+    }
+    const used = order.filter((sid) => (lanes.get(sid) || []).length);
+
     let minT = Infinity, maxT = -Infinity;
     for (const c of timed) {
-      const start = c.startedAt;
       const dur = c.timeSeconds != null ? c.timeSeconds * 1000 : 0;
-      minT = Math.min(minT, start);
-      maxT = Math.max(maxT, start + dur);
+      minT = Math.min(minT, c.startedAt);
+      maxT = Math.max(maxT, c.startedAt + dur);
     }
-    if (!Number.isFinite(minT) || !Number.isFinite(maxT) || maxT <= minT) { maxT = minT + 1; }
+    if (!Number.isFinite(minT) || !Number.isFinite(maxT) || maxT <= minT) maxT = minT + 1;
     const span = maxT - minT;
-    const H = 44;
 
     const canvas = document.createElement("div");
     canvas.className = "tov-canvas";
-    canvas.style.height = H + "px";
+    canvas.style.height = (TL_PAD * 2 + used.length * LANE_H) + "px";
 
+    // Each lane is a full-width track offset past the label gutter, so bar
+    // left/width are plain percentages of the shared time axis.
+    const laneY = new Map();
+    const trackFor = new Map();
+    used.forEach((sid, i) => {
+      const y = TL_PAD + i * LANE_H;
+      laneY.set(sid, y);
+      const lab = document.createElement("div");
+      lab.className = "tov-lane-label";
+      const meta = familyMeta.find((m) => m.sid === sid);
+      lab.textContent = agentLabel(meta?.session || session, sid);
+      lab.title = sid;
+      lab.style.top = y + "px";
+      lab.style.height = LANE_H + "px";
+      lab.style.lineHeight = LANE_H + "px";
+      lab.style.width = LANE_LABEL_W + "px";
+      canvas.appendChild(lab);
+      const track = document.createElement("div");
+      track.className = "tov-track";
+      track.style.top = y + "px";
+      track.style.height = LANE_H + "px";
+      track.style.left = LANE_LABEL_W + "px";
+      canvas.appendChild(track);
+      trackFor.set(sid, track);
+    });
+
+    const leftPct = (t) => (t - minT) / span;
+
+    // Dispatch connectors first, so bars paint over them.
     for (const c of timed) {
-      const dur = c.timeSeconds != null ? c.timeSeconds * 1000 : 0;
-      const left = ((c.startedAt - minT) / span) * 100;
-      const width = Math.max(((dur || 1) / span) * 100, 0.12);
-      const bar = document.createElement("div");
-      bar.className = "tov-bar tov-" + c.kind;
-      bar.style.left = left.toFixed(4) + "%";
-      bar.style.width = width.toFixed(4) + "%";
-      bar.style.top = (6 + (c.kind === "message" ? 0 : c.kind === "tool" ? 14 : 28)) + "px";
-      bar.style.height = (c.kind === "message" ? 12 : c.kind === "tool" ? 12 : 4) + "px";
-      bar.dataset.index = c.index;
-
-      if (c.kind === "message" && c.prefillMs != null && dur > 0) {
-        const seg = document.createElement("span");
-        seg.className = "tov-seg";
-        seg.style.width = Math.min(100, (c.prefillMs / dur) * 100).toFixed(2) + "%";
-        bar.appendChild(seg);
+      if (c.kind !== "dispatch" || !c.subs) continue;
+      const fromY = (laneY.get(c.agentSid || familyRoot) ?? 0) + LANE_H - 3;
+      const x = leftPct(c.startedAt) * 100;
+      for (const s of c.subs) {
+        const y = laneY.get(s.sid);
+        if (y == null) continue;
+        const toY = y + 4;
+        const el = document.createElement("div");
+        el.className = "tov-link";
+        el.style.left = `calc(${LANE_LABEL_W}px + ${x.toFixed(4)}%)`;
+        el.style.top = Math.min(fromY, toY) + "px";
+        el.style.height = Math.abs(toY - fromY) + "px";
+        el.title = `dispatch → ${s.name}`;
+        canvas.appendChild(el);
       }
-
-      bar.title = `#${c.index} ${kindLabel(c.kind)} · ${fmtTs(new Date(c.startedAt).toISOString())} · ${fmtOwn(c.timeSeconds)}`;
-      bar.addEventListener("click", () => {
-        const row = ledger.querySelector(`.traj-row[data-index="${c.index}"]`);
-        if (row) row.scrollIntoView({ block: "center", behavior: "smooth" });
-      });
-      canvas.appendChild(bar);
     }
+
+    for (const sid of used) {
+      const track = trackFor.get(sid);
+      const y = laneY.get(sid);
+      for (const c of lanes.get(sid)) {
+        const dur = c.timeSeconds != null ? c.timeSeconds * 1000 : 0;
+        const bar = document.createElement("div");
+        bar.className = "tov-bar tov-" + c.kind;
+        bar.style.left = (leftPct(c.startedAt) * 100).toFixed(4) + "%";
+        bar.style.width = "max(3px, " + (dur / span * 100).toFixed(4) + "%)";
+        bar.style.top = (c.kind === "message" ? 2 : 8) + "px";
+        bar.style.height = (c.kind === "message" ? 9 : 5) + "px";
+        bar.dataset.index = c.index;
+        void y;
+
+        if (c.kind === "message" && c.prefillMs != null && dur > 0) {
+          const seg = document.createElement("span");
+          seg.className = "tov-seg";
+          seg.style.width = Math.min(100, (c.prefillMs / dur) * 100).toFixed(2) + "%";
+          bar.appendChild(seg);
+        }
+
+        bar.title = `#${c.index} ${kindLabel(c.kind)} · ${fmtTs(new Date(c.startedAt).toISOString())} · ${fmtOwn(c.timeSeconds)}`;
+        bar.addEventListener("click", () => {
+          const row = ledger.querySelector(`.traj-row[data-index="${c.index}"]`);
+          if (row) row.scrollIntoView({ block: "center", behavior: "smooth" });
+        });
+        track.appendChild(bar);
+      }
+    }
+
+    const legend = document.createElement("div");
+    legend.className = "tov-legend";
+    legend.innerHTML =
+      `<span><span class="tov-sw message"></span>message</span>`
+      + `<span><span class="tov-sw tool"></span>tool</span>`
+      + `<span><span class="tov-sw dispatch"></span>dispatch</span>`
+      + `<span><span class="tov-sw other"></span>context</span>`
+      + `<span style="margin-left:auto">${used.length} agent lane${used.length === 1 ? "" : "s"} · shared time axis</span>`;
 
     overview.innerHTML = "";
     overview.appendChild(canvas);
+    overview.appendChild(legend);
   }
 
   function updateEmpty() {
     if (!ledger) return;
     const empty = ledger.querySelector(".traj-empty");
-    if (!evts.length && !empty) {
-      ledger.innerHTML = '<div class="empty-state traj-empty"><span class="icon">⛓</span>Select a session from the sidebar</div>';
-      if (statsEl) statsEl.textContent = "";
-      if (overview) overview.style.display = "none";
-      if (label) label.textContent = "trajectory";
+    if (evts.length || empty) return;
+    const msg = loading
+      ? "Loading session…"
+      : familyRoot
+        ? "No events recorded for this session yet"
+        : `No sessions in ${escapeHtml(currentWorkspace() || "this workspace")} yet`;
+    ledger.innerHTML = `<div class="empty-state traj-empty"><span class="icon">⛓</span>${msg}</div>`;
+    if (statsEl) statsEl.textContent = "";
+    if (overview) overview.style.display = "none";
+    if (label && !familyRoot) label.textContent = "trajectory";
+  }
+
+  /** No session exists for the current workspace — show that instead of a
+   *  stale tree from another workspace. */
+  function showWorkspaceEmpty() {
+    familyRoot = null;
+    selectedSid = null;
+    familyMeta = [];
+    familySids = new Set();
+    subEvents = new Map();
+    evts = [];
+    lastSeq = -1;
+    loading = false;
+    session = null;
+    costStr = "";
+    closeInspector();
+    if (overview) overview.style.display = "none";
+    if (statsEl) statsEl.textContent = "";
+    if (label) {
+      const ws = currentWorkspace();
+      label.textContent = ws ? (ws.split("/").filter(Boolean).pop() || ws) + " · trajectory" : "trajectory";
+      label.title = ws;
     }
+    if (ledger) {
+      ledger.innerHTML = `<div class="empty-state traj-empty"><span class="icon">⛓</span>`
+        + `No sessions in ${escapeHtml(currentWorkspace() || "this workspace")} yet</div>`;
+    }
+  }
+
+  // ─── Workspace-scoped agent families ──────────────────────────────────────
+
+  function isMemorySummarizer(s) {
+    return (s?.agent_name || "").toLowerCase() === "memory-summarizer";
+  }
+
+  function recency(s) {
+    const t = Date.parse(s?.last_ts || s?.first_ts || "");
+    return Number.isFinite(t) ? t : 0;
+  }
+
+  /** The workspace the user is in: the terminal cwd, or the newest session's. */
+  function currentWorkspace() {
+    if (STATE.cwd) return STATE.cwd;
+    let best = null;
+    for (const s of (STATE.sessions || [])) if (!best || recency(s) > recency(best)) best = s;
+    return best?.cwd || "";
+  }
+
+  function workspaceSessions(ws) {
+    const want = ws || "";
+    return (STATE.sessions || []).filter((s) => (s.cwd || "") === want && !isMemorySummarizer(s));
+  }
+
+  function agentLabel(s, sid) {
+    return s?.agent_name || (s?.cwd ? s.cwd.split("/").filter(Boolean).pop() : "") || (sid ? shortId(sid) : "agent");
+  }
+
+  /** Newest top-level session in `ws` (falls back to any session there). */
+  function latestRootSession(ws) {
+    const all = workspaceSessions(ws);
+    if (!all.length) return null;
+    const roots = all.filter((s) => !s.parent_session_id);
+    return (roots.length ? roots : all).slice().sort((a, b) => recency(b) - recency(a))[0];
+  }
+
+  /** Depth-first list of a session's descendants (subagents), chronological. */
+  function descendantsOf(rootSid) {
+    const byParent = new Map();
+    for (const s of (STATE.sessions || [])) {
+      if (!s.parent_session_id) continue;
+      const arr = byParent.get(s.parent_session_id);
+      if (arr) arr.push(s); else byParent.set(s.parent_session_id, [s]);
+    }
+    const out = [];
+    const seen = new Set([rootSid]);
+    const walk = (pid, depth) => {
+      const kids = (byParent.get(pid) || []).slice().sort((a, b) => recency(a) - recency(b));
+      for (const k of kids) {
+        if (seen.has(k.session_id)) continue;
+        seen.add(k.session_id);
+        out.push({ sid: k.session_id, session: k, depth });
+        walk(k.session_id, depth + 1);
+      }
+    };
+    walk(rootSid, 1);
+    return out;
+  }
+
+  function familyFor(rootSid) {
+    const root = (STATE.sessions || []).find((s) => s.session_id === rootSid) || null;
+    return [{ sid: rootSid, session: root, depth: 0 }].concat(descendantsOf(rootSid));
+  }
+
+  // ─── Dispatch linkage ─────────────────────────────────────────────────────
+  // A dispatch_agent(s) call names its targets in args.tasks[].agent, and the
+  // spawned session is a child of the calling session whose agent_name matches.
+  // Pair them by agent name (skipping children already claimed by an earlier
+  // call of the same name) so each dispatch row can link to its subagents.
+
+  const DISPATCH_TOOL_RE = /dispatch|spawn|task|subagent/i;
+  let dispatchByCall = new Map(); // tool_call_id -> [{ sid, name, task }]
+  let dispatchBySid = new Map();  // sid -> { sid, name, task }
+
+  function isDispatchTool(name) {
+    return !!name && DISPATCH_TOOL_RE.test(name);
+  }
+
+  function dispatchTargets(payload) {
+    const args = payload?.args;
+    if (!args) return [];
+    const list = Array.isArray(args.tasks) ? args.tasks
+      : Array.isArray(args.agents) ? args.agents
+      : args.agent ? [args] : [];
+    return list.map((t) => ({
+      name: String(t?.agent ?? t?.agent_name ?? t?.name ?? ""),
+      task: String(t?.task ?? t?.prompt ?? t?.message ?? ""),
+    })).filter((t) => t.name);
+  }
+
+  /** Recompute the call_id → subagents map for the loaded family. */
+  function linkDispatches() {
+    dispatchByCall = new Map();
+    dispatchBySid = new Map();
+    const children = familyMeta.filter((m) => m.sid !== familyRoot);
+    const used = new Set();
+    // Walk root events in order so a later call of the same agent name takes
+    // the next unconsumed child (dispatch order ≈ spawn order).
+    const calls = evts.filter((e) => e.type === "tool_call" && isDispatchTool(e.payload?.tool_name));
+    for (const call of calls) {
+      const callId = call.payload?.tool_call_id;
+      if (!callId) continue;
+      const targets = dispatchTargets(call.payload);
+      if (!targets.length) continue;
+      const links = [];
+      for (const t of targets) {
+        const child = children.find((m) => !used.has(m.sid)
+          && (m.session?.agent_name || "").toLowerCase() === t.name.toLowerCase());
+        if (child) {
+          used.add(child.sid);
+          const link = { sid: child.sid, name: t.name, task: t.task };
+          links.push(link);
+          dispatchBySid.set(child.sid, link);
+        } else {
+          links.push({ sid: null, name: t.name, task: t.task });
+        }
+      }
+      dispatchByCall.set(callId, links);
+    }
+  }
+
+  /** Insert a synthetic dispatch cell right after each dispatch tool cell, so
+   *  the call renders as a row of links to the subagents it spawned. */
+  function injectDispatchRows(layout) {
+    for (const turn of layout) {
+      for (const g of turn.groups) {
+        const out = [];
+        for (const c of g.cells) {
+          out.push(c);
+          if (c.kind !== "tool" || !isDispatchTool(c.toolName) || !c.callId) continue;
+          const subs = dispatchByCall.get(c.callId);
+          if (!subs || !subs.length) continue;
+          out.push({
+            index: 0, kind: "dispatch", subs,
+            startedAt: c.startedAt, timeSeconds: c.timeSeconds,
+            sourceEvt: c.sourceEvt, agentSid: c.agentSid, agentName: c.agentName,
+          });
+        }
+        g.cells = out;
+      }
+    }
+    return layout;
   }
 
   // ─── Data loading / SSE ───────────────────────────────────────────────────
 
-  async function select(sid) {
-    selectedSid = sid;
+  const MAX_FAMILY = 80; // sessions loaded for one family (root + subagents)
+
+  /** Load a root session plus every subagent spawned under it, then render. */
+  async function selectGroup(rootSid) {
+    const token = ++loadToken;
+    familyRoot = rootSid;
+    selectedSid = rootSid;
+    familyMeta = familyFor(rootSid).slice(0, MAX_FAMILY);
+    familySids = new Set(familyMeta.map((m) => m.sid));
+    subEvents = new Map();
     evts = [];
     lastSeq = -1;
     search = "";
     closeInspector();
     if (searchBox) searchBox.value = "";
-    session = STATE.sessions.find((s) => s.session_id === sid) ?? null;
-    const stats = STATE.sessionStats[sid];
+    session = familyMeta[0]?.session ?? null;
+    const stats = STATE.sessionStats[rootSid];
     costStr = stats ? `$${stats.total_cost.toFixed(4)} · ${fmtTokens(stats.total_tokens)} tk` : "";
+    loading = true;
     render();
 
-    const events = await fetchSessionEvents(sid);
-    if (selectedSid !== sid) return;
-    evts = events || [];
-    lastSeq = evts.length ? evts[evts.length - 1].seq : -1;
+    const results = await Promise.all(familyMeta.map(async (m) => {
+      try { return [m.sid, await fetchSessionEvents(m.sid)]; }
+      catch { return [m.sid, []]; }
+    }));
+    if (loadToken !== token) return; // a newer selection superseded this load
+    for (const [sid, events] of results) {
+      const list = events || [];
+      if (sid === rootSid) {
+        evts = list;
+        lastSeq = list.length ? list[list.length - 1].seq : -1;
+      } else {
+        subEvents.set(sid, list);
+      }
+    }
+    loading = false;
     prune();
     render();
   }
@@ -748,58 +1181,117 @@
     evts.splice(0, evts.length - MAX_EVENTS);
   }
 
+  /** Pick up subagents that appeared since the family was loaded. */
+  async function refreshFamily() {
+    if (!familyRoot) return false;
+    const next = familyFor(familyRoot).slice(0, MAX_FAMILY);
+    const changed = next.length !== familyMeta.length || next.some((m, i) => familyMeta[i]?.sid !== m.sid);
+    const missing = next.filter((m) => m.sid !== familyRoot && !subEvents.has(m.sid));
+    familyMeta = next;
+    familySids = new Set(next.map((m) => m.sid));
+    session = next[0]?.session ?? session;
+    if (!missing.length) return changed;
+    const results = await Promise.all(missing.map(async (m) => {
+      try { return [m.sid, await fetchSessionEvents(m.sid)]; } catch { return [m.sid, []]; }
+    }));
+    for (const [sid, list] of results) subEvents.set(sid, list || []);
+    return true;
+  }
+
   async function resync() {
-    if (selectedSid == null) return;
-    if (lastSeq < 0) { await select(selectedSid); return; }
-    const newer = await fetchSessionEvents(selectedSid, lastSeq);
-    if (!newer?.length) return;
-    for (const e of newer) {
-      if (e.seq > lastSeq) { evts.push(e); lastSeq = e.seq; }
+    if (!familyRoot) return;
+    const token = loadToken;
+    if (lastSeq >= 0) {
+      const newer = await fetchSessionEvents(familyRoot, lastSeq);
+      if (loadToken !== token) return;
+      for (const e of (newer || [])) if (e.seq > lastSeq) { evts.push(e); lastSeq = e.seq; }
+    }
+    for (const m of familyMeta) {
+      if (m.sid === familyRoot) continue;
+      const arr = subEvents.get(m.sid) || [];
+      const seq = arr.length ? arr[arr.length - 1].seq : -1;
+      const newer = await fetchSessionEvents(m.sid, seq);
+      if (loadToken !== token) return;
+      if (newer?.length) subEvents.set(m.sid, arr.concat(newer.filter((e) => e.seq > seq)));
     }
     prune();
     render();
   }
 
+  function scheduleRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => { renderQueued = false; render(); });
+  }
+
   // ─── Hooks called from app.js ─────────────────────────────────────────────
 
+  // Opening the view follows the workspace automatically. A session explicitly
+  // picked in the sidebar still wins, but with nothing selected we show the
+  // newest session in the current cwd together with its whole agent tree.
   window.__trajectoryOnView = function () {
-    const sid = STATE.selectedSessionId;
-    if (sid && sid !== selectedSid) select(sid);
-    else if (!sid) { selectedSid = null; evts = []; lastSeq = -1; render(); }
-    else {
-      session = STATE.sessions.find((s) => s.session_id === sid) ?? session;
-      render();
+    const manual = STATE.selectedSessionId;
+    if (manual) {
+      if (manual !== familyRoot) selectGroup(manual);
+      else refreshFamily().then((changed) => { if (changed) render(); });
+      return;
     }
+    const latest = latestRootSession(currentWorkspace());
+    if (!latest) { showWorkspaceEmpty(); return; }
+    if (latest.session_id !== familyRoot) selectGroup(latest.session_id);
+    else refreshFamily().then((changed) => { if (changed) render(); });
   };
 
   window.__trajectoryOnSessions = function () {
-    if (selectedSid) {
-      session = STATE.sessions.find((s) => s.session_id === selectedSid) ?? session;
-      updateLabel();
+    // Nothing shown yet (e.g. the view was opened before the first /sessions
+    // response landed, so the boot hook found no session): adopt the newest
+    // session in the workspace now that the list exists.
+    if (!familyRoot) { window.__trajectoryOnView(); return; }
+    session = (STATE.sessions || []).find((s) => s.session_id === familyRoot) ?? session;
+    // Auto mode (no explicit sidebar pick): keep following the newest session
+    // in the workspace, and pull in any subagents that have appeared since.
+    if (!STATE.selectedSessionId) {
+      const latest = latestRootSession(currentWorkspace());
+      if (latest && latest.session_id !== familyRoot) { selectGroup(latest.session_id); return; }
     }
+    refreshFamily().then((changed) => { if (changed) render(); else updateLabel(); });
   };
 
   window.__trajectoryOnEvent = function (evt) {
-    if (!selectedSid || evt.session_id !== selectedSid) return;
-    if (evt.seq <= lastSeq) return;
-    evts.push(evt);
-    lastSeq = evt.seq;
-    prune();
-    render();
+    if (!familySids.has(evt.session_id)) return;
+    if (evt.session_id === familyRoot) {
+      if (evt.seq <= lastSeq) return;
+      evts.push(evt);
+      lastSeq = evt.seq;
+      prune();
+    } else {
+      const arr = subEvents.get(evt.session_id) || [];
+      if (arr.length && evt.seq <= arr[arr.length - 1].seq) return;
+      arr.push(evt);
+      subEvents.set(evt.session_id, arr);
+    }
+    scheduleRender();
   };
 
   window.__trajectoryOnReconnect = function () { resync(); };
 
   window.__trajectoryStatsUpdate = function (sid, stats) {
-    if (sid !== selectedSid) return;
-    costStr = `$${stats.total_cost.toFixed(4)} · ${fmtTokens(stats.total_tokens)} tk`;
+    if (sid === familyRoot) {
+      costStr = `$${stats.total_cost.toFixed(4)} · ${fmtTokens(stats.total_tokens)} tk`;
+    }
+    if (familySids.has(sid)) scheduleRender();
   };
 
   window.__trajectoryClear = function () {
+    familyRoot = null;
     selectedSid = null;
+    familyMeta = [];
+    familySids = new Set();
+    subEvents = new Map();
     evts = [];
     lastSeq = -1;
     session = null;
+    loading = false;
     costStr = "";
     if (searchBox) searchBox.value = "";
     search = "";
@@ -807,7 +1299,21 @@
     render();
   };
 
-  window.__trajectoryIsSelected = (sid) => sid === selectedSid;
+  window.__trajectoryIsSelected = (sid) => familySids.has(sid);
+
+  // ─── Boot ─────────────────────────────────────────────────────────────────
+  // app.js runs setView() and the first /sessions fetch before this script
+  // loads, so neither hook fires for the initial URL-hash view. Adopt the
+  // workspace's newest session as soon as the session list is available —
+  // otherwise the pane sits empty until the next 10s sessions poll.
+  if (STATE.view === "trajectory") {
+    let tries = 0;
+    const boot = () => {
+      if (STATE.sessionsLoaded || tries++ > 100) { window.__trajectoryOnView(); return; }
+      setTimeout(boot, 100);
+    };
+    boot();
+  }
 
   // ─── Local event wiring ───────────────────────────────────────────────────
 

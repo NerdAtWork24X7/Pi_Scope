@@ -2304,6 +2304,541 @@
       font-family: monospace, var(--emoji);
     }
 
+    /* ─── Review diagram (dependency graph + change overlay) ─────────── */
+    .files-diagram {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+    }
+
+    .diagram-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 5px 10px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .diagram-gran {
+      display: inline-flex;
+      gap: 4px;
+    }
+
+    .diagram-chk {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .diagram-toolbar input[type="text"] {
+      font-family: monospace, var(--emoji);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--text);
+      font-size: 13px;
+      padding: 3px 6px;
+      width: 150px;
+    }
+
+    .diagram-spacer {
+      flex: 1;
+    }
+
+    .diagram-stats {
+      color: var(--muted);
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
+
+    .diagram-main {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .diagram-canvas {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      background: radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0) 0 0 / 22px 22px;
+    }
+
+    #diagram-svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+    }
+
+    #diagram-svg:active {
+      cursor: grabbing;
+    }
+
+    .dedge {
+      fill: none;
+      stroke: var(--border);
+      stroke-width: 1.1;
+      stroke-linecap: round;
+      opacity: 0.7;
+    }
+
+    .dedge.hot {
+      stroke: var(--accent);
+      stroke-width: 1.8;
+      opacity: 0.95;
+    }
+
+    #d-arrow path {
+      fill: var(--border);
+    }
+
+    .dnode {
+      cursor: pointer;
+    }
+
+    .dnode .dbox {
+      fill: var(--surface);
+      stroke: var(--border);
+      stroke-width: 1.2;
+    }
+
+    .dnode text {
+      fill: var(--muted);
+      font-size: 10px;
+      font-family: monospace, var(--emoji);
+      text-anchor: middle;
+      pointer-events: none;
+    }
+
+    .dnode .dbar {
+      fill: var(--muted);
+    }
+
+    .dnode.changed .dbox {
+      stroke-width: 2;
+    }
+
+    .dnode.st-modified .dbox {
+      fill: var(--tint-orange);
+      stroke: var(--amber);
+    }
+
+    .dnode.st-modified .dbar {
+      fill: var(--amber);
+    }
+
+    .dnode.st-added .dbox {
+      fill: var(--tint-green);
+      stroke: var(--diff-add);
+    }
+
+    .dnode.st-added .dbar {
+      fill: var(--diff-add);
+    }
+
+    .dnode.st-deleted .dbox {
+      fill: var(--tint-red);
+      stroke: var(--diff-del);
+      stroke-dasharray: 3 2;
+    }
+
+    .dnode.st-deleted .dbar {
+      fill: var(--diff-del);
+    }
+
+    .dnode.st-untracked .dbox {
+      fill: var(--tint-blue);
+      stroke: var(--accent);
+    }
+
+    .dnode.st-untracked .dbar {
+      fill: var(--accent);
+    }
+
+    .dnode.st-renamed .dbox {
+      fill: var(--tint-purple);
+      stroke: var(--purple);
+    }
+
+    .dnode.st-renamed .dbar {
+      fill: var(--purple);
+    }
+
+    .dnode.changed text {
+      fill: var(--text);
+    }
+
+    .dnode.sel .dbox {
+      fill: var(--accent-soft);
+      stroke: var(--accent);
+      stroke-width: 2.5;
+    }
+
+    .dnode.sel text {
+      fill: var(--text);
+      font-weight: 600;
+    }
+
+    .dnode.impact .dbox {
+      stroke: var(--red);
+      stroke-width: 2.4;
+    }
+
+    .dnode.dim {
+      opacity: 0.22;
+    }
+
+    .dnode.dim text {
+      opacity: 0;
+    }
+
+    .dnode.done .dbox {
+      stroke-dasharray: 3 2;
+    }
+
+    .dcluster {
+      pointer-events: none;
+    }
+
+    .dcluster-bg {
+      fill: var(--surface);
+      stroke: var(--border);
+      stroke-width: 1;
+      opacity: 0.55;
+    }
+
+    .dcluster-title {
+      font-family: monospace, var(--emoji);
+      font-size: 11px;
+      font-weight: 600;
+      text-anchor: start;
+    }
+
+    .dfolder {
+      font-family: monospace, var(--emoji);
+      font-size: 9px;
+      fill: var(--muted);
+      text-anchor: start;
+      opacity: 0.85;
+    }
+
+    .darea {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 2px;
+    }
+
+    .diagram-legend {
+      position: absolute;
+      left: 10px;
+      bottom: 10px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 4px 8px;
+      font-size: 11px;
+      color: var(--muted);
+      pointer-events: none;
+    }
+
+    .dlg {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .dsw {
+      width: 11px;
+      height: 8px;
+      border-radius: 2px;
+      display: inline-block;
+      border: 1.5px solid var(--border);
+      background: var(--surface);
+    }
+
+    .dsw.changed,
+    .dsw.modified {
+      background: var(--tint-orange);
+      border-color: var(--amber);
+    }
+
+    .dsw.added {
+      background: var(--tint-green);
+      border-color: var(--diff-add);
+    }
+
+    .dsw.deleted {
+      background: var(--tint-red);
+      border-color: var(--diff-del);
+    }
+
+    .dsw.done {
+      border-style: dashed;
+    }
+
+    .diagram-hint {
+      position: absolute;
+      right: 10px;
+      top: 8px;
+      font-size: 11px;
+      color: var(--muted);
+      pointer-events: none;
+      opacity: 0.8;
+    }
+
+    .diagram-side {
+      width: 340px;
+      flex-shrink: 0;
+      border-left: 1px solid var(--border);
+      overflow: auto;
+      padding: 10px;
+      background: var(--surface);
+      font-size: 13px;
+    }
+
+    .dside-head {
+      margin-bottom: 10px;
+    }
+
+    .dside-kicker {
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--muted);
+      margin-bottom: 3px;
+    }
+
+    .dside-title {
+      font-family: monospace, var(--emoji);
+      color: var(--text);
+      word-break: break-all;
+    }
+
+    .dside-sub {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    .dside-section {
+      border-top: 1px solid var(--border);
+      padding-top: 8px;
+      margin-top: 8px;
+    }
+
+    .dside-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-top: none;
+      padding-top: 0;
+      margin-top: 0;
+    }
+
+    .dside-review {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .dstats-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      margin: 3px 0;
+    }
+
+    .dstat {
+      background: var(--pill-bg);
+      border-radius: 3px;
+      padding: 1px 6px;
+      color: var(--muted);
+      font-size: 11.5px;
+    }
+
+    .dstat.add,
+    .dchanged-stat .add {
+      color: var(--green);
+    }
+
+    .dstat.del,
+    .dchanged-stat .del {
+      color: var(--red);
+    }
+
+    .dstat.warn {
+      color: var(--amber);
+    }
+
+    .dprogress {
+      height: 6px;
+      border-radius: 3px;
+      background: var(--pill-bg);
+      overflow: hidden;
+      margin: 6px 0 4px;
+    }
+
+    .dprogress-bar {
+      height: 100%;
+      background: var(--green);
+    }
+
+    .dchanged {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 2px;
+      border-radius: 4px;
+    }
+
+    .dchanged:hover {
+      background: var(--pill-bg);
+    }
+
+    .dchanged.done .dchanged-path {
+      color: var(--muted);
+      text-decoration: line-through;
+    }
+
+    .dchanged .st,
+    .drel .st {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 0 4px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+
+    .dchanged .st.modified,
+    .drel .st.modified {
+      background: var(--tint-orange);
+      color: var(--amber);
+    }
+
+    .dchanged .st.added,
+    .drel .st.added {
+      background: var(--tint-green);
+      color: var(--diff-add);
+    }
+
+    .dchanged .st.deleted,
+    .drel .st.deleted {
+      background: var(--tint-red);
+      color: var(--diff-del);
+    }
+
+    .dchanged .st.untracked,
+    .drel .st.untracked {
+      background: var(--tint-blue);
+      color: var(--accent);
+    }
+
+    .dchanged .st.renamed,
+    .drel .st.renamed {
+      background: var(--tint-purple);
+      color: var(--purple);
+    }
+
+    .dchanged-path {
+      font-family: monospace, var(--emoji);
+      color: var(--text);
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .dchanged-path:hover {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+
+    .dchanged-mod {
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .dchanged-stat {
+      font-size: 11.5px;
+      white-space: nowrap;
+    }
+
+    .drisk {
+      font-size: 10.5px;
+      padding: 0 5px;
+      border-radius: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    .drisk.high {
+      background: var(--tint-red);
+      color: var(--diff-del);
+    }
+
+    .drisk.med {
+      background: var(--tint-orange);
+      color: var(--amber);
+    }
+
+    .drisk.low {
+      background: var(--pill-bg);
+      color: var(--muted);
+    }
+
+    .dfanin {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .drel {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 2px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+
+    .drel:hover {
+      background: var(--pill-bg);
+    }
+
+    .drel-name {
+      font-family: monospace, var(--emoji);
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .drel-count {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
     /* ─── Checkpoints view ──────────────────────────────────────────── */
     #checkpoints-pane {
       display: none;
@@ -2630,16 +3165,76 @@
 
     #trajectory-overview {
       position: relative;
-      height: 56px;
+      height: auto;
+      max-height: 40vh;
       flex-shrink: 0;
       border-bottom: 1px solid var(--border);
       background: var(--surface);
-      overflow: hidden;
+      overflow: auto;
     }
 
     #trajectory-overview .tov-canvas {
       position: relative;
       width: 100%;
+    }
+
+    /* One row per agent on a shared time axis: orchestrator first, then subs. */
+    .tov-track {
+      position: absolute;
+      right: 0;
+      border-top: 1px dashed var(--border);
+    }
+
+    .tov-lane-label {
+      position: absolute;
+      left: 0;
+      padding-left: 6px;
+      font-size: 11px;
+      color: var(--muted);
+      font-family: monospace, var(--emoji);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      box-sizing: border-box;
+    }
+
+    /* Shared time-axis legend pinned under the lanes. */
+    .tov-legend {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 3px 8px 5px;
+      font-size: 11px;
+      color: var(--muted);
+      font-family: monospace, var(--emoji);
+    }
+
+    .tov-legend .tov-sw {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 2px;
+      margin-right: 3px;
+      vertical-align: -1px;
+    }
+
+    .tov-legend .tov-sw.message { background: var(--accent); }
+    .tov-legend .tov-sw.tool { background: var(--orange); }
+    .tov-legend .tov-sw.dispatch { background: var(--accent); }
+    .tov-legend .tov-sw.other { background: var(--muted); }
+
+    /* Dispatch connector: a line from the dispatch call down to the subagent. */
+    .tov-link {
+      position: absolute;
+      background: var(--accent);
+      opacity: 0.45;
+      pointer-events: none;
+    }
+
+    .tov-bar.tov-dispatch,
+    .tov-bar.dispatch {
+      background: var(--accent);
+      border-radius: 0;
     }
 
     .tov-bar {
@@ -2653,14 +3248,23 @@
       opacity: 1;
     }
 
+    /* Kind classes are emitted as `tov-<kind>` — keep the bare form too so
+       older markup still colours. */
+    .tov-bar.tov-message,
     .tov-bar.message {
       background: var(--accent);
     }
 
+    .tov-bar.tov-tool,
     .tov-bar.tool {
       background: var(--orange);
     }
 
+    .tov-bar.tov-user,
+    .tov-bar.tov-system,
+    .tov-bar.tov-compacted,
+    .tov-bar.tov-context,
+    .tov-bar.tov-request,
     .tov-bar.user,
     .tov-bar.system,
     .tov-bar.compacted,
@@ -2673,6 +3277,40 @@
       height: 100%;
       background: rgba(255, 255, 255, 0.4);
       border-radius: 3px 0 0 3px;
+    }
+
+    /* Dispatch ledger row: chips link to the subagents the call spawned. */
+    .traj-dispatch .traj-disp-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .traj-disp-chip {
+      border: 1px solid var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      color: var(--accent);
+      border-radius: 10px;
+      padding: 1px 8px;
+      font-size: 11.5px;
+      cursor: pointer;
+      white-space: nowrap;
+      font-family: monospace, var(--emoji);
+    }
+
+    .traj-disp-chip:hover {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .traj-agent.flash {
+      animation: traj-agent-flash 1.2s ease-out;
+    }
+
+    @keyframes traj-agent-flash {
+      0% { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+      100% { background: transparent; }
     }
 
     #trajectory-ledger {
@@ -2857,6 +3495,76 @@
 
     .traj-group-desc {
       opacity: 0.8;
+    }
+
+    /* Subagent sections nested under the root session. */
+    .traj-agent {
+      margin-top: 6px;
+      border-top: 2px solid var(--border);
+    }
+
+    .traj-agent-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 8px;
+      background: linear-gradient(180deg, var(--surface-2), var(--surface));
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      position: sticky;
+      top: 24px;
+      z-index: 2;
+      color: var(--text);
+    }
+
+    .traj-agent-head:hover {
+      background: var(--row-hover);
+    }
+
+    .traj-agent-caret {
+      color: var(--muted);
+      width: 12px;
+      flex-shrink: 0;
+    }
+
+    .traj-agent-name {
+      font-weight: 700;
+      color: var(--accent);
+      font-family: monospace, var(--emoji);
+    }
+
+    .traj-agent-tag {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0 6px;
+      flex-shrink: 0;
+    }
+
+    .traj-agent-meta {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .traj-agent-head.green { border-left: 3px solid var(--green); }
+    .traj-agent-head.orange { border-left: 3px solid var(--orange); }
+    .traj-agent-head.red { border-left: 3px solid var(--red); }
+    .traj-agent-head.gray { border-left: 3px solid var(--border); }
+
+    .traj-agent.collapsed .traj-agent-body {
+      display: none;
+    }
+
+    /* Nested ledgers skip the sticky turn bars the root ledger uses. */
+    .traj-agent-body .traj-turn-head {
+      position: static;
     }
 
     .traj-body {

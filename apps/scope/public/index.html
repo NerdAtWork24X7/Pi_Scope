@@ -140,14 +140,15 @@
 
     <section id="files-pane" style="display:none;flex-direction:column;flex:1;overflow:hidden">
       <div class="pane-header">
-        <span style="font-weight:500">Files</span>
-        <button class="btn-sm" id="btn-files-hide" type="button" title="Hide/show the file list">☰ hide</button>
+        <button class="btn-sm" id="btn-files-toggle" type="button" title="Show/hide the file list">☰ Files</button>
         <span id="files-cwd-label" title="Working directory scanned by Files (set in the Terminal pane)"
           style="font-family:monospace;color:var(--muted);font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
         <span id="files-status" style="color:var(--muted);font-size:13.5px"></span>
-        <label style="display:flex;align-items:center;gap:4px;color:var(--muted);font-size:13px;cursor:pointer"><input
-            type="checkbox" id="files-ignored"> show all</label>
+        <button class="btn-sm" id="btn-files-ignored" type="button"
+          title="Show or hide files matched by .gitignore">gitignore: hidden</button>
         <button class="btn-sm" id="btn-files-refresh" type="button" title="Re-scan modified files">↻ refresh</button>
+        <button class="btn-sm" id="btn-files-diagram" type="button"
+          title="Toggle between the code diff and the dependency diagram (changed code highlighted)">▦ diagram</button>
       </div>
       <div class="files-body">
         <div id="files-list" class="files-list"></div>
@@ -175,6 +176,29 @@
               <div class="diff-col-head">NEW · working tree (editable)</div>
               <div id="diff-new-lines" class="diff-lines"></div>
             </div>
+          </div>
+        </div>
+        <div id="files-diagram" class="files-diagram" style="display:none">
+          <div class="diagram-toolbar">
+            <span class="diagram-gran" role="group" aria-label="Diagram granularity">
+              <button class="btn-sm active" id="diagram-gran-files" type="button" title="One node per file">files</button>
+              <button class="btn-sm" id="diagram-gran-modules" type="button" title="One node per folder">folders</button>
+            </span>
+            <input id="diagram-search" type="text" placeholder="filter…" spellcheck="false" autocomplete="off">
+            <label class="diagram-chk" title="Dim the unchanged nodes"><input type="checkbox" id="diagram-changed-only"> changed only</label>
+            <label class="diagram-chk" title="Highlight everything that depends on the selected node (blast radius)"><input type="checkbox" id="diagram-impact"> impact</label>
+            <span class="diagram-spacer"></span>
+            <span id="diagram-stats" class="diagram-stats"></span>
+            <button class="btn-sm" id="diagram-relayout" type="button" title="Re-run the layout">⟳ layout</button>
+            <button class="btn-sm" id="diagram-fit" type="button" title="Zoom to fit">⤢ fit</button>
+          </div>
+          <div class="diagram-main">
+            <div class="diagram-canvas" id="diagram-canvas">
+              <svg id="diagram-svg"></svg>
+              <div class="diagram-legend" id="diagram-legend"></div>
+              <div class="diagram-hint" id="diagram-hint">blocks grouped by area · scroll to zoom · drag to pan · drag a block to move it</div>
+            </div>
+            <div class="diagram-side" id="diagram-side"></div>
           </div>
         </div>
       </div>
@@ -320,7 +344,7 @@
               <span class="chat-composer-hint" id="chat-composer-hint"></span>
             </div>
             <div class="chat-composer-box">
-              <textarea id="chat-input" rows="1" placeholder="Message the pi coding agent…" spellcheck="false"></textarea>
+              <textarea id="chat-input" rows="1" placeholder="Message the pi coding agent…" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off" enterkeyhint="send"></textarea>
               <div class="chat-composer-bar">
                 <span class="chat-model-wrap" title="Model used for this chat">
                   <span class="dot">◆</span>

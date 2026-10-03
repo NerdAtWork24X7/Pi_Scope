@@ -1233,6 +1233,346 @@ function cleanPaths(absCwd: string, paths: unknown): string[] | null {
   return out;
 }
 
+// ─── Review → Diagram: repository dependency graph ──────────────────────────
+// Builds a module-level dependency graph from LOCAL imports, so the Review view
+// can show how changed code relates to the rest of the repo. A "module" is a
+// directory that contains source files; edges aggregate imports between
+// directories. Third-party/package imports are ignored — only relative (and,
+// for Python/Go, resolvable) imports can indicate what a change might break
+// inside this repo.
+
+const GRAPH_JS_EXTS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"]);
+const GRAPH_PY_EXTS = new Set([".py"]);
+const GRAPH_GO_EXTS = new Set([".go"]);
+const GRAPH_READ_EXTS = new Set([...GRAPH_JS_EXTS, ...GRAPH_PY_EXTS, ...GRAPH_GO_EXTS]);
+const GRAPH_SKIP_DIRS = new Set([
+  "node_modules", ".git", "dist", "build", "out", "coverage", "vendor",
+  ".next", ".nuxt", ".cache", ".turbo", ".parcel-cache", ".svelte-kit",
+  "target", "__pycache__", ".venv", "venv", "env", ".tox", ".mypy_cache",
+  ".pytest_cache", "bower_components", "jspm_packages",
+]);
+const GRAPH_MAX_FILES = 2500;
+const GRAPH_MAX_READ_BYTES = 768 * 1024;
+const GRAPH_JS_IMPORT_RES: RegExp[] = [
+  /\bimport\s+(?:type\s+)?(?:[^'"`()]*?\bfrom\s*)?["'`]([^"'`]+)["'`]/g,
+  /\bexport\s+(?:type\s+)?(?:[^'"`()]*?\bfrom\s*)?["'`]([^"'`]+)["'`]/g,
+  /\bimport\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g,
+  /\brequire\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g,
+];
+// Extensions tried, in order, when resolving an extensionless JS/TS import.
+const GRAPH_JS_RESOLVE = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", ".json"];
+
+interface GraphFileNode { path: string; module: string; loc: number; imports: string[]; }
+interface GraphModule {
+  id: string; label: string; depth: number; files: number; loc: number;
+  changedFiles: number; add: number; del: number; fanIn: number; fanOut: number;
+  statuses: Record<string, number>;
+}
+
+function graphExt(rel: string): string {
+  const base = rel.slice(rel.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(dot).toLowerCase() : "";
+}
+function graphDir(rel: string): string {
+  const i = rel.lastIndexOf("/");
+  return i < 0 ? "." : rel.slice(0, i);
+}
+function graphModuleLabel(dir: string): string { return dir === "." ? "(root)" : dir; }
+
+/** List source files to graph: tracked + untracked (gitignore respected), with a
+ * filesystem-walk fallback when the directory is not a git repo. */
+function listGraphFiles(absCwd: string): { files: string[]; truncated: boolean } {
+  const raw: string[] = [];
+  const r = gitTry(absCwd, ["ls-files", "-co", "--exclude-standard"]);
+  if (r.ok) {
+    for (const f of r.out.split("\n")) if (f) raw.push(f);
+  } else {
+    const walk = (dir: string, rel: string) => {
+      if (raw.length >= GRAPH_MAX_FILES) return;
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (raw.length >= GRAPH_MAX_FILES) return;
+        const childRel = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) { if (!GRAPH_SKIP_DIRS.has(e.name)) walk(path.join(dir, e.name), childRel); }
+        else if (e.isFile()) raw.push(childRel);
+      }
+    };
+    walk(absCwd, "");
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const f of raw) {
+    if (!f || seen.has(f)) continue;
+    seen.add(f);
+    if (f.split("/").some((seg) => GRAPH_SKIP_DIRS.has(seg))) continue;
+    if (!GRAPH_READ_EXTS.has(graphExt(f))) continue;
+    out.push(f);
+  }
+  const truncated = out.length > GRAPH_MAX_FILES;
+  return { files: truncated ? out.slice(0, GRAPH_MAX_FILES) : out, truncated };
+}
+
+/** Resolve a relative JS/TS import specifier to a repo file, if it exists. */
+function resolveGraphJs(fromRel: string, spec: string, fileSet: Set<string>): string | null {
+  if (!spec.startsWith(".")) return null;
+  const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromRel), spec));
+  if (fileSet.has(base)) return base;
+  for (const ext of GRAPH_JS_RESOLVE) if (ext && fileSet.has(base + ext)) return base + ext;
+  for (const ext of GRAPH_JS_RESOLVE) if (ext && fileSet.has(`${base}/index${ext}`)) return `${base}/index${ext}`;
+  return null;
+}
+
+/** Resolve a Python dotted import (absolute or package-relative) to a repo file. */
+function resolveGraphPy(fromRel: string, spec: string, fileSet: Set<string>): string | null {
+  let dots = 0;
+  while (dots < spec.length && spec[dots] === ".") dots++;
+  const rest = spec.slice(dots).split(".").filter(Boolean);
+  let baseDir = dots > 0 ? path.posix.dirname(fromRel) : ".";
+  for (let k = 0; k < dots - 1; k++) baseDir = path.posix.dirname(baseDir);
+  const base = rest.length ? path.posix.join(baseDir, ...rest) : baseDir;
+  if (fileSet.has(base + ".py")) return base + ".py";
+  if (fileSet.has(base + "/__init__.py")) return base + "/__init__.py";
+  return null;
+}
+
+function readGoModule(absCwd: string): string | null {
+  try {
+    const m = fs.readFileSync(path.join(absCwd, "go.mod"), "utf8").match(/^\s*module\s+(\S+)/m);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
+/** Resolve a Go import path to a directory anchor inside this repo. */
+function resolveGraphGo(fromRel: string, spec: string, goModule: string | null, dirIndex: Map<string, string>): string | null {
+  let rel: string | null = null;
+  if (goModule && (spec === goModule || spec.startsWith(goModule + "/"))) {
+    rel = spec === goModule ? "." : spec.slice(goModule.length + 1);
+  } else if (spec.startsWith(".")) {
+    rel = path.posix.normalize(path.posix.join(path.posix.dirname(fromRel), spec));
+  }
+  if (rel == null) return null;
+  const anchor = dirIndex.get(rel);
+  if (!anchor || anchor === fromRel) return null;
+  return anchor;
+}
+
+/** Extract resolved local imports from one source file (best-effort per language). */
+function extractGraphImports(rel: string, text: string, fileSet: Set<string>, dirIndex: Map<string, string>, goModule: string | null): string[] {
+  const ext = graphExt(rel);
+  const out = new Set<string>();
+  const add = (p: string | null) => { if (p && p !== rel) out.add(p); };
+  if (GRAPH_JS_EXTS.has(ext)) {
+    for (const re of GRAPH_JS_IMPORT_RES) {
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text))) add(resolveGraphJs(rel, m[1], fileSet));
+    }
+  } else if (GRAPH_PY_EXTS.has(ext)) {
+    let m: RegExpExecArray | null;
+    const fromRe = /^\s*from\s+([.\w]+)\s+import\b/gm;
+    while ((m = fromRe.exec(text))) add(resolveGraphPy(rel, m[1], fileSet));
+    const impRe = /^\s*import\s+([.\w]+)/gm;
+    while ((m = impRe.exec(text))) add(resolveGraphPy(rel, m[1].split(".")[0], fileSet));
+  } else if (GRAPH_GO_EXTS.has(ext)) {
+    let m: RegExpExecArray | null;
+    const blockRe = /import\s*\(([\s\S]*?)\)/g;
+    while ((m = blockRe.exec(text))) {
+      const lineRe = /["`]([^"`]+)["`]/g;
+      let n: RegExpExecArray | null;
+      while ((n = lineRe.exec(m[1]))) add(resolveGraphGo(rel, n[1], goModule, dirIndex));
+    }
+    const oneRe = /^\s*import\s+(?:\w+\s+)?["`]([^"`]+)["`]/gm;
+    while ((m = oneRe.exec(text))) add(resolveGraphGo(rel, m[1], goModule, dirIndex));
+  }
+  return [...out];
+}
+
+/** Build the module dependency graph + change overlay for the Review diagram. */
+function buildRepoGraph(absCwd: string): unknown {
+  const { files, truncated } = listGraphFiles(absCwd);
+  const fileSet = new Set(files);
+  const dirIndex = new Map<string, string>();
+  for (const f of files) { const d = graphDir(f); if (!dirIndex.has(d)) dirIndex.set(d, f); }
+  const goModule = readGoModule(absCwd);
+
+  // ── Changed files (status + churn), so the graph can overlay "what moved". ─
+  const statusMap = new Map<string, string>();
+  const numstat = new Map<string, { add: number; del: number }>();
+  const st = gitTry(absCwd, ["status", "--porcelain", "-uall"]);
+  if (st.ok) {
+    for (const raw of st.out.split("\n")) {
+      if (!raw) continue;
+      const code = raw.slice(0, 2);
+      let p = raw.slice(3);
+      if (code[0] === "R" || code[1] === "R") {
+        const mm = p.match(/^(.*?) -> (.*)$/);
+        if (mm) p = mm[2];
+      }
+      const status = code === "??" ? "untracked"
+        : code.includes("D") ? "deleted"
+        : code.includes("A") ? "added"
+        : (code[0] === "R" || code[1] === "R") ? "renamed"
+        : "modified";
+      statusMap.set(p, status);
+    }
+  }
+  // HEAD-relative numstat captures both staged and unstaged churn; fall back to
+  // the index-relative diff for a repo with no commits yet.
+  const headNs = gitTry(absCwd, ["diff", "HEAD", "--numstat"]);
+  const nsOut = headNs.ok ? headNs.out : gitTry(absCwd, ["diff", "--numstat"]).out;
+  for (const line of (nsOut || "").split("\n")) {
+    if (!line) continue;
+    const parts = line.split("\t");
+    if (parts.length < 3) continue;
+    numstat.set(parts.slice(2).join("\t"), {
+      add: parts[0] === "-" ? 0 : parseInt(parts[0], 10) || 0,
+      del: parts[1] === "-" ? 0 : parseInt(parts[1], 10) || 0,
+    });
+  }
+
+  // ── Read + parse source files. ──────────────────────────────────────────
+  const nodes = new Map<string, GraphFileNode>();
+  let totalBytes = 0;
+  for (const rel of files) {
+    let text = "";
+    try {
+      const abs = path.join(absCwd, rel);
+      const s = fs.statSync(abs);
+      if (s.size <= GRAPH_MAX_READ_BYTES && totalBytes + s.size <= 64 * 1024 * 1024) {
+        text = fs.readFileSync(abs, "utf8");
+        totalBytes += s.size;
+      }
+    } catch { /* unreadable — keep the node, no edges */ }
+    nodes.set(rel, {
+      path: rel,
+      module: graphDir(rel),
+      loc: text ? text.split("\n").length : 0,
+      imports: text ? extractGraphImports(rel, text, fileSet, dirIndex, goModule) : [],
+    });
+  }
+  // Changed non-source files (README, config…) still highlight their module.
+  for (const p of statusMap.keys()) {
+    if (!nodes.has(p)) nodes.set(p, { path: p, module: graphDir(p), loc: 0, imports: [] });
+  }
+
+  // ── Aggregate file edges into module edges + file fan-in. ───────────────
+  const modFiles = new Map<string, GraphFileNode[]>();
+  for (const n of nodes.values()) {
+    const arr = modFiles.get(n.module) || [];
+    arr.push(n);
+    modFiles.set(n.module, arr);
+  }
+  const moduleIds = new Set(modFiles.keys());
+  const edgeWeight = new Map<string, number>();
+  const fileFanIn = new Map<string, number>();
+  const fileEdgeSet = new Set<string>();
+  for (const n of nodes.values()) {
+    for (const imp of n.imports) {
+      if (imp === n.path || !moduleIds.has(graphDir(imp))) continue;
+      fileFanIn.set(imp, (fileFanIn.get(imp) || 0) + 1);
+      if (fileEdgeSet.size < 6000) fileEdgeSet.add(n.path + "\u0000" + imp);
+      const toMod = graphDir(imp);
+      if (toMod === n.module) continue;
+      const key = n.module + "\u0000" + toMod;
+      edgeWeight.set(key, (edgeWeight.get(key) || 0) + 1);
+    }
+  }
+  const fanInMod = new Map<string, number>();
+  const fanOutMod = new Map<string, number>();
+  for (const key of edgeWeight.keys()) {
+    const [a, b] = key.split("\u0000");
+    fanOutMod.set(a, (fanOutMod.get(a) || 0) + 1);
+    fanInMod.set(b, (fanInMod.get(b) || 0) + 1);
+  }
+
+  const modules: GraphModule[] = [];
+  for (const id of moduleIds) {
+    const fs2 = modFiles.get(id)!;
+    let loc = 0, add = 0, del = 0, changedFiles = 0;
+    const statuses: Record<string, number> = {};
+    for (const f of fs2) {
+      loc += f.loc;
+      const s = statusMap.get(f.path);
+      if (!s) continue;
+      changedFiles++;
+      statuses[s] = (statuses[s] || 0) + 1;
+      const nss = numstat.get(f.path);
+      if (nss) { add += nss.add; del += nss.del; }
+      else if (s === "untracked" || s === "added") add += f.loc;
+    }
+    modules.push({
+      id, label: graphModuleLabel(id), depth: id === "." ? 0 : id.split("/").length,
+      files: fs2.length, loc, changedFiles, add, del,
+      fanIn: fanInMod.get(id) || 0, fanOut: fanOutMod.get(id) || 0, statuses,
+    });
+  }
+
+  let edges = [...edgeWeight.entries()].map(([key, weight]) => {
+    const [from, to] = key.split("\u0000");
+    return { from, to, weight };
+  });
+  edges.sort((a, b) => b.weight - a.weight);
+  if (edges.length > 5000) edges = edges.slice(0, 5000);
+
+  const changed = [...statusMap.entries()].map(([p, status]) => {
+    const n = nodes.get(p);
+    const nss = numstat.get(p);
+    return {
+      path: p,
+      module: n ? n.module : graphDir(p),
+      status,
+      loc: n ? n.loc : 0,
+      add: nss ? nss.add : ((status === "untracked" || status === "added") && n ? n.loc : 0),
+      del: nss ? nss.del : 0,
+      fanIn: fileFanIn.get(p) || 0,
+    };
+  }).sort((a, b) => (b.fanIn * 3 + b.add + b.del) - (a.fanIn * 3 + a.add + a.del));
+
+  let head: unknown = null;
+  const lg = gitTry(absCwd, ["log", "-1", "--format=%h\u001f%s\u001f%an\u001f%ad", "--date=short"]);
+  if (lg.ok && lg.out.trim()) {
+    const [hash, subject, author, date] = lg.out.trim().split("\u001f");
+    head = { hash, subject, author, date };
+  }
+
+  const fileNodes = [...nodes.values()].map((n) => {
+    const s = statusMap.get(n.path) || null;
+    const nss = numstat.get(n.path);
+    return {
+      path: n.path, module: n.module, loc: n.loc, status: s,
+      add: nss ? nss.add : ((s === "untracked" || s === "added") ? n.loc : 0),
+      del: nss ? nss.del : 0,
+      fanIn: fileFanIn.get(n.path) || 0,
+      fanOut: n.imports.length,
+    };
+  });
+  const fileEdges = [...fileEdgeSet].map((key) => {
+    const [from, to] = key.split("\u0000");
+    return { from, to };
+  });
+
+  return {
+    cwd: absCwd,
+    git: st.ok,
+    modules,
+    edges,
+    fileNodes,
+    fileEdges,
+    changed,
+    head,
+    stats: {
+      files: nodes.size,
+      modules: modules.length,
+      changedFiles: statusMap.size,
+      add: changed.reduce((s, c) => s + c.add, 0),
+      del: changed.reduce((s, c) => s + c.del, 0),
+      truncated,
+    },
+  };
+}
+
 // ─── Routing helpers ────────────────────────────────────────────────────────
 
 /** Match /sessions/<session_id>/events */
@@ -2572,6 +2912,23 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ cwd: absCwd, file, binary: false, old: oldContent, new: newContent });
     } catch (err: any) {
       return jsonResponse({ error: String(err?.message ?? err).split("\n")[0] }, 500);
+    }
+  }
+
+  // ── GET /files/graph (module dependency graph + change overlay) ─────
+  if (pathname === "/files/graph" && method === "GET") {
+    const cwd = url.searchParams.get("cwd") ?? "";
+    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+    const absCwd = validateCwd(cwd);
+    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    try {
+      return jsonResponse(buildRepoGraph(absCwd));
+    } catch (err: any) {
+      return jsonResponse({
+        cwd: absCwd, git: false, error: String(err?.message ?? err).split("\n")[0],
+        modules: [], edges: [], fileNodes: [], fileEdges: [], changed: [], head: null,
+        stats: { files: 0, modules: 0, changedFiles: 0, add: 0, del: 0, truncated: false },
+      });
     }
   }
 
