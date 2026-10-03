@@ -505,6 +505,33 @@
     if (ec != null && ec !== 0) return true;
     return false;
   }
+
+  /**
+   * Transient bottom-center toast, for one-off messages that must not take over
+   * a view's own status/banner row (e.g. the terminal refusing a workspace cd
+   * while another program owns the PTY). `kind` is "err" | "warn" | undefined.
+   * Re-used by any view; creates its element lazily and restarts the enter
+   * animation on a re-toast.
+   */
+  let _toastEl = null, _toastTimer = null;
+  function toast(msg, kind) {
+    if (!_toastEl) {
+      _toastEl = document.createElement("div");
+      _toastEl.id = "scope-toast";
+      _toastEl.className = "scope-toast";
+      _toastEl.setAttribute("role", "status");
+      _toastEl.setAttribute("aria-live", "polite");
+      document.body.appendChild(_toastEl);
+    }
+    _toastEl.textContent = msg;
+    _toastEl.classList.toggle("err", kind === "err");
+    _toastEl.classList.toggle("warn", kind === "warn");
+    clearTimeout(_toastTimer);
+    _toastEl.classList.remove("show");
+    void _toastEl.offsetWidth; // force reflow so the animation replays
+    _toastEl.classList.add("show");
+    _toastTimer = setTimeout(() => _toastEl.classList.remove("show"), 3200);
+  }
   const HELPERS = {
     fmtTs,
     fmtRel,
@@ -527,6 +554,7 @@
     summaryClass,
     renderDetailHTML,
     renderLLMRequestHTML,
+    toast,
   };
 
   // Expose helpers on window.SCOPE so every view can access them explicitly.

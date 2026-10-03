@@ -10,7 +10,6 @@
   let ctxMenuMousedownHandler = null, ctxMenuKeydownHandler = null, ctxMenuResizeHandler = null;
   let ctxContainerContextMenuHandler = null, ctxContainerScrollHandler = null;
   let isConnected = false;
-  let cdHintTimer = null;
 
   function token() { return new URLSearchParams(location.search).get("token") || ""; }
   function wsUrl() {
@@ -166,12 +165,9 @@
           }
           if (m && m.type === "cdBlocked") {
             // The workspace rail asked to cd, but another program owns the PTY
-            // (pi, an editor, a pager, …) — injecting would type into it. Say so
-            // in the status line instead of corrupting its input.
-            setStatus("working dir not changed — a program owns the terminal", isConnected);
-            clearTimeout(cdHintTimer);
-            cdHintTimer = setTimeout(
-              () => setStatus(isConnected ? "connected" : "disconnected", isConnected), 3500);
+            // (pi, an editor, a pager, …) — injecting would type into it. Show a
+            // transient popup instead of hijacking the terminal's status row.
+            window.SCOPE?.toast("Working dir not changed — a program owns the terminal", "warn");
             return;
           }
           if (m && m.type === "herdr" && typeof m.detected === "boolean") {

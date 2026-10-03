@@ -8754,3 +8754,48 @@ body.sidebar-collapsed .sidebar-rail {
 .ws-mini .mini-dot.gray {
   background: var(--muted);
 }
+
+/* Generic transient toast (helpers.js `SCOPE.toast`). Mirrors the Settings
+ * toast's placement/animation but is view-agnostic — used e.g. when the
+ * terminal refuses a workspace cd because another program owns the PTY. */
+.scope-toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%) translateY(12px);
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 300;
+  max-width: min(92vw, 640px);
+  text-align: center;
+}
+.scope-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.scope-toast::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.scope-toast.warn {
+  border-color: var(--orange);
+  color: var(--orange);
+}
+.scope-toast.warn::before { background: var(--orange); }
+.scope-toast.err {
+  border-color: var(--red);
+  color: var(--red);
+}
+.scope-toast.err::before { background: var(--red); }
