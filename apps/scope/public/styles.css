@@ -2457,12 +2457,12 @@
     }
 
     .dnode.st-untracked .dbox {
-      fill: var(--tint-blue);
-      stroke: var(--accent);
+      fill: var(--tint-green);
+      stroke: var(--diff-add);
     }
 
     .dnode.st-untracked .dbar {
-      fill: var(--accent);
+      fill: var(--diff-add);
     }
 
     .dnode.st-renamed .dbox {
@@ -2476,6 +2476,16 @@
 
     .dnode.changed text {
       fill: var(--text);
+    }
+
+    /* Second line on a folder block: changed-file count, smaller than the name. */
+    .dnode .dsub {
+      font-size: 7.5px;
+      fill: var(--muted);
+    }
+
+    .dnode.changed .dsub {
+      fill: var(--muted);
     }
 
     .dnode.sel .dbox {
@@ -2522,6 +2532,15 @@
       font-size: 11px;
       font-weight: 600;
       text-anchor: start;
+    }
+
+    /* Second heading line: change summary, smaller than the area name. */
+    .dcluster-sub {
+      font-family: monospace, var(--emoji);
+      font-size: 8.5px;
+      font-weight: 500;
+      text-anchor: start;
+      opacity: 0.85;
     }
 
     .dfolder {

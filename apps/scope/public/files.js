@@ -742,6 +742,14 @@
     return "other";
   }
 
+  // Second line of an area-block heading: how many of its files changed.
+  function bandSubLabel(total, changedN) {
+    const unit = gran === "files"
+      ? (total === 1 ? "file" : "files")
+      : (total === 1 ? "folder" : "folders");
+    return changedN ? `${changedN} of ${total} changed` : `${total} ${unit}`;
+  }
+
   function clusteredLayout(nodes, edges) {
     const n = nodes.length;
     LAY.clusters = [];
@@ -788,7 +796,7 @@
       return i < 0 ? "." : nd.full.slice(0, i);
     };
 
-    const padX = 16, headH = 26, padBottom = 16, folderLabelH = 15;
+    const padX = 16, headH = 38, padBottom = 16, folderLabelH = 15;
     const groupGap = 20, nodeGapY = 8, rowGap = 14, margin = 30;
     const bandGapX = 26, bandGapY = 24;
     // Each area wraps its folder groups to roughly this width; areas are then
@@ -828,7 +836,13 @@
       const bandH = headH + rows.reduce((s, r) => s + r.h, 0) + rowGap * (rows.length - 1) + padBottom;
       const depth = ids.map((i) => rank[i]).sort((a, b) => a - b)[Math.floor(ids.length / 2)];
       const meta = CATEGORY_META[key] || CATEGORY_FALLBACK;
-      bands.push({ key, meta, ids, rows, innerW, bandW: innerW + padX * 2, bandH, depth });
+      // The heading is two lines now (area name / change summary), so the band
+      // is widened to fit the wider line and the summary can never spill out.
+      const changedN = ids.filter((i) => nodes[i].changed).length;
+      const sub = bandSubLabel(ids.length, changedN);
+      const headerW = Math.min(460, Math.max(meta.label.length * 6.9 + 26, sub.length * 5.2 + 26));
+      const bandW = Math.max(innerW + padX * 2, headerW);
+      bands.push({ key, meta, ids, rows, innerW, sub, bandW, bandH, depth });
     }
     if (!bands.length) return;
     // Entry-point areas first; the fixed semantic order breaks ties when a repo
@@ -897,10 +911,20 @@
   }
 
   // ── Blocks: rectangular nodes sized to fit their label ────────────────────
+  // A folder block is a collection of files, so it carries a second, smaller
+  // line: how many files inside it changed.
+  function nodeSubLabel(nd) {
+    if (gran !== "modules" || !nd.changedCount) return "";
+    return `${nd.changedCount} changed`;
+  }
   function nodeSize(nd) {
     const label = window.SCOPE.trunc(nd.label, 26);
-    const w = Math.max(58, Math.min(220, label.length * 6.4 + 18));
-    const h = gran === "files" ? 22 : 26;
+    const sub = nodeSubLabel(nd);
+    // The sub-line renders at 7.5px (~4.5px/char); size to the wider line so
+    // neither the name nor the summary can spill past the box edge.
+    const textW = Math.max(label.length * 6.4, sub ? sub.length * 4.9 : 0);
+    const w = Math.max(58, Math.min(240, textW + 18));
+    const h = sub ? 32 : (gran === "files" ? 22 : 26);
     return { w, h };
   }
   // Which side of a block an edge should leave from, given where the other end
@@ -1009,17 +1033,25 @@
     LAY.byId = byId; // kept so a live drag can re-route the edges it touches
 
     // Area bands (drawn behind everything) + the folder labels inside them.
+    // Each band heading is two lines — the area name, then the change summary
+    // in a smaller font — both kept inside the band's rounded header strip.
     let clusterHtml = "";
     for (const c of (LAY.clusters || [])) {
-      const headW = Math.min(Math.max(72, c.label.length * 6.6 + 78), c.w - 12);
+      const pad = 26;
+      const maxT = Math.max(8, Math.floor((c.w - pad) / 6.9));
+      const maxS = Math.max(8, Math.floor((c.w - pad) / 5.2));
+      const sub = c.sub || bandSubLabel(c.count, c.changed);
       clusterHtml += `<g class="dcluster">`
         + `<rect class="dcluster-bg" x="${c.x.toFixed(1)}" y="${c.y.toFixed(1)}" width="${c.w.toFixed(1)}" height="${c.h.toFixed(1)}" rx="10"/>`
-        + `<rect class="dcluster-head" x="${(c.x + 6).toFixed(1)}" y="${(c.y + 7).toFixed(1)}" width="${headW.toFixed(1)}" height="18" rx="6" fill="${c.color}" fill-opacity="0.16"/>`
-        + `<text class="dcluster-title" x="${(c.x + 13).toFixed(1)}" y="${(c.y + 20).toFixed(1)}" fill="${c.color}">${esc(c.label)} · ${c.count}${c.changed ? " · " + c.changed + " changed" : ""}</text>`
+        + `<rect class="dcluster-head" x="${(c.x + 6).toFixed(1)}" y="${(c.y + 6).toFixed(1)}" width="${(c.w - 12).toFixed(1)}" height="28" rx="7" fill="${c.color}" fill-opacity="0.14"/>`
+        + `<text class="dcluster-title" x="${(c.x + 13).toFixed(1)}" y="${(c.y + 18).toFixed(1)}" fill="${c.color}">${esc(window.SCOPE.trunc(c.label, maxT))}</text>`
+        + `<text class="dcluster-sub" x="${(c.x + 13).toFixed(1)}" y="${(c.y + 30).toFixed(1)}" fill="${c.color}">${esc(window.SCOPE.trunc(sub, maxS))}</text>`
         + `</g>`;
     }
     for (const f of (LAY.folders || [])) {
-      const maxChars = Math.max(8, Math.floor((f.w + 14) / 5.4));
+      // Keep the folder label inside its own slot: no +slack, so it can never
+      // reach past the band's inner edge.
+      const maxChars = Math.max(8, Math.floor(f.w / 5.8));
       clusterHtml += `<text class="dfolder" x="${f.x.toFixed(1)}" y="${(f.y + 11).toFixed(1)}">${esc(window.SCOPE.trunc(f.label, maxChars))}</text>`;
     }
 
@@ -1040,11 +1072,13 @@
       else if (impacted && impacted.has(nd.id)) cls.push("impact");
       else if (sel || impacted) cls.push("dim");
       const tip = `${nd.full}${nd.changed ? " · " + (nd.status || "modified") : ""}${nd.fanIn ? " · " + nd.fanIn + " dependents" : ""}${isReviewed(nd.full) ? " · reviewed" : ""}`;
+      const sub = nodeSubLabel(nd);
       nodeHtml += `<g class="${cls.join(" ")}" data-node="${esc(nd.id)}" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})">`
         + `<rect class="dbox" x="${(-w / 2).toFixed(1)}" y="${(-h / 2).toFixed(1)}" width="${w.toFixed(0)}" height="${h}" rx="4"/>`
         + (nd.changed ? `<rect class="dbar" x="${(-w / 2).toFixed(1)}" y="${(-h / 2).toFixed(1)}" width="3" height="${h}"/>` : "")
         + `<title>${esc(tip)}</title>`
-        + `<text y="3.5">${esc(window.SCOPE.trunc(nd.label, 26))}</text>`
+        + `<text y="${sub ? -3 : 3.5}">${esc(window.SCOPE.trunc(nd.label, 26))}</text>`
+        + (sub ? `<text class="dsub" y="10">${esc(window.SCOPE.trunc(sub, 20))}</text>` : "")
         + `</g>`;
     }
     diagramSvg.setAttribute("viewBox", `0 0 ${LAY.w} ${LAY.h}`);
