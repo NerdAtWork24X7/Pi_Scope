@@ -207,13 +207,13 @@ chmod +x Pi-Scope-1.0.0.AppImage
   relaunch and never writes into the read-only AppImage mount.
 - Closing the window stops the server. If one is already listening on the port, the AppImage
   reuses it instead of starting a second.
-- Build it yourself: `./build-release.sh` → `apps/scope-launcher/dist/Pi-Scope-<version>.AppImage`.
+- Build it yourself: `./build-release.sh` → `apps/scope-desktop/dist/Pi-Scope-<version>.AppImage`.
 
 ### 🏃 Option B — Run from the git repo (developers)
 
 ```bash
 git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
-apps/scope-launcher/run.sh                # requires Node.js 24+
+apps/scope-desktop/run.sh                # requires Node.js 24+
 ```
 
 Open the URL it prints (`http://127.0.0.1:43190/?token=<uuid>`), and you're looking at a
@@ -298,7 +298,7 @@ live, alongside the desktop.
 **1. Bind to the LAN.** Copy the settings template and turn the bind on:
 
 ```bash
-cp apps/scope-launcher/scope.env.example apps/scope-launcher/scope.env
+cp apps/scope-desktop/scope.env.example apps/scope-desktop/scope.env
 # then uncomment:  SCOPE_HOST=0.0.0.0
 ```
 
@@ -317,7 +317,7 @@ so bookmark it rather than sharing it. If the machine has more than one network 
 > randomly at boot; pin `SCOPE_AUTH_TOKEN` in `scope.env` if you want a stable URL.
 
 Running from source instead of the launcher? `SCOPE_HOST=0.0.0.0 npm start` in
-`apps/scope` works the same way; the boot banner prints the phone URL.
+`apps/scope-server` works the same way; the boot banner prints the phone URL.
 
 ---
 
@@ -341,7 +341,7 @@ Chat-spawned `pi` subprocesses also get the workspace venv bin dirs prepended to
 GUI session that never sourced the shell rc.
 
 The full HTTP API (all endpoints, auth rules, and the SSE stream) is documented in
-[`apps/scope/README.md`](apps/scope/README.md).
+[`apps/scope-server/README.md`](apps/scope-server/README.md).
 
 ---
 
@@ -349,14 +349,14 @@ The full HTTP API (all endpoints, auth rules, and the SSE stream) is documented 
 
 This repository is structured so an AI coding agent can onboard quickly. The server API,
 environment variables, and full endpoint list live in
-[`apps/scope/README.md`](apps/scope/README.md); the telemetry extension and its flags are
+[`apps/scope-server/README.md`](apps/scope-server/README.md); the telemetry extension and its flags are
 documented in [`extension/README.md`](extension/README.md).
 
 - **Demo data:** [`docs/seed-demo.mjs`](docs/seed-demo.mjs) — the script that created the
   screenshots above.
-- **UI:** vanilla-JS, zero frameworks — `apps/scope/public/`. Each view is one file
+- **UI:** vanilla-JS, zero frameworks — `apps/scope-server/public/`. Each view is one file
   (`single`, `trajectory`, `chat`, `terminal`, `files`, `checkpoints`, `git`, `settings`).
-- **Server:** single-file Node HTTP + SSE + SQLite — `apps/scope/server.ts`.
+- **Server:** single-file Node HTTP + SSE + SQLite — `apps/scope-server/server.ts`.
 
 ---
 

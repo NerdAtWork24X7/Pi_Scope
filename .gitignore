@@ -21,16 +21,16 @@ db/scope.db-shm
 db/scope.db-wal
 
 # Build / release artifacts
-apps/scope-launcher/server-bundle/
-apps/scope-launcher/dist/
-apps/scope-launcher/node-portable/
+apps/scope-desktop/server-bundle/
+apps/scope-desktop/dist/
+apps/scope-desktop/node-portable/
 
 squashfs-root/
 
 # Machine-specific desktop launcher shortcuts (Exec/Icon must be absolute
 # paths, so these are generated per-machine and never committed)
 Pi Scope.desktop
-apps/scope-launcher/pi-scope.desktop
+apps/scope-desktop/pi-scope.desktop
 
 # Per-machine launcher settings (may pin SCOPE_HOST=0.0.0.0 / a fixed token)
-apps/scope-launcher/scope.env
+apps/scope-desktop/scope.env

@@ -2,7 +2,7 @@
  * server.ts — Node HTTP + SSE + SQLite scope server.
  *
  * Single-file server. Hand-rolled routing. Uses node:sqlite via db.ts.
- * Serves static UI from apps/scope/public/.
+ * Serves static UI from apps/scope-server/public/.
  */
 
 import * as path from "node:path";

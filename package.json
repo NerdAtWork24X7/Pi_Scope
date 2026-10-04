@@ -9,6 +9,10 @@
     "url": "https://github.com/NerdAtWork24X7/Pi_Scope.git"
   },
   "license": "MIT",
+  "workspaces": [
+    "apps/scope-server",
+    "apps/scope-desktop"
+  ],
   "dependencies": {
     "playwright": "^1.63.0",
     "playwright-extra": "^4.3.6",

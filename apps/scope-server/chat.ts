@@ -32,7 +32,7 @@ const ENCODER = new TextEncoder();
 
 /**
  * Resolve the pi binary without relying on spawn()'s PATH lookup. The server is
- * often launched by the Electron scope-launcher, whose npm-lifecycle PATH omits
+ * often launched by the Electron scope-desktop, whose npm-lifecycle PATH omits
  * ~/.local/share/pnpm/bin (where pi is installed) — spawning the bare name then
  * fails with ENOENT and every chat dies with "process closed" before any text.
  */
@@ -357,7 +357,7 @@ function resolvePlaywrightBrowsersPath(): string | null {
  *  1. The workspace's Python venv bin dirs (see venvBinDirs) — tools like
  *     web-fetch that need the venv's `playwright` keep working in Chat.
  *  2. SCOPE_EXTRA_PATH (colon-separated) — explicit user override, e.g.
- *     `SCOPE_EXTRA_PATH=~/.pyenv/versions/3.12/bin apps/scope-launcher/run.sh`.
+ *     `SCOPE_EXTRA_PATH=~/.pyenv/versions/3.12/bin apps/scope-desktop/run.sh`.
  *  3. The pi binary's own directory, so the agent-team extension running INSIDE
  *     that pi process can spawn further `pi` subprocesses (subagents, the
  *     memory summarizer) by their bare name from the inherited environment —

@@ -1,5 +1,5 @@
 // scope-control.js — engine-agnostic control of the Pi Scope server.
-// Boots `node apps/scope/server.ts` on demand and waits for /health.
+// Boots `node apps/scope-server/server.ts` on demand and waits for /health.
 // Safe to reuse an already-running server. Kills only what it spawned.
 const { spawn } = require("node:child_process");
 const http = require("node:http");
@@ -10,7 +10,7 @@ const crypto = require("node:crypto");
 const { app } = require("electron");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
-const SCOPE_DIR = path.join(PROJECT_ROOT, "apps", "scope");
+const SCOPE_DIR = path.join(PROJECT_ROOT, "apps", "scope-server");
 // The server persists its per-run token here (0600) so the launcher UI and the
 // pi extension can discover it without a hardcoded constant like "devtoken".
 const TOKEN_FILE = path.join(PROJECT_ROOT, "tmp", "scope_token");
@@ -19,7 +19,7 @@ function readTokenFile() {
   try { return fs.readFileSync(tf, "utf8").trim(); } catch { return null; }
 }
 
-// Optional `apps/scope-launcher/scope.env` for settings that must survive a
+// Optional `apps/scope-desktop/scope.env` for settings that must survive a
 // desktop-icon launch (which inherits no shell env). Plain KEY=VALUE lines;
 // `#` comments and blank lines ignored. This is how the server is pinned to
 // 0.0.0.0 so a phone on the same Wi-Fi can reach it — see README. Real
@@ -88,7 +88,7 @@ function waitForHealth(healthUrl, { timeoutMs = 20000, intervalMs = 300 } = {}) 
 }
 
   // Resolve how to launch the SCOPE server.
-  // Dev: `node apps/scope/server.ts`. Packaged: the bundled portable Node runs the
+  // Dev: `node apps/scope-server/server.ts`. Packaged: the bundled portable Node runs the
   // compiled server bundle (node-pty/ws resolve from the app's node_modules).
   function serverLaunch() {
     if (app && app.isPackaged) {

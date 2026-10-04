@@ -160,7 +160,7 @@ function computeAgentInfo(sid) {
   // terminal context bar across cached providers. For uncached providers
   // (e.g. deepseek) cache_read/cache_write are 0 so the sum collapses to
   // input. Cache volume stays separately visible on the cache r / cache w
-  // pills for cost-attribution analysis. See apps/scope/db.ts getSessionContext
+  // pills for cost-attribution analysis. See apps/scope-server/db.ts getSessionContext
   // for the empirical verification (gemini-3.5-flash + deepseek-v4-flash).
   let latestInput = stats.latest_input ?? null;
   let latestPrefillMs = null, latestOutputTps = null, latestGenMs = null, latestLatencyMs = null;
@@ -295,9 +295,9 @@ function setSingleSessionControlsVisible(visible) {
 // ─── View toggle ────────────────────────────────────────────────────────────
 
 // Apply light/dark theme: body attribute + persistence + terminal re-theme.
-// DeepSeek light is the default; dark swaps in the deepseek-harness dark tokens.
+// DeepSeek dark is the default; light swaps in the deepseek-harness light tokens.
 window.setTheme = function(theme) {
-  if (theme !== "light" && theme !== "dark") theme = "light";
+  if (theme !== "light" && theme !== "dark") theme = "dark";
   STATE.theme = theme;
   if (theme === "dark") document.body.setAttribute("data-ds-dark-theme", "");
   else document.body.removeAttribute("data-ds-dark-theme");
@@ -508,7 +508,7 @@ function clearSelectedSession() {
 
 // ─── Sidebar (Workspaces rail) ──────────────────────────────────────────────
 // The global aside renders the SAME Workspaces rail as the Chat view
-// (apps/scope/public/rail.js), replacing the old per-cwd session list. app.js
+// (apps/scope-server/public/rail.js), replacing the old per-cwd session list. app.js
 // stays the owner of session selection, so the rail calls back into
 // selectSession / deleteSession rather than touching the store itself.
 
@@ -1218,7 +1218,7 @@ function loadSidebarCollapsed() {
 }
 
 function loadTheme() {
-  return localStorage.getItem("scope-theme") === "dark" ? "dark" : "light";
+  return localStorage.getItem("scope-theme") === "light" ? "light" : "dark";
 }
 
 // ─── Exports to window.SCOPE ──────────────────────────────────────────────────

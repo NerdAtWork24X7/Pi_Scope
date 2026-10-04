@@ -88,7 +88,7 @@ remove / subagent nesting and the streaming + click flows; `test/harness.mjs` ho
 the shared Playwright helpers.
 
 ```bash
-# from apps/scope (Playwright + Chromium come from the repo's root install)
+# from apps/scope-server (Playwright + Chromium come from the repo's root install)
 npm test
 # or pick a subset:
 node --test --test-name-pattern="workspace" test/chat.e2e.test.mjs

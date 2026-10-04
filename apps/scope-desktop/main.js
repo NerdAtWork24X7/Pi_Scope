@@ -1,7 +1,7 @@
 // main.js — Electron shell for the Pi Scope 1-click app.
 // Boots the SCOPE server (or reuses a running one) and shows the WebUI in-app.
 const { app, BrowserWindow, nativeImage, dialog, ipcMain } = require("electron");
-app.setName("pi-scope-launcher");
+app.setName("pi-scope-desktop");
 const { ensureServer, stopServer } = require("./scope-control");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -10,7 +10,7 @@ const ROOT = path.resolve(__dirname, "..", "..");
 const APP_DIR = app.getAppPath();
 const PNG_ICON = fs.existsSync(path.join(APP_DIR, "server-bundle", "icon.png"))
   ? path.join(APP_DIR, "server-bundle", "icon.png")
-  : path.join(ROOT, "apps", "scope-launcher", "icon.png");
+  : path.join(ROOT, "apps", "scope-desktop", "icon.png");
 const SVG_ICON = path.join(APP_DIR, "server-bundle", "public", "logo.svg");
 const APP_ICON = nativeImage.createFromPath(fs.existsSync(PNG_ICON) ? PNG_ICON : SVG_ICON);
 
@@ -18,7 +18,7 @@ const APP_ICON = nativeImage.createFromPath(fs.existsSync(PNG_ICON) ? PNG_ICON :
 app.commandLine.appendSwitch("no-sandbox");
 app.commandLine.appendSwitch("disable-gpu");
 // Force WM_CLASS so the panel/dock matches this window to our .desktop (StartupWMClass).
-app.commandLine.appendSwitch("class", "pi-scope-launcher");
+app.commandLine.appendSwitch("class", "pi-scope-desktop");
 
 let serverProc = null;
 

@@ -316,6 +316,12 @@
     }
     row.appendChild(actions);
     row.onclick = () => selectFile(f.path, f.section);
+    row.oncontextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      selectFile(f.path, f.section);
+      showFileMenu(f, e.clientX, e.clientY);
+    };
     return row;
   }
 
@@ -360,6 +366,11 @@
     if (!res.ok || !data.ok) { setStatus("discard failed: " + (data.error || res.status), true); return; }
     selected = { path: "", cached: false, section: "" };
     await loadStatus();
+  }
+  // Discard a staged file: unstage it, then revert the worktree to the index.
+  async function unstageThenDiscard(paths) {
+    await unstage(paths);
+    await discard(paths, false);
   }
   async function commit() {
     const cwd = selectedCwd(); if (!cwd) return;
@@ -955,7 +966,7 @@
   }
 
   // ─── Modal dialog (replaces browser prompt/confirm for Electron compat) ──
-  function showGitModal({ title, message, input, confirmLabel, danger }) {
+  function showGitModal({ title, message, input, select, confirmLabel, danger }) {
     return new Promise((resolve) => {
       closeMenu();
       const backdrop = document.createElement("div");
@@ -983,6 +994,18 @@
         inputEl.value = input.value || "";
         box.appendChild(inputEl);
         setTimeout(() => inputEl.focus(), 60);
+      } else if (select) {
+        inputEl = document.createElement("select");
+        inputEl.className = "git-modal-input";
+        for (const opt of select.options || []) {
+          const o = document.createElement("option");
+          o.value = opt.value;
+          o.textContent = opt.label ?? opt.value;
+          if (opt.value === select.value) o.selected = true;
+          inputEl.appendChild(o);
+        }
+        box.appendChild(inputEl);
+        setTimeout(() => inputEl.focus(), 60);
       }
 
       const actions = document.createElement("div");
@@ -990,7 +1013,7 @@
       const cancel = document.createElement("button");
       cancel.className = "git-modal-btn";
       cancel.textContent = "Cancel";
-      cancel.onclick = () => { backdrop.remove(); resolve(input ? null : false); };
+      cancel.onclick = () => { backdrop.remove(); resolve(input || select ? null : false); };
       const ok = document.createElement("button");
       ok.className = "git-modal-btn" + (danger ? " danger" : " primary");
       ok.textContent = confirmLabel || "OK";
@@ -1016,10 +1039,11 @@
     });
   }
 
-  // ─── Commit context menu (right-click) ───────────────────────────────────
+  // ─── Context menus (right-click) ─────────────────────────────────────────
   function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
 
-  function showCommitMenu(sha, x, y) {
+  // Build and position a floating menu. `build(add, sep)` populates it.
+  function showMenu(x, y, build) {
     closeMenu();
     menuEl = document.createElement("div");
     menuEl.className = "git-menu";
@@ -1032,13 +1056,50 @@
       menuEl.appendChild(b);
     };
     const sep = () => { const d = document.createElement("div"); d.className = "git-menu-sep"; menuEl.appendChild(d); };
+    build(add, sep);
+    document.body.appendChild(menuEl);
+    const rect = menuEl.getBoundingClientRect();
+    menuEl.style.left = Math.min(x, window.innerWidth - rect.width - 8) + "px";
+    menuEl.style.top = Math.min(y, window.innerHeight - rect.height - 8) + "px";
+  }
 
+  // Right-click menu for a working-tree file row: stage/unstage, discard, etc.
+  function showFileMenu(f, x, y) {
+    showMenu(x, y, (add, sep) => {
+      const staged = f.section === "staged";
+      if (staged) add("Unstage file", () => unstage([f.path]));
+      else add("Stage file", () => stage([f.path]));
+      if (f.section === "conflicted") add("Mark resolved", () => stage([f.path]));
+      if (f.section === "untracked") {
+        sep();
+        add("Delete untracked file", () => discard([f.path], true), true);
+      } else if (f.section === "unstaged") {
+        sep();
+        add("Discard changes", () => discard([f.path], false), true);
+      } else if (staged) {
+        sep();
+        add("Unstage & discard changes", () => unstageThenDiscard([f.path]), true);
+      }
+    });
+  }
+
+  function showCommitMenu(sha, x, y) {
+    showMenu(x, y, (add, sep) => {
     add("Checkout this commit", async () => {
       const ok = await showGitModal({ title: "Checkout Commit", message: "Checkout this commit as a detached HEAD?", confirmLabel: "Checkout" });
       if (ok) gitAction("checkout", sha);
     });
     add("Checkout branch…", async () => {
-      const n = await showGitModal({ title: "Checkout Branch", input: { placeholder: "Branch name to check out…" }, confirmLabel: "Checkout" });
+      const cwd = selectedCwd(); if (!cwd) return;
+      const { res, data } = await api("/git/branches", { cwd });
+      if (!res.ok) { setStatus("load branches failed: " + (data.error || res.status), true); return; }
+      const names = (data.branches || []).map((b) => b.name).filter((n) => n && n !== data.current);
+      if (!names.length) { setStatus("no other branches to check out"); return; }
+      const n = await showGitModal({
+        title: "Checkout Branch",
+        select: { options: names.map((name) => ({ value: name, label: name })), value: names[0] },
+        confirmLabel: "Checkout",
+      });
       if (n && n.trim()) branchOp("switch", n.trim());
     });
     add("Create branch…", async () => {
@@ -1084,10 +1145,7 @@
       showCompareDiff(sha, "WORKTREE");
     });
 
-    document.body.appendChild(menuEl);
-    const rect = menuEl.getBoundingClientRect();
-    menuEl.style.left = Math.min(x, window.innerWidth - rect.width - 8) + "px";
-    menuEl.style.top = Math.min(y, window.innerHeight - rect.height - 8) + "px";
+    });
   }
 
   async function gitAction(action, sha, name) {

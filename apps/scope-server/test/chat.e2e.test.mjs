@@ -1,7 +1,7 @@
 // End-to-end tests for the Chat view, run in headless Chromium against the
 // mock backend in ./mock-backend.mjs (which serves the real public/ assets).
 //
-//   node --test apps/scope/test/chat.e2e.test.mjs
+//   node --test apps/scope-server/test/chat.e2e.test.mjs
 //
 // Focus: workspace selection / restore / add / remove / nesting edge cases, and
 // the streaming + click flows the page depends on.

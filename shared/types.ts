@@ -1,5 +1,5 @@
 // shared/types.ts — shared types for the Pi Scope server and DB layer.
-// Imported (as ../../shared/types.ts) by apps/scope/server.ts and apps/scope/db.ts.
+// Imported (as ../../shared/types.ts) by apps/scope-server/server.ts and apps/scope-server/db.ts.
 
 /** Max allowed size (bytes) for a POST /events request body. */
 export const MAX_REQUEST_BYTES = 16 * 1024 * 1024;

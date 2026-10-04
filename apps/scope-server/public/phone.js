@@ -96,7 +96,7 @@
         <p>${loopbackBound
           ? "Only this machine can reach it — a QR would scan on the desktop and then open nothing on the phone. Restart it on the LAN interface:"
           : "The server is LAN-bound, but no external IPv4 address is available to reach it from a phone. Check that this machine is on a network, then reload."}</p>
-        ${loopbackBound ? '<pre class="phone-cmd">SCOPE_HOST=0.0.0.0 node apps/scope/server.ts</pre>' : ""}
+        ${loopbackBound ? '<pre class="phone-cmd">SCOPE_HOST=0.0.0.0 node apps/scope-server/server.ts</pre>' : ""}
         ${target ? `<p>${target}</p>` : ""}
         <p class="phone-hint">Only rebind on a Wi-Fi you trust: the phone gets the full UI, and the
         Terminal view is a real shell on this host.</p>

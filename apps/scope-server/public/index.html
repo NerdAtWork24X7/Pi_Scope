@@ -13,7 +13,7 @@
 </head>
 
 <body class="layout-form">
-  <script>(function () { try { var t = localStorage.getItem('scope-theme'); if (t !== 'dark') t = 'light'; document.documentElement.style.colorScheme = t === 'dark' ? 'dark' : 'light'; if (t === 'dark') document.body.setAttribute('data-ds-dark-theme', ''); } catch (e) { } })();</script>
+  <script>(function () { try { var t = localStorage.getItem('scope-theme'); if (t !== 'light') t = 'dark'; document.documentElement.style.colorScheme = t === 'dark' ? 'dark' : 'light'; if (t === 'dark') document.body.setAttribute('data-ds-dark-theme', ''); } catch (e) { } })();</script>
 
   <header>
     <div class="brand-logo-container" style="display:flex;align-items:center;gap:10px">
@@ -40,7 +40,7 @@
     <div id="header-right">
       <button id="btn-phone" title="Open Pi Scope on your phone — scan the QR on this screen"
         aria-label="Open on phone"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2.5"/><line x1="11" y1="18.5" x2="13" y2="18.5"/></svg></button>
-      <button id="btn-theme" title="Toggle light / dark theme" onclick="toggleTheme()">☀</button>
+      <button id="btn-theme" title="Toggle light / dark theme" onclick="toggleTheme()">🌙</button>
       <div id="live-indicator">
         <span id="live-dot" class="red"></span>
         <span id="live-label">off</span>

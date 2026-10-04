@@ -13,6 +13,8 @@ export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared deps live in the repo-root node_modules (npm workspaces).
+ROOT_DIR="$(cd "$DIR/../.." && pwd)"
 cd "$DIR"
 
 # Install the .desktop into the user applications dir (idempotent) so the DE
@@ -35,10 +37,11 @@ if [ ! -f "$DESKTOP_SHORTCUT" ] || ! cmp -s "$DESKTOP_SRC" "$DESKTOP_SHORTCUT"; 
   chmod +x "$DESKTOP_SHORTCUT"
 fi
 
-# Install electron on first run (idempotent).
-if [ ! -d node_modules/electron ]; then
-  npm install --no-audit --no-fund
+# Install dependencies on first run (idempotent). The workspace install runs at
+# the repo root; electron/node-pty/ws are hoisted there.
+if [ ! -d "$ROOT_DIR/node_modules/electron" ]; then
+  ( cd "$ROOT_DIR" && npm install --no-audit --no-fund )
 fi
 
 # Overwrite launcher.log each run so failures are easy to read.
-exec npx electron . > "$DIR/launcher.log" 2>&1
+exec "$ROOT_DIR/node_modules/.bin/electron" . > "$DIR/launcher.log" 2>&1

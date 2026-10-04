@@ -1,6 +1,6 @@
 // Mock backend for the Chat-view end-to-end tests.
 //
-// Serves the REAL `apps/scope/public` assets over HTTP, so the browser runs the
+// Serves the REAL `apps/scope-server/public` assets over HTTP, so the browser runs the
 // actual index.html / app.js / chat.js, while every API endpoint the Chat view
 // talks to is implemented here. That keeps the tests deterministic and
 // hermetic: no SQLite, no `pi` subprocess, and no network.
