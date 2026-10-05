@@ -21,21 +21,21 @@ cd "$DIR"
 # can match this window's WM_CLASS to its icon in the dock/taskbar.
 APPS_DIR="$HOME/.local/share/applications"
 mkdir -p "$APPS_DIR"
-DESKTOP_SRC="$DIR/pi-scope.desktop"
-DESKTOP_DST="$APPS_DIR/pi-scope.desktop"
-if [ ! -f "$DESKTOP_DST" ] || ! cmp -s "$DESKTOP_SRC" "$DESKTOP_DST"; then
-  cp "$DESKTOP_SRC" "$DESKTOP_DST"
-fi
+#DESKTOP_SRC="$DIR/pi-scope.desktop"
+#DESKTOP_DST="$APPS_DIR/pi-scope.desktop"
+#if [ ! -f "$DESKTOP_DST" ] || ! cmp -s "$DESKTOP_SRC" "$DESKTOP_DST"; then
+#  cp "$DESKTOP_SRC" "$DESKTOP_DST"
+#fi
 
 # Also install an identical copy on the Desktop shortcut (idempotent) so the
 # icon renders there too. XDG_DESKTOP_DIR falls back to ~/Desktop.
-DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
-mkdir -p "$DESKTOP_DIR"
-DESKTOP_SHORTCUT="$DESKTOP_DIR/pi-scope.desktop"
-if [ ! -f "$DESKTOP_SHORTCUT" ] || ! cmp -s "$DESKTOP_SRC" "$DESKTOP_SHORTCUT"; then
-  cp "$DESKTOP_SRC" "$DESKTOP_SHORTCUT"
-  chmod +x "$DESKTOP_SHORTCUT"
-fi
+#DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
+#mkdir -p "$DESKTOP_DIR"
+#DESKTOP_SHORTCUT="$DESKTOP_DIR/pi-scope.desktop"
+#if [ ! -f "$DESKTOP_SHORTCUT" ] || ! cmp -s "$DESKTOP_SRC" "$DESKTOP_SHORTCUT"; then
+#  cp "$DESKTOP_SRC" "$DESKTOP_SHORTCUT"
+#  chmod +x "$DESKTOP_SHORTCUT"
+#fi
 
 # Install dependencies on first run (idempotent). The workspace install runs at
 # the repo root; electron/node-pty/ws are hoisted there.

@@ -392,13 +392,8 @@
       return `${cBtn}${wBtn}<div style="margin:2px 0 6px;color:var(--muted);font-size:12px">final response · turn #${evt.payload?.turn_index ?? "?"}</div>${frHTML}${agentEndHTML}<details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">📄 raw JSON</summary><pre>${escapeHtml(JSON.stringify(evt.payload, null, 2))}</pre></details>`;
     }
 
+    // tool_result never reaches here — its own branch above returns first.
     const chips = [];
-    if (evt.type === "tool_result" && evt.payload?.details_summary?.exit_code !== undefined) {
-      const ec = evt.payload.details_summary.exit_code;
-      chips.push(`<span class="exit-chip ${ec !== 0 || isToolResultError(evt.payload) ? 'err' : 'ok'}">exit ${ec}</span>`);
-    } else if (evt.type === "tool_result" && isToolResultError(evt.payload)) {
-      chips.push(`<span class="exit-chip err">failed</span>`);
-    }
     if (evt.type === "assistant_message") {
       if (evt.payload?.stop_reason) chips.push(`<span class="exit-chip ok">${escapeHtml(evt.payload.stop_reason)}</span>`);
       if (evt.payload?.latency_ms) chips.push(`<span class="exit-chip ok">${evt.payload.latency_ms}ms</span>`);

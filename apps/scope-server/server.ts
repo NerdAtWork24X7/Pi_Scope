@@ -162,6 +162,13 @@ function resolveProjectDir(cwdRaw?: string | null, remember = true): string | nu
  *  break the file structure. Keep the accepted set identical to the parser's. */
 const TEAM_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MEMBER_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+/** Model ids are written into teams.yaml as `model:` values. They are plain
+ *  `provider/model` strings, so refuse anything a YAML line couldn't hold — a
+ *  newline would let the value inject extra teams/members into the file. */
+const MODEL_ID_RE = /^[A-Za-z0-9._:\/+@-]{1,128}$/;
+function isModelId(value: string): boolean {
+  return MODEL_ID_RE.test(value);
+}
 
 /** Minimal parser for the teams.yaml format used by the agent-team harness. */
 function parseTeamsYaml(raw: string): { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean } {
@@ -568,6 +575,9 @@ function updateSettingsJson(mutate: (cfg: any) => void): void {
   let cfg: any = {};
   try { cfg = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8")); } catch { /* absent */ }
   mutate(cfg);
+  // The agent dir may not exist yet (fresh machine, SCOPE_SETTINGS_JSON pointed
+  // at a new path) — mirror what the teams/config writers do.
+  fs.mkdirSync(path.dirname(SETTINGS_JSON), { recursive: true });
   fs.writeFileSync(SETTINGS_JSON, JSON.stringify(cfg, null, 2) + "\n");
 }
 
@@ -876,22 +886,71 @@ function textResponse(body: string, status: number, contentType: string): Respon
   });
 }
 
+/** Constant-time token comparison. The token is a per-run secret that gates a
+ *  real shell, and a plain `===` short-circuits on the first differing byte —
+ *  measurable from the same machine, which on a loopback bind is enough to
+ *  recover it byte by byte. */
+function tokenMatches(candidate: string | null): boolean {
+  if (!candidate) return false;
+  const a = Buffer.from(candidate, "utf8");
+  const b = Buffer.from(AUTH_TOKEN, "utf8");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 function checkAuth(req: Request): boolean {
   // Check Authorization header
   const auth = req.headers.get("authorization");
   if (auth) {
     const parts = auth.split(" ");
-    if (parts.length === 2 && parts[0].toLowerCase() === "bearer" && parts[1] === AUTH_TOKEN) {
-      return true;
-    }
+    if (parts.length === 2 && parts[0].toLowerCase() === "bearer") return tokenMatches(parts[1]);
     return false;
   }
   // Check ?token= query param
-  const url = new URL(req.url);
-  const qToken = url.searchParams.get("token");
-  if (qToken && qToken === AUTH_TOKEN) return true;
+  return tokenMatches(new URL(req.url).searchParams.get("token"));
+}
 
-  return false;
+/**
+ * True when a request either carries no Origin (a non-browser client: the pi
+ * extension, curl, the launcher's health poll) or an Origin that is this
+ * server's own.
+ *
+ * Browsers attach Origin to every POST — same-origin included — so requiring it
+ * to match closes CSRF against the routes that sit above the auth wall because
+ * they trust the caller's loopback *address* (`POST /shutdown`, `POST /events`,
+ * `/capture/*`). A page the user merely visits can still have the browser
+ * deliver a "simple" cross-origin POST (no preflight, and the attacker cannot
+ * read the reply — but the side effect happens: forged telemetry, a killed
+ * server). Those routes are legitimately reachable without the token, so the
+ * Origin has to be the thing that proves who is asking.
+ */
+function originSameServer(req: Request): boolean {
+  const origin = req.headers.get("origin");
+  if (!origin) return true;
+  if (ALLOWED_ORIGINS.has(origin)) return true;
+  // A LAN-bound server is reached at an address the ALLOWED_ORIGINS set (built
+  // from HOST = 0.0.0.0) can't name, so accept the Host the client actually
+  // used. "null" (sandboxed/opaque origins) never matches and is refused.
+  const host = req.headers.get("host");
+  return !!host && (origin === `http://${host}` || origin === `https://${host}`);
+}
+
+/** Parse a non-negative integer query param, clamped to `max`; `def` when
+ *  absent or malformed. A malformed value used to reach SQLite as NaN and fail
+ *  the whole request with "datatype mismatch" (LIMIT ?). */
+function intParam(url: URL, name: string, def: number, max: number): number {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw.trim() === "") return def;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return def;
+  return Math.min(n, max);
+}
+
+/** Parse an integer query param; null when absent or malformed (never NaN). */
+function intOrNull(url: URL, name: string): number | null {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw.trim() === "") return null;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : null;
 }
 
 /**
@@ -1233,6 +1292,66 @@ function cleanPaths(absCwd: string, paths: unknown): string[] | null {
   return out;
 }
 
+/**
+ * Reject caller-supplied values that git would read as an option.
+ *
+ * Every git call here passes the value as its own argv entry, so a value like
+ * `-d` can't inject a second command — but it CAN become an option of the
+ * command being run (`git tag -d <sha>` deletes a tag instead of creating one).
+ * `/git/compare` and `/git/cat` already refuse a leading dash; this keeps the
+ * rest of the Git GUI honest. `--` can't help: it ends option parsing for
+ * paths, not for a ref/name argument.
+ */
+function rejectOptionLike(...values: string[]): boolean {
+  return values.some((v) => v.startsWith("-"));
+}
+
+// ─── `git status --porcelain` parsing ───────────────────────────────────────
+// The Review (files), Git and Review-diagram views each walked the same
+// porcelain output with their own copy of this parsing (rename arrow form,
+// workspace status classification, conflict detection). One parser now feeds
+// all three.
+
+interface PorcelainEntry {
+  /** The two status columns, e.g. "M ", " M", "??", "R ". */
+  code: string;
+  x: string;
+  y: string;
+  /** Destination path (the new path for a rename). */
+  path: string;
+  /** Source path of a rename, else null. */
+  renamedFrom: string | null;
+  conflicted: boolean;
+  ignored: boolean;
+}
+
+function parsePorcelainLine(raw: string): PorcelainEntry | null {
+  if (!raw) return null;
+  const code = raw.slice(0, 2);
+  let p = raw.slice(3);
+  let renamedFrom: string | null = null;
+  if (code.includes("R")) {
+    const mm = p.match(/^(.*?) -> (.*)$/);
+    if (mm) { renamedFrom = mm[1]; p = mm[2]; }
+  }
+  const x = code[0], y = code[1];
+  return {
+    code, x, y, path: p, renamedFrom,
+    conflicted: x === "U" || y === "U" || code === "AA" || code === "DD" || code === "AU" || code === "UA" || code === "DU" || code === "UD",
+    ignored: code === "!!",
+  };
+}
+
+/** Workspace-level status label for a porcelain entry. */
+function porcelainStatus(e: PorcelainEntry): "ignored" | "untracked" | "deleted" | "added" | "renamed" | "modified" {
+  if (e.ignored) return "ignored";
+  if (e.code === "??") return "untracked";
+  if (e.code.includes("D")) return "deleted";
+  if (e.code.includes("A")) return "added";
+  if (e.code.includes("R")) return "renamed";
+  return "modified";
+}
+
 // ─── Review → Diagram: repository dependency graph ──────────────────────────
 // Builds a module-level dependency graph from LOCAL imports, so the Review view
 // can show how changed code relates to the rest of the repo. A "module" is a
@@ -1403,19 +1522,8 @@ function buildRepoGraph(absCwd: string): unknown {
   const st = gitTry(absCwd, ["status", "--porcelain", "-uall"]);
   if (st.ok) {
     for (const raw of st.out.split("\n")) {
-      if (!raw) continue;
-      const code = raw.slice(0, 2);
-      let p = raw.slice(3);
-      if (code[0] === "R" || code[1] === "R") {
-        const mm = p.match(/^(.*?) -> (.*)$/);
-        if (mm) p = mm[2];
-      }
-      const status = code === "??" ? "untracked"
-        : code.includes("D") ? "deleted"
-        : code.includes("A") ? "added"
-        : (code[0] === "R" || code[1] === "R") ? "renamed"
-        : "modified";
-      statusMap.set(p, status);
+      const e = parsePorcelainLine(raw);
+      if (e) statusMap.set(e.path, porcelainStatus(e));
     }
   }
   // HEAD-relative numstat captures both staged and unstaged churn; fall back to
@@ -1687,8 +1795,11 @@ async function handle(req: Request): Promise<Response> {
     // the launcher's readiness poll — so it carries its own gate. On a loopback
     // bind the only possible caller is this machine (stop.sh, the launcher); on
     // a LAN bind an unauthenticated caller could kill the server, so the token
-    // becomes mandatory.
-    if (LAN_EXPOSED && !checkAuth(req)) {
+    // becomes mandatory. A cross-site POST from a page the user is visiting is
+    // delivered by the browser even though its reply can't be read, so on a
+    // loopback bind the caller must also not be another origin (see
+    // originSameServer) — otherwise any website could stop the server.
+    if ((LAN_EXPOSED || !originSameServer(req)) && !checkAuth(req)) {
       return jsonResponse({ error: "unauthorized" }, 401);
     }
     const response = jsonResponse({ ok: true, message: "shutting down" });
@@ -1725,7 +1836,8 @@ async function handle(req: Request): Promise<Response> {
     // Loopback seq-seed probe (used by the extension to continue a resumed
     // session's event sequence). Same trust model as POST /events.
     (method === "GET" && matchSessionSeq(pathname) !== null);
-  const isTrustedProducer = isLocalProducer && (!LAN_EXPOSED || peerIsLoopback(req));
+  const isTrustedProducer =
+    isLocalProducer && (!LAN_EXPOSED || peerIsLoopback(req)) && originSameServer(req);
   if (!isTrustedProducer && !checkAuth(req)) {
     return jsonResponse({ error: "unauthorized" }, 401);
   }
@@ -2184,6 +2296,7 @@ async function handle(req: Request): Promise<Response> {
           break;
         case "setMemoryModel": {
           const model = String(value || "").trim();
+          if (model && !isModelId(model)) return jsonResponse({ error: "invalid model id" }, 400);
           updateTeamsYaml(proj, (p) => { p.memoryModel = model || undefined; });
           break;
         }
@@ -2291,6 +2404,7 @@ async function handle(req: Request): Promise<Response> {
           const key = String(body.agent || "");
           const model = String(body.model || "").trim();
           if (!key) return jsonResponse({ error: "missing agent" }, 400);
+          if (model && !isModelId(model)) return jsonResponse({ error: "invalid model id" }, 400);
           updateTeamsYaml(proj, (p) => {
             for (const members of Object.values(p.teams || {})) {
               const mem = (members as any[]).find((m) => (m.name || "").toLowerCase() === key.toLowerCase());
@@ -2356,6 +2470,8 @@ async function handle(req: Request): Promise<Response> {
           if (!team) return jsonResponse({ error: "missing team" }, 400);
           if (!MEMBER_NAME_RE.test(name)) return jsonResponse({ error: "invalid subagent name" }, 400);
           if (!readTeams(proj).teams[team]) return jsonResponse({ error: `no such team: ${team}` }, 400);
+          const newMemberModel = String(body.model || "").trim();
+          if (newMemberModel && !isModelId(newMemberModel)) return jsonResponse({ error: "invalid model id" }, 400);
           updateTeamsYaml(proj, (p) => {
             const teams = (p.teams = p.teams || {});
             const members = (teams[team] = teams[team] || []);
@@ -2363,8 +2479,7 @@ async function handle(req: Request): Promise<Response> {
             // so the UI can be clicked twice safely.
             if (members.some((m) => (m.name || "").toLowerCase() === name.toLowerCase())) return;
             const entry: Record<string, any> = { name };
-            const model = String(body.model || "").trim();
-            if (model) entry.model = model;
+            if (newMemberModel) entry.model = newMemberModel;
             members.push(entry);
           });
           break;
@@ -2382,7 +2497,8 @@ async function handle(req: Request): Promise<Response> {
         }
         case "toggleSkill": {
           const group = body.group; // "orchestrator" | "subagent"
-          const dir = body.dir;
+          const dir = String(body.dir || "");
+          if (!dir) return jsonResponse({ error: "missing skill" }, 400);
           updateAgentConfig(proj, (cfg) => {
             const key = group === "orchestrator" ? "orchestratorSkills" : "subagentSkills";
             const arr: string[] = cfg[key] || [];
@@ -2420,7 +2536,11 @@ async function handle(req: Request): Promise<Response> {
           break;
         }
         case "toggleSkillSetting": {
-          const dir = body.dir;
+          // `dir` becomes part of a `skills/<dir>/SKILL.md` settings entry, which
+          // pi resolves against its own config dir — keep it a plain name so it
+          // can never point outside the skills folder.
+          const dir = String(body.dir || "");
+          if (!/^[A-Za-z0-9_.-]{1,64}$/.test(dir)) return jsonResponse({ error: "invalid skill name" }, 400);
           updateSettingsJson((cfg) => {
             cfg.skills = cfg.skills || [];
             const idx = cfg.skills.findIndex((e: string) => parseSkillSettingEntry(e)?.name === dir);
@@ -2651,7 +2771,7 @@ async function handle(req: Request): Promise<Response> {
     const pool = url.searchParams.get("pool") ?? "";
     const tag = url.searchParams.get("tag") ?? "";
     const since = url.searchParams.get("since") ?? "";
-    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 200);
+    const limit = intParam(url, "limit", 50, 200);
 
     try {
       const rows = q.listSessions.all({ $pool: pool, $tag: tag, $limit: limit }) as any[];
@@ -2738,9 +2858,9 @@ async function handle(req: Request): Promise<Response> {
   // ── GET /sessions/:session_id/events ───────────────────────────────────
   const sidEvents = matchSessionEvents(pathname);
   if (sidEvents && method === "GET") {
-    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "200", 10), 1000);
-    const beforeSeq = url.searchParams.get("before_seq");
-    const sinceSeq = url.searchParams.get("since_seq");
+    const limit = intParam(url, "limit", 200, 1000);
+    const beforeSeq = intOrNull(url, "before_seq");
+    const sinceSeq = intOrNull(url, "since_seq");
     const type = url.searchParams.get("type") ?? "";
 
     try {
@@ -2749,7 +2869,7 @@ async function handle(req: Request): Promise<Response> {
         const rows = q.getSessionEventsSince.all({
           $session_id: sidEvents,
           $limit: limit,
-          $since_seq: parseInt(sinceSeq, 10),
+          $since_seq: sinceSeq,
           $type: type,
         }) as any[];
         return jsonResponse({ events: rows.map(rowToEvent) });
@@ -2758,7 +2878,7 @@ async function handle(req: Request): Promise<Response> {
       const rows = q.getSessionEvents.all({
         $session_id: sidEvents,
         $limit: limit,
-        $before_seq: beforeSeq ? parseInt(beforeSeq, 10) : null,
+        $before_seq: beforeSeq,
         $type: type,
       }) as any[];
 
@@ -2838,9 +2958,10 @@ async function handle(req: Request): Promise<Response> {
       start(controller) {
         subId = addSubscriber(controller, streamPool, streamTag, streamSession);
 
-        // Initial hello
+        // Initial hello — reuse the process-wide encoder (one less allocation
+        // per connection, same as pushSSE).
         const hello = JSON.stringify({ server: "pi-scope", version: VERSION });
-        controller.enqueue(new TextEncoder().encode(`retry: 5000\nevent: hello\ndata: ${hello}\n\n`));
+        controller.enqueue(sseEncoder.encode(`retry: 5000\nevent: hello\ndata: ${hello}\n\n`));
       },
       cancel() {
         removeSubscriber(subId!);
@@ -2868,23 +2989,10 @@ async function handle(req: Request): Promise<Response> {
       const out = git(absCwd, ["status", "--porcelain", "-uall", ...(includeIgnored ? ["--ignored"] : [])]);
       const files: any[] = [];
       for (const raw of out.split("\n")) {
-        if (!raw) continue;
-        const code = raw.slice(0, 2);
-        let p = raw.slice(3);
-        let renamed_from: string | null = null;
-        if (code[0] === "R" || code[1] === "R") {
-          const mm = p.match(/^(.*?) -> (.*)$/);
-          if (mm) { renamed_from = mm[1]; p = mm[2]; }
-        }
-        const isIgnored = code === "!!";
-        const staged = !isIgnored && code[0] !== " " && code[0] !== "?";
-        const status = isIgnored ? "ignored"
-          : code === "??" ? "untracked"
-          : code.includes("D") ? "deleted"
-          : code.includes("A") ? "added"
-          : (code[0] === "R" || code[1] === "R") ? "renamed"
-          : "modified";
-        files.push({ path: p, status, staged, renamed_from });
+        const e = parsePorcelainLine(raw);
+        if (!e) continue;
+        const staged = !e.ignored && e.x !== " " && e.x !== "?";
+        files.push({ path: e.path, status: porcelainStatus(e), staged, renamed_from: e.renamedFrom });
       }
       return jsonResponse({ cwd: absCwd, git: true, files });
     } catch (err: any) {
@@ -3226,25 +3334,13 @@ async function handle(req: Request): Promise<Response> {
     const porcelain = gitTry(absCwd, ["status", "--porcelain=v1", "-uall"]);
     const files: any[] = [];
     for (const raw of porcelain.out.split("\n")) {
-      if (!raw) continue;
-      const code = raw.slice(0, 2);
-      let p = raw.slice(3);
-      let renamed_from: string | null = null;
-      if (code.includes("R")) {
-        const mm = p.match(/^(.*?) -> (.*)$/);
-        if (mm) { renamed_from = mm[1]; p = mm[2]; }
-      }
-      if (code === "!!") continue; // ignored files are not part of the Git view
-      const x = code[0], y = code[1];
-      const conflict = x === "U" || y === "U" || code === "AA" || code === "DD" || code === "AU" || code === "UA" || code === "DU" || code === "UD";
-      const status = conflict ? "conflicted"
-        : code === "??" ? "untracked"
-        : (y === "D" || x === "D") ? "deleted"
-        : (x === "A" || y === "A") ? "added"
-        : code.includes("R") ? "renamed"
-        : "modified";
-      if (conflict) { files.push({ path: p, section: "conflicted", status, renamed_from }); continue; }
-      if (code === "??") { files.push({ path: p, section: "untracked", status, renamed_from }); continue; }
+      const e = parsePorcelainLine(raw);
+      if (!e) continue;
+      if (e.ignored) continue; // ignored files are not part of the Git view
+      const { x, y, path: p, renamedFrom: renamed_from } = e;
+      const status = e.conflicted ? "conflicted" : porcelainStatus(e);
+      if (e.conflicted) { files.push({ path: p, section: "conflicted", status, renamed_from }); continue; }
+      if (e.code === "??") { files.push({ path: p, section: "untracked", status, renamed_from }); continue; }
       const staged = x !== " ";
       const unstaged = y !== " ";
       if (staged) files.push({ path: p, section: "staged", status, renamed_from, x, y });
@@ -3333,7 +3429,7 @@ async function handle(req: Request): Promise<Response> {
     const absCwd = validateCwd(cwd);
     if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     const all = url.searchParams.get("all") === "1";
-    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "200", 10), 500);
+    const limit = intParam(url, "limit", 200, 500);
     // `%P` yields space-separated parent SHAs (first parent first) so the UI
     // can draw a coloured lane graph. --topo-order keeps the first-parent
     // (mainline) chain grouped; the lanes are rebuilt client-side from the
@@ -3423,6 +3519,10 @@ async function handle(req: Request): Promise<Response> {
     const action = typeof parsed.action === "string" ? parsed.action : "";
     const sha = typeof parsed.sha === "string" ? parsed.sha.trim() : "";
     const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    // `sha`/`name` become git arguments, so a leading dash would be read as an
+    // option of the command being run (e.g. name "-d" turns `git tag <name>`
+    // into a tag deletion). Same guard /git/compare and /git/cat already use.
+    if (rejectOptionLike(sha, name)) return jsonResponse({ error: "invalid sha or name" }, 400);
     let r: { ok: boolean; out: string };
     switch (action) {
       case "checkout":
@@ -3494,9 +3594,10 @@ async function handle(req: Request): Promise<Response> {
     const action = parsed.action ?? "";
     const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
     if (!name) return jsonResponse({ error: "missing branch name" }, 400);
+    const startPoint = typeof parsed.startPoint === "string" && parsed.startPoint.trim() ? parsed.startPoint.trim() : "";
+    if (rejectOptionLike(name, startPoint)) return jsonResponse({ error: "invalid branch name" }, 400);
     let r;
     if (action === "create") {
-      const startPoint = typeof parsed.startPoint === "string" && parsed.startPoint.trim() ? parsed.startPoint.trim() : "";
       r = gitTry(absCwd, ["switch", "-c", name, ...(startPoint ? [startPoint] : [])]);
     } else if (action === "delete") {
       r = gitTry(absCwd, ["branch", "-D", name]);
@@ -3550,6 +3651,7 @@ async function handle(req: Request): Promise<Response> {
     const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
     const urlStr = typeof parsed.url === "string" ? parsed.url.trim() : "";
     if (!name) return jsonResponse({ error: "missing remote name" }, 400);
+    if (rejectOptionLike(name, urlStr)) return jsonResponse({ error: "invalid remote name or url" }, 400);
     let r;
     if (parsed.action === "remove") r = gitTry(absCwd, ["remote", "remove", name]);
     else {
@@ -3619,6 +3721,9 @@ async function handle(req: Request): Promise<Response> {
     const { cwd: absCwd, parsed } = body;
     const action = parsed.action ?? "";
     const ref = typeof parsed.ref === "string" && parsed.ref.trim() ? parsed.ref.trim() : "";
+    // "stash@{0}" is the expected form; anything else (e.g. "--all") would be
+    // read as an option of `git stash pop`/`drop`.
+    if (ref && !/^stash@\{\d+\}$/.test(ref)) return jsonResponse({ error: "invalid stash ref" }, 400);
     let r;
     if (action === "pop") r = gitTry(absCwd, ["stash", "pop", ...(ref ? [ref] : [])]);
     else if (action === "drop") r = gitTry(absCwd, ["stash", "drop", ...(ref ? [ref] : [])]);
@@ -3682,6 +3787,8 @@ async function handle(req: Request): Promise<Response> {
     const url = typeof parsed.url === "string" ? parsed.url.trim() : "";
     // Validate submodule path to prevent traversal outside the repo
     if (subPath && !resolveWithinCwd(absCwd, subPath)) return jsonResponse({ error: "invalid submodule path" }, 400);
+    // A path/url starting with "-" would be parsed as a git option.
+    if (rejectOptionLike(subPath, url)) return jsonResponse({ error: "invalid submodule path or url" }, 400);
     let r: { ok: boolean; out: string };
     switch (action) {
       case "add":

@@ -35,10 +35,14 @@ else
     [ -n "$TOKEN" ] && TOKEN_ARGS=(-H "Authorization: Bearer ${TOKEN}")
   fi
 
+  # curl already prints "000" when it can't connect; the previous `|| echo "000"`
+  # appended a second one ("000000") because curl writes its -w output even on
+  # failure, turning the log line into nonsense.
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     --max-time 5 \
     "${TOKEN_ARGS[@]}" \
-    -X POST "$SHUTDOWN_URL" 2>/dev/null || echo "000")
+    -X POST "$SHUTDOWN_URL" 2>/dev/null)
+  HTTP_CODE="${HTTP_CODE:-000}"
 
   if [ "$HTTP_CODE" = "200" ]; then
     echo "  Shutdown request accepted. Waiting for server to stop…"

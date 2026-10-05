@@ -99,12 +99,22 @@ node --test --test-name-pattern="workspace" test/chat.e2e.test.mjs
 All endpoints except `/health` and `/` require `Authorization: Bearer <token>`.
 The SSE endpoint also accepts `?token=<token>` (browsers can't set headers on EventSource).
 
+The routes marked *loopback-trusted* below (`POST /events`, `/capture/*`,
+`POST /shutdown`, `GET /sessions/:id/seq`) skip the token on a loopback bind,
+because the only reachable caller is then a local process. A browser POST is not
+local traffic though — any page the user visits can have the browser deliver a
+simple cross-origin POST it can't read but that still takes effect — so those
+routes also require the caller to send either no `Origin` header (curl, the pi
+extension, the launcher) or this server's own. A cross-site request gets `401`;
+send the token to use them from another origin. Once `SCOPE_HOST` is a wildcard
+address the token is required anyway (see the LAN notes in the root README).
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check + version + uptime + totals (no auth) |
-| POST | `/shutdown` | Graceful server shutdown (no auth) |
+| POST | `/shutdown` | Graceful server shutdown (loopback-trusted) |
 | GET | `/` | Scope UI (no auth) |
-| POST | `/events` | Ingest single event or array (no auth — loopback only) |
+| POST | `/events` | Ingest single event or array (loopback-trusted) |
 | GET | `/models` | List distinct models seen |
 | GET | `/sessions` | List sessions (pool/tag/since/limit) |
 | DELETE | `/sessions` | Delete ALL sessions + events (destructive) |

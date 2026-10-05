@@ -27,6 +27,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readStoredKeys } from "./api-keys.ts";
+import { expandShellPath, readShellEnvValues, shellQuote } from "../../shared/shell.ts";
 
 const ENCODER = new TextEncoder();
 
@@ -279,17 +280,6 @@ function venvBinDirs(cwd: string): string[] {
   return dirs;
 }
 
-/** Shell rc files an interactive terminal sources, in the order we check them.
- *  A GUI/desktop-launched server never reads these, so env vars exported only
- *  there are invisible to chat-spawned subprocesses — chatChildEnv mirrors the
- *  few the pi web tools depend on. */
-function shellRcFiles(): string[] {
-  const home = os.homedir();
-  return [".zshenv", ".zshrc", ".bash_profile", ".bashrc", ".profile"]
-    .map((f) => path.join(home, f))
-    .filter((p) => fs.existsSync(p));
-}
-
 /** True when `dir` holds an installed Playwright browser build (a subdirectory
  *  named like chromium-<build>, firefox-<build>, webkit-<build>,
  *  headless_shell-<build>, or chromium_headless_shell-<build>). Used so we
@@ -322,20 +312,10 @@ function resolvePlaywrightBrowsersPath(): string | null {
   const explicit = process.env.PLAYWRIGHT_BROWSERS_PATH;
   if (explicit) return explicit;
   const home = os.homedir();
-  const expand = (v: string) =>
-    v.replace(/^~(?=\/|$)/, home).replace(/\$\{HOME\}|\$HOME/g, home);
-  for (const rc of shellRcFiles()) {
-    let content: string;
-    try { content = fs.readFileSync(rc, "utf8"); } catch { continue; }
-    for (const rawLine of content.split("\n")) {
-      const line = rawLine.trim();
-      const m = line.match(/^(?:export\s+)?PLAYWRIGHT_BROWSERS_PATH\s*=\s*(.+)$/);
-      if (!m) continue;
-      const val = m[1].trim().replace(/^(['"])(.*)\1$/, "$2").trim();
-      if (!val) continue;
-      const dir = expand(val);
-      if (looksLikePlaywrightBrowsersDir(dir)) return dir;
-    }
+  // First rc assignment that actually points at an installed browser build wins.
+  for (const val of readShellEnvValues("PLAYWRIGHT_BROWSERS_PATH")) {
+    const dir = expandShellPath(val);
+    if (looksLikePlaywrightBrowsersDir(dir)) return dir;
   }
   const candidates = [
     process.env.XDG_CACHE_HOME ? path.join(process.env.XDG_CACHE_HOME, "ms-playwright") : "",
@@ -412,12 +392,6 @@ function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
   // saved there wins over whatever the launcher's environment carried.
   for (const [name, value] of Object.entries(readStoredKeys())) env[name] = value;
   return env;
-}
-
-/** Single-quote a value for `sh -c` (bash/zsh): safe for spaces, quotes, and
- *  shell metacharacters in paths/assets. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /** The user's interactive shell, used to spawn pi with the environment their

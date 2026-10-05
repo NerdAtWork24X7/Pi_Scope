@@ -60,8 +60,10 @@ export interface PreparedQueries {
   getEventById: StatementSync;
   getSessionByFile: StatementSync;
   getSessionStats: StatementSync;
+  getSessionModelTokens: StatementSync;
   getSessionContext: StatementSync;
   getSessionParents: StatementSync;
+  getProviderCostSince: StatementSync;
   countTotals: StatementSync;
   clearSessions: StatementSync;
   clearEvents: StatementSync;

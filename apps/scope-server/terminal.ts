@@ -14,6 +14,7 @@ import net from "node:net";
 import { execFileSync } from "node:child_process";
 import pty from "node-pty";
 import { WebSocketServer, WebSocket } from "ws";
+import { shellQuote } from "../../shared/shell.ts";
 
 interface TerminalConfig {
   port: number;
@@ -69,7 +70,7 @@ function herdrSockPath(): string | null {
   for (const p of possibleHerdrSockPaths()) {
     try { if (fs.existsSync(p)) { found = p; break; } } catch {}
   }
-  (herdrSockCache as { path: string | null; at: number } | null) = { path: found, at: now };
+  herdrSockCache = { path: found, at: now };
   return found;
 }
 
@@ -219,7 +220,7 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
             // cwd). Ctrl-U clears any half-typed line first so the injected
             // command can't concatenate with the user's pending input.
             if (selectedShell !== "herdr" && shellAtPrompt(term.pid)) {
-              term.write("\x15cd -- " + shq(ctrl.cwd) + "\r");
+              term.write("\x15cd -- " + shellQuote(ctrl.cwd) + "\r");
             } else if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({
                 type: "cdBlocked", cwd: ctrl.cwd,
@@ -305,11 +306,6 @@ function shellAtPrompt(pid: number): boolean {
   } catch {
     return false;
   }
-}
-
-// POSIX single-quote escaping for a shell argument.
-function shq(s: string): string {
-  return "'" + String(s).replace(/'/g, "'\\''") + "'";
 }
 
 const herdrDescendantCache = new Map<number, { result: boolean; at: number }>();

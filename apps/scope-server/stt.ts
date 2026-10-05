@@ -24,6 +24,7 @@ import { readFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { storedKey } from "./api-keys.ts";
+import { readShellEnvValue } from "../../shared/shell.ts";
 
 const AGENT_DIR = process.env.SCOPE_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -79,9 +80,9 @@ interface ActiveStt {
   config: SttConfig;
   handle: RecorderHandle;
   maxTimer: NodeJS.Timeout | null;
-  /** Set once the recorder stopped and transcription finished (auto-stop). */
-  ready: SttResult | null;
-  /** In-flight stop, so concurrent stop calls join instead of racing. */
+  /** In-flight stop (recorder shutdown + transcription). Non-null means the
+   *  microphone is already released — concurrent stop calls join this promise
+   *  instead of racing, and a new recording can't start until it settles. */
   stopping: Promise<SttResult> | null;
   /** Live level meter reading the WAV the recorder is still writing. */
   meter: AudioLevelMeter;
@@ -101,40 +102,8 @@ function projectConfigPath(cwd: string): string {
   return path.join(cwd, ".pi", "speech-to-text.json");
 }
 
-/** Shell rc files an interactive terminal sources, in the order we check them.
- *  A GUI/desktop-launched server never reads these, so variables exported only
- *  there are invisible to it — the same problem `chatChildEnv` solves for
- *  PLAYWRIGHT_BROWSERS_PATH. */
-function shellRcFiles(): string[] {
-  const home = os.homedir();
-  return [".zshenv", ".zshrc", ".bash_profile", ".bashrc", ".profile"]
-    .map((f) => path.join(home, f))
-    .filter((p) => fs.existsSync(p));
-}
-
-/** Scan the user's shell rc files for `export NAME=value` (quotes and a leading
- *  `~`/`$HOME` are handled). Returns "" when nothing is found. */
-function readShellEnv(name: string): string {
-  const home = os.homedir();
-  const expand = (v: string) => v.replace(/^~(?=\/|$)/, home).replace(/\$\{HOME\}|\$HOME/g, home);
-  for (const rc of shellRcFiles()) {
-    let content: string;
-    try { content = fs.readFileSync(rc, "utf8"); } catch { continue; }
-    for (const rawLine of content.split("\n")) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith("#")) continue;
-      const assignment = line.startsWith("export ") ? line.slice(7).trim() : line;
-      const eq = assignment.indexOf("=");
-      if (eq <= 0 || assignment.slice(0, eq).trim() !== name) continue;
-      const val = assignment.slice(eq + 1).trim().replace(/^(['\"])(.*)\1$/, "$2").trim();
-      if (val) return expand(val);
-    }
-  }
-  return "";
-}
-
 /** Resolve GROQ_* variables the way the user's interactive terminal would: the
- *  server's own env first, then the shell rc files (see readShellEnv). Only
+ *  server's own env first, then the shell rc files (see shared/shell.ts). Only
  *  non-empty results are cached, so a key the user adds to their profile after
  *  the server started is picked up without a restart. */
 const shellEnvCache = new Map<string, string>();
@@ -143,7 +112,7 @@ function shellEnvValue(name: string): string {
   if (direct) return direct;
   const cached = shellEnvCache.get(name);
   if (cached) return cached;
-  const found = readShellEnv(name);
+  const found = readShellEnvValue(name);
   if (found) shellEnvCache.set(name, found);
   return found;
 }
@@ -491,7 +460,9 @@ export interface SttStartInfo {
 /** Start (or join) the single host recording. */
 export function startStt(cwd: string): SttStartInfo {
   if (active) {
-    if (active.ready) return { ok: false, error: "the previous clip is still being transcribed" };
+    // The recorder is stopped but the clip is still being transcribed; the
+    // session still holds the single host microphone.
+    if (active.stopping) return { ok: false, error: "the previous clip is still being transcribed" };
     return {
       ok: true,
       reused: true,
@@ -527,7 +498,6 @@ export function startStt(cwd: string): SttStartInfo {
     config,
     handle,
     maxTimer: null,
-    ready: null,
     stopping: null,
     meter: new AudioLevelMeter(file, config.sampleRate),
   };
@@ -554,13 +524,6 @@ export async function stopStt(): Promise<SttResult> {
     return { ok: false, text: "", error: "not recording" };
   }
   if (cur.stopping) return cur.stopping;
-  if (cur.ready) {
-    if (cur.maxTimer) clearTimeout(cur.maxTimer);
-    cur.meter.close();
-    active = null;
-    lastResult = { at: Date.now(), result: cur.ready };
-    return cur.ready;
-  }
 
   cur.stopping = (async (): Promise<SttResult> => {
     if (cur.maxTimer) clearTimeout(cur.maxTimer);
@@ -574,13 +537,15 @@ export async function stopStt(): Promise<SttResult> {
       try {
         const t = await transcribe(cur.config, cur.handle.file);
         result = { ok: true, text: t.text, model: t.model, elapsedMs: t.elapsedMs };
-        lastResult = { at: Date.now(), result };
       } catch (err) {
         result = { ok: false, text: "", error: err instanceof Error ? err.message : String(err) };
       }
     }
     cleanupAudio(cur.handle.file, cur.config.keepAudio);
-    active = null;
+    // Cache every outcome, not just successes: a failed clip must not leave an
+    // older transcript behind for the next stop to return as its own.
+    lastResult = { at: Date.now(), result };
+    if (active === cur) active = null;
     return result;
   })();
 
@@ -593,6 +558,10 @@ export function sttStatus(cwd: string): {
   recording: boolean;
   startedAt: number | null;
   elapsedMs: number;
+  /** Live RMS level (0..1) of the audio appended since the last poll. */
+  level: number;
+  /** How long the signal has been at/below the silence threshold, in ms. */
+  silentMs: number;
   recorder: string | null;
   recorderAvailable: boolean;
   hasApiKey: boolean;
@@ -604,19 +573,22 @@ export function sttStatus(cwd: string): {
   // so reuse the live session's config/recorder instead of re-reading the
   // speech-to-text.json files and re-probing PATH on every tick.
   const config = active ? active.config : loadSttConfig(cwd);
+  // A session whose stop is already in flight (recorder shut down, transcript
+  // pending) is no longer recording and has no live meter to sample.
+  const live = !!active && !active.stopping;
   let recorderAvailable = !!active;
   let recorder: string | null = active ? active.handle.kind : null;
   if (!active) {
     try { recorder = detectRecorder(config.recorder); recorderAvailable = true; } catch { /* none installed */ }
   }
   return {
-    recording: !!active && !active.ready,
+    recording: live,
     startedAt: active ? active.startedAt : null,
     elapsedMs: active ? Date.now() - active.startedAt : 0,
     // Live RMS level (0..1) of the audio appended since the last poll, plus how
     // long it has been quiet — the composer renders these as a level bar.
-    level: active && !active.ready ? active.meter.sample() : 0,
-    silentMs: active && !active.ready ? active.meter.silentForMs() : 0,
+    level: live && active ? active.meter.sample() : 0,
+    silentMs: live && active ? active.meter.silentForMs() : 0,
     recorder,
     recorderAvailable,
     hasApiKey: !!config.apiKey,
