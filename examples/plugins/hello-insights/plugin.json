@@ -1,0 +1,11 @@
+{
+  "id": "hello-insights",
+  "name": "Insights",
+  "description": "Example plugin: counts ingested events by type and lists them in its own view.",
+  "version": "1.0.0",
+  "author": "you",
+  "server": "server.js",
+  "client": "client.js",
+  "nav": { "label": "Insights", "order": 75, "group": "timeline" },
+  "ui": { "icon": "▤" }
+}

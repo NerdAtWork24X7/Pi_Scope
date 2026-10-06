@@ -1,0 +1,15 @@
+{
+  "id": "chat",
+  "name": "Chat",
+  "description": "Talk to your agent, manage workspaces and the agent team, and stream turns live.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "serverRoutes": [
+    "/chat"
+  ],
+  "nav": {
+    "label": "Chat",
+    "order": 10,
+    "group": "session"
+  }
+}

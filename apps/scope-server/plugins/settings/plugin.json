@@ -1,0 +1,14 @@
+{
+  "id": "settings",
+  "name": "Settings",
+  "description": "Configure the agent, teams, models, skills, API keys and plugins.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "core": true,
+  "serverRoutes": [],
+  "nav": {
+    "label": "Settings",
+    "order": 80,
+    "group": "system"
+  }
+}

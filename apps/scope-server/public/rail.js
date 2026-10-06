@@ -291,6 +291,18 @@
     return typeof window.scopeNative?.pickDirectory === "function";
   }
 
+  // ─── Plugin view lookup ───────────────────────────────────────────────────
+  // The rail is shared by every non-chat view, but *which* views show it and
+  // how a session click behaves is owned by the plugin registry, not by this
+  // file. A view that does not declare `sidebar` keeps the shared rail.
+  function viewSpec(viewId) {
+    return window.SCOPE.Plugins?.get?.(viewId) || null;
+  }
+  function sidebarVisible(viewId) {
+    const spec = viewSpec(viewId);
+    return spec ? spec.sidebar !== false : true;
+  }
+
   function render() {
     if (!R.root) return;
     const st = state();
@@ -298,7 +310,7 @@
     // of this rail). Clear the sidebar's rows there so the visible chat rail is
     // the only source of .chat-ws / .ws-sess in the DOM — a hidden duplicate
     // breaks strict selectors and doubles every render.
-    if (st.view === "chat" || st.view === "settings") {
+    if (!sidebarVisible(st.view)) {
       if (R.lastHtml !== "") { R.lastHtml = ""; R.lastMiniHtml = null; R.root.innerHTML = ""; }
       return;
     }
@@ -357,7 +369,9 @@
     window.__setCwd?.(cwd);
     try { localStorage.setItem(CHAT_WS_KEY, cwd); } catch {}
     if (!R.expandedWs.has(cwd)) { R.expandedWs.add(cwd); saveJSON(EXPAND_KEY, [...R.expandedWs]); }
-    if (state().view === "terminal") window.__terminalCd?.(cwd);
+    // A view may need to follow the workspace change itself (Terminal cds its
+    // shell). Declared on the plugin spec via `view.cdOnCwd`.
+    if (viewSpec(state().view)?.view?.cdOnCwd) window.__terminalCd?.(cwd);
     R.lastHtml = null; R.lastMiniHtml = null;
     render();
   }
@@ -391,11 +405,15 @@
     if (!sid) return;
     const st = state();
     const s = (st.sessions || []).find((x) => x.session_id === sid);
-    if (st.view === "chat") {
+    // Page-aware session activation (see the plugin specs): "chat" resumes the
+    // transcript in place, "select" also selects the session (Single/Trajectory),
+    // anything else just points the shared cwd at the session's workspace.
+    const mode = viewSpec(st.view)?.view?.session || "workspace";
+    if (mode === "chat") {
       window.__chatOpenSession?.(sid);
       return;
     }
-    if (st.view === "single" || st.view === "trajectory") {
+    if (mode === "select") {
       if (s?.cwd) selectWorkspace(s.cwd);
       if (state().selectedSessionId !== sid) S.selectSession?.(sid);
       return;

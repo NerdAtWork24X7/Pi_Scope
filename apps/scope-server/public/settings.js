@@ -340,10 +340,44 @@
     keys: () => renderKeys(),
     workspaces: () => renderWorkspaces(),
     pi: () => renderPi(),
+    plugins: () => renderPlugins(),
   };
+
+  /**
+   * A plugin may contribute its own Settings section by declaring
+   * `view.settings = { label, render }` on its spec. Those sections are
+   * registered here rather than in index.html, so a user plugin adds one
+   * without editing any of the app's markup.
+   */
+  function pluginSettingsSections() {
+    const list = window.SCOPE.Plugins?.all?.() || [];
+    return list.filter((p) => p.view?.settings?.label && p.enabled !== false);
+  }
+
+  function mountPluginSettingsNav() {
+    if (!el.nav) return;
+    el.nav.querySelectorAll("[data-plugin-sec]").forEach((n) => n.remove());
+    for (const p of pluginSettingsSections()) {
+      const btn = document.createElement("button");
+      btn.className = "settings-nav-item";
+      btn.type = "button";
+      btn.dataset.sec = `plugin:${p.id}`;
+      btn.dataset.pluginSec = p.id;
+      btn.textContent = p.view.settings.label;
+      btn.addEventListener("click", () => setSection(btn.dataset.sec));
+      el.nav.appendChild(btn);
+    }
+  }
 
   function renderSection(sec) {
     if (!SET) { showLoading(); return; }
+    if (sec.startsWith("plugin:")) {
+      const p = window.SCOPE.Plugins?.get?.(sec.slice(7));
+      const render = p?.view?.settings?.render;
+      if (!p || typeof render !== "function") { renderError("Unknown section"); return; }
+      el.content.innerHTML = `<div class="settings-panel">${render()}</div>`;
+      return;
+    }
     const fn = SECTIONS[sec];
     if (!fn) { renderError("Unknown section"); return; }
     el.content.innerHTML = `<div class="settings-panel">${fn()}</div>`;
@@ -563,6 +597,8 @@
         `<input type="text" class="set-input" value="${esc(defaultProvider)}" list="set-prov-list" data-act="setDefaultProvider">`) +
       `<datalist id="set-prov-list">${providerOptions.map((p) => `<option value="${esc(p)}">`).join("")}</datalist>` +
       field("Thinking level", "resolved at agent start", selectControl(thinks, thinking, 'data-act="setDefaultThinkingLevel"')) +
+      // Git's commit-message model + template live with the Git plugin now — see
+      // its `pluginSettings` popup in Settings → Plugins.
       `<div class="settings-group-div"></div>` +
       `<div class="settings-group-kicker">Enabled models</div>` +
       `<div class="settings-intro">Models the composer dropdown offers. Add a model id (provider/model) to enable it; remove to disable.</div>` +
@@ -918,15 +954,17 @@
     }
   }
 
-  function wireSection(sec) {
-    const panel = el.content.querySelector(".settings-panel");
-    if (!panel) return;
-
-    if (sec === "keys") wireKeys(panel);
-    if (sec === "teams") wireTeams(panel);
-
+  /**
+   * Wire the shared `[data-act]` controls (selects, number/text inputs and
+   * textareas) inside `root` to POST /settings.
+   *
+   * Extracted from wireSection so a plugin's settings popup persists through the
+   * exact same writers as the built-in sections — a plugin only has to emit
+   * markup carrying `data-act`.
+   */
+  function wireDataActs(root) {
     // Selects and number inputs commit on change.
-    panel.querySelectorAll("select[data-act]").forEach((node) =>
+    root.querySelectorAll("select[data-act]").forEach((node) =>
       node.addEventListener("change", () => {
         const act = node.dataset.act;
         if (act === "setMode") {
@@ -937,15 +975,20 @@
       })
     );
 
-    panel.querySelectorAll('input[type="number"][data-act]').forEach((node) =>
+    root.querySelectorAll('input[type="number"][data-act]').forEach((node) =>
       node.addEventListener("change", () => postSettings(node.dataset.act, Number(node.value)))
+    );
+
+    // Multi-line templates commit on blur (change), like the text inputs.
+    root.querySelectorAll("textarea[data-act]").forEach((node) =>
+      node.addEventListener("change", () => postSettings(node.dataset.act, node.value))
     );
 
     // Text inputs. `setDestructiveTools` / `setSkipOrchestratorTools` are
     // comma-separated lists rendered as text, so split their value into an
     // array before posting (the server expects an array, not a string).
     const LIST_ACTS = new Set(["setDestructiveTools", "setSkipOrchestratorTools"]);
-    panel.querySelectorAll('input[type="text"][data-act]').forEach((node) => {
+    root.querySelectorAll('input[type="text"][data-act]').forEach((node) => {
       node.addEventListener("change", () => {
         const act = node.dataset.act;
         const raw = node.value.trim();
@@ -960,6 +1003,17 @@
         if (e.key === "Enter") { e.preventDefault(); node.blur(); }
       });
     });
+  }
+
+  function wireSection(sec) {
+    const panel = el.content.querySelector(".settings-panel");
+    if (!panel) return;
+
+    if (sec === "keys") wireKeys(panel);
+    if (sec === "teams") wireTeams(panel);
+    if (sec === "plugins") wirePlugins(panel);
+
+    wireDataActs(panel);
 
     panel.querySelectorAll("label.set-toggle").forEach((label) => {
       const input = label.querySelector("input[type=checkbox]");
@@ -1240,6 +1294,166 @@
     }
   }
 
+  // ─── Plugins ──────────────────────────────────────────────────────────────
+  // Pi Scope's features (Chat, Terminal, Review, Checkpoints, Git, Single,
+  // Trajectory) are plugins, and so is anything you write. This section is the
+  // registry's control surface: every plugin is listed with an enable/disable
+  // switch. Disabling one hides its header view and, server-side, refuses the
+  // routes that plugin owns (see apps/scope-server/plugins.ts).
+  function renderPlugins() {
+    const snap = SET.plugins;
+    const plugins = Array.isArray(snap?.plugins) ? snap.plugins : [];
+    const dir = snap?.pluginsDir || "~/.pi/scope/plugins";
+
+    const row = (p) => {
+      const badges =
+        `<span class="set-scope set-scope-${p.source === "builtin" ? "global" : "project"}" ` +
+        `title="${esc(p.source === "builtin" ? "Bundled with Pi Scope" : "Installed by you")}">${esc(p.source)}</span>` +
+        (p.core ? `<span class="set-scope set-scope-none" title="Core plugin — cannot be disabled">core</span>` : "") +
+        `<span class="set-scope set-scope-none">v${esc(p.version || "0")}</span>` +
+        (p.hasServer ? `<span class="set-scope set-scope-none" title="Ships a server module">server</span>` : "") +
+        (p.hasClient ? `<span class="set-scope set-scope-none" title="Ships a client bundle">client</span>` : "");
+      const toggle = p.core
+        ? `<span class="set-chip on" title="Always enabled — hosts the plugin manager">always on</span>`
+        : `<label class="set-toggle" data-plugin-toggle="${esc(p.id)}"><input type="checkbox"${p.enabled ? " checked" : ""}>` +
+          `<span class="set-toggle-track"><span class="set-toggle-knob"></span></span>` +
+          `<span class="set-toggle-label">${p.enabled ? "On" : "Off"}</span></label>`;
+      // A plugin whose client spec declares `pluginSettings` gets a gear on its
+      // row; clicking it opens a popup with the plugin's own options.
+      const hasOpts = typeof window.SCOPE.Plugins?.get?.(p.id)?.pluginSettings?.render === "function";
+      const gear = hasOpts
+        ? `<button type="button" class="btn-sm set-plugin-cfg" data-plugin-config="${esc(p.id)}" ` +
+          `title="Settings for ${esc(p.name || p.id)}">⚙ Settings</button>`
+        : "";
+      const control = `<span class="set-plugin-controls">${toggle}${gear}</span>`;
+      const err = p.error
+        ? `<div class="set-field-hint" style="color:var(--red)">load error: ${esc(p.error)}</div>`
+        : "";
+      return field(
+        esc(p.name || p.id) + " " + badges,
+        esc(p.description || "") + (p.dir ? ` <code>${esc(p.dir)}</code>` : ""),
+        control
+      ) + err;
+    };
+
+    const body = plugins.length
+      ? plugins.map(row).join("")
+      : `<div class="settings-empty-sub">No plugins found. Add one under <code>${esc(dir)}</code>.</div>`;
+
+    return (
+      `<div class="settings-group">` +
+      `<div class="settings-group-kicker">Plugins</div>` +
+      `<h2 class="settings-group-title">features ${scopeBadge("global")}</h2>` +
+      `<div class="settings-intro">Every Pi Scope feature is a plugin. Toggle one off to remove its view and refuse its server routes. ` +
+      `Drop your own plugin under <code>${esc(dir)}</code> — a folder with <code>plugin.json</code> plus an optional ` +
+      `<code>server.js</code> and <code>client.js</code> — and it shows up here. See <code>plugins/README.md</code>.</div>` +
+      `<div style="margin-bottom:10px"><button type="button" class="btn-sm" data-plugin-reload="1" ` +
+      `title="Re-scan the plugin directories and re-activate server modules">⟳ Reload plugins</button></div>` +
+      body +
+      `</div>`
+    );
+  }
+
+  function wirePlugins(panel) {
+    panel.querySelectorAll("label[data-plugin-toggle]").forEach((label) => {
+      const input = label.querySelector("input[type=checkbox]");
+      if (!input) return;
+      input.addEventListener("change", async () => {
+        const id = label.dataset.pluginToggle;
+        const on = input.checked;
+        const lbl = label.querySelector(".set-toggle-label");
+        if (lbl) lbl.textContent = on ? "On" : "Off";
+        const { res, data } = await S.api("/plugins", {}, { action: on ? "enable" : "disable", id });
+        if (!res.ok || !data) {
+          toast(data?.error || "Failed to update plugin", true);
+          input.checked = !on;
+          if (lbl) lbl.textContent = !on ? "On" : "Off";
+          return;
+        }
+        SET.plugins = data;
+        toast(on ? "Plugin enabled" : "Plugin disabled");
+        // The header nav is rendered from the client registry — resync it so a
+        // disabled view's button disappears immediately.
+        try { await window.SCOPE.Plugins?.sync?.(); } catch { /* nav stays put */ }
+      });
+    });
+    panel.querySelectorAll("[data-plugin-reload]").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        const { res, data } = await S.api("/plugins", {}, { action: "reload" });
+        if (!res.ok || !data) { toast(data?.error || "Reload failed", true); return; }
+        SET.plugins = data;
+        try { await window.SCOPE.Plugins?.sync?.(); } catch { /* nav stays put */ }
+        setSection(activeSec, true);
+        toast("Plugins reloaded");
+      })
+    );
+    panel.querySelectorAll("[data-plugin-config]").forEach((btn) =>
+      btn.addEventListener("click", () => openPluginSettings(btn.dataset.pluginConfig))
+    );
+  }
+
+  // ─── Plugin settings popup ────────────────────────────────────────────────
+  /**
+   * A plugin may declare `pluginSettings = { render, onMount }` on its client
+   * spec. Its row in Settings → Plugins then shows a gear that opens this popup.
+   * `render(ctx)` returns the markup and `onMount(panel, ctx)` wires it; `ctx`
+   * hands the plugin the settings snapshot, the shared `field()` helper, `esc`
+   * and `wire()` — so its controls persist through the same POST /settings
+   * writers every built-in section uses. Distinct from `view.settings`, which
+   * contributes a whole left-nav section instead.
+   */
+  function pluginSettingsCtx() {
+    return { settings: SET, field, esc, wire: wireDataActs, toast, postSettings };
+  }
+
+  function openPluginSettings(id) {
+    const p = window.SCOPE.Plugins?.get?.(id);
+    const render = p?.pluginSettings?.render;
+    if (!p || typeof render !== "function") { toast("This plugin has no settings", true); return; }
+    closePluginSettings();
+
+    const ctx = pluginSettingsCtx();
+    let markup = "";
+    try { markup = render(ctx) || ""; }
+    catch (e) {
+      console.error("[settings] plugin settings render failed", e);
+      toast("Could not open plugin settings", true);
+      return;
+    }
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "plugin-settings-backdrop";
+    backdrop.id = "plugin-settings-backdrop";
+    backdrop.innerHTML =
+      `<div class="plugin-settings-modal" role="dialog" aria-modal="true" ` +
+        `aria-label="${esc(p.name || p.id)} settings">` +
+        `<div class="plugin-settings-head">` +
+          `<span class="plugin-settings-title">${esc(p.name || p.id)} ` +
+            `<span class="plugin-settings-sub">settings</span></span>` +
+          `<button type="button" class="plugin-settings-close" aria-label="Close">×</button>` +
+        `</div>` +
+        `<div class="plugin-settings-body">${markup}</div>` +
+      `</div>`;
+    document.body.appendChild(backdrop);
+
+    // Backdrop click (outside the modal) and Escape close it.
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) closePluginSettings(); });
+    backdrop.querySelector(".plugin-settings-close")?.addEventListener("click", closePluginSettings);
+    document.addEventListener("keydown", pluginSettingsEsc);
+
+    try { p.pluginSettings.onMount?.(backdrop.querySelector(".plugin-settings-body"), ctx); }
+    catch (e) { console.error("[settings] plugin settings onMount failed", e); }
+  }
+
+  function closePluginSettings() {
+    document.getElementById("plugin-settings-backdrop")?.remove();
+    document.removeEventListener("keydown", pluginSettingsEsc);
+  }
+
+  function pluginSettingsEsc(e) {
+    if (e.key === "Escape") closePluginSettings();
+  }
+
   // ─── Toast ────────────────────────────────────────────────────────────────
   function toast(msg, isError) {
     let t = $("#settings-toast");
@@ -1262,6 +1476,15 @@
     if (el.nav) el.nav.querySelectorAll(".settings-nav-item").forEach((b) =>
       b.addEventListener("click", () => setSection(b.dataset.sec))
     );
+    // Plugin-contributed sections appear once the client registry has synced
+    // with the server's plugin config.
+    mountPluginSettingsNav();
+    window.addEventListener("scope:plugins-ready", () => {
+      mountPluginSettingsNav();
+      // A user plugin's options appear only once its client bundle has loaded —
+      // refresh the list so a late plugin gets its gear too.
+      if (activeSec === "plugins" && SET) setSection("plugins", true);
+    });
   }
 
   function onView() {

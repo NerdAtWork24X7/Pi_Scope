@@ -16,6 +16,7 @@
   const commitMsg = $("#git-commit-msg");
   const amendCB = $("#git-amend");
   const btnCommit = $("#btn-git-commit");
+  const btnGenMsg = $("#btn-git-gen-msg");
   const btnStageAll = $("#btn-git-stage-all");
   const btnUnstageAll = $("#btn-git-unstage-all");
   const btnFetch = $("#btn-git-fetch");
@@ -385,6 +386,24 @@
     setStatus("committed " + (data.sha || ""));
     await loadStatus();
     if (activeTab === "history") loadHistory();
+  }
+  // Draft a commit message from the pending diff with the model configured in
+  // Settings → Models (server-side; falls back to the agent's default model).
+  async function generateMessage() {
+    const cwd = selectedCwd(); if (!cwd) return;
+    if (btnGenMsg) { btnGenMsg.disabled = true; btnGenMsg.textContent = "⟳ generating…"; }
+    setStatus("generating a commit message…");
+    try {
+      const { res, data } = await api("/git/commit-message", {}, { cwd });
+      if (!res.ok || !data.ok) { setStatus(data.error || "could not generate a message", true); return; }
+      commitMsg.value = data.message;
+      commitMsg.focus();
+      setStatus(`drafted with ${data.model} (from ${data.source})`);
+    } catch (err) {
+      setStatus("could not generate a message: " + String(err?.message || err), true);
+    } finally {
+      if (btnGenMsg) { btnGenMsg.disabled = false; btnGenMsg.textContent = "✨ generate"; }
+    }
   }
   async function remoteOp(kind) {
     const cwd = selectedCwd(); if (!cwd) return;
@@ -1383,6 +1402,7 @@
   // ─── Wiring ───────────────────────────────────────────────────────────────
   btnRefresh.onclick = loadStatus;
   btnCommit.onclick = commit;
+  if (btnGenMsg) btnGenMsg.onclick = generateMessage;
   btnStageAll.onclick = () => stage(null, true);
   btnUnstageAll.onclick = () => {
     const staged = repo.files.filter((f) => f.section === "staged").map((f) => f.path);

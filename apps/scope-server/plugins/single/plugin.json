@@ -1,0 +1,13 @@
+{
+  "id": "single",
+  "name": "Single",
+  "description": "The complete forensic event timeline for a session, live over SSE.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "serverRoutes": [],
+  "nav": {
+    "label": "Single",
+    "order": 60,
+    "group": "timeline"
+  }
+}

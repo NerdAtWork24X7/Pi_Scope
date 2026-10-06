@@ -37,7 +37,9 @@ function loadURLState() {
   if (!h) return;
   const p = new URLSearchParams(h);
   if (p.has("view")) STATE.view = p.get("view");
-  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat", "settings"].includes(STATE.view)) STATE.view = "chat";
+  // View names come from the plugin registry — a plugin adds a view and its
+  // `#view=<id>` deep link starts working with no change here.
+  if (!window.SCOPE.Plugins?.get(STATE.view)) STATE.view = "chat";
   if (p.has("sid")) STATE.selectedSessionId = p.get("sid");
 }
 
@@ -59,10 +61,6 @@ const liveDot = $("#live-dot");
 const liveLabel = $("#live-label");
 const searchBox = $("#search-box");
 const filterChips = $("#filter-chips");
-const singlePane = $("#single-pane");
-const filesPane = $("#files-pane");
-const checkpointsPane = document.getElementById("checkpoints-pane");
-const chatPane = document.getElementById("chat-pane");
 const headerBreadcrumb = $("#header-breadcrumb");
 const btnExpandAll = $("#btn-expand-all");
 const btnCollapseAll = $("#btn-collapse-all");
@@ -320,48 +318,42 @@ window.toggleTheme = function() {
   setTheme(STATE.theme === "dark" ? "light" : "dark");
 };
 
+/**
+ * Switch the active view.
+ *
+ * Every view is a plugin (see plugins-builtin.js / plugins.js): this function
+ * no longer knows any view by name. It hides the panes of the plugins that are
+ * not active, shows the active one, tints its nav button, and fires the
+ * plugin's own onHide/onShow hooks. Adding a view is a register() call, not an
+ * edit here.
+ */
 window.setView = function(mode) {
-  if (!["single", "trajectory", "terminal", "files", "checkpoints", "git", "chat", "settings"].includes(mode)) mode = "single";
+  const P = window.SCOPE.Plugins;
+  let spec = P?.get(mode);
+  if (!spec || !spec.view || spec.enabled === false) {
+    // Unknown or disabled view (e.g. a plugin was turned off in Settings while
+    // it was open, or a stale ?view= link) — land on the first usable view.
+    const fallback = P?.views?.()[0]?.id;
+    mode = fallback || "chat";
+    spec = P?.get(mode);
+  }
+  const prev = P?.get(STATE.view);
   STATE.view = mode;
   localStorage.setItem("scope-view", mode);
-  document.body.classList.toggle("layout-chat", mode === "chat");
-  document.body.classList.toggle("layout-settings", mode === "settings");
-  $("#btn-single").classList.toggle("active", mode === "single");
-  $("#btn-trajectory")?.classList.toggle("active", mode === "trajectory");
-  $("#btn-terminal")?.classList.toggle("active", mode === "terminal");
-  singlePane.style.display = mode === "single" ? "" : "none";
-  const trajectoryPane = document.getElementById("trajectory-pane");
-  if (trajectoryPane) trajectoryPane.style.display = mode === "trajectory" ? "flex" : "none";
-  const terminalPane = document.getElementById("terminal-pane");
-  if (terminalPane) terminalPane.style.display = mode === "terminal" ? "" : "none";
-  $("#btn-files")?.classList.toggle("active", mode === "files");
-  if (filesPane) filesPane.style.display = mode === "files" ? "" : "none";
-  if (mode === "files") window.__filesOnView?.();
-  $("#btn-checkpoints")?.classList.toggle("active", mode === "checkpoints");
-  if (checkpointsPane) checkpointsPane.style.display = mode === "checkpoints" ? "flex" : "none";
-  if (mode === "checkpoints") window.__checkpointsOnView?.();
-  $("#btn-git")?.classList.toggle("active", mode === "git");
-  const gitPane = document.getElementById("git-pane");
-  if (gitPane) gitPane.style.display = mode === "git" ? "flex" : "none";
-  if (mode === "git") window.__gitOnView?.();
-  $("#btn-chat")?.classList.toggle("active", mode === "chat");
-  if (chatPane) chatPane.style.display = mode === "chat" ? "flex" : "none";
-  if (mode === "chat") window.__chatOnView?.();
-  $("#btn-settings")?.classList.toggle("active", mode === "settings");
-  const settingsPane = document.getElementById("settings-pane");
-  if (settingsPane) settingsPane.style.display = mode === "settings" ? "flex" : "none";
-  if (mode === "settings") window.__settingsOnView?.();
-  if (mode === "trajectory") window.__trajectoryOnView?.();
+  document.body.classList.toggle("layout-chat", spec?.layout === "chat");
+  document.body.classList.toggle("layout-settings", spec?.layout === "settings");
+
+  for (const p of (P?.all?.() ?? [])) {
+    const pane = p.view?.pane ? document.querySelector(p.view.pane) : null;
+    if (pane) pane.style.display = p.id === mode ? (p.view.display || "") : "none";
+    const btn = document.getElementById("btn-" + p.id);
+    if (btn) btn.classList.toggle("active", p.id === mode);
+  }
+
+  if (prev && prev.id !== mode) prev.view?.onHide?.();
   if (sessionSubnav) sessionSubnav.style.display = (mode === "single" && STATE.selectedSessionId) ? "flex" : "none";
   renderSessions();
-  if (mode === "single" && STATE.selectedSessionId) {
-    setSingleSessionControlsVisible(true);
-    loadSession(STATE.selectedSessionId);
-  } else if (mode === "single") {
-    setSingleSessionControlsVisible(false);
-  }
-  if (mode === "terminal") window.__terminalOnShow?.();
-  else window.__terminalOnHide?.();
+  spec?.view?.onShow?.();
   saveURLState();
 };
 
@@ -396,11 +388,9 @@ async function fetchSessions() {
     // (avoids a needless teardown/re-create on every 3s poll).
     const sig = sessions.map((s) => [s.session_id, s.event_count, s.last_ts, s.agent_name, s.model, s.cwd].join(":")).join("|");
     if (sig !== STATE.sessionsSig) { STATE.sessionsSig = sig; renderSessions(); }
-    if (STATE.view === "files") window.__filesOnSessions?.();
-    if (STATE.view === "checkpoints") window.__checkpointsOnSessions?.();
-    if (STATE.view === "git") window.__gitOnSessions?.();
-    if (STATE.view === "trajectory") window.__trajectoryOnSessions?.();
-    if (STATE.view === "chat") window.__chatOnSessions?.();
+    // Let the active plugin react to a fresh session list (a plugin view only
+    // refreshes while it is on screen — the hook is the plugin's own).
+    window.SCOPE.Plugins?.activeView?.()?.view?.onSessions?.();
     // Batch-fetch stats for all visible sessions (one request, not N)
     var newSids = sessions.map(function(s){return s.session_id}).filter(function(id){return !STATE.sessionStats[id]});
     if (newSids.length) {
@@ -421,7 +411,7 @@ async function fetchBatchSessionStats(sids) {
     var stats = data.stats || {};
     for (var sid in stats) {
       STATE.sessionStats[sid] = stats[sid];
-      if (STATE.view === "trajectory") window.__trajectoryStatsUpdate?.(sid, stats[sid]);
+      window.SCOPE.Plugins?.activeView?.()?.view?.onStats?.(sid, stats[sid]);
       if (sid === STATE.selectedSessionId) scheduleAgentSubnav();
     }
     // Stats can flip a workspace's "⚠ review" flag — refresh the rail once for
@@ -438,7 +428,7 @@ async function fetchSessionStats(sid) {
     const stats = await res.json();
     STATE.sessionStats[sid] = stats;
     renderSessions(); // stats can flip the workspace "⚠ review" flag
-    if (STATE.view === "trajectory") window.__trajectoryStatsUpdate?.(sid, stats);
+    window.SCOPE.Plugins?.activeView?.()?.view?.onStats?.(sid, stats);
     if (sid === STATE.selectedSessionId) scheduleAgentSubnav();
   } catch { /* ignore */ }
 }
@@ -1136,7 +1126,7 @@ function updateSSEFilter() {
 
 function connectSSE() {
   const params = {};
-  if ((STATE.view === "single" || STATE.view === "trajectory") && STATE.selectedSessionId) params.session_id = STATE.selectedSessionId;
+  if (window.SCOPE.Plugins?.activeView?.()?.view?.sseSession && STATE.selectedSessionId) params.session_id = STATE.selectedSessionId;
   if (STATE.token) params.token = STATE.token;
   const url = apiUrl("/events/stream", params);
 
@@ -1144,7 +1134,7 @@ function connectSSE() {
   es.addEventListener("hello", () => {
     setLive(true);
     STATE.sseReconnectDelay = 1000;
-    if (STATE.view === "trajectory") window.__trajectoryOnReconnect?.();
+    window.SCOPE.Plugins?.activeView?.()?.view?.onReconnect?.();
   });
   es.addEventListener("event", (msg) => {
     try {
@@ -1158,8 +1148,7 @@ function connectSSE() {
       // Keep session list live: patch last_ts (and has_shutdown on lifecycle
       // events) so the sidebar status dots reflect real-time activity.
       patchSessionFromSSE(evt);
-      if (STATE.view === "single") appendEventSingle(evt);
-      else if (STATE.view === "trajectory") window.__trajectoryOnEvent?.(evt);
+      window.SCOPE.Plugins?.activeView?.()?.view?.onEvent?.(evt);
     } catch { /* ignore */ }
   });
   es.onerror = () => {
@@ -1232,6 +1221,21 @@ Object.assign(window.SCOPE, {
   deleteSession,
 });
 
+// ─── View hooks consumed by the plugin specs ─────────────────────────────────
+// The Single view's internals (its controls, its live append path) stay in
+// app.js because they own STATE.events; plugins-builtin.js wires them into the
+// "single" plugin through these hooks, the same way every other view exposes
+// __filesOnView / __gitOnView from its own script.
+window.__singleOnShow = function () {
+  if (STATE.selectedSessionId) {
+    setSingleSessionControlsVisible(true);
+    loadSession(STATE.selectedSessionId);
+  } else {
+    setSingleSessionControlsVisible(false);
+  }
+};
+window.__singleOnEvent = appendEventSingle;
+
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
 loadURLState();
@@ -1251,6 +1255,10 @@ window.__setCwd = function (cwd) {
 // triggers its first render alongside the session fetch.
 window.SCOPE.WorkspaceRail?.mount();
 setView(STATE.view);
+// Reconcile with the server's plugin config: hide disabled features, load any
+// user plugin client bundles, and re-render the nav. Async and non-fatal — the
+// built-in plugins are already registered, so the app works even if this fails.
+window.SCOPE.Plugins?.sync?.();
 applySidebarCollapsed();
 fetchSessions();
 connectSSE();
@@ -1265,9 +1273,7 @@ function setCwd(cwd) {
   try { localStorage.setItem("scope-cwd", STATE.cwd); } catch {}
   const inp = document.getElementById("terminal-cwd");
   if (inp && inp.value !== STATE.cwd) inp.value = STATE.cwd;
-  if (STATE.view === "files") window.__filesOnView?.();
-  else if (STATE.view === "checkpoints") window.__checkpointsOnView?.();
-  else if (STATE.view === "git") window.__gitOnView?.();
+  window.SCOPE.Plugins?.activeView?.()?.view?.onCwd?.();
   // The rail highlights the shared cwd as the active workspace — keep it in
   // step when the cwd arrives from the shell / health probe rather than a click.
   renderSessions();
@@ -1282,9 +1288,7 @@ async function initCwd() {
     if (data.cwd) {
       STATE.cwd = data.cwd;
       if (inp) inp.value = STATE.cwd;
-      if (STATE.view === "files") window.__filesOnView?.();
-      else if (STATE.view === "checkpoints") window.__checkpointsOnView?.();
-      else if (STATE.view === "git") window.__gitOnView?.();
+      window.SCOPE.Plugins?.activeView?.()?.view?.onCwd?.();
       renderSessions();
     }
   } catch {}

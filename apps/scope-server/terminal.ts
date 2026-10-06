@@ -25,6 +25,11 @@ interface TerminalConfig {
   onCwdChange?: (ws: WebSocket, cwd: string) => void;
   /** Called when a terminal connection closes. */
   onClose?: (ws: WebSocket) => void;
+  /**
+   * Plugin gate — when this returns false the Terminal feature plugin is
+   * disabled and upgrade requests are refused. Absent means "always enabled".
+   */
+  isEnabled?: () => boolean;
 }
 
 // ─── Herdr integration ────────────────────────────────────────────────────
@@ -120,6 +125,11 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     if (url.pathname !== "/terminal") { socket.destroy(); return; }
+    if (cfg.isEnabled && !cfg.isEnabled()) {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
+    }
     if (url.searchParams.get("token") !== cfg.token) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();

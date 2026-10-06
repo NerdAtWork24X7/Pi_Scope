@@ -1,0 +1,16 @@
+{
+  "id": "checkpoints",
+  "name": "Checkpoints",
+  "description": "Git-backed save points: label a moment and restore it with one click.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "serverRoutes": [
+    "/checkpoints"
+  ],
+  "nav": {
+    "label": "Checkpoints",
+    "order": 40,
+    "group": "session"
+  },
+  "server": "server.ts"
+}

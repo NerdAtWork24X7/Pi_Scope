@@ -1,0 +1,16 @@
+{
+  "id": "files",
+  "name": "Review",
+  "description": "Scan the working tree, diff any file side by side, and edit it in place.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "serverRoutes": [
+    "/files"
+  ],
+  "nav": {
+    "label": "Review",
+    "order": 30,
+    "group": "session"
+  },
+  "server": "server.ts"
+}

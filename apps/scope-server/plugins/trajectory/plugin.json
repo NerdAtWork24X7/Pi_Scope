@@ -1,0 +1,13 @@
+{
+  "id": "trajectory",
+  "name": "Trajectory",
+  "description": "Fold events into turns with per-record time, cost and token columns.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "serverRoutes": [],
+  "nav": {
+    "label": "Trajectory",
+    "order": 70,
+    "group": "timeline"
+  }
+}

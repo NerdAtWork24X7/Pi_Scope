@@ -1,0 +1,15 @@
+{
+  "id": "terminal",
+  "name": "Terminal",
+  "description": "A real shell on the agent host, embedded in the browser over WebSocket.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "serverRoutes": [
+    "/terminal"
+  ],
+  "nav": {
+    "label": "Terminal",
+    "order": 20,
+    "group": "session"
+  }
+}

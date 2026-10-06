@@ -25,17 +25,10 @@
     </div>
     <div id="header-center">
       <span id="header-breadcrumb"></span>
-      <div class="view-toggle">
-        <button id="btn-chat" onclick="reloadChat()" title="Reload the chat page (refetches the latest chat code)">Chat</button>
-        <button id="btn-terminal" onclick="setView('terminal')">Terminal</button>
-        <button id="btn-files" onclick="setView('files')">Review</button>
-        <button id="btn-checkpoints" onclick="setView('checkpoints')">Checkpoints</button>
-        <button id="btn-git" onclick="setView('git')">Git</button>
-        <span class="view-toggle-sep" aria-hidden="true"></span>
-        <button id="btn-single" class="active" onclick="setView('single')">Single</button>
-        <button id="btn-trajectory" onclick="setView('trajectory')">Trajectory</button>
-        <button id="btn-settings" onclick="setView('settings')">Settings</button>
-      </div>
+      <!-- View buttons are rendered from the plugin registry (plugins.js).
+           Every view — built-in or user-installed — is a plugin, so the nav is
+           never hand-maintained here. -->
+      <div class="view-toggle" id="view-toggle"></div>
     </div>
     <div id="header-right">
       <button id="btn-phone" title="Open Pi Scope on your phone — scan the QR on this screen"
@@ -45,6 +38,9 @@
         <span id="live-dot" class="red"></span>
         <span id="live-label">off</span>
       </div>
+      <!-- Right-slot nav items (plugins whose nav asks for slot:"right", e.g.
+           Settings) render here as icon buttons, next to the live status. -->
+      <div id="header-actions" class="header-actions"></div>
     </div>
   </header>
 
@@ -303,6 +299,8 @@
       <div class="git-commitbar">
         <textarea id="git-commit-msg" placeholder="Commit message (Ctrl/⌘+Enter to commit)" rows="2"></textarea>
         <label class="git-amend" title="Amend the last commit"><input type="checkbox" id="git-amend"> amend</label>
+        <button class="btn-sm" id="btn-git-gen-msg" type="button"
+          title="Draft a commit message from the pending diff with the AI model configured in Settings → Models">✨ generate</button>
         <button class="btn-sm" id="btn-git-commit" type="button" title="Commit staged changes">✓ Commit</button>
       </div>
     </section>
@@ -423,6 +421,7 @@
           <button class="settings-nav-item" data-sec="keys" type="button">API Keys</button>
           <button class="settings-nav-item" data-sec="workspaces" type="button">Workspaces</button>
           <button class="settings-nav-item" data-sec="pi" type="button">pi</button>
+          <button class="settings-nav-item" data-sec="plugins" type="button">Plugins</button>
         </nav>
         <div class="settings-content" id="settings-content">
           <div class="settings-empty">Loading settings…</div>
@@ -474,6 +473,10 @@
   </div>
 
   <script src="helpers.js"></script>
+  <!-- Plugin host + built-in feature plugins. Both run before app.js so the
+       nav and every view spec exist by the time the app boots. -->
+  <script src="plugins.js"></script>
+  <script src="plugins-builtin.js"></script>
   <script src="rail.js"></script>
   <script src="app.js"></script>
   <script src="vendor/qrcode-generator.js"></script>

@@ -174,11 +174,17 @@
       line-height: 1.1
     }
 
+    /* The centre block is flex:1 but must be allowed to shrink below its content
+       width (min-width:0) and wrap its buttons, otherwise a narrow window makes
+       the nav push the header's right cluster — live status + Settings — off the
+       edge instead of wrapping. */
     #header-center {
       display: flex;
       align-items: center;
       gap: 12px;
       flex: 1;
+      min-width: 0;
+      flex-wrap: wrap;
       justify-content: center
     }
 
@@ -186,6 +192,7 @@
       display: flex;
       align-items: center;
       gap: 10px;
+      flex-shrink: 0;
       font-size: 16.5px
     }
 
@@ -197,6 +204,8 @@
 
     .view-toggle {
       display: flex;
+      flex-wrap: wrap;
+      min-width: 0;
       border: 1px solid var(--border);
       border-radius: 4px;
       overflow: hidden
@@ -231,6 +240,44 @@
       align-items: center;
       gap: 5px;
       justify-content: flex-start
+    }
+
+    /* Right-slot nav actions (Settings): icon buttons in the header's top-right
+       cluster, next to the live status. Hidden while empty so it adds no gap. */
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px
+    }
+
+    .header-actions:empty {
+      display: none
+    }
+
+    .header-icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: var(--pill-bg);
+      color: var(--muted);
+      cursor: pointer;
+      line-height: 1
+    }
+
+    .header-icon-btn:hover {
+      color: var(--text);
+      border-color: var(--accent)
+    }
+
+    .header-icon-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--on-accent)
     }
 
     #age-ticker {
@@ -8657,6 +8704,87 @@ body.set-cost-resizing * { user-select: none; }
   margin-right: 8px;
 }
 .settings-toast.err::before { background: var(--red); }
+
+/* ─── Plugin settings popup (Settings → Plugins → ⚙ Settings) ──────────────
+ * A plugin may declare `pluginSettings = { render, onMount }` on its client spec;
+ * its row in the Plugins list then grows a gear that opens this modal. The
+ * fields inside use the same `[data-act]` writers as the built-in sections, so
+ * they need no styling of their own beyond the shared `.set-field` chrome. */
+.set-plugin-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.set-plugin-cfg {
+  white-space: nowrap;
+}
+
+.plugin-settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(0, 0, 0, .55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8vh 16px 16px;
+  overflow-y: auto;
+}
+
+.plugin-settings-modal {
+  width: min(640px, 96vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .55);
+  overflow: hidden;
+}
+
+.plugin-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.plugin-settings-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.plugin-settings-sub {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.plugin-settings-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+
+.plugin-settings-close:hover {
+  color: var(--text);
+}
+
+.plugin-settings-body {
+  padding: 14px 16px 18px;
+  overflow-y: auto;
+}
 
 /* Responsive: stack nav above content on small screens */
 @media (max-width: 720px) {

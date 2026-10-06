@@ -1,0 +1,16 @@
+{
+  "id": "git",
+  "name": "Git",
+  "description": "A full git client — stage, commit, history graph, branches, stashes, remotes.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "serverRoutes": [
+    "/git"
+  ],
+  "nav": {
+    "label": "Git",
+    "order": 50,
+    "group": "session"
+  },
+  "server": "server.ts"
+}

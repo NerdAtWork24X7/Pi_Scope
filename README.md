@@ -150,7 +150,9 @@ instant, safe, and reversible.
 Stage, unstage, discard, commit (with amend), push, pull, fetch — plus **History** with a
 commit-lane graph, **Branches**, **Stashes**, **Remotes**, and **Submodules**. Click any
 commit to see its detail and diff. Cherry-pick, revert, rebase, or reset from the graph's
-context menu.
+context menu. Stuck on a message? **✨ generate** drafts one from the pending diff (staged, or
+the working tree when nothing is staged) — pick the model and edit the instruction template in
+**Settings → Models**; both default to the agent's model and a Conventional Commits prompt.
 
 <p align="center">
   <img src="docs/shots/git-dark.png" alt="Git history" width="880" />
@@ -167,11 +169,22 @@ context menu.
 ### ⚙️ Settings — the whole agent, configured from the browser
 
 Manage your **Agent** defaults, **Teams**, **Models** (with the cost catalog), **Skills**,
-**Extensions**, and **Workspaces** — mirroring your `pi` config, editable from the UI.
+**Extensions**, **Workspaces**, and **Plugins** — mirroring your `pi` config, editable from the UI.
 
 <p align="center">
   <img src="docs/shots/settings-dark.png" alt="Settings" width="880" />
 </p>
+
+### 🧩 Plugins — every feature, and yours too
+
+Every header view — **Chat, Terminal, Review, Checkpoints, Git, Single, Trajectory** — is a
+**plugin**. Enable or disable any of them from **Settings → Plugins**: the view disappears and,
+server-side, the routes that feature owns are refused. You can add your own plugin by dropping a
+folder with a `plugin.json` (plus an optional `server.js` / `client.js`) into
+`~/.pi/scope/plugins/`: it gets a header button and view, its own HTTP routes on the server, a hook
+on every ingested event, and its own persistent JSON state. See
+[`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md) and the working
+example in [`examples/plugins/hello-insights/`](examples/plugins/hello-insights/).
 
 ---
 
@@ -354,8 +367,14 @@ documented in [`extension/README.md`](extension/README.md).
 
 - **Demo data:** [`docs/seed-demo.mjs`](docs/seed-demo.mjs) — the script that created the
   screenshots above.
-- **UI:** vanilla-JS, zero frameworks — `apps/scope-server/public/`. Each view is one file
-  (`single`, `trajectory`, `chat`, `terminal`, `files`, `checkpoints`, `git`, `settings`).
+- **UI:** vanilla-JS, zero frameworks — `apps/scope-server/public/`. Views are plugins:
+  `plugins.js` is the client host/registry, `plugins-builtin.js` registers the shipped views
+  (`single`, `trajectory`, `chat`, `terminal`, `files`, `checkpoints`, `git`, `settings`), and
+  `app.js` `setView()` is registry-driven — it knows no view by name.
+- **Plugins:** `apps/scope-server/plugins.ts` is the server host (discovery, enable/disable,
+  route gating, event hooks, per-plugin storage); `apps/scope-server/plugins/` holds the built-in
+  feature manifests; `examples/plugins/` has an installable example. Docs:
+  [`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md).
 - **Server:** single-file Node HTTP + SSE + SQLite — `apps/scope-server/server.ts`.
 
 ---

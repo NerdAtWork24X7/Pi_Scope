@@ -761,6 +761,48 @@ export function stopChat(id: string): boolean {
   return true;
 }
 
+// ANSI escape sequences (SGR colours, cursor moves) that a print-mode pi run
+// may emit alongside its text answer.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+
+/**
+ * One-shot, non-interactive pi run (`--print`) that drafts a commit message from
+ * a prepared prompt.
+ *
+ * Used by Git → “✨ generate”. It deliberately reuses `chatChildEnv` so the call
+ * runs with the same API keys / PATH / venv the Chat view gets — a commit
+ * message must not fail because the server was launched from a GUI session that
+ * never sourced the user's shell rc. `--no-session` keeps this housekeeping run
+ * out of pi's session store.
+ *
+ * Resolves to the trimmed plain-text answer; throws when pi fails with no
+ * output at all (the caller surfaces the stderr text).
+ */
+export async function generateCommitMessage(opts: {
+  cwd: string;
+  model: string;
+  prompt: string;
+  timeoutMs?: number;
+}): Promise<string> {
+  const { cwd, model, prompt } = opts;
+  const args = ["--print", "--no-session", "--model", model, prompt];
+  const proc = spawn(PI_BIN, args, { cwd, env: chatChildEnv(cwd), stdio: ["ignore", "pipe", "pipe"] });
+
+  let out = "";
+  let err = "";
+  proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+  proc.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+
+  const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already gone */ } }, opts.timeoutMs ?? 60_000);
+  const code = await new Promise<number>((resolve) => proc.on("close", (c) => resolve(c ?? -1)));
+  clearTimeout(timer);
+
+  const text = out.replace(ANSI_RE, "").trim();
+  if (!text) throw new Error(err.trim() || `pi exited with code ${code}`);
+  return text;
+}
+
 /** Kill every chat subprocess (called on server shutdown). */
 export function shutdownChatSessions(): void {
   for (const [, sess] of sessions) {
