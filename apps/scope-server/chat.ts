@@ -777,7 +777,16 @@ const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
  * out of pi's session store.
  *
  * Resolves to the trimmed plain-text answer; throws when pi fails with no
- * output at all (the caller surfaces the stderr text).
+ * output at all (the caller surfaces the message).
+ *
+ * pi emits benign startup warnings (e.g. `Warning: No models match pattern …`
+ * for stale settings patterns) on stderr for every run, so those are filtered
+ * out of the error — previously they were reported verbatim as the failure,
+ * which is why a slow/killed run surfaced as "could not generate…: Warning: …"
+ * with no hint that nothing was actually produced. A run that is still silent
+ * at the deadline is killed and reported as a timeout; the window defaults to
+ * 3 minutes (was 1) because the first `pi` of a session can spend a while
+ * refreshing its model catalog before it emits anything.
  */
 export async function generateCommitMessage(opts: {
   cwd: string;
@@ -794,13 +803,38 @@ export async function generateCommitMessage(opts: {
   proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
   proc.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
 
-  const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already gone */ } }, opts.timeoutMs ?? 60_000);
-  const code = await new Promise<number>((resolve) => proc.on("close", (c) => resolve(c ?? -1)));
+  // Overridable so a slow model/provider can be given more room without a code
+  // change (SCOPE_COMMIT_TIMEOUT_MS), e.g. on a heavily loaded machine.
+  const envTimeout = Number(process.env.SCOPE_COMMIT_TIMEOUT_MS);
+  const timeoutMs =
+    opts.timeoutMs ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 180_000);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+  }, timeoutMs);
+  const code = await new Promise<number>((resolve) => {
+    let done = false;
+    const finish = (c: number) => { if (!done) { done = true; resolve(c); } };
+    // `close` fires once every stdio pipe is closed. A killed pi may have left
+    // child processes (extensions) holding those pipes, so after a timeout we
+    // fall back to process `exit` plus a short grace instead of hanging.
+    proc.on("close", (c) => finish(c ?? -1));
+    proc.on("exit", (c) => { if (timedOut) setTimeout(() => finish(c ?? -1), 1500); });
+  });
   clearTimeout(timer);
 
   const text = out.replace(ANSI_RE, "").trim();
-  if (!text) throw new Error(err.trim() || `pi exited with code ${code}`);
-  return text;
+  if (text) return text;
+  if (timedOut) throw new Error(`pi produced no message within ${Math.round(timeoutMs / 1000)}s — the model may be slow or unreachable`);
+  // Keep only the meaningful stderr lines; drop pi's per-run startup warnings.
+  const detail = err
+    .split(/\r?\n/)
+    .map((l) => l.replace(ANSI_RE, "").trim())
+    .filter((l) => l && !/^warning:/i.test(l))
+    .slice(-3)
+    .join(" ");
+  throw new Error(detail || `pi exited with code ${code} and no message`);
 }
 
 /** Kill every chat subprocess (called on server shutdown). */

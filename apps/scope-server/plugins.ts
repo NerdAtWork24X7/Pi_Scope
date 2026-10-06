@@ -248,11 +248,13 @@ export function discover(): PluginRecord[] {
   config = readConfig();
   const disabled = new Set(config.disabled);
 
+  // Scan each root once: the built-in manifests feed both the id lookup (to
+  // tell a built-in from a user plugin) and the merged table below.
   const seen = new Map<string, PluginManifest>();
-  for (const m of scanDir(BUILTIN_DIR, "builtin")) seen.set(m.id, m);
+  const builtinManifests = scanDir(BUILTIN_DIR, "builtin");
+  const builtinIds = new Set(builtinManifests.map((m) => m.id));
+  for (const m of builtinManifests) seen.set(m.id, m);
   for (const m of scanDir(USER_DIR, "user")) seen.set(m.id, m);
-
-  const builtinIds = new Set(scanDir(BUILTIN_DIR, "builtin").map((m) => m.id));
 
   for (const manifest of seen.values()) {
     const source: "builtin" | "user" = builtinIds.has(manifest.id) && !isUserOverride(manifest.id) ? "builtin" : "user";
@@ -361,7 +363,7 @@ function makeApi(record: PluginRecord, host: PluginHost): PluginApi {
     id: record.id,
     dir: record.dir,
     source: record.source,
-    kit: { ...(host.kit ?? {}), validateCwd: host.kit?.validateCwd },
+    kit: { ...(host.kit ?? {}) },
     validateCwd: host.kit?.validateCwd ?? (() => null),
     log: (...args: unknown[]) => console.log(`[plugin:${record.id}]`, ...args),
     route: (method, routePath, handler) => {

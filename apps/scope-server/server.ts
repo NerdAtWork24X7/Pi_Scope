@@ -1181,7 +1181,31 @@ function resolveWithinCwd(cwd: string, file: string): string | null {
   const absFile = path.resolve(absCwd, file);
   const rel = path.relative(absCwd, absFile);
   if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null;
-  return absFile;
+  // The lexical check above rejects ".." segments, but a symlink *inside* the
+  // tree can still point outside it (cwd/link -> /etc). Resolve the real path of
+  // the file — or of its nearest existing ancestor, for a file that does not
+  // exist yet — and require it to stay under the real cwd, so /files/save and
+  // friends cannot be used to write through a symlink out of the sandbox.
+  let realCwd: string;
+  try { realCwd = fs.realpathSync(absCwd); } catch { return null; }
+  let cur = absFile;
+  const tail: string[] = [];
+  for (;;) {
+    let real: string;
+    try {
+      real = fs.realpathSync(cur);
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return null; // no existing ancestor (shouldn't happen)
+      tail.push(path.basename(cur));
+      cur = parent;
+      continue;
+    }
+    const realFile = tail.length ? path.resolve(real, ...tail.reverse()) : real;
+    const rrel = path.relative(realCwd, realFile);
+    if (rrel === "" || rrel.startsWith("..") || path.isAbsolute(rrel)) return null;
+    return absFile;
+  }
 }
 
 // Default file-system sandbox for /files/* and /checkpoints/* endpoints.

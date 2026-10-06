@@ -173,6 +173,8 @@ export function activate(api: any): void {
     const cwd = url.searchParams.get("cwd") ?? "";
     const sha = url.searchParams.get("sha") ?? "";
     if (!cwd || !sha) return jsonResponse({ error: "missing cwd or sha" }, 400);
+    // `sha` becomes a git argument — a leading dash would be read as an option.
+    if (rejectOptionLike(sha)) return jsonResponse({ error: "invalid sha" }, 400);
     const absCwd = validateCwd(cwd);
     if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     const meta = gitTry(absCwd, ["show", "-s", "--date=iso-strict", "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b%x1f%cn%x1f%ce%x1f%cd%x1f%P", sha]);
@@ -375,6 +377,20 @@ export function activate(api: any): void {
       r = gitTry(absCwd, ["switch", "-c", name, ...(startPoint ? [startPoint] : [])]);
     } else if (action === "delete") {
       r = gitTry(absCwd, ["branch", "-D", name]);
+    } else if (action === "checkout-remote") {
+      // `name` is a remote-tracking ref ("origin/feature"). Check out a local
+      // branch that tracks it — reusing an existing local branch of the same
+      // short name when there is one, otherwise creating it with --track.
+      const slash = name.indexOf("/");
+      const local = slash >= 0 ? name.slice(slash + 1) : name;
+      if (!local) return jsonResponse({ error: "missing branch name" }, 400);
+      // Both `name` (the --track ref) and the derived `local` become git
+      // arguments, so a leading dash must never reach them.
+      if (rejectOptionLike(name, local)) return jsonResponse({ error: "invalid branch name" }, 400);
+      const exists = gitTry(absCwd, ["show-ref", "--verify", "--quiet", `refs/heads/${local}`]);
+      r = exists.ok
+        ? gitTry(absCwd, ["switch", local])
+        : gitTry(absCwd, ["switch", "-c", local, "--track", name]);
     } else {
       r = gitTry(absCwd, ["switch", name]);
     }
@@ -396,7 +412,23 @@ export function activate(api: any): void {
       const [name, sha, upstream, date] = line.split("\0");
       branches.push({ name: name ?? "", sha: sha ?? "", upstream: upstream ?? "", date: date ?? "" });
     }
-    return jsonResponse({ ok: true, current: cur.ok ? cur.out.trim() : null, branches });
+    // Remote-tracking branches (refs/remotes/<remote>/<branch>), listed alongside
+    // the local ones so the Branches view mirrors `git branch -a`. Each remote's
+    // symbolic HEAD alias (e.g. origin/HEAD → origin/main) is skipped — it points
+    // at another branch rather than being one.
+    const rr = gitTry(absCwd, ["for-each-ref", "--format=%(refname:lstrip=2)%00%(objectname:short)%00%(creatordate:relative)", "--sort=-committerdate", "refs/remotes"]);
+    const remoteBranches: any[] = [];
+    for (const line of rr.out.split("\n")) {
+      if (!line.trim()) continue;
+      const [ref, sha, date] = line.split("\0");
+      const slash = (ref ?? "").indexOf("/");
+      if (slash <= 0) continue;
+      const remote = ref.slice(0, slash);
+      const short = ref.slice(slash + 1);
+      if (!short || short === "HEAD") continue;
+      remoteBranches.push({ name: ref, remote, short, sha: sha ?? "", date: date ?? "" });
+    }
+    return jsonResponse({ ok: true, current: cur.ok ? cur.out.trim() : null, branches, remoteBranches });
   });
 
   api.route("GET", "/git/remotes", async (ctx) => {
@@ -444,6 +476,9 @@ export function activate(api: any): void {
     const { cwd: absCwd, parsed } = body;
     let remote = typeof parsed.remote === "string" && parsed.remote.trim() ? parsed.remote.trim() : "";
     let branch = typeof parsed.branch === "string" && parsed.branch.trim() ? parsed.branch.trim() : "";
+    // Both become git arguments, so a leading dash would be read as an option
+    // of push/pull/fetch (e.g. remote "--force" or branch "--tags").
+    if (rejectOptionLike(remote, branch)) return jsonResponse({ error: "invalid remote or branch" }, 400);
     // Resolve the current branch name when the client doesn't send one.
     if (!branch) {
       const cur = gitTry(absCwd, ["branch", "--show-current"]);

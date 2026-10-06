@@ -63,10 +63,11 @@ prompts to a third-party cloud.
 
 > Every screenshot below is **real** — taken from a live Pi Scope dashboard with an actual
 > agent session. No mockups, no magic. Captured in **dark theme** 🌙 — light is one click
-> away (the ☀/🌙 toggle in the header); the Single view below shows both.
+> away (the ☀/🌙 toggle in the header); **Chat** and **Single** below show both.
 >
 > 🎬 Prefer video? Watch the feature tour: [Part 1](docs/video/Pi-Scope-5.0.0-features_1.mp4) ·
-> [Part 2](docs/video/Pi-Scope-5.0.0-features_2.mp4) · [Part 3](docs/video/Pi-Scope-5.0.0-features_3.mp4)
+> [Part 2](docs/video/Pi-Scope-5.0.0-features_2.mp4) · [Part 3](docs/video/Pi-Scope-5.0.0-features_3.mp4) ·
+> [Full showcase](docs/video/Pi-Scope-showcase.mp4)
 
 ### 💬 Chat — talk to your agent like it's a teammate
 
@@ -77,8 +78,14 @@ touching the terminal. Pick a model and thinking level, hit **Steer** to interru
 run with a new instruction, or open any session in the full timeline.
 
 <p align="center">
-  <img src="docs/shots/chat-dark.png" alt="Chat view" width="880" />
+  <img src="docs/shots/chat.png" alt="Chat view (light)" width="880" />
 </p>
+
+<p align="center">
+  <img src="docs/shots/chat-dark.png" alt="Chat view (dark)" width="880" />
+</p>
+
+*Light and dark, your choice — same session, one click apart.*
 
 ### ⏱ Single — the complete, forensic timeline
 
@@ -222,7 +229,35 @@ chmod +x Pi-Scope-1.0.0.AppImage
   reuses it instead of starting a second.
 - Build it yourself: `./build-release.sh` → `apps/scope-desktop/dist/Pi-Scope-<version>.AppImage`.
 
-### 🏃 Option B — Run from the git repo (developers)
+### 🚀 Option B — One command (the whole stack)
+
+```bash
+git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
+./Start.sh                               # desktop app (Electron window)
+```
+
+`Start.sh` is the single entry point for every mode — it picks a sane Node (nvm-aware),
+boots the server and the app together, and on Ctrl-C stops only the server it started. The
+one exception to "no setup": in desktop mode it runs `npm install` **once**, on first run
+only, to get Electron.
+
+```bash
+./Start.sh                              # desktop app (Electron window, default)
+./Start.sh --web                        # headless server + open the WebUI in a browser
+./Start.sh --server                     # headless server only, stays in the foreground
+./Start.sh --dev                        # server with --watch
+./Start.sh --keep-server                # leave the server up after the script exits
+./Start.sh --port 8080 --host 0.0.0.0   # override the defaults
+./Start.sh --db /path/to/scope.db --token my-token
+```
+
+The server is started **at most once**: if one is already healthy on the target port, its
+token is adopted instead of a second instance being spawned, and a server orphaned by a
+`kill -9` is reaped on the next run. Per-machine defaults can live in
+`apps/scope-desktop/scope.env` (see `scope.env.example`); real environment variables always
+win.
+
+### 🏃 Option C — Run from the git repo (developers)
 
 ```bash
 git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
@@ -233,23 +268,32 @@ Open the URL it prints (`http://127.0.0.1:43190/?token=<uuid>`), and you're look
 live (empty) dashboard. `npm run dev` adds `--watch`; the DB defaults to `db/scope.db`.
 Override with `SCOPE_PORT`, `SCOPE_HOST`, `SCOPE_DB_PATH`, or `SCOPE_AUTH_TOKEN`.
 
-### 🧪 Option C — Take a test drive (no agent needed)
+### 🧪 Option D — Take a test drive (no agent needed)
 
 Want to see it *before* wiring up an agent? Seed the dashboard with a realistic demo
 session (a coder adding dark mode, its tester subagent, and a second project with a failed
 command):
 
 ```bash
-# server running? (Option A or B) then:
+# server running? (Option A, B or C) then:
 node docs/seed-demo.mjs
 ```
 
 Instantly populated — click around every view. Re-running is safe (events are idempotent).
 
-### 🔌 Option D — Attach a real agent
+### 🔌 Option E — Attach a real agent
 
 The dashboard comes alive when a `pi` agent feeds it. This extension hooks the agent
 lifecycle and streams telemetry, **auto-discovering the server's auth token**.
+
+The agent runs as normal in your terminal — nothing to learn, no new commands:
+
+<p align="center">
+  <img src="docs/shots/pi.png" alt="The pi coding agent running in a terminal" width="880" />
+</p>
+
+*That's the agent side. Everything it does — every message, tool call, shell command and
+file edit — shows up in the Pi Scope dashboard in real time.*
 
 **One session:**
 
@@ -295,6 +339,10 @@ Full flag/env and event reference: [`extension/README.md`](extension/README.md).
   events appear without reloading. The top-bar dot turns green when the feed is connected.
 - **The terminal is shared state.** The Files, Checkpoints, and Git panes follow the
   terminal's working directory — or set it manually in the Terminal pane's cwd box.
+- **One rail, every view.** The **Workspaces rail** on the left is the same component in
+  every view: pick a workspace and it becomes the shared working directory (Terminal `cd`s
+  there, Review/Git/Checkpoints re-scan it), fold subagent groups open or closed, open a
+  session straight into Single or Trajectory, or delete it from the rail.
 - **Where's my data?** A single SQLite file (`db/scope.db` in dev, or
   `~/.local/share/pi-scope/` packaged), chmod `0600`. Delete sessions from the sidebar —
   or `DELETE /sessions` for everything.
@@ -345,6 +393,7 @@ Running from source instead of the launcher? `SCOPE_HOST=0.0.0.0 npm start` in
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
 | `SCOPE_SETTINGS_JSON` | `~/.pi/agent/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
 | `SCOPE_SKILLS_DIR` | `~/.pi/agent/skills` | Override the skills directory scanned for the agent-team sidebar |
+| `SCOPE_PLUGINS_DIR` | `~/.pi/scope/plugins` | Where user plugins live (enable/disable state in `plugins.json`, namespaced state in `.data/`) |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. a non-standard venv: `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
 
 Chat-spawned `pi` subprocesses also get the workspace venv bin dirs prepended to
@@ -364,6 +413,13 @@ This repository is structured so an AI coding agent can onboard quickly. The ser
 environment variables, and full endpoint list live in
 [`apps/scope-server/README.md`](apps/scope-server/README.md); the telemetry extension and its flags are
 documented in [`extension/README.md`](extension/README.md).
+
+Every feature is a plugin, so the fastest way to change Pi Scope's behaviour is usually to
+write one rather than edit the core. Start with
+[`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md) — it covers
+manifests, the `api.route` / `api.onEvent` / `api.store` / `api.log` API, client bundles, and
+where state is persisted — and copy the working example in
+[`examples/plugins/hello-insights/`](examples/plugins/hello-insights/).
 
 - **Demo data:** [`docs/seed-demo.mjs`](docs/seed-demo.mjs) — the script that created the
   screenshots above.

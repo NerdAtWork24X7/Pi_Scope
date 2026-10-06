@@ -6,6 +6,13 @@
  * arrive through `api.kit`.
  */
 
+/** A checkpoint ref is exactly refs/checkpoints/<ns>/<id>: `ns` is a base64url
+ *  slice of the cwd and `id` is the generated timestamp/random suffix. Pinning
+ *  the shape keeps a caller-supplied ref from naming another namespace or
+ *  handing git an unexpected value, and both parts are also used to build the
+ *  `checkpoints/<ns>/<id>` branch name. */
+const CHECKPOINT_REF_RE = /^refs\/checkpoints\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/;
+
 export function activate(api: any): void {
   const {
     jsonResponse,
@@ -13,6 +20,7 @@ export function activate(api: any): void {
     validateCwd,
     git,
     ensureGitRepo,
+    rejectOptionLike,
   } = api.kit;
 
   api.route("POST", "/checkpoints/create", async (ctx) => {
@@ -101,7 +109,7 @@ export function activate(api: any): void {
     let parsed: any;
     try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
     const ref = parsed.ref ?? "";
-    if (!ref.startsWith("refs/checkpoints/")) {
+    if (!CHECKPOINT_REF_RE.test(ref)) {
       return jsonResponse({ error: "ref must be a checkpoint ref (refs/checkpoints/...)" }, 400);
     }
     const cwd = parsed.cwd ?? "";
@@ -148,11 +156,15 @@ export function activate(api: any): void {
     let parsed: any;
     try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
     const ref = parsed.ref ?? "";
-    if (!ref.startsWith("refs/checkpoints/")) {
+    if (!CHECKPOINT_REF_RE.test(ref)) {
       return jsonResponse({ error: "ref must be a checkpoint ref (refs/checkpoints/...)" }, 400);
     }
     const target = typeof parsed.target === "string" && parsed.target.trim() ? parsed.target.trim() : "";
     if (!target) return jsonResponse({ error: "missing target branch" }, 400);
+    // `target` becomes a git argument (`switch`) and a ref name
+    // (`refs/heads/<target>`); a leading dash or whitespace would be an option
+    // or a malformed ref.
+    if (rejectOptionLike(target) || /\s/.test(target)) return jsonResponse({ error: "invalid target branch" }, 400);
     const cwd = parsed.cwd ?? "";
     if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
     const absCwd = validateCwd(cwd);
@@ -196,7 +208,7 @@ export function activate(api: any): void {
     let parsed: any;
     try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
     const ref = parsed.ref ?? "";
-    if (!ref.startsWith("refs/checkpoints/")) {
+    if (!CHECKPOINT_REF_RE.test(ref)) {
       return jsonResponse({ error: "ref must be a checkpoint ref (refs/checkpoints/...)" }, 400);
     }
     const cwd = parsed.cwd ?? "";

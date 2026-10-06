@@ -1112,14 +1112,28 @@
       const cwd = selectedCwd(); if (!cwd) return;
       const { res, data } = await api("/git/branches", { cwd });
       if (!res.ok) { setStatus("load branches failed: " + (data.error || res.status), true); return; }
-      const names = (data.branches || []).map((b) => b.name).filter((n) => n && n !== data.current);
-      if (!names.length) { setStatus("no other branches to check out"); return; }
-      const n = await showGitModal({
+      // Offer every branch except the one already checked out: local branches
+      // switch directly, remote-tracking ones are checked out into a local
+      // branch that tracks them (or reuse the existing local one).
+      const localNames = (data.branches || []).map((b) => b.name).filter((n) => n && n !== data.current);
+      const remoteNames = (data.remoteBranches || []).map((b) => b.name).filter(Boolean);
+      const options = [
+        ...localNames.map((name) => ({ value: "local:" + name, label: name })),
+        ...remoteNames.map((name) => ({ value: "remote:" + name, label: name + "  (remote)" })),
+      ];
+      if (!options.length) { setStatus("no other branches to check out"); return; }
+      const pick = await showGitModal({
         title: "Checkout Branch",
-        select: { options: names.map((name) => ({ value: name, label: name })), value: names[0] },
+        select: { options, value: options[0].value },
         confirmLabel: "Checkout",
       });
-      if (n && n.trim()) branchOp("switch", n.trim());
+      if (!pick) return;
+      const idx = pick.indexOf(":");
+      const kind = pick.slice(0, idx);
+      const name = pick.slice(idx + 1);
+      if (!name) return;
+      if (kind === "remote") branchOp("checkout-remote", name);
+      else branchOp("switch", name);
     });
     add("Create branch…", async () => {
       const n = await showGitModal({ title: "Create Branch", input: { placeholder: "New branch name…" }, confirmLabel: "Create" });
@@ -1193,6 +1207,7 @@
     const { res, data } = await api("/git/branches", { cwd });
     if (!res.ok) { panes.branches.innerHTML = `<div class="git-diff-empty">error: ${esc(data.error || res.status)}</div>`; return; }
     const branches = data.branches || [];
+    const remoteBranches = data.remoteBranches || [];
     panes.branches.innerHTML = "";
     const form = el('<div class="git-new-branch"></div>');
     const inp = document.createElement("input");
@@ -1201,7 +1216,10 @@
     form.appendChild(inp);
     form.appendChild(create);
     panes.branches.appendChild(form);
-    if (!branches.length) panes.branches.appendChild(el('<div class="git-diff-empty">no branches</div>'));
+
+    // Local branches — the ones you can switch to directly.
+    panes.branches.appendChild(el(`<div class="git-section-title">local <span class="git-count">${branches.length}</span></div>`));
+    if (!branches.length) panes.branches.appendChild(el('<div class="git-diff-empty">no local branches</div>'));
     for (const br of branches) {
       const row = el('<div class="git-branch-item"></div>');
       if (br.name === data.current) row.classList.add("current");
@@ -1215,6 +1233,28 @@
       row.appendChild(listBtn(br.name === data.current ? "✓" : "switch", () => branchOp("switch", br.name)));
       row.appendChild(listBtn("del", () => branchOp("delete", br.name), true));
       panes.branches.appendChild(row);
+    }
+
+    // Remote-tracking branches — read-only until checked out; the button creates
+    // (or reuses) the local branch that tracks the selected one.
+    if (remoteBranches.length) {
+      // upstream ref → local branch name, to flag already-tracked remotes.
+      const tracked = new Map();
+      for (const br of branches) if (br.upstream) tracked.set(br.upstream, br.name);
+      panes.branches.appendChild(el(`<div class="git-section-title">remote <span class="git-count">${remoteBranches.length}</span></div>`));
+      for (const br of remoteBranches) {
+        const row = el('<div class="git-branch-item remote"></div>');
+        const nm = el('<span class="gb-name"></span>');
+        nm.textContent = br.name;
+        nm.title = br.name;
+        const local = tracked.get(br.name);
+        const meta = el('<span class="gb-meta"></span>');
+        meta.textContent = `${br.sha}${local ? " → " + local : ""} · ${br.date}`;
+        row.appendChild(nm);
+        row.appendChild(meta);
+        row.appendChild(listBtn(local ? "✓ " + local : "checkout", () => branchOp("checkout-remote", br.name)));
+        panes.branches.appendChild(row);
+      }
     }
   }
 

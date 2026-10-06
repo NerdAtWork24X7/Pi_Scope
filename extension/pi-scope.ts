@@ -27,6 +27,17 @@ const MAX_TEXT_FIELD = 1024 * 1024;   // 1 MB cap for free-text fields
 const MAX_ARGS_BYTES = 16 * 1024;    // 16 KiB cap per tool-call argument
 const MAX_RESULT_BYTES = 1024 * 1024; // 1 MB cap for tool-result text
 
+/** Set by the spawning harness (agent-team dispatch clones + memory
+ *  summarizer) on the child's env. A worker process boots, runs one task and is
+ *  killed, so host-only work is pure overhead: the connectivity probe and the
+ *  session-seq seed are dashboard/UX concerns for the top-level session, and the
+ *  completion flush is capped hard below so the child's tail never waits on a
+ *  slow observability server (the orchestrator kills it on agent_end). */
+const IS_SUBAGENT = process.env.PI_SUBAGENT === "1";
+/** How long a subagent's final event flush may block its exit. The localhost
+ *  POST completes in a few ms; the cap only bounds the pathological case. */
+const SUBAGENT_FLUSH_CAP_MS = 250;
+
 interface TruncateResult {
   text: string;
   truncated: boolean;
@@ -260,6 +271,11 @@ function loadEnv(cwd: string) {
     }
   }
 }
+
+// Load env files at module init so subprocesses spawned before
+// session_start still inherit .env variables. Safe to run here:
+// guarded by fs.existsSync, and session_start re-runs with ctx.cwd.
+try { loadEnv(process.cwd()); } catch { /* cwd may be unavailable */ }
 
 // Lightweight reachability check against the obs server's unauthenticated
 // /health endpoint. Short timeout so a dead server never stalls agent boot.
@@ -767,7 +783,7 @@ export default function (pi: ExtensionAPI) {
     if (!token) {
       // Loud, single-line warning. Server will 401 every POST otherwise.
       try {
-        notify?.(`📡 Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`, "warning");
+        notify?.(`⚠️ Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`, "warning");;
       } catch { /* hasUI may be false */ }
       logObs("no_token_configured", { server_url: serverUrl });
     }
@@ -778,13 +794,14 @@ export default function (pi: ExtensionAPI) {
     // in flight — only captured notify is used, and the whole block is guarded so
     // a stale snapshot can never crash the agent mid-turn.
     void (async () => {
+      if (IS_SUBAGENT) return; // no dashboard notice to deliver from a worker
       try {
         const connected = await probeServer(serverUrl);
         try {
           if (connected) {
-            notify?.(`📡 Pi Scope: connected to ${serverUrl}`, "info");
+            notify?.(`✅ Pi Scope: connected to ${serverUrl}`, "info");;
           } else {
-            notify?.(`📡 Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,
+            notify?.(`⚠️ Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,,
               "warning");
           }
         } catch { /* hasUI may be false */ }
@@ -812,7 +829,9 @@ export default function (pi: ExtensionAPI) {
     // sequence where the server left off instead of restarting at 0 (which
     // would collide on the server's (session_id, seq) UNIQUE index and drop
     // every continued turn). Fire-and-forget — boot must never block.
-    void seedSessionSeq(sessionInfo.sessionId, serverUrl);
+    // A worker always starts a FRESH session file (the harness wipes it per
+    // dispatch), so its seq legitimately restarts at 0 — nothing to seed.
+    if (!IS_SUBAGENT) void seedSessionSeq(sessionInfo.sessionId, serverUrl);
 
     // 6. Log boot
     logObs("obs boot", { serverUrl, pool, tags, agentName: name });
@@ -978,10 +997,12 @@ export default function (pi: ExtensionAPI) {
     // to stdout, and agent-team kills the subprocess as soon as it reads
     // agent_end from stdout.  Without this await, SIGKILL tears down the
     // in-flight fetch and the events never reach the observability server.
-    // A 5 s cap prevents a dead server from hanging the subagent.
+    // A 5 s cap prevents a dead server from hanging the top-level session; a
+    // dispatch worker (killed the instant its result lands) gets a much tighter
+    // cap, which still delivers localhost events but never delays its tail.
     await Promise.race([
       queue.flush(),
-      new Promise<void>(r => setTimeout(r, 5_000)),
+      new Promise<void>(r => setTimeout(r, IS_SUBAGENT ? SUBAGENT_FLUSH_CAP_MS : 5_000)),
     ]);
   });
 

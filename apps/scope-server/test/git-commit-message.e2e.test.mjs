@@ -228,7 +228,17 @@ describe("git commit message generation", () => {
 });
 
 describe("git view", () => {
-  test("Settings → Plugins → Git opens a popup with the commit message model and template", async () => {
+  test("Settings → Plugins → Git offers the enabled-model roster for the commit message", async () => {
+    // The dropdown is sourced from the enabled-models roster — the same
+    // "available" list the Chat composer uses — not the whole model catalogue
+    // (which also carries provider caches pi can't resolve, so a pick from there
+    // silently fell back to the default model).
+    const roster = ["test/alpha", "test/beta"];
+    const setRoster = await api("/settings", {
+      method: "POST", body: JSON.stringify({ action: "setEnabledModels", value: roster }),
+    });
+    assert.ok(setRoster.res.ok, `setEnabledModels failed: ${JSON.stringify(setRoster.data)}`);
+
     const page = await browser.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e?.message ?? e)));
@@ -238,27 +248,39 @@ describe("git view", () => {
     await page.click('.settings-nav-item[data-sec="plugins"]');
     await page.waitForSelector('[data-plugin-config="git"]');
     await page.click('[data-plugin-config="git"]');
-    await page.waitForSelector('#plugin-settings-backdrop input[data-act="setGitCommitModel"]');
+    const modelSel = '#plugin-settings-backdrop select[data-act="setGitCommitModel"]';
+    await page.waitForSelector(modelSel);
 
-    // ...and the popup carries the current values.
-    assert.equal(
-      await page.inputValue('#plugin-settings-backdrop input[data-act="setGitCommitModel"]'),
-      "test/stub-model"
-    );
+    // "(agent default)" first, then every roster model, then the configured value
+    // (not in the roster) so it is never silently dropped.
+    const opts = await page.$$eval(`${modelSel} option`, (els) => els.map((e) => e.value));
+    assert.equal(opts[0], "", "first option is the agent default");
+    assert.deepEqual(opts.slice(1, 1 + roster.length), roster, "roster models are offered");
+    assert.equal(await page.inputValue(modelSel), "test/stub-model");
+    assert.ok(opts.includes("test/stub-model"), "current model kept as an option");
+    const outside = Object.keys((await api("/settings")).data.modelsMeta || {})
+      .find((k) => !roster.includes(k));
+    if (outside) assert.ok(!opts.includes(outside), `catalogue-only model ${outside} is not offered`);
     assert.equal(
       await page.inputValue('#plugin-settings-backdrop textarea[data-act="setGitCommitTemplate"]'),
       CUSTOM_TEMPLATE
     );
 
-    // Editing in the popup persists through the same /settings writer.
-    await page.fill('#plugin-settings-backdrop input[data-act="setGitCommitModel"]', "test/popup-model");
-    await page.press('#plugin-settings-backdrop input[data-act="setGitCommitModel"]', "Enter");
-    let saved = "";
-    for (let i = 0; i < 50 && saved !== "test/popup-model"; i++) {
+    // Selecting a roster model persists AND is the model the generator then
+    // invokes pi with — the end-to-end guarantee that was broken before.
+    await page.selectOption(modelSel, "test/alpha");
+    let saved = null;
+    for (let i = 0; i < 50 && saved !== "test/alpha"; i++) {
       saved = (await api("/settings")).data.gitCommitModel;
-      if (saved !== "test/popup-model") await new Promise((r) => setTimeout(r, 100));
+      if (saved !== "test/alpha") await new Promise((r) => setTimeout(r, 100));
     }
-    assert.equal(saved, "test/popup-model", "popup edit persisted");
+    assert.equal(saved, "test/alpha", "popup selection persisted");
+
+    if (fs.existsSync(argvLog)) fs.rmSync(argvLog);
+    const gen = await api("/git/commit-message", { method: "POST", body: JSON.stringify({ cwd: repoDir }) });
+    assert.ok(gen.res.ok, `expected 200, got ${gen.res.status}: ${JSON.stringify(gen.data)}`);
+    assert.equal(gen.data.model, "test/alpha", "generation used the model selected in the dropdown");
+    assert.ok(fs.readFileSync(argvLog, "utf8").split("\n").includes("test/alpha"), "pi was invoked with the selected model");
 
     // Escape closes it, and the fields are gone from the Models section.
     await page.keyboard.press("Escape");

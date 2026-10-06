@@ -144,8 +144,8 @@ address the token is required anyway (see the LAN notes in the root README).
 | GET | `/git/cat` | File content at a commit |
 | POST | `/git/action` | Graph context menu (checkout/cherry-pick/revert/rebase/reset/branch/tag) |
 | POST | `/git/commit` | Create commit (with amend support) |
-| POST | `/git/branch` | Create/switch/delete branch |
-| GET | `/git/branches` | List all branches |
+| POST | `/git/branch` | Create/switch/delete branch (checkout-remote checks out a tracking branch) |
+| GET | `/git/branches` | List local and remote-tracking branches |
 | GET | `/git/remotes` | List remotes |
 | POST | `/git/remote` | Add/remove a remote |
 | POST | `/git/push` | Push (auto set-upstream) |

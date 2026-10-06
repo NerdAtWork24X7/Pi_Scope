@@ -1403,7 +1403,7 @@
    * contributes a whole left-nav section instead.
    */
   function pluginSettingsCtx() {
-    return { settings: SET, field, esc, wire: wireDataActs, toast, postSettings };
+    return { settings: SET, field, esc, selectControl, wire: wireDataActs, toast, postSettings };
   }
 
   function openPluginSettings(id) {

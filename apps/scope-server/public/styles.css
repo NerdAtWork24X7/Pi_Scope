@@ -5058,6 +5058,11 @@
       font-size: 11px;
     }
 
+    /* Remote-tracking rows read as secondary: same layout, dimmer name. */
+    .git-branch-item.remote .gb-name {
+      color: var(--muted);
+    }
+
     .git-new-branch {
       display: flex;
       gap: 6px;

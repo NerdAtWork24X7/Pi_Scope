@@ -384,8 +384,10 @@ pluginSettings: {
 
 The host renders a gear on the plugin's row; clicking it opens a modal with
 `render(ctx)`. `ctx` gives you the settings snapshot (`ctx.settings`), the shared
-`ctx.field(label, sub, control, hint)` helper, `ctx.esc`, `ctx.toast`,
-`ctx.postSettings(action, value)` — and `ctx.wire(panel)`, which binds every
+`ctx.field(label, sub, control, hint)` helper, `ctx.esc`, `ctx.selectControl(options, value, attrs)`
+(a `<select class="set-select">` that commits on change, like the built-in
+sections), `ctx.toast`, `ctx.postSettings(action, value)` — and `ctx.wire(panel)`,
+which binds every
 `[data-act]` control to the same `POST /settings` writers the built-in sections
 use, so persistence is free (`data-act` **is** the settings key; text/number
 inputs commit on `change`, Enter blurs to save). `onMount` is optional; call

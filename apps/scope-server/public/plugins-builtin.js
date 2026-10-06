@@ -118,14 +118,27 @@
     pluginSettings: {
       render(ctx) {
         const sr = ctx.settings || {};
-        const known = Object.keys(sr.modelsMeta || {}).sort();
-        const fallback = (sr.settingsRaw && sr.settingsRaw.defaultModel) || "agent default";
+        const current = sr.gitCommitModel || "";
+        const fallback = (sr.settingsRaw && sr.settingsRaw.defaultModel) || "";
+        // Offer the enabled-models roster — the same "available" list the Chat
+        // composer uses — so the picked model is one pi can actually resolve.
+        // The full modelsMeta catalogue also carries provider caches (e.g. the
+        // kilo catalogue) that pi can't run, and picking one made `pi --model`
+        // silently fall back to the default. Only fall back to the full
+        // catalogue when the roster is empty.
+        const enabled = Array.isArray(sr.enabledModels) ? sr.enabledModels.map(String).filter(Boolean) : [];
+        const catalogue = Object.keys(sr.modelsMeta || {}).sort();
+        const list = [...new Set(enabled.length ? enabled : catalogue)];
+        const modelOptions = [
+          { value: "", label: fallback ? `(agent default — ${fallback})` : "(agent default)" },
+          ...list.map((m) => ({ value: m, label: m })),
+        ];
+        // A configured model that is no longer offered stays selectable, so the
+        // control never silently drops the current value.
+        if (current && !list.includes(current)) modelOptions.push({ value: current, label: current });
         return (
           ctx.field("Commit message model", "used by Git → ✨ generate",
-            `<input type="text" class="set-input" value="${ctx.esc(sr.gitCommitModel || "")}" ` +
-            `list="git-commit-model-list" data-act="setGitCommitModel" ` +
-            `placeholder="${ctx.esc(fallback)}" spellcheck="false">`) +
-          `<datalist id="git-commit-model-list">${known.map((m) => `<option value="${ctx.esc(m)}">`).join("")}</datalist>` +
+            ctx.selectControl(modelOptions, current, 'data-act="setGitCommitModel"')) +
           ctx.field("Commit message template", "how the generated message should look",
             `<textarea class="set-input" rows="7" data-act="setGitCommitTemplate" spellcheck="false" ` +
             `style="width:100%;min-height:120px;resize:vertical" ` +
