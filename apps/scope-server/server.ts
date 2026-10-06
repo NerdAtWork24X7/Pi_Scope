@@ -1941,7 +1941,8 @@ async function handle(req: Request): Promise<Response> {
       }
       return jsonResponse({ error: "unknown action" }, 400);
     } catch (err: any) {
-      return jsonResponse({ error: String(err?.message ?? err) }, 400);
+      console.error("Plugin action failed:", err);
+      return jsonResponse({ error: "plugin action failed" }, 400);
     }
   }
 
