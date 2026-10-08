@@ -115,7 +115,7 @@ before(async () => {
       SCOPE_AUTH_TOKEN: TOKEN,
       SCOPE_PLUGINS_DIR: path.join(tmpDir, "plugins"),
       // Isolate the settings/api-key files: without these the server would read
-      // and write the developer's real ~/.pi/agent, and this test's
+      // and write the developer's real agent dir, and this test's
       // setGitCommitModel write would leak into their config.
       SCOPE_AGENT_DIR: path.join(tmpDir, "agent"),
       SCOPE_SETTINGS_JSON: path.join(tmpDir, "agent", "settings.json"),

@@ -107,11 +107,15 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
   // and readTokenFile() run so the "reuse already-running server" path reads the
   // right token, and the spawned server inherits it via the env snapshot below.
   if (app && app.isPackaged) {
-    const dataDir = path.join(os.homedir(), ".local", "share", "pi-scope");
+    const dataDir = path.join(os.homedir(), ".pi-scope");
     fs.mkdirSync(dataDir, { recursive: true });
     process.env.SCOPE_DB_PATH = path.join(dataDir, "scope.db");
     process.env.SCOPE_TOKEN_FILE = path.join(dataDir, "scope_token");
     process.env.SCOPE_PACKAGED = "1";
+    // The Pi coding agent bundled with the app (extraResources -> resources/pi).
+    // The server resolves its `pi` shim from here so every spawned agent uses
+    // the bundled copy instead of a global install.
+    process.env.SCOPE_PI_BUNDLE_DIR = path.join(process.resourcesPath, "pi");
   }
   const cfg = config();
   try {

@@ -72,6 +72,16 @@ NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]' 2>/dev/null |
 
 mkdir -p "$RUN_DIR"
 
+# The Pi coding agent bundled with Pi Scope (apps/scope-desktop/pi-bundle). When
+# installed, the server launches every `pi` from it instead of a global install.
+# Install its deps once; a failure is non-fatal — the server falls back to `pi`
+# on PATH and logs which one it chose.
+if [ -f "$DESKTOP_DIR/pi-bundle/package.json" ] && [ ! -d "$DESKTOP_DIR/pi-bundle/node_modules" ]; then
+  info "installing the bundled Pi coding agent (first run only)…"
+  ( cd "$DESKTOP_DIR/pi-bundle" && npm install --no-audit --no-fund ) \
+    || info "pi-bundle install failed — Chat will fall back to a global pi."
+fi
+
 # ── Config: real env > scope.env file > defaults ─────────────────────────────
 
 # Mirrors scope-control.js so the desktop icon and this script agree on host,

@@ -8460,6 +8460,15 @@ body.layout-settings #sidebar-resizer {
   margin-bottom: 10px;
 }
 .set-team-name { font-size: 14px; font-weight: 700; color: var(--text); }
+/* Teams are collapsed by default: just a chevron + name until expanded. */
+.set-team-toggle {
+  border: 0; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 4px;
+  border-radius: 4px; flex-shrink: 0;
+}
+.set-team-toggle:hover { color: var(--text); background: var(--surface-2); }
+.set-team.collapsed .set-team-head { margin-bottom: 0; }
+.set-team.collapsed { padding: 10px 16px; }
 .set-team-count { font-size: 12px; color: var(--muted); margin-left: auto; }
 /* Right-hand group (count + active state) owns the single auto margin, so the
    head doesn't split its free space across two margin-left:auto elements. */
@@ -8680,6 +8689,78 @@ body.set-cost-resizing * { user-select: none; }
   cursor: pointer; font-size: 16px; line-height: 1; padding: 0 3px; border-radius: 4px;
 }
 .set-ws-x:hover { color: var(--red); }
+
+/* Per-extension enablement rows (extensions section) */
+.set-extflags { display: flex; flex-direction: column; gap: 6px; }
+.set-extflag {
+  display: flex; align-items: center; gap: 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 11px;
+}
+.set-extflag-name {
+  flex: 1; min-width: 0;
+  font-size: 13px;
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Subagent definitions (teams section) */
+.set-defs { display: flex; flex-direction: column; gap: 12px; }
+.set-def {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+.set-def-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.set-def-name { font-size: 13.5px; font-weight: 700; color: var(--text); }
+.set-def-file {
+  font-size: 11.5px; color: var(--muted);
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+}
+/* One compact row per subagent definition (name + Edit). */
+.set-defs { gap: 6px; }
+.set-def-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 11px;
+}
+.set-def-row .set-def-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Full-screen subagent markdown editor */
+.def-editor-backdrop {
+  position: fixed; inset: 0; z-index: 1200;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+}
+.def-editor {
+  display: flex; flex-direction: column;
+  width: 100%; height: 100%;
+  background: var(--surface);
+}
+.def-editor-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.def-editor-title {
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-size: 13px; font-weight: 700; color: var(--text);
+}
+.def-editor-hint { font-size: 12px; color: var(--muted); }
+.def-editor-spacer { flex: 1; }
+.def-editor-text {
+  flex: 1; width: 100%; border: 0; outline: 0; resize: none;
+  background: var(--surface); color: var(--text);
+  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-size: 13px; line-height: 1.55;
+  padding: 16px 20px; tab-size: 2; white-space: pre;
+}
 
 /* Toast */
 .settings-toast {

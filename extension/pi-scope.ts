@@ -19,6 +19,18 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { fileURLToPath } from "node:url";
+
+/** This file's own absolute path, for the duplicate-copy guard in the default
+ *  export. Loaded as ESM by pi (with a CJS fallback for other loaders). */
+function selfFilePath(): string {
+  try {
+    const url = (import.meta as any)?.url;
+    if (url) return fileURLToPath(url);
+  } catch { /* not ESM */ }
+  try { if (typeof __filename === "string") return __filename; } catch { /* not CJS */ }
+  return "";
+}
 
 // ━━ Truncation constants & helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // These were previously (erroneously) imported from "./pi-scope.ts" — a
@@ -217,15 +229,15 @@ const EXT_PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 // Candidate locations where the scope server may have persisted its per-run
 // token. In dev the server writes <project>/tmp/scope_token. When launched via
 // the packaged AppImage, scope-control sets SCOPE_TOKEN_FILE to
-// $HOME/.local/share/pi-scope/scope_token — so we must check that too.
+// $HOME/.pi-scope/scope_token — so we must check that too.
 function tokenCandidates(): string[] {
   const out: string[] = [];
   if (process.env.SCOPE_TOKEN_FILE) out.push(process.env.SCOPE_TOKEN_FILE);
   // Packaged AppImage server writes its per-run token to the data dir
-  // (~/.local/share/pi-scope/scope_token); check it BEFORE the dev
-  // tmp/scope_token so a stale dev token can't shadow the real one and
-  // cause every POST to 401 (no activity in the dashboard).
-  out.push(path.join(os.homedir(), ".local", "share", "pi-scope", "scope_token"));
+  // (~/.pi-scope/scope_token); check it BEFORE the dev tmp/scope_token so a
+  // stale dev token can't shadow the real one and cause every POST to 401
+  // (no activity in the dashboard).
+  out.push(path.join(os.homedir(), ".pi-scope", "scope_token"));
   out.push(path.join(EXT_PROJECT_ROOT, "tmp", "scope_token"));
   return out;
 }
@@ -630,6 +642,22 @@ class EventQueue {
 // ━━ Default Export (Extension Entry) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 export default function (pi: ExtensionAPI) {
+  // ━━ Duplicate-copy guard ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Pi Scope's bundled launcher force-loads this file with `--extension` and
+  // sets PI_SCOPE_FORCE_EXTENSION to its absolute path. A user's global pi
+  // settings.json may independently list its own copy; if both
+  // loaded, the second would abort with a hard "Flag ... conflicts" error. So
+  // when the launcher names an authoritative copy, any *other* copy no-ops.
+  const forcedPath = process.env.PI_SCOPE_FORCE_EXTENSION;
+  if (forcedPath) {
+    const self = selfFilePath();
+    try {
+      if (self && fs.realpathSync(self) !== fs.realpathSync(forcedPath)) return;
+    } catch {
+      // If either path can't be resolved, fall through and load as normal.
+    }
+  }
+
   // ━━ CLI flag registrations ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   pi.registerFlag("obs-server-url", {
     description: "Pi Scope server URL (overrides env OBS_SERVER_URL)",
@@ -801,8 +829,7 @@ export default function (pi: ExtensionAPI) {
           if (connected) {
             notify?.(`✅ Pi Scope: connected to ${serverUrl}`, "info");;
           } else {
-            notify?.(`⚠️ Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,,
-              "warning");
+            notify?.(`⚠️ Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`, "warning");
           }
         } catch { /* hasUI may be false */ }
         logObs(connected ? "server_connected" : "server_unreachable", { server_url: serverUrl });

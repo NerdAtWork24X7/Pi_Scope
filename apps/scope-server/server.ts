@@ -10,6 +10,7 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import { Readable } from "node:stream";
+import { AGENT_DIR } from "./agent-dir.ts";
 import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent, canonicalSessionId } from "./db.ts";
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
@@ -29,7 +30,7 @@ import {
 } from "./plugins.ts";
 import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage } from "./chat.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
-import { keyEntries, maskSecret, setStoredKey, clearStoredKey, isValidKeyName, MAX_KEY_LENGTH } from "./api-keys.ts";
+import { keyEntries, maskSecret, setStoredKey, clearStoredKey, isValidKeyName, MAX_KEY_LENGTH, KNOWN_KEYS } from "./api-keys.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -105,15 +106,29 @@ try {
 
 // ─── Agent-team sidebar state ───────────────────────────────────────────────
 // The pi agent-team harness persists its sidebar state to two files under the
-// agent dir (~/.pi/agent): agents/teams.yaml (teams + members + memory_model)
-// and agent-team-config.json (activeTeam, mode, disabledAgents, skills). The
-// web Chat view's right sidebar mirrors the agent-team sidebar (sidebar.ts), so
-// the server reads these files and returns a normalized snapshot.
-const AGENT_DIR = process.env.SCOPE_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+// agent dir: agents/teams.yaml (teams + members + memory_model) and
+// agent-team-config.json (activeTeam, mode, disabledAgents, skills). The web
+// Chat view's right sidebar mirrors the agent-team sidebar (sidebar.ts), so the
+// server reads these files and returns a normalized snapshot. AGENT_DIR is Pi
+// Scope's OWN agent dir (see agent-dir.ts) — never the user's global pi agent
+// dir — so Pi Scope's bundled pi and config stay isolated.
 const TEAMS_YAML = process.env.SCOPE_TEAMS_YAML ?? path.join(AGENT_DIR, "agents", "teams.yaml");
 const AGENT_CONFIG = process.env.SCOPE_AGENT_CONFIG ?? path.join(AGENT_DIR, "agent-team-config.json");
 const SETTINGS_JSON = process.env.SCOPE_SETTINGS_JSON ?? path.join(AGENT_DIR, "settings.json");
 const SKILLS_DIR = process.env.SCOPE_SKILLS_DIR ?? path.join(AGENT_DIR, "skills");
+// Other agent-dir config the Settings page manages: per-extension enablement,
+// the project-trust store, custom themes, and the subagent definitions. All
+// live in Pi Scope's own agent dir (see agent-dir.ts).
+const EXTENSIONS_JSON = path.join(AGENT_DIR, "extensions", "extensions.json");
+const TRUST_JSON = process.env.SCOPE_TRUST_JSON ?? path.join(AGENT_DIR, "trust.json");
+const THEMES_DIR = path.join(AGENT_DIR, "themes");
+const AGENTS_DIR = path.join(AGENT_DIR, "agents");
+// Global instruction files pi loads from the agent dir (discovery order in
+// pi's loadContextFileFromDir + discoverSystemPromptFile/AppendSystemPromptFile).
+const INSTRUCTION_FILES = ["AGENTS.md", "AGENTS.override.md", "SYSTEM.md", "APPEND_SYSTEM.md"];
+// pi's own built-in themes plus its synthetic "system" theme — the rest are
+// user themes discovered from <agentDir>/themes/*.json.
+const BUILTIN_THEMES = ["system", "dark", "light"];
 
 // ─── Project-scoped agent-team config (agent-team-config.json / teams.yaml) ─
 // pi's agent-team extension now stores these PER PROJECT under each project's
@@ -371,12 +386,16 @@ function readAgentConfig(proj?: string | null): Record<string, any> {
  *  (Settings → env → shell rc → speech-to-text.json) — without it a key that
  *  only lives in speech-to-text.json would look unset here. Secrets are masked. */
 function apiKeysSnapshot(proj?: string | null): Record<string, any>[] {
-  const entries = keyEntries();
-  return entries.map((entry) => {
+  const entries = keyEntries().map((entry) => {
     if (entry.name !== "GROQ_API_KEY") return entry;
     const stt = loadSttConfig(proj || TERMINAL_CWD);
     return { ...entry, source: stt.apiKeySource, masked: stt.apiKey ? maskSecret(stt.apiKey) : "" };
   });
+  // Known keys are never seeded: a default (GROQ_API_KEY, KILO_API_KEY, …) is
+  // listed only once it actually has a value — stored, in the environment, in
+  // the shell profile or in an extension config. `knownApiKeys` still names
+  // them so the Add field can suggest the exact variable names.
+  return entries.filter((e) => !e.known || !!e.source);
 }
 
 /** Full, normalized settings snapshot for the Settings page: everything the
@@ -391,6 +410,7 @@ function loadSettingsSnapshot(proj?: string | null): Record<string, any> {
     ...team,
     // API keys (stored in <agentDir>/api-keys.json; masked previews only)
     apiKeys: apiKeysSnapshot(proj),
+    knownApiKeys: KNOWN_KEYS.map((k) => k.name),
     // Plugin registry (enable/disable state + where plugin dirs live). Feature
     // plugins are the app's views; the Settings → Plugins section toggles them.
     plugins: pluginSnapshot(),
@@ -425,6 +445,17 @@ function loadSettingsSnapshot(proj?: string | null): Record<string, any> {
       skipOrchestratorTools: Array.isArray(cfg.skipOrchestratorTools) ? cfg.skipOrchestratorTools : [],
       destructiveTools: Array.isArray(cfg.destructiveTools) ? cfg.destructiveTools : [],
     },
+    // Agent-dir config surfaced by the Settings page (see the discovery helpers
+    // above): pi packages, per-extension enablement, trusted projects, custom
+    // themes, global instruction files, provider sign-in status and subagent
+    // definitions.
+    packages: discoverPiPackages(),
+    extensionFlags: readExtensionFlags(),
+    themes: discoverThemes(),
+    trustedProjects: readTrustedProjects(),
+    instructions: readInstructions(),
+    providers: readProviders(),
+    agentDefs: discoverAgentDefs(),
     // Shared vocabulary for form controls
     thinkingLevels: THINKING_LEVELS,
     modelsMeta: buildModelMeta(),
@@ -548,6 +579,182 @@ function discoverSkills(): { name: string; dir: string; description: string; set
   return out;
 }
 
+// ─── Agent-dir config: packages, extension flags, trust, themes, instructions,
+//     provider sign-in, subagent definitions ─────────────────────────────────
+
+/** Normalize a settings.json `packages` entry (string or { source }) to its
+ *  source spec (e.g. "npm:@scope/rpiv-todo"). */
+function packageSource(entry: unknown): string {
+  if (typeof entry === "string") return entry.trim();
+  if (entry && typeof entry === "object" && typeof (entry as any).source === "string") return String((entry as any).source).trim();
+  return "";
+}
+
+/** pi packages from settings.json (the npm/etc. packages pi loads). */
+function discoverPiPackages(): { source: string; extensions: string[] }[] {
+  const list = readSettingsJson().packages;
+  if (!Array.isArray(list)) return [];
+  const out: { source: string; extensions: string[] }[] = [];
+  for (const item of list) {
+    const source = packageSource(item);
+    if (!source) continue;
+    const extensions = item && typeof item === "object" && Array.isArray((item as any).extensions)
+      ? (item as any).extensions.map((e: unknown) => String(e))
+      : [];
+    out.push({ source, extensions });
+  }
+  return out;
+}
+
+/** Per-extension orchestrator/subagent enablement (extensions/extensions.json).
+ *  Keys are extension names (directory name, or file stem for a single-file
+ *  extension). An omitted extension is enabled for both (pi's default). */
+function readExtensionFlags(): Record<string, { orchestrator: boolean; subagent: boolean }> {
+  const out: Record<string, { orchestrator: boolean; subagent: boolean }> = {};
+  try {
+    const raw = JSON.parse(fs.readFileSync(EXTENSIONS_JSON, "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+    for (const [name, v] of Object.entries(raw)) {
+      if (name.startsWith("_") || !v || typeof v !== "object") continue; // skip _doc metadata
+      out[name] = {
+        orchestrator: (v as any).orchestrator !== false,
+        subagent: (v as any).subagent !== false,
+      };
+    }
+  } catch { /* absent */ }
+  return out;
+}
+
+/** Set one enablement flag for an extension, preserving the file's other keys
+ *  (including the explanatory `_doc` block). */
+function setExtensionFlag(name: string, flag: "orchestrator" | "subagent", enabled: boolean): void {
+  let cfg: any = {};
+  try { cfg = JSON.parse(fs.readFileSync(EXTENSIONS_JSON, "utf8")); } catch { /* absent */ }
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {};
+  const cur = (cfg[name] && typeof cfg[name] === "object" && !Array.isArray(cfg[name])) ? cfg[name] : {};
+  cur[flag] = !!enabled;
+  cfg[name] = cur;
+  fs.mkdirSync(path.dirname(EXTENSIONS_JSON), { recursive: true });
+  fs.writeFileSync(EXTENSIONS_JSON, JSON.stringify(cfg, null, 2) + "\n");
+}
+
+/** Theme names the Settings picker offers: pi's built-ins + "system" + every
+ *  <agentDir>/themes/*.json the user has installed. */
+function discoverThemes(): string[] {
+  const set = new Set<string>(BUILTIN_THEMES);
+  try {
+    for (const f of fs.readdirSync(THEMES_DIR)) {
+      if (f.endsWith(".json")) set.add(f.slice(0, -5));
+    }
+  } catch { /* no themes dir */ }
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+/** Paths the user has marked trusted in trust.json ({ "/path": true }). */
+function readTrustedProjects(): string[] {
+  try {
+    const raw = JSON.parse(fs.readFileSync(TRUST_JSON, "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    return Object.entries(raw).filter(([, v]) => v === true).map(([k]) => k).sort();
+  } catch { return []; }
+}
+
+/** Drop a path from the trust store (revoke project trust). */
+function revokeTrust(p: string): void {
+  let cfg: any = {};
+  try { cfg = JSON.parse(fs.readFileSync(TRUST_JSON, "utf8")); } catch { /* absent */ }
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {};
+  delete cfg[p];
+  fs.mkdirSync(path.dirname(TRUST_JSON), { recursive: true });
+  fs.writeFileSync(TRUST_JSON, JSON.stringify(cfg, null, 2) + "\n");
+}
+
+/** Global instruction files pi loads from the agent dir, with their content so
+ *  the Settings editor can show and edit them (absent files are editable too). */
+function readInstructions(): { file: string; exists: boolean; content: string; bytes: number }[] {
+  return INSTRUCTION_FILES.map((file) => {
+    try {
+      const content = fs.readFileSync(path.join(AGENT_DIR, file), "utf8");
+      return { file, exists: true, content, bytes: Buffer.byteLength(content, "utf8") };
+    } catch {
+      return { file, exists: false, content: "", bytes: 0 };
+    }
+  });
+}
+
+/** Providers that have stored credentials in auth.json — names + credential
+ *  type only, never the secret material. */
+function readProviders(): { name: string; type: string }[] {
+  try {
+    const raw = JSON.parse(fs.readFileSync(AUTH_JSON, "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    return Object.entries(raw)
+      .map(([name, v]: [string, any]) => ({ name, type: typeof v?.type === "string" ? v.type : "" }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch { return []; }
+}
+
+/** Split a leading `---` YAML frontmatter block off a markdown file. */
+function splitFrontmatter(raw: string): { lines: string[]; body: string } | null {
+  const m = raw.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+  if (!m) return null;
+  return { lines: m[1].split(/\r?\n/), body: raw.slice(m[0].length) };
+}
+
+function frontmatterFields(lines: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of lines) {
+    const i = line.indexOf(":");
+    if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return out;
+}
+
+/** Subagent definitions from <agentDir>/agents/*.md, with parsed frontmatter
+ *  plus the whole file text (so the Settings page can open it in an editor). */
+function discoverAgentDefs(): { file: string; name: string; description: string; model: string; tools: string; thinking: string; content: string }[] {
+  const out: { file: string; name: string; description: string; model: string; tools: string; thinking: string; content: string }[] = [];
+  let files: string[] = [];
+  try { files = fs.readdirSync(AGENTS_DIR).filter((f) => f.endsWith(".md")); } catch { return out; }
+  for (const file of files) {
+    try {
+      const raw = fs.readFileSync(path.join(AGENTS_DIR, file), "utf8");
+      const fm = splitFrontmatter(raw);
+      const f = fm ? frontmatterFields(fm.lines) : {};
+      out.push({
+        file,
+        name: f.name || file.replace(/\.md$/, ""),
+        description: f.description || "",
+        model: f.model || "",
+        tools: f.tools || "",
+        thinking: f.thinking || "",
+        content: raw,
+      });
+    } catch { /* unreadable — skip */ }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Fields of a subagent .md the editor may write back. */
+const AGENT_DEF_FIELDS = new Set(["description", "model", "tools", "thinking"]);
+
+/** Update one frontmatter field of a subagent definition, preserving the rest of
+ *  the file. An empty value removes the field. */
+function setAgentDefField(file: string, field: string, value: string): void {
+  if (!/^[A-Za-z0-9_.-]+\.md$/.test(file)) throw new Error("invalid agent file");
+  if (!AGENT_DEF_FIELDS.has(field)) throw new Error(`invalid agent field: ${field}`);
+  const p = path.join(AGENTS_DIR, file);
+  const raw = fs.readFileSync(p, "utf8");
+  const fm = splitFrontmatter(raw);
+  const lines = fm ? fm.lines : [];
+  const body = fm ? fm.body : raw;
+  const idx = lines.findIndex((l) => { const i = l.indexOf(":"); return i > 0 && l.slice(0, i).trim() === field; });
+  if (value === "") { if (idx >= 0) lines.splice(idx, 1); }
+  else if (idx >= 0) lines[idx] = `${field}: ${value}`;
+  else lines.push(`${field}: ${value}`);
+  fs.writeFileSync(p, `---\n${lines.join("\n")}\n---\n${body}`);
+}
+
 // ─── Config persistence (teams.yaml / agent-team-config.json / settings.json) ─
 
 function serializeTeamsYaml(data: { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean }): string {
@@ -619,14 +826,14 @@ const GO_LIMITS: Record<"h5" | "wk" | "mo", number> = { h5: 12, wk: 30, mo: 60 }
 // models-store.json. Its models are ingested here so the Settings cost catalog
 // surfaces `kilo` as an independent provider (never conflated with a model of the
 // same id under another provider such as openrouter). The path mirrors the
-// agent-team extension's model-cache.ts CACHE_DIR (~/.pi/kilo_Cache), which is
+// agent-team extension's model-cache.ts CACHE_DIR (~/.pi-scope/kilo_Cache), which is
 // the only writer of these files.
-const KILO_CACHE_DIR = process.env.SCOPE_KILO_CACHE_DIR ?? path.join(os.homedir(), ".pi", "kilo_Cache");
+const KILO_CACHE_DIR = process.env.SCOPE_KILO_CACHE_DIR ?? path.join(os.homedir(), ".pi-scope", "kilo_Cache");
 
 let modelsStoreCache: { mtimeMs: number; data: Record<string, any> } | null = null;
 let kiloCache: { models: any[] } | null = null;
 
-/** Read the pi model store (~/.pi/agent/models-store.json), cached by mtime. */
+/** Read the pi model store (~/.pi-scope/agent/models-store.json), cached by mtime. */
 function loadModelsStore(): Record<string, any> {
   try {
     const st = fs.statSync(MODELS_STORE);
@@ -639,7 +846,7 @@ function loadModelsStore(): Record<string, any> {
   }
 }
 
-/** Read the kilo provider's model cache (~/.pi/kilo_Cache/kilo-models.json and
+/** Read the kilo provider's model cache (~/.pi-scope/kilo_Cache/kilo-models.json and
  *  kilo-free-models.json). Each is a { cachedAt, data: [...] } envelope; merge
  *  the arrays. Cached in-process; a fresh read happens once per process since
  *  the caches change only when the kilo extension refreshes them at boot. */
@@ -2456,6 +2663,98 @@ async function handle(req: Request): Promise<Response> {
           clearStoredKey(name);
           break;
         }
+        // ── pi packages (settings.json `packages`) ──
+        // Add a package source (e.g. npm:@scope/rpiv-todo) or remove one by an
+        // exact source match. `value` is the source string.
+        case "addPiPackage": {
+          const src = String(value || "").trim();
+          if (!src) return jsonResponse({ error: "missing package source" }, 400);
+          if (src.length > 512) return jsonResponse({ error: "package source is too long" }, 400);
+          updateSettingsJson((cfg) => {
+            cfg.packages = Array.isArray(cfg.packages) ? cfg.packages : [];
+            if (!cfg.packages.some((e: unknown) => packageSource(e) === src)) cfg.packages.push(src);
+          });
+          break;
+        }
+        case "removePiPackage": {
+          const src = String(value || "").trim();
+          if (!src) return jsonResponse({ error: "missing package source" }, 400);
+          updateSettingsJson((cfg) => {
+            cfg.packages = (Array.isArray(cfg.packages) ? cfg.packages : []).filter((e: unknown) => packageSource(e) !== src);
+          });
+          break;
+        }
+        // ── Per-extension enablement (extensions/extensions.json) ──
+        // `value` is { name, flag: "orchestrator"|"subagent", enabled }.
+        case "setExtensionFlag": {
+          const v = (value ?? {}) as { name?: unknown; flag?: unknown; enabled?: unknown };
+          const name = String(v.name ?? "").trim();
+          const flag = String(v.flag ?? "");
+          if (!name) return jsonResponse({ error: "missing extension name" }, 400);
+          if (flag !== "orchestrator" && flag !== "subagent") return jsonResponse({ error: `invalid flag: ${flag}` }, 400);
+          setExtensionFlag(name, flag, !!v.enabled);
+          break;
+        }
+        // ── Project trust (trust.json) ──
+        case "revokeTrust": {
+          const p = String(value || "").trim();
+          if (!p) return jsonResponse({ error: "missing path" }, 400);
+          revokeTrust(p);
+          break;
+        }
+        // ── Global instruction files (AGENTS.md / SYSTEM.md / APPEND_SYSTEM.md) ──
+        // `value` is { file, content }. The file must be one of the allowlisted
+        // names so a request can never write an arbitrary path.
+        case "setInstructionFile": {
+          const v = (value ?? {}) as { file?: unknown; content?: unknown };
+          const file = String(v.file ?? "").trim();
+          const content = typeof v.content === "string" ? v.content : "";
+          if (!INSTRUCTION_FILES.includes(file)) return jsonResponse({ error: `invalid instruction file: ${file}` }, 400);
+          if (content.length > 2 * 1024 * 1024) return jsonResponse({ error: "file is too large (2 MB max)" }, 400);
+          fs.mkdirSync(AGENT_DIR, { recursive: true });
+          if (content === "") {
+            // Empty content removes the file rather than leaving an empty one
+            // pi would still load as a (blank) context file.
+            try { fs.rmSync(path.join(AGENT_DIR, file)); } catch { /* already absent */ }
+          } else {
+            fs.writeFileSync(path.join(AGENT_DIR, file), content);
+          }
+          break;
+        }
+        // ── Subagent definition file (agents/*.md) ──
+        // `value` is { file, content } — the FULL markdown, so the editor can
+        // change frontmatter and the prompt body together.
+        case "saveAgentDefFile": {
+          const v = (value ?? {}) as { file?: unknown; content?: unknown };
+          const file = String(v.file ?? "").trim();
+          const content = typeof v.content === "string" ? v.content : "";
+          if (!/^[A-Za-z0-9_.-]+\.md$/.test(file)) return jsonResponse({ error: "invalid agent file" }, 400);
+          if (content.length > 1024 * 1024) return jsonResponse({ error: "file is too large (1 MB max)" }, 400);
+          const p = path.join(AGENTS_DIR, file);
+          if (!fs.existsSync(p)) return jsonResponse({ error: `no such agent definition: ${file}` }, 404);
+          try {
+            fs.writeFileSync(p, content);
+          } catch {
+            return jsonResponse({ error: `could not write ${file}` }, 500);
+          }
+          break;
+        }
+        // ── Subagent definition frontmatter (agents/*.md) ──
+        // `value` is { file, field, value }.
+        case "setAgentDefField": {
+          const v = (value ?? {}) as { file?: unknown; field?: unknown; value?: unknown };
+          const file = String(v.file ?? "").trim();
+          const field = String(v.field ?? "").trim();
+          const nextVal = String(v.value ?? "").trim();
+          if (!/^[A-Za-z0-9_.-]+\.md$/.test(file)) return jsonResponse({ error: "invalid agent file" }, 400);
+          if (!AGENT_DEF_FIELDS.has(field)) return jsonResponse({ error: `invalid agent field: ${field}` }, 400);
+          try {
+            setAgentDefField(file, field, nextVal);
+          } catch {
+            return jsonResponse({ error: `no such agent definition: ${file}` }, 404);
+          }
+          break;
+        }
         default:
           return jsonResponse({ error: `unknown settings action: ${action}` }, 400);
       }
@@ -2536,18 +2835,22 @@ async function handle(req: Request): Promise<Response> {
           break;
         }
         case "setMemberModel": {
-          // Set a specific team member's model in teams.yaml. `agent` is the
-          // member name; the write targets every team containing that member
-          // (a member may exist in several teams). Empty model clears it.
+          // Set a member's model in teams.yaml. Teams are independent: a member
+          // name may appear in several teams, so the write is scoped to the one
+          // team the caller names. `agent` is the member name; empty model
+          // clears it.
           const key = String(body.agent || "");
+          const team = String(body.team || "").trim();
           const model = String(body.model || "").trim();
           if (!key) return jsonResponse({ error: "missing agent" }, 400);
+          if (!team) return jsonResponse({ error: "missing team" }, 400);
           if (model && !isModelId(model)) return jsonResponse({ error: "invalid model id" }, 400);
+          if (!readTeams(proj).teams[team]) return jsonResponse({ error: `no such team: ${team}` }, 400);
           updateTeamsYaml(proj, (p) => {
-            for (const members of Object.values(p.teams || {})) {
-              const mem = (members as any[]).find((m) => (m.name || "").toLowerCase() === key.toLowerCase());
-              if (mem) { if (model) mem.model = model; else delete mem.model; }
-            }
+            const members = (p.teams || {})[team];
+            if (!Array.isArray(members)) return;
+            const mem = members.find((m) => (m.name || "").toLowerCase() === key.toLowerCase());
+            if (mem) { if (model) mem.model = model; else delete mem.model; }
           });
           break;
         }

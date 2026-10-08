@@ -16,14 +16,14 @@
  *      from here or from the environment, so the two can't be confused.
  *
  * File: <agentDir>/api-keys.json (mode 0600), override with SCOPE_KEYS_JSON.
- * Secrets stay server-side; the UI only ever receives a masked preview.
+ * `<agentDir>` is Pi Scope's OWN agent dir (see agent-dir.ts), not the user's
+ * global pi agent dir. Secrets stay server-side; the UI only ever receives a
+ * masked preview.
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-
-const AGENT_DIR = process.env.SCOPE_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+import { AGENT_DIR } from "./agent-dir.ts";
 
 /** Where the Settings page stores user-entered keys. */
 export const KEYS_JSON = process.env.SCOPE_KEYS_JSON ?? path.join(AGENT_DIR, "api-keys.json");

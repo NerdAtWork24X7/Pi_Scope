@@ -43,5 +43,11 @@ if [ ! -d "$ROOT_DIR/node_modules/electron" ]; then
   ( cd "$ROOT_DIR" && npm install --no-audit --no-fund )
 fi
 
+# The bundled Pi coding agent (first run only). The server launches every `pi`
+# from here; if it is missing it falls back to a global pi install.
+if [ -f "$DIR/pi-bundle/package.json" ] && [ ! -d "$DIR/pi-bundle/node_modules" ]; then
+  ( cd "$DIR/pi-bundle" && npm install --no-audit --no-fund ) || true
+fi
+
 # Overwrite launcher.log each run so failures are easy to read.
 exec "$ROOT_DIR/node_modules/.bin/electron" . > "$DIR/launcher.log" 2>&1

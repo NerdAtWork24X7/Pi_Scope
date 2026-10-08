@@ -1,0 +1,9 @@
+{
+  "name": "pi-scope-pi-bundle",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The Pi coding agent bundled with Pi Scope, so every pi process is launched from Pi Scope instead of a global pi install.",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.3"
+  }
+}

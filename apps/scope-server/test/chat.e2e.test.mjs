@@ -467,24 +467,10 @@ describe("chat workspaces", () => {
     assert.equal(await page.locator("#chat-composer").isVisible(), false);
   });
 
-  test("REGRESSION: removing a workspace from Settings force-reloads the app", async () => {
-    await boot({ sessions: [], team: defaultTeam({ chatWorkspaces: [WS_A, WS_B] }) });
-    page.on("dialog", (d) => d.accept());
-    await page.evaluate(() => window.setView("settings"));
-    await page.waitForSelector('.settings-nav-item[data-sec="workspaces"]');
-    await page.click('.settings-nav-item[data-sec="workspaces"]');
-    await page.waitForSelector(`[data-remove-ws="${WS_A}"]`);
-
-    const reloaded = page.waitForEvent("load", { timeout: 5000 });
-    await page.click(`[data-remove-ws="${WS_A}"]`);
-    await reloaded;
-    await page.waitForFunction(() => window.__SCOPE_STATE?.sessionsLoaded === true);
-    // After the reload the removed workspace is gone from the config.
-    await page.waitForSelector('.settings-nav-item[data-sec="workspaces"]');
-    await page.click('.settings-nav-item[data-sec="workspaces"]');
-    await page.waitForSelector(`[data-remove-ws="${WS_B}"]`);
-    assert.equal(await page.locator(`[data-remove-ws="${WS_A}"]`).count(), 0, "removed workspace stays gone");
-  });
+  // Settings no longer carries a Workspaces editor — workspaces are added and
+  // removed from the Chat rail (covered by the test above) and the global
+  // sidebar rail, both of which post the same addWorkspace/removeWorkspace
+  // actions.
 
   test("REGRESSION: a removed workspace stays removed after a reload even if another project lists it", async () => {
     // The rail is a union of every project's chatWorkspaces, but a removal is

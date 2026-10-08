@@ -8,7 +8,7 @@
  *
  *   1. Discovering plugins in two roots: the app's built-in plugins
  *      (`apps/scope-server/plugins/`) and the user's plugin directory
- *      (`$SCOPE_PLUGINS_DIR`, default `~/.pi/scope/plugins`).
+ *      (`$SCOPE_PLUGINS_DIR`, default `~/.pi-scope/plugins`).
  *   2. Persisting which plugins are enabled/disabled (`plugins.json` in the
  *      user plugin directory) — the Settings → Plugins page writes this via
  *      `POST /plugins`.
@@ -38,7 +38,7 @@ export const BUILTIN_DIR = path.join(PROJECT_ROOT, "apps", "scope-server", "plug
 
 /** User plugins. Override with SCOPE_PLUGINS_DIR (e.g. to keep them in-repo). */
 export const USER_DIR =
-  process.env.SCOPE_PLUGINS_DIR ?? path.join(os.homedir(), ".pi", "scope", "plugins");
+  process.env.SCOPE_PLUGINS_DIR ?? path.join(os.homedir(), ".pi-scope", "plugins");
 
 /** Where enable/disable choices are persisted. */
 const CONFIG_PATH = path.join(USER_DIR, "plugins.json");

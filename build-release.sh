@@ -16,6 +16,12 @@ NODE_URL="https://nodejs.org/dist/${NODE_VER}/${NODE_TARBALL}"
 echo "[build] installing workspace deps (electron, node-pty, ws, esbuild, electron-builder)..."
 ( cd "$ROOT" && npm install --no-audit --no-fund )
 
+echo "[build] bundling the Pi coding agent (pi-bundle)..."
+( cd "$LAUNCHER/pi-bundle" && npm install --no-audit --no-fund )
+# Ship the Pi Scope extension inside the bundle so the packaged `pi` shim can
+# force-load it without depending on the user's global pi configuration.
+cp "$ROOT/extension/pi-scope.ts" "$LAUNCHER/pi-bundle/pi-scope.ts"
+
 echo "[build] bundling SCOPE server (TS -> JS; node-pty/ws kept external)..."
 mkdir -p server-bundle/public
 npx esbuild "$ROOT/apps/scope-server/server.ts" \

@@ -33,6 +33,10 @@
   // ─── Persistent view state ───────────────────────────────────────────────
   let activeSec = "agent";
   let editingTeam = null;  // team name being renamed inline in the Teams section
+  // Team names whose details (members, per-agent models, add row) are expanded in
+  // the SubAgent → agent teams list. Empty by default, so every team renders as
+  // just its name until the user opens it.
+  const expandedTeams = new Set();
   let SET = null;          // latest /settings snapshot
   let loaded = false;      // first/only fetch done
   let fetching = false;
@@ -332,13 +336,13 @@
   }
 
   const SECTIONS = {
-    agent: () => renderAgent(),
-    teams: () => renderTeams(),
+    // Teams is not a separate tab any more: the agent-team roster lives inside
+    // the SubAgent tab, so both render as one panel.
+    agent: () => renderAgent() + renderTeams(),
     models: () => renderModels(),
     skills: () => renderSkills(),
     extensions: () => renderExtensions(),
     keys: () => renderKeys(),
-    workspaces: () => renderWorkspaces(),
     pi: () => renderPi(),
     plugins: () => renderPlugins(),
   };
@@ -405,7 +409,7 @@
   // Scope badge shown next to section titles: "Project" means the control
   // persists in the current workspace's .pi/settings (agent-team-config.json /
   // agents/teams.yaml), "Global" means it lives in the shared pi
-  // settings.json (~/.pi/agent/settings.json). Mirrors where each section's
+  // settings.json (~/.pi-scope/agent/settings.json). Mirrors where each section's
   // writes actually land — see the per-action writers in server.ts.
   function scopeBadge(scope) {
     const project = scope === "project";
@@ -413,7 +417,7 @@
       `<span class="set-scope set-scope-${project ? "project" : "global"}" ` +
       `title="${project
         ? "Saved in this workspace's .pi/settings (agent-team-config.json / teams.yaml)"
-        : "Saved in the global ~/.pi/agent/settings.json"}">` +
+        : "Saved in Pi Scope's own agent dir (settings.json)"}">` +
       `${project ? "Project" : "Global"}</span>`
     );
   }
@@ -423,6 +427,17 @@
       `<label class="set-toggle" ${attrs || ""}><input type="checkbox"${on ? " checked" : ""}>` +
       `<span class="set-toggle-track"><span class="set-toggle-knob"></span></span>` +
       `<span class="set-toggle-label">${on ? esc(labelOn || "On") : esc(labelOff || "Off")}</span></label>`
+    );
+  }
+
+  /** Compact labelled toggle for dense rows — same markup as toggleControl but
+   *  with the small track. `attrs` land on the label (like toggleControl) and
+   *  `inputAttrs` on the checkbox, for a caller binding its own change handler. */
+  function miniToggle(on, attrs, label, inputAttrs) {
+    return (
+      `<label class="set-toggle" ${attrs || ""}><input type="checkbox"${inputAttrs ? " " + inputAttrs : ""}${on ? " checked" : ""}>` +
+      `<span class="set-toggle-track sm"><span class="set-toggle-knob"></span></span>` +
+      `<span class="set-toggle-label">${esc(label)}</span></label>`
     );
   }
 
@@ -441,6 +456,78 @@
     return html;
   }
 
+  // ─── Model pickers ────────────────────────────────────────────────────────
+  // Every model dropdown in Settings is built from the model registry
+  // (SET.modelsMeta) plus the composer's enabled models, de-duplicated and
+  // grouped into one <optgroup> per provider — the same list the team member
+  // pickers use. A value that is neither enabled nor in the catalogue is kept
+  // as its own option so it always round-trips.
+
+  /** Registry key (provider/id) for a stored model value. Configs may hold the
+   *  key, a bare id, or an id relative to `defaultProvider`; pi resolves all
+   *  three, so the dropdown has to as well or the current model would look
+   *  unset. Returns "" when nothing matches. */
+  function resolveModelKey(value) {
+    const sel = String(value || "");
+    if (!sel) return "";
+    const meta = SET.modelsMeta || {};
+    if (meta[sel]) return sel;
+    const dp = fText((SET.settingsRaw || {}).defaultProvider, "");
+    if (dp && meta[`${dp}/${sel}`]) return `${dp}/${sel}`;
+    return Object.keys(meta).find((k) => k.split("/").slice(1).join("/") === sel) || "";
+  }
+
+  /** `<optgroup>` markup, one group per provider, with `current` selected. */
+  function modelOptionGroups(current) {
+    const meta = SET.modelsMeta || {};
+    const sel = String(current || "");
+    const ids = new Set([...Object.keys(meta), ...strList(SET.enabledModels)].filter(Boolean));
+    if (sel) ids.add(sel);
+    const groups = new Map(); // provider -> Set<model key>
+    for (const id of ids) {
+      const provider = (meta[id] && meta[id].provider) || id.split("/")[0] || "other";
+      if (!groups.has(provider)) groups.set(provider, new Set());
+      groups.get(provider).add(id);
+    }
+    return [...groups.keys()].sort((a, b) => a.localeCompare(b)).map((provider) => {
+      const keys = [...groups.get(provider)].sort((a, b) => a.localeCompare(b));
+      return (
+        `<optgroup label="${esc(provider)}">` +
+        keys.map((key) =>
+          `<option value="${esc(key)}"${key === sel ? " selected" : ""}>${esc(key.split("/").slice(1).join("/") || key)}</option>`
+        ).join("") +
+        `</optgroup>`
+      );
+    }).join("");
+  }
+
+  /** Provider-grouped model dropdown. `emptyLabel` (when given) adds a leading
+   *  option with the empty value — "(default)" for inheriting, "(none)" for
+   *  unset. `cls` adds a section-specific modifier class. */
+  function modelSelect(current, attrs, emptyLabel, cls) {
+    const sel = String(current || "");
+    return (
+      `<select class="set-input set-select${cls ? " " + cls : ""}" ${attrs || ""}>` +
+      (emptyLabel == null
+        ? ""
+        : `<option value=""${sel ? "" : " selected"}>${esc(emptyLabel)}</option>`) +
+      modelOptionGroups(sel) +
+      `</select>`
+    );
+  }
+
+  /** Model dropdown for a team member: "(default)" inherits the session model. */
+  function memberModelSelect(name, team, current) {
+    const sel = String(current || "");
+    return modelSelect(
+      sel,
+      `data-member-model="${esc(name)}" data-member-team="${esc(team)}" ` +
+      `aria-label="Model for ${esc(name)}" title="${esc(sel || "(default)")}"`,
+      "(default)",
+      "set-member-model"
+    );
+  }
+
   // ─── Agent section ────────────────────────────────────────────────────────
   function renderAgent() {
     const sr = SET.settingsRaw || {};
@@ -456,7 +543,7 @@
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Agent behavior</div>` +
-      `<h2 class="settings-group-title">pi agent ${scopeBadge("project")}</h2>` +
+      `<h2 class="settings-group-title">SubAgent ${scopeBadge("project")}</h2>` +
       field("Mode", "creative vs standard", selectControl(
         [{ value: "standard", label: "Standard" }, { value: "creative", label: "Creative" }],
         mode, 'data-act="setMode"'
@@ -487,6 +574,7 @@
     const activeTeam = SET.activeTeam && teams[SET.activeTeam] ? SET.activeTeam : order[0];
     const disabled = new Set(strList(SET.disabledAgents));
     const cr = SET.agentConfigRaw || {};
+    const defs = strList(SET.agentDefs);
 
     let teamHtml = "";
     if (!order.length) {
@@ -496,51 +584,65 @@
         const members = teams[tn] || [];
         const isActive = tn === activeTeam;
         const activeCount = members.filter((m) => m.active !== false && !disabled.has((m.name || "").toLowerCase())).length;
-        // Renaming happens inline: the name swaps for an input, and the rest of
-        // the head is replaced by Save/Cancel so the row can't be misclicked.
+        // Collapsed by default: a team shows as just a chevron + its name.
+        // Expanding reveals Edit/Remove/Activate and the member list. Renaming
+        // happens inline: the name swaps for an input and the rest of the head
+        // is replaced by Save/Cancel so the row can't be misclicked.
+        const open = expandedTeams.has(tn);
+        const toggle =
+          `<button type="button" class="set-team-toggle" data-team-toggle="${esc(tn)}" ` +
+          `aria-expanded="${open ? "true" : "false"}" title="${open ? "Collapse" : "Expand"} ${esc(tn)}">` +
+          `${open ? "▾" : "▸"}</button>`;
         const head = editingTeam === tn
           ? `<div class="set-team-head">` +
+            toggle +
             `<input type="text" class="set-input set-team-rename" value="${esc(tn)}" data-team-rename="${esc(tn)}" ` +
             `aria-label="New name for ${esc(tn)}" spellcheck="false">` +
             `<button type="button" class="btn-sm" data-team-rename-save="${esc(tn)}">Save</button>` +
             `<button type="button" class="btn-sm" data-team-rename-cancel="1">Cancel</button>` +
             `</div>`
           : `<div class="set-team-head">` +
+            toggle +
             `<span class="set-team-name">${esc(tn)}</span>` +
-            `<button type="button" class="btn-sm set-team-edit" data-team-edit="${esc(tn)}" title="Rename this team">Edit</button>` +
-            `<button type="button" class="btn-sm set-team-del" data-team-del="${esc(tn)}" title="Delete this team">Remove</button>` +
-            `<span class="set-team-actions">` +
-            `<span class="set-team-count">${activeCount}/${members.length} active</span>` +
-            (isActive
-              ? `<span class="set-team-pill">active</span>`
-              : `<button type="button" class="btn-sm set-team-select" data-select="${esc(tn)}">Activate</button>`) +
-            `</span>` +
+            (open
+              ? `<button type="button" class="btn-sm set-team-edit" data-team-edit="${esc(tn)}" title="Rename this team">Edit</button>` +
+                `<button type="button" class="btn-sm set-team-del" data-team-del="${esc(tn)}" title="Delete this team">Remove</button>` +
+                `<span class="set-team-actions">` +
+                `<span class="set-team-count">${activeCount}/${members.length} active</span>` +
+                (isActive
+                  ? `<span class="set-team-pill">active</span>`
+                  : `<button type="button" class="btn-sm set-team-select" data-select="${esc(tn)}">Activate</button>`) +
+                `</span>`
+              : "") +
             `</div>`;
         teamHtml +=
-          `<div class="set-team${isActive ? " active" : ""}" data-team="${esc(tn)}">` +
+          `<div class="set-team${isActive ? " active" : ""}${open ? "" : " collapsed"}" data-team="${esc(tn)}">` +
           head +
-          `<div class="set-members">` +
-          members.map((m) => {
-            const name = m.name || "";
-            const off = disabled.has(name.toLowerCase()) || m.active === false;
-            const model = m.model || "";
-            return (
-              `<div class="set-member">` +
-              `<label class="set-member-toggle"><input type="checkbox" data-agent="${esc(name)}" data-disabled="${off}"${off ? "" : " checked"}>` +
-              `<span class="set-toggle-track sm"><span class="set-toggle-knob"></span></span></label>` +
-              `<span class="set-member-name">${esc(name)}</span>` +
-              `<input type="text" class="set-input set-member-model" value="${esc(model)}" placeholder="model (e.g. provider/model)" data-member-model="${esc(name)}">` +
-              `<button type="button" class="set-member-x" data-member-del="${esc(name)}" data-member-team="${esc(tn)}" ` +
-              `title="Remove ${esc(name)} from ${esc(tn)}" aria-label="Remove ${esc(name)}">&times;</button>` +
+          (open
+            ? `<div class="set-members">` +
+              members.map((m) => {
+                const name = m.name || "";
+                const off = disabled.has(name.toLowerCase()) || m.active === false;
+                const model = m.model || "";
+                return (
+                  `<div class="set-member">` +
+                  `<label class="set-member-toggle"><input type="checkbox" data-agent="${esc(name)}" data-disabled="${off}"${off ? "" : " checked"}>` +
+                  `<span class="set-toggle-track sm"><span class="set-toggle-knob"></span></span></label>` +
+                  `<span class="set-member-name">${esc(name)}</span>` +
+                  memberModelSelect(name, tn, model) +
+                  `<button type="button" class="set-member-x" data-member-del="${esc(name)}" data-member-team="${esc(tn)}" ` +
+                  `title="Remove ${esc(name)} from ${esc(tn)}" aria-label="Remove ${esc(name)}">&times;</button>` +
+                  `</div>`
+                );
+              }).join("") +
+              `<div class="set-member-add">` +
+              `<input type="text" class="set-input" placeholder="add a subagent (e.g. web_fetch)" data-member-add="${esc(tn)}" ` +
+              `spellcheck="false" aria-label="Add a subagent to ${esc(tn)}">` +
+              `<button type="button" class="btn-sm" data-member-add-btn="${esc(tn)}">Add</button>` +
+              `</div>` +
               `</div>`
-            );
-          }).join("") +
-          `<div class="set-member-add">` +
-          `<input type="text" class="set-input" placeholder="add a subagent (e.g. web_fetch)" data-member-add="${esc(tn)}" ` +
-          `spellcheck="false" aria-label="Add a subagent to ${esc(tn)}">` +
-          `<button type="button" class="btn-sm" data-member-add-btn="${esc(tn)}">Add</button>` +
-          `</div>` +
-          `</div></div>`;
+            : "") +
+          `</div>`;
       }
     }
 
@@ -566,8 +668,103 @@
         `<input type="text" class="set-input" value="${esc(strList(cr.destructiveTools).join(", "))}" data-act="setDestructiveTools">`) +
       field("Skip orchestrator tools", "not run by the orchestrator",
         `<input type="text" class="set-input" value="${esc(strList(cr.skipOrchestratorTools).join(", "))}" data-act="setSkipOrchestratorTools">`) +
+      `<div class="settings-group-div"></div>` +
+      `<div class="settings-group-kicker">Subagent definitions</div>` +
+      `<div class="settings-intro">One row per <code>agents/*.md</code>. <b>Edit</b> opens the whole file (frontmatter + prompt) in a full-screen editor.</div>` +
+      `<div class="set-defs">` +
+      defs.map((d) =>
+        `<div class="set-def-row">` +
+        `<span class="set-def-name">${esc(d.name)}</span>` +
+        `<span class="set-def-file">agents/${esc(d.file)}</span>` +
+        `<button type="button" class="btn-sm" data-agentdef-edit="${esc(d.file)}">Edit</button>` +
+        `</div>`
+      ).join("") +
+      (defs.length ? "" : `<div class="settings-empty-sub">No subagent definitions found in <code>agents/</code>.</div>`) +
+      `</div>` +
       `</div>`
     );
+  }
+
+  // ─── Full-screen text editor ──────────────────────────────────────────────
+  // One overlay, shared by subagent definitions (agents/<file>.md) and the
+  // global instruction files, so a whole file is read and edited at once
+  // instead of through an inline textarea. The overlay is appended to <body>,
+  // not the settings panel, so postSettings' re-render doesn't tear it down.
+  // Save (button or Ctrl/Cmd+S), Close, Esc and a backdrop click all work.
+  function openFullscreenEditor({ title, hint, content, save }) {
+    closeFullscreenEditor();
+
+    const overlay = document.createElement("div");
+    overlay.className = "def-editor-backdrop";
+    overlay.id = "def-editor-backdrop";
+    overlay.innerHTML =
+      `<div class="def-editor" role="dialog" aria-modal="true" aria-label="Edit ${esc(title)}">` +
+        `<div class="def-editor-head">` +
+          `<span class="def-editor-title">${esc(title)}</span>` +
+          `<span class="def-editor-hint">${esc(hint)}</span>` +
+          `<span class="def-editor-spacer"></span>` +
+          `<button type="button" class="btn-sm def-editor-save">Save</button>` +
+          `<button type="button" class="btn-sm def-editor-close">Close</button>` +
+        `</div>` +
+        `<textarea class="def-editor-text" spellcheck="false" wrap="off"></textarea>` +
+      `</div>`;
+    document.body.appendChild(overlay);
+
+    const ta = overlay.querySelector(".def-editor-text");
+    ta.value = content || "";
+    ta.focus();
+
+    overlay.querySelector(".def-editor-save").addEventListener("click", () => {
+      save(ta.value).then((ok) => { if (ok) closeFullscreenEditor(); });
+    });
+    overlay.querySelector(".def-editor-close").addEventListener("click", closeFullscreenEditor);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeFullscreenEditor(); });
+    document.addEventListener("keydown", defEditorEsc);
+  }
+
+  function closeFullscreenEditor() {
+    document.getElementById("def-editor-backdrop")?.remove();
+    document.removeEventListener("keydown", defEditorEsc);
+  }
+
+  function defEditorEsc(e) {
+    // Ctrl/Cmd+S saves without leaving the editor.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      const btn = document.querySelector("#def-editor-backdrop .def-editor-save");
+      if (btn) { e.preventDefault(); btn.click(); }
+      return;
+    }
+    if (e.key === "Escape") closeFullscreenEditor();
+  }
+
+  // Opens agents/<file>.md (frontmatter + prompt) whole, so advanced edits
+  // (tools, thinking, the prompt body) are possible — the inline Model/Description
+  // rows only covered two frontmatter keys.
+  function openAgentDefEditor(file) {
+    const def = strList(SET.agentDefs).find((d) => d.file === file);
+    if (!def) { toast("Unknown subagent definition", true); return; }
+    openFullscreenEditor({
+      title: `agents/${file}`,
+      hint: "frontmatter + prompt",
+      content: def.content || "",
+      save: (content) => postSettings("saveAgentDefFile", { file, content }, `${file} saved`),
+    });
+  }
+
+  // Opens one of the agent dir's global instruction files (AGENTS.md,
+  // SYSTEM.md, …). An empty save deletes the file on the server.
+  function openInstructionEditor(file) {
+    const ins = strList(SET.instructions).find((i) => i.file === file);
+    if (!ins) { toast("Unknown instruction file", true); return; }
+    openFullscreenEditor({
+      title: file,
+      hint: ins.exists ? `agent dir · ${ins.bytes} B` : "agent dir · not created yet",
+      content: ins.content || "",
+      save: (content) => postSettings(
+        "setInstructionFile", { file, content },
+        content.trim() ? `${file} saved` : `${file} removed`
+      ),
+    });
   }
 
   // ─── Models section ───────────────────────────────────────────────────────
@@ -579,10 +776,16 @@
     const thinking = fText(sr.defaultThinkingLevel, "high");
     const meta = SET.modelsMeta || {};
 
-    // Known model ids as presentable options (provider-qualified).
+    // Provider keys as presentable options for the default-provider field.
     const known = Object.keys(meta).sort();
     const providerOptions = [...new Set(known.map((m) => (meta[m] && meta[m].provider) || m.split("/")[0]))]
       .filter(Boolean).sort();
+
+    // The stored default model may be a registry key, a bare id, or an id
+    // relative to defaultProvider; fall back to the raw value so an unknown
+    // model is never silently blanked (it becomes its own option).
+    const defaultKey = defaultModel ? resolveModelKey(defaultModel) || defaultModel : "";
+    const memoryKey = SET.memoryModel ? resolveModelKey(SET.memoryModel) || SET.memoryModel : "";
 
     const thinks = strList(SET.thinkingLevels).map((l) => ({ value: l, label: l }));
 
@@ -591,8 +794,7 @@
       `<div class="settings-group-kicker">Defaults</div>` +
       `<h2 class="settings-group-title">models & inference ${scopeBadge("global")}</h2>` +
       field("Default model", "used when no session model matches",
-        `<input type="text" class="set-input" value="${esc(defaultModel)}" list="set-model-list" data-act="setDefaultModel">`) +
-      `<datalist id="set-model-list">${known.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>` +
+        modelSelect(defaultKey, 'data-act="setDefaultModel"', "(none)")) +
       field("Default provider", "preferred provider key",
         `<input type="text" class="set-input" value="${esc(defaultProvider)}" list="set-prov-list" data-act="setDefaultProvider">`) +
       `<datalist id="set-prov-list">${providerOptions.map((p) => `<option value="${esc(p)}">`).join("")}</datalist>` +
@@ -609,16 +811,15 @@
       ).join("") +
       (enabled.length ? "" : `<div class="settings-empty-sub">No enabled models.</div>`) +
       `</div>` +
-      field("Add model", "provider/model id",
-        `<span class="set-input-wrap"><input type="text" class="set-input" id="set-add-model" list="set-model-list" placeholder="provider/model"><button type="button" class="btn-sm" id="set-add-model-btn">Add</button></span>`) +
+      field("Add model", "pick a model to offer in the composer",
+        `<span class="set-input-wrap">` +
+        modelSelect("", 'id="set-add-model" aria-label="Model to enable"', "(choose a model)") +
+        `<button type="button" class="btn-sm" id="set-add-model-btn">Add</button>` +
+        `</span>`) +
       `<div class="settings-group-div"></div>` +
       `<div class="settings-group-kicker">Memory</div>` +
       field("Memory model", "powers the memory summarizer; (default) falls back to the settings default model when memory is enabled",
-        selectControl(
-          [{ value: "", label: "(default)" }, ...enabled.map((m) => ({ value: m, label: m }))],
-          SET.memoryModel || "",
-          'data-act="setMemoryModel"'
-        )) +
+        modelSelect(memoryKey, 'data-act="setMemoryModel"', "(default)")) +
       renderModelCost() +
       `</div>`
     );
@@ -675,7 +876,7 @@
     const skills = strList(SET.skills);
     if (!skills.length) {
       return `<div class="settings-group"><div class="settings-group-kicker">Skills</div><h2 class="settings-group-title">skills ${scopeBadge("project")}</h2>` +
-        `<div class="settings-empty-sub">No skills discovered in <code>~/.pi/agent/skills</code>.</div></div>`;
+        `<div class="settings-empty-sub">No skills discovered in Pi Scope's agent dir (<code>skills/</code>).</div></div>`;
     }
     const group = (g, label) => {
       const isOn = (sk) => (g === "orchestrator" ? !!sk.orchestrator : !!sk.subagent);
@@ -691,11 +892,30 @@
         `</div></div>`
       );
     };
+    // Third axis: the default pi skills — whether pi loads the skill at all
+    // (settings.json `skills` +/- entries). Distinct from the
+    // orchestrator/subagent membership above, which is agent-team-config.json
+    // state.
+    const loadGroup = () => {
+      const isOn = (sk) => sk.settingsEnabled !== false;
+      const on = skills.filter(isOn).length;
+      return (
+        `<div class="set-skill-group">` +
+        `<div class="set-skill-head"><span>Default pi skills</span><span class="set-skill-count">${on}/${skills.length}</span></div>` +
+        `<div class="set-chips">` +
+        skills.map((sk) =>
+          `<button type="button" class="set-chip${isOn(sk) ? " on" : ""}" data-skill-load="${esc(sk.dir)}" title="Load ${esc(sk.name)} in pi sessions (settings.json skills)">` +
+          `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(sk.name)}</span></button>`
+        ).join("") +
+        `</div></div>`
+      );
+    };
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Skills</div>` +
       `<h2 class="settings-group-title">capabilities ${scopeBadge("project")}</h2>` +
-      `<div class="settings-intro">Toggle a skill on for the orchestrator, subagents, both, or neither. Membership persists in <code>agent-team-config.json</code>.</div>` +
+      `<div class="settings-intro">Three independent axes: whether pi <b>loads</b> a skill at all (<code>settings.json</code>), and whether its tools are offered to the <b>orchestrator</b> / <b>subagents</b> (<code>agent-team-config.json</code>).</div>` +
+      loadGroup() +
       group("orchestrator", "Orchestrator") +
       group("subagent", "Subagents") +
       `</div>`
@@ -709,23 +929,38 @@
       return `<div class="settings-group"><div class="settings-group-kicker">Extensions</div><h2 class="settings-group-title">extensions ${scopeBadge("global")}</h2>` +
         `<div class="settings-empty-sub">No extensions configured.</div></div>`;
     }
+    // Enablement flags live in extensions/extensions.json, keyed by the
+    // extension's name (directory name, or file stem for a single-file
+    // extension). Only extensions pi can actually load are worth configuring.
+    // This is the only control that decides whether each extension loads, so the
+    // previously separate settings.json "loaded extensions" chip list was folded
+    // into it.
+    const flags = SET.extensionFlags || {};
+    const named = exts.filter((ex) => ex.available !== false);
+    const flagRows = named.map((ex) => {
+      const f = flags[ex.name] || {};
+      return (
+        `<div class="set-extflag">` +
+        `<span class="set-extflag-name">${esc(ex.name)}</span>` +
+        miniToggle(f.orchestrator !== false, "", "orchestrator", `data-ext-flag="${esc(ex.name)}" data-ext-which="orchestrator"`) +
+        miniToggle(f.subagent !== false, "", "subagent", `data-ext-flag="${esc(ex.name)}" data-ext-which="subagent"`) +
+        `</div>`
+      );
+    }).join("");
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Extensions</div>` +
-      `<h2 class="settings-group-title">loaded extensions ${scopeBadge("global")}</h2>` +
-      `<div class="settings-intro">Extensions listed in <code>settings.json</code>. Toggle one to enable or disable it; <code>+</code> enables, <code>-</code> disables.</div>` +
-      `<div class="set-chips">` +
-      exts.map((ex) =>
-        `<button type="button" class="set-chip${ex.enabled ? " on" : ""}" data-path="${esc(ex.path)}">` +
-        `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(ex.name)}</span></button>`
-      ).join("") +
+      `<h2 class="settings-group-title">extensions ${scopeBadge("global")}</h2>` +
+      `<div class="settings-intro">Whether each extension loads for the <b>orchestrator</b> and for spawned <b>subagents</b> (<code>extensions/extensions.json</code>).</div>` +
+      `<div class="set-extflags">` + flagRows +
+      (named.length ? "" : `<div class="settings-empty-sub">No loadable extensions to configure.</div>`) +
       `</div></div>`
     );
   }
 
   // ─── API keys ─────────────────────────────────────────────────────────────
   // Keys for app features (Groq speech-to-text) and for pi extensions that read
-  // process.env. They are stored in ~/.pi/agent/api-keys.json (mode 0600) and
+  // process.env. They are stored in ~/.pi-scope/agent/api-keys.json (mode 0600) and
   // injected into the environment of every pi chat the server launches, so a
   // key no longer has to be exported in the shell the server was started from —
   // a desktop/GUI launch never sources the shell profile, which is exactly why
@@ -766,15 +1001,21 @@
 
     const known = keys.filter((k) => k.known);
     const custom = keys.filter((k) => !k.known);
+    // No defaults are seeded, so the panel can legitimately be empty: only keys
+    // that actually have a value (Settings, environment, shell profile or an
+    // extension config) are listed. The known names stay reachable through the
+    // datalist on the Add field below.
+    const knownNames = strList(SET.knownApiKeys);
 
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">Credentials</div>` +
       `<h2 class="settings-group-title">API keys ${scopeBadge("global")}</h2>` +
-      `<div class="settings-intro">Saved to <code>~/.pi/agent/api-keys.json</code> (owner-only) and injected ` +
+      `<div class="settings-intro">Saved to <code>~/.pi-scope/agent/api-keys.json</code> (owner-only) and injected ` +
       `into the environment of every pi chat the server launches — those chats run under your interactive shell ` +
       `(which sources <code>~/.bashrc</code> / <code>~/.zshrc</code>), so keys exported there reach them too. A saved key overrides the ` +
       `launcher's environment; Clear falls back to it.</div>` +
+      (keys.length ? "" : `<div class="settings-empty-sub">No keys saved.</div>`) +
       known.map(row).join("") +
       (custom.length
         ? `<div class="settings-group-div"></div>` +
@@ -782,49 +1023,48 @@
           custom.map(row).join("")
         : "") +
       `<div class="settings-group-div"></div>` +
-      field("Add a custom key", "any environment variable a pi extension reads",
+      field("Add a key", "any environment variable the app or a pi extension reads",
         `<span class="set-input-wrap">` +
-        `<input type="text" class="set-input key-name" id="set-key-name" placeholder="MY_API_KEY" spellcheck="false" autocomplete="off">` +
+        `<input type="text" class="set-input key-name" id="set-key-name" list="set-known-keys" placeholder="MY_API_KEY" spellcheck="false" autocomplete="off">` +
         `<input type="password" class="set-input" id="set-key-value" placeholder="value" autocomplete="off" aria-label="key value">` +
         `<button type="button" class="btn-sm" id="set-key-add-btn">Add</button>` +
-        `</span>`,
+        `</span>` +
+        (knownNames.length
+          ? `<datalist id="set-known-keys">${knownNames.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>`
+          : ""),
         "Stored keys are handed to pi by name, so the name must be a valid environment variable (A-Z, 0-9, _).") +
       `</div>`
     );
   }
 
   // ─── Workspaces ───────────────────────────────────────────────────────────
-  function renderWorkspaces() {
-    const ws = strList(SET.chatWorkspaces);
-    const addErr = `<div class="settings-empty-sub" id="set-ws-err"></div>`;
-    return (
-      `<div class="settings-group">` +
-      `<div class="settings-group-kicker">Workspaces</div>` +
-      `<h2 class="settings-group-title">chat workspaces ${scopeBadge("project")}</h2>` +
-      `<div class="settings-intro">Directories available in the Chat view's workspace rail. Removing one also deletes its recorded sessions and events from the database. Session-derived workspaces you remove are remembered in <code>chatWorkspacesRemoved</code>.</div>` +
-      `<div class="set-ws-list">` +
-      ws.map((w) =>
-        `<div class="set-ws"><span class="set-ws-path">${esc(w)}</span>` +
-        `<button type="button" class="set-ws-x" data-remove-ws="${esc(w)}" aria-label="Remove ${esc(w)}">×</button></div>`
-      ).join("") +
-      (ws.length ? "" : `<div class="settings-empty-sub">No workspaces added.</div>`) +
-      `</div>` +
-      field("Add workspace", "must exist on disk",
-        `<span class="set-input-wrap"><input type="text" class="set-input" id="set-add-ws" placeholder="/absolute/path"><button type="button" class="btn-sm" id="set-add-ws-btn">Add</button></span>`, addErr) +
-      `</div>`
-    );
-  }
+  // No Settings section: workspaces are added and removed from the Chat view's
+  // own rail (see chat.js / rail.js), which owns the same addWorkspace and
+  // removeWorkspace actions. Keeping a second editor here only duplicated that
+  // surface.
 
   // ─── pi section ───────────────────────────────────────────────────────────
   function renderPi() {
     const sr = SET.settingsRaw || {};
     const term = sr.terminal || {};
     const comp = sr.compaction || {};
+    const themes = strList(SET.themes);
+    const pkgs = strList(SET.packages);
+    const trusted = strList(SET.trustedProjects);
+    const providers = strList(SET.providers);
+    const instr = strList(SET.instructions);
+
+    const listRow = (value, removeAttr) =>
+      `<div class="set-ws"><span class="set-ws-path">${esc(value)}</span>` +
+      `<button type="button" class="set-ws-x" ${removeAttr} aria-label="Remove ${esc(value)}">&times;</button></div>`;
+
     return (
       `<div class="settings-group">` +
       `<div class="settings-group-kicker">pi settings.json</div>` +
       `<h2 class="settings-group-title">pi coding agent ${scopeBadge("global")}</h2>` +
-      field("Theme", "pi terminal theme", `<input type="text" class="set-input" value="${esc(fText(sr.theme, "cyberpunk"))}" data-act="setTheme">`) +
+      field("Theme", "pi terminal theme",
+        `<input type="text" class="set-input" value="${esc(fText(sr.theme, "cyberpunk"))}" list="set-theme-list" data-act="setTheme">` +
+        `<datalist id="set-theme-list">${themes.map((t) => `<option value="${esc(t)}"></option>`).join("")}</datalist>`) +
       field("Quiet startup", "suppress verbose boot banner",
         toggleControl(fBool(sr.quietStartup, false), 'data-act="setQuietStartup"')) +
       field("Hide thinking block", "collapse reasoning in the transcript",
@@ -838,6 +1078,45 @@
         toggleControl(fBool(term.showTerminalProgress, true), 'data-act="setTerminalShowProgress"')) +
       field("Compaction", "auto-compact long sessions",
         toggleControl(fBool(comp.enabled, true), 'data-act="setCompactionEnabled"')) +
+
+      `<div class="settings-group-div"></div>` +
+      `<div class="settings-group-kicker">Packages</div>` +
+      `<div class="settings-intro">pi packages from <code>settings.json</code> <code>packages</code> (npm:, git:, github:, …). Remove to uninstall; add a source to install on the next pi start.</div>` +
+      `<div class="set-ws-list">` +
+      pkgs.map((p) => listRow(p.source, `data-pkg-remove="${esc(p.source)}"`)).join("") +
+      (pkgs.length ? "" : `<div class="settings-empty-sub">No packages installed.</div>`) +
+      `</div>` +
+      field("Add package", "npm:name, git:url, github:owner/repo",
+        `<span class="set-input-wrap"><input type="text" class="set-input" id="set-add-pkg" placeholder="npm:@scope/tool" spellcheck="false"><button type="button" class="btn-sm" id="set-add-pkg-btn">Add</button></span>`) +
+
+      `<div class="settings-group-div"></div>` +
+      `<div class="settings-group-kicker">Trusted projects</div>` +
+      `<div class="settings-intro">Directories pi trusts to load project-local <code>.pi</code> config from (<code>trust.json</code>). Revoke to make pi ask again.</div>` +
+      `<div class="set-ws-list">` +
+      trusted.map((p) => listRow(p, `data-trust-revoke="${esc(p)}"`)).join("") +
+      (trusted.length ? "" : `<div class="settings-empty-sub">No trusted projects.</div>`) +
+      `</div>` +
+
+      `<div class="settings-group-div"></div>` +
+      `<div class="settings-group-kicker">Provider sign-in</div>` +
+      `<div class="settings-intro">Providers with stored credentials in <code>auth.json</code>. Sign in by running <code>pi</code> in a terminal. Secrets are never shown here.</div>` +
+      `<div class="set-chips">` +
+      providers.map((p) => `<span class="set-chip on" title="${esc(p.type || "credential")}"><span class="set-chip-dot"></span><span class="set-chip-name">${esc(p.name)}</span></span>`).join("") +
+      (providers.length ? "" : `<div class="settings-empty-sub">No providers signed in.</div>`) +
+      `</div>` +
+
+      `<div class="settings-group-div"></div>` +
+      `<div class="settings-group-kicker">Global instructions</div>` +
+      `<div class="settings-intro">Files every pi session loads from the agent dir. <b>Edit</b> opens the file in a full-screen editor; saving it empty removes the file. <code>AGENTS.md</code> is context; <code>SYSTEM.md</code> replaces the system prompt and <code>APPEND_SYSTEM.md</code> appends to it.</div>` +
+      `<div class="set-defs">` +
+      instr.map((i) =>
+        `<div class="set-def-row">` +
+        `<span class="set-def-name">${esc(i.file)}</span>` +
+        `<span class="set-def-file">${i.exists ? `${i.bytes} B` : "not created"}</span>` +
+        `<button type="button" class="btn-sm" data-instr-edit="${esc(i.file)}">Edit</button>` +
+        `</div>`
+      ).join("") +
+      (instr.length ? "" : `<div class="settings-empty-sub">No instruction files.</div>`) +
       `</div>`
     );
   }
@@ -883,6 +1162,16 @@
   function wireTeams(panel) {
     const rerender = () => setSection(activeSec, true);
 
+    // Collapse/expand a team. Teams render collapsed by default, so this is the
+    // only way a team's member list is revealed.
+    panel.querySelectorAll("[data-team-toggle]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const tn = b.dataset.teamToggle;
+        if (expandedTeams.has(tn)) expandedTeams.delete(tn); else expandedTeams.add(tn);
+        rerender();
+      })
+    );
+
     panel.querySelectorAll("[data-team-edit]").forEach((b) =>
       b.addEventListener("click", () => { editingTeam = b.dataset.teamEdit; rerender(); })
     );
@@ -900,6 +1189,8 @@
         // Unchanged/empty just leaves edit mode; the server validates the name
         // and its error toast is the single source of truth for collisions.
         if (!to || to === from) { rerender(); return; }
+        // Keep a rename from collapsing the team the user had open.
+        if (expandedTeams.has(from)) { expandedTeams.delete(from); expandedTeams.add(to); }
         await postTeam("renameTeam", { team: from, to });
       };
       renameInput.addEventListener("keydown", (e) => {
@@ -915,6 +1206,7 @@
       b.addEventListener("click", () => {
         const tn = b.dataset.teamDel;
         if (!confirm(`Delete team "${tn}"?\n\nIts subagent list is removed from teams.yaml. Members stay available in other teams.`)) return;
+        expandedTeams.delete(tn);
         postTeam("removeTeam", { team: tn });
       })
     );
@@ -1010,7 +1302,7 @@
     if (!panel) return;
 
     if (sec === "keys") wireKeys(panel);
-    if (sec === "teams") wireTeams(panel);
+    if (sec === "agent") wireTeams(panel);
     if (sec === "plugins") wirePlugins(panel);
 
     wireDataActs(panel);
@@ -1044,25 +1336,69 @@
         postTeam("toggleAgent", { agent: name, disabled: nowDisabled });
       })
     );
-    panel.querySelectorAll('input[data-member-model]').forEach((node) =>
+    panel.querySelectorAll('select[data-member-model]').forEach((node) =>
       node.addEventListener("change", () => {
         // Per-member model writes to teams.yaml. Populate a team+member-aware
         // action through the shared writer (which supports it implicitly via
         // teams.yaml mutation), then reload to reflect the save.
         const name = node.dataset.memberModel;
+        const team = node.dataset.memberTeam;
         const model = node.value.trim();
-        postMemberModel(name, model);
+        postMemberModel(name, team, model);
       })
     );
 
-    // Skill chips.
+    // Skill chips: orchestrator/subagent membership (data-dir/data-group) and
+    // the separate "default pi skills" settings.json toggle (data-skill-load).
     panel.querySelectorAll(".set-chip[data-dir]").forEach((chip) =>
       chip.addEventListener("click", () => postTeam("toggleSkill", { group: chip.dataset.group, dir: chip.dataset.dir }))
     );
+    panel.querySelectorAll(".set-chip[data-skill-load]").forEach((chip) =>
+      chip.addEventListener("click", () => postTeam("toggleSkillSetting", { dir: chip.dataset.skillLoad }))
+    );
 
-    // Extension chips.
-    panel.querySelectorAll(".set-chip[data-path]").forEach((chip) =>
-      chip.addEventListener("click", () => postTeam("toggleExtension", { path: chip.dataset.path }))
+    // Per-extension orchestrator/subagent enablement (extensions/extensions.json).
+    panel.querySelectorAll("input[data-ext-flag]").forEach((node) =>
+      node.addEventListener("change", () =>
+        postSettings("setExtensionFlag", {
+          name: node.dataset.extFlag,
+          flag: node.dataset.extWhich,
+          enabled: node.checked,
+        })
+      )
+    );
+
+    // pi packages (settings.json `packages`): remove buttons + add row.
+    panel.querySelectorAll("[data-pkg-remove]").forEach((b) =>
+      b.addEventListener("click", () => postSettings("removePiPackage", b.dataset.pkgRemove, "Package removed"))
+    );
+    const addPkgInput = $("#set-add-pkg");
+    const addPkgBtn = $("#set-add-pkg-btn");
+    if (addPkgInput && addPkgBtn) {
+      const addPkg = () => {
+        const src = addPkgInput.value.trim();
+        if (!src) { toast("Type a package source first", true); return; }
+        postSettings("addPiPackage", src, "Package added").then((ok) => { if (ok) addPkgInput.value = ""; });
+      };
+      addPkgBtn.addEventListener("click", addPkg);
+      addPkgInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addPkg(); } });
+    }
+
+    // Project trust (trust.json): revoke a trusted path.
+    panel.querySelectorAll("[data-trust-revoke]").forEach((b) =>
+      b.addEventListener("click", () => postSettings("revokeTrust", b.dataset.trustRevoke, "Trust revoked"))
+    );
+
+    // Global instruction files: one row each; Edit opens the full-screen editor
+    // for the whole file (an empty save removes it).
+    panel.querySelectorAll("[data-instr-edit]").forEach((b) =>
+      b.addEventListener("click", () => openInstructionEditor(b.dataset.instrEdit))
+    );
+
+    // Subagent definitions: one row each; Edit opens the full-screen markdown
+    // editor for the whole agents/<file>.md.
+    panel.querySelectorAll("[data-agentdef-edit]").forEach((b) =>
+      b.addEventListener("click", () => openAgentDefEditor(b.dataset.agentdefEdit))
     );
 
     // Model chips remove + add.
@@ -1077,50 +1413,12 @@
     if (addModelInput && addModelBtn) {
       const addModel = () => {
         const m = addModelInput.value.trim();
-        if (!m) return;
+        if (!m) { toast("Pick a model first", true); return; }
         const next = [...strList(SET.enabledModels)];
         if (!next.includes(m)) next.push(m);
         postSettings("setEnabledModels", next).then(() => { if (addModelInput) addModelInput.value = ""; });
       };
       addModelBtn.addEventListener("click", addModel);
-      addModelInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addModel(); } });
-    }
-
-    // Workspace remove + add. Removing also clears that workspace's recorded
-    // sessions/events (server-side), so confirm the destructive part first.
-    panel.querySelectorAll("[data-remove-ws]").forEach((b) =>
-      b.addEventListener("click", () => {
-        const w = b.dataset.removeWs;
-        if (!confirm(`Remove this workspace?\n\n${w}\n\nIts recorded sessions and events are permanently deleted from the database. This cannot be undone.`)) return;
-        postTeam("removeWorkspace", { path: w }).then((ok) => {
-          // Removing a workspace rewrites per-project config the whole app reads
-          // at boot; reload so every view starts from the new state (and any
-          // updated static assets — they are served no-cache, so a plain reload
-          // revalidates them).
-          if (ok) location.reload();
-        });
-      })
-    );
-    const addWsInput = $("#set-add-ws");
-    const addWsBtn = $("#set-add-ws-btn");
-    if (addWsInput && addWsBtn) {
-      const addWs = async () => {
-        const p = addWsInput.value.trim();
-        if (!p) return;
-        const { res, data } = await S.api("/agent-team", {}, { action: "addWorkspace", path: p, cwd: projectCwd() });
-        if (res.ok && data) {
-          SET = { ...SET, ...data };
-          mergeTeamIntoSnapshot(data);
-          setSection(activeSec, true);
-          toast("Workspace added");
-          if (addWsInput) addWsInput.value = "";
-        } else {
-          const err = $("#set-ws-err");
-          if (err) err.textContent = data?.error || `HTTP ${res.status}`;
-        }
-      };
-      addWsBtn.addEventListener("click", addWs);
-      addWsInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addWs(); } });
     }
 
     // Model-cost provider chips + search. Re-render only the row list on
@@ -1278,9 +1576,9 @@
   // Per-member model: routes through /agent-team with a dedicated writer so the
   // change lands in teams.yaml and the rail/snapshot stay in sync. The server
   // handles a "setMemberModel" action that writes the member's model.
-  async function postMemberModel(name, model) {
+  async function postMemberModel(name, team, model) {
     try {
-      const { res, data } = await S.api("/agent-team", {}, { action: "setMemberModel", agent: name, model, cwd: projectCwd() });
+      const { res, data } = await S.api("/agent-team", {}, { action: "setMemberModel", agent: name, team, model, cwd: projectCwd() });
       if (res.ok && data) {
         SET = { ...SET, ...data };
         mergeTeamIntoSnapshot(data);
@@ -1303,7 +1601,7 @@
   function renderPlugins() {
     const snap = SET.plugins;
     const plugins = Array.isArray(snap?.plugins) ? snap.plugins : [];
-    const dir = snap?.pluginsDir || "~/.pi/scope/plugins";
+    const dir = snap?.pluginsDir || "~/.pi-scope/plugins";
 
     const row = (p) => {
       const badges =

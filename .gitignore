@@ -25,6 +25,10 @@ apps/scope-desktop/server-bundle/
 apps/scope-desktop/dist/
 apps/scope-desktop/node-portable/
 
+# The Pi coding agent bundle's node_modules are gitignored by the pattern above;
+# this is the extension copy build-release.sh drops in for the packaged shim.
+apps/scope-desktop/pi-bundle/pi-scope.ts
+
 squashfs-root/
 
 # Machine-specific desktop launcher shortcuts (Exec/Icon must be absolute

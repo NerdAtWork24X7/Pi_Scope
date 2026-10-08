@@ -17,6 +17,13 @@ publish: null
 extraResources:
   - from: node-portable
     to: node
+  # The Pi coding agent bundled with Pi Scope. The server installs a `pi` shim
+  # from here that every spawned process uses instead of a global pi install.
+  - from: pi-bundle
+    to: pi
+    filter:
+      - "**/*"
+      - "!package-lock.json"
 linux:
   target:
     - AppImage

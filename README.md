@@ -188,7 +188,7 @@ Every header view — **Chat, Terminal, Review, Checkpoints, Git, Single, Trajec
 **plugin**. Enable or disable any of them from **Settings → Plugins**: the view disappears and,
 server-side, the routes that feature owns are refused. You can add your own plugin by dropping a
 folder with a `plugin.json` (plus an optional `server.js` / `client.js`) into
-`~/.pi/scope/plugins/`: it gets a header button and view, its own HTTP routes on the server, a hook
+`~/.pi-scope/plugins/`: it gets a header button and view, its own HTTP routes on the server, a hook
 on every ingested event, and its own persistent JSON state. See
 [`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md) and the working
 example in [`examples/plugins/hello-insights/`](examples/plugins/hello-insights/).
@@ -204,7 +204,7 @@ feeds it agent telemetry. Here's exactly what you need:
 |---|---|---|
 | 🖥️ **AppImage** (end users) | A Linux desktop (x86_64) | ❌ Nothing — Node 24 is bundled inside |
 | 💻 **From source** (developers) | **Node.js 24+** (for built-in `node:sqlite`) | `npm install` (only for the terminal) |
-| 🤖 **Feed it agent data** | The [`pi`](https://github.com/disler/pi-agent-observability) coding agent | Copy one extension file |
+| 🤖 **Feed it agent data** | The [`pi`](https://github.com/disler/pi-agent-observability) coding agent — **bundled** | ❌ Nothing — Pi Scope ships its own `pi` |
 | 🌐 **Any other tool** | Anything that can `POST /events` | A ~10 line script |
 
 **Node 24+** is the only real requirement — Pi Scope uses `node:sqlite`, which ships inside
@@ -223,7 +223,7 @@ chmod +x Pi-Scope-1.0.0.AppImage
 ./Pi-Scope-1.0.0.AppImage
 ```
 
-- Data (SQLite DB + per-run auth token) lives in `~/.local/share/pi-scope/` — it survives
+- Data (SQLite DB + per-run auth token) lives in `~/.pi-scope/` — it survives
   relaunch and never writes into the read-only AppImage mount.
 - Closing the window stops the server. If one is already listening on the port, the AppImage
   reuses it instead of starting a second.
@@ -286,7 +286,21 @@ Instantly populated — click around every view. Re-running is safe (events are 
 The dashboard comes alive when a `pi` agent feeds it. This extension hooks the agent
 lifecycle and streams telemetry, **auto-discovering the server's auth token**.
 
-The agent runs as normal in your terminal — nothing to learn, no new commands:
+**Pi Scope bundles its own `pi` coding agent.** The Chat view, the git-commit-message
+generator, and the in-browser Terminal all launch that bundled copy — with the Pi Scope
+extension force-loaded — so there is nothing to install and a separate global `pi` is
+never used. The bundled agent lives in `apps/scope-desktop/pi-bundle` (packaged as
+`resources/pi` inside the AppImage); point elsewhere with `SCOPE_PI_BIN`.
+
+The bundled agent also keeps its **own agent dir** (`~/.pi-scope/agent`, see
+`SCOPE_AGENT_DIR`). Its settings, API keys, model store, sessions and extensions live
+there, so it never reads or writes your global pi agent dir — the two installations do
+not interfere, and a `pi-scope.ts` listed in your global config can't collide with the
+force-loaded copy.
+
+The steps below are only for a `pi` you installed yourself and run outside Pi Scope
+(e.g. in your own terminal). That agent runs as normal — nothing to learn, no new
+commands:
 
 <p align="center">
   <img src="docs/shots/pi.png" alt="The pi coding agent running in a terminal" width="880" />
@@ -304,7 +318,7 @@ pi -e /path/to/Pi_Scope/extension/pi-scope.ts
 **Every session** — add it to your agent config:
 
 ```json
-// ~/.pi/agent/settings.json
+// your pi agent dir's settings.json
 {
   "extensions": [
     "/absolute/path/to/Pi_Scope/extension/pi-scope.ts"
@@ -312,11 +326,11 @@ pi -e /path/to/Pi_Scope/extension/pi-scope.ts
 }
 ```
 
-(Or copy `extension/pi-scope.ts` into `~/.pi/agent/extensions/` and list it as
+(Or copy `extension/pi-scope.ts` into your pi agent dir's `extensions/` folder and list it as
 `"+extensions/pi-scope.ts"`.)
 
 The extension finds the token from `tmp/scope_token` (dev) or
-`~/.local/share/pi-scope/scope_token` (AppImage), so you usually set nothing else. Point it
+`~/.pi-scope/scope_token` (AppImage), so you usually set nothing else. Point it
 elsewhere with `--obs-server-url` or `OBS_SERVER_URL` (default `http://127.0.0.1:43190`).
 Full flag/env and event reference: [`extension/README.md`](extension/README.md).
 
@@ -344,7 +358,7 @@ Full flag/env and event reference: [`extension/README.md`](extension/README.md).
   there, Review/Git/Checkpoints re-scan it), fold subagent groups open or closed, open a
   session straight into Single or Trajectory, or delete it from the rail.
 - **Where's my data?** A single SQLite file (`db/scope.db` in dev, or
-  `~/.local/share/pi-scope/` packaged), chmod `0600`. Delete sessions from the sidebar —
+  `~/.pi-scope/` packaged), chmod `0600`. Delete sessions from the sidebar —
   or `DELETE /sessions` for everything.
 - **What's captured?** Session start/end, every user/assistant message, thinking blocks,
   tool calls + results (with exit codes), LLM request args + system prompt, model changes,
@@ -391,10 +405,13 @@ Running from source instead of the launcher? `SCOPE_HOST=0.0.0.0 npm start` in
 | `SCOPE_DB_PATH` | `db/scope.db` | SQLite database path |
 | `SCOPE_AUTH_TOKEN` | random UUID | Bearer token for auth |
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
-| `SCOPE_SETTINGS_JSON` | `~/.pi/agent/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
-| `SCOPE_SKILLS_DIR` | `~/.pi/agent/skills` | Override the skills directory scanned for the agent-team sidebar |
-| `SCOPE_PLUGINS_DIR` | `~/.pi/scope/plugins` | Where user plugins live (enable/disable state in `plugins.json`, namespaced state in `.data/`) |
+| `SCOPE_AGENT_DIR` | `~/.pi-scope/agent` | Pi Scope's **own** pi agent dir (settings, API keys, model store, sessions). The bundled `pi` is pinned here via `PI_CODING_AGENT_DIR`, so it never touches the global pi agent dir. |
+| `SCOPE_SETTINGS_JSON` | `<agentDir>/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
+| `SCOPE_SKILLS_DIR` | `<agentDir>/skills` | Override the skills directory scanned for the agent-team sidebar |
+| `SCOPE_PLUGINS_DIR` | `~/.pi-scope/plugins` | Where user plugins live (enable/disable state in `plugins.json`, namespaced state in `.data/`) |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. a non-standard venv: `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
+| `SCOPE_PI_BIN` | bundled `pi` | Override the `pi` executable Pi Scope launches for Chat, commit messages and subagents. Set it to use a different `pi` than the bundled one (or to stub it in tests). |
+| `SCOPE_PI_BUNDLE_DIR` | auto-detected | Where the bundled `pi` lives (`apps/scope-desktop/pi-bundle` in dev, `resources/pi` packaged). Set by the packaged launcher; only override for an out-of-tree bundle. |
 
 Chat-spawned `pi` subprocesses also get the workspace venv bin dirs prepended to
 `PATH`, and `PLAYWRIGHT_BROWSERS_PATH` restored from the user's shell rc files

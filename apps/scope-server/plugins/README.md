@@ -24,7 +24,7 @@ end to end against the real server.
 **1. Create the directory and three files**
 
 ```bash
-mkdir -p ~/.pi/scope/plugins/my-plugin && cd ~/.pi/scope/plugins/my-plugin
+mkdir -p ~/.pi-scope/plugins/my-plugin && cd ~/.pi-scope/plugins/my-plugin
 ```
 
 `plugin.json`
@@ -147,10 +147,10 @@ Done: header button → view → own HTTP route → own persistent counters.
 | Root | Purpose |
 |---|---|
 | `apps/scope-server/plugins/<id>/` | Built-in feature plugins shipped with the app (`plugin.json` + their route handler in `server.ts`; the client specs live in `public/plugins-builtin.js`). |
-| `~/.pi/scope/plugins/<id>/` | **Your plugins.** Override the location with `SCOPE_PLUGINS_DIR` (**must be an absolute path** — see [Gotchas](#gotchas-and-hard-rules)). |
+| `~/.pi-scope/plugins/<id>/` | **Your plugins.** Override the location with `SCOPE_PLUGINS_DIR` (**must be an absolute path** — see [Gotchas](#gotchas-and-hard-rules)). |
 
-Enable/disable state is persisted to `~/.pi/scope/plugins/plugins.json`. Per
-plugin state written through `api.store` lands in `~/.pi/scope/plugins/.data/`.
+Enable/disable state is persisted to `~/.pi-scope/plugins/plugins.json`. Per
+plugin state written through `api.store` lands in `~/.pi-scope/plugins/.data/`.
 
 A user plugin with the same `id` as a built-in **overrides** it — that is how you
 swap out a shipped feature without patching the app.
@@ -169,7 +169,7 @@ Reload plugins**.
 ## Anatomy of a plugin
 
 ```
-~/.pi/scope/plugins/my-plugin/
+~/.pi-scope/plugins/my-plugin/
 ├── plugin.json      # manifest (required)
 ├── server.js        # optional server module (ESM)
 └── client.js        # optional client bundle (plain browser script)
@@ -528,8 +528,8 @@ that counts events by type plus a view that renders the table). It is also what
 the e2e test installs, so it is the fastest starting point:
 
 ```bash
-mkdir -p ~/.pi/scope/plugins
-cp -r examples/plugins/hello-insights ~/.pi/scope/plugins/
+mkdir -p ~/.pi-scope/plugins
+cp -r examples/plugins/hello-insights ~/.pi-scope/plugins/
 ```
 
 Then Settings → Plugins → **⟳ Reload plugins**. The **Insights** button appears

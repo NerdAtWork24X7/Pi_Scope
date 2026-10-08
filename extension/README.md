@@ -12,13 +12,23 @@ A lightweight, local-first pi agent extension that observes agent lifecycle hook
 
 ## Installation & Load
 
+> **Bundled usage:** Pi Scope's own `pi` (used by Chat, the Terminal, commit-message
+generation and subagents) is force-loaded with this extension automatically — you do
+not configure anything. The launcher passes `--extension <this file>` and pins
+`PI_CODING_AGENT_DIR` to Pi Scope's own agent dir
+(`~/.pi-scope/agent`), so this bundled agent never reads your global pi agent
+dir at all. As a belt-and-braces measure it also sets
+`PI_SCOPE_FORCE_EXTENSION` to the file's absolute path, which makes any *other*
+copy that does happen to load no-op, so two copies can never both register the
+same flags. The manual steps below are for a `pi` you run outside Pi Scope.
+
 Simply pass the `-e` or `--extension` flag to load the extension:
 
 ```bash
 pi -e ./extension/pi-scope.ts
 ```
 
-Alternatively, add the path to your local `~/.pi/agent/settings.json`:
+Alternatively, add the path to your pi agent dir's `settings.json`:
 
 ```json
 {

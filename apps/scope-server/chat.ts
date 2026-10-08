@@ -28,32 +28,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { readStoredKeys } from "./api-keys.ts";
 import { expandShellPath, readShellEnvValues, shellQuote } from "../../shared/shell.ts";
+// Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
+// PATH (force-loading the Pi Scope extension). Must be imported before PI_BIN is
+// used so chat subprocesses launch the bundled agent, not a global install.
+import { PI_BIN } from "./pi-bundle.ts";
 
 const ENCODER = new TextEncoder();
-
-/**
- * Resolve the pi binary without relying on spawn()'s PATH lookup. The server is
- * often launched by the Electron scope-desktop, whose npm-lifecycle PATH omits
- * ~/.local/share/pnpm/bin (where pi is installed) — spawning the bare name then
- * fails with ENOENT and every chat dies with "process closed" before any text.
- */
-function resolvePiBin(): string {
-  const configured = process.env.SCOPE_PI_BIN || "pi";
-  if (configured.includes("/")) return configured;
-  const dirs = [
-    path.join(os.homedir(), ".local", "share", "pnpm", "bin"),
-    ...(process.env.PATH || "").split(":").filter(Boolean),
-    "/usr/local/bin",
-    "/usr/bin",
-  ];
-  for (const dir of dirs) {
-    const candidate = path.join(dir, configured);
-    try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch { /* next */ }
-  }
-  return configured; // fall back to spawn()'s own PATH lookup
-}
-const PI_BIN = resolvePiBin();
-console.log(`  Chat: pi binary: ${PI_BIN}`);
 
 interface ActivePrompt {
   controller: ReadableStreamDefaultController<Uint8Array>;

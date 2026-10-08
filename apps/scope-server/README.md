@@ -24,10 +24,11 @@ SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 | `SCOPE_DB_PATH` | `db/scope.db` | SQLite database path |
 | `SCOPE_AUTH_TOKEN` | dev_token | Bearer token for auth |
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
-| `SCOPE_SETTINGS_JSON` | `~/.pi/agent/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
-| `SCOPE_SKILLS_DIR` | `~/.pi/agent/skills` | Override the skills directory scanned for the agent-team sidebar |
+| `SCOPE_AGENT_DIR` | `~/.pi-scope/agent` | Pi Scope's **own** pi agent dir. The bundled `pi` is pinned here via `PI_CODING_AGENT_DIR`, so it never reads or writes the global pi agent dir. |
+| `SCOPE_SETTINGS_JSON` | `<agentDir>/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
+| `SCOPE_SKILLS_DIR` | `<agentDir>/skills` | Override the skills directory scanned for the agent-team sidebar |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
-| `SCOPE_KEYS_JSON` | `~/.pi/agent/api-keys.json` | API keys entered in Settings → API Keys (owner-only file, mode 0600) |
+| `SCOPE_KEYS_JSON` | `<agentDir>/api-keys.json` | API keys entered in Settings → API Keys (owner-only file, mode 0600) |
 
 Chat-spawned `pi` subprocesses are launched through the user's **interactive
 shell** (`bash -ic` / `zsh -ic`, preferring `$SHELL`), so the environment they see
@@ -48,8 +49,9 @@ never sourced the shell rc. The `PATH` prefix is re-applied inside the shell too
 so an rc file that reassigns `PATH` instead of prepending to it doesn't drop
 those dirs.
 
-API keys entered in **Settings → API Keys** are stored in
-`~/.pi/agent/api-keys.json` (mode 0600) and injected into the environment of
+API keys entered in **Settings → API Keys** are stored in Pi Scope's own agent
+dir (`~/.pi-scope/agent/api-keys.json`, mode 0600) and injected into
+that of
 every chat-spawned `pi` subprocess, so an extension that reads `process.env`
 (e.g. the speech-to-text extension's `GROQ_API_KEY`) works without the key
 living in a shell profile. A stored key overrides the inherited environment; the

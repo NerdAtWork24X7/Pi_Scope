@@ -25,8 +25,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { storedKey } from "./api-keys.ts";
 import { readShellEnvValue } from "../../shared/shell.ts";
-
-const AGENT_DIR = process.env.SCOPE_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+import { AGENT_DIR } from "./agent-dir.ts";
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
 const DEFAULT_MODEL = "whisper-large-v3-turbo";
 const RECORDER_KINDS: RecorderKind[] = ["sox", "arecord", "ffmpeg"];
