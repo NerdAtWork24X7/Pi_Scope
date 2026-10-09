@@ -29,6 +29,8 @@ SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 | `SCOPE_SKILLS_DIR` | `<agentDir>/skills` | Override the skills directory scanned for the agent-team sidebar |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
 | `SCOPE_KEYS_JSON` | `<agentDir>/api-keys.json` | API keys entered in Settings → API Keys (owner-only file, mode 0600) |
+| `SCOPE_PI_REGISTRY` | `https://registry.npmjs.org` | npm registry the Settings → Update tab asks for the latest bundled `pi` version (point at a mirror for air-gapped installs) |
+| `SCOPE_NPM_BIN` | `npm` | `npm` executable the Update tab runs to install a newer bundled `pi` |
 
 Chat-spawned `pi` subprocesses are launched through the user's **interactive
 shell** (`bash -ic` / `zsh -ic`, preferring `$SHELL`), so the environment they see
@@ -157,3 +159,9 @@ address the token is required anyway (see the LAN notes in the root README).
 | POST | `/git/stash` | Push/pop/drop a stash |
 | GET | `/git/submodules` | List submodules |
 | POST | `/git/submodule` | Add/remove/update/init/deinit/sync a submodule |
+| GET | `/pi-update` | Compare the bundled Pi coding agent against the npm latest |
+| POST | `/pi-update` | `{ action: "check"|"update" }` — check, or install the newest bundled agent |
+| GET | `/auth/providers` | Provider catalogue (methods + status) and stored credentials, read live from the bundled agent |
+| POST | `/auth/login` | `{ providerId, type }` to start, `{ id, promptId, value }` to answer a prompt, `{ id, cancel: true }` to abort |
+| GET | `/auth/login?id=` | Current login session state (pending prompt + event log) |
+| POST | `/auth/logout` | `{ providerId }` — remove a stored credential (pi's `/logout`) |

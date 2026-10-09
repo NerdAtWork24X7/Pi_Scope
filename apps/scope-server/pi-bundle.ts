@@ -66,6 +66,29 @@ function candidateBundleDirs(): string[] {
   return out;
 }
 
+/** Path to the bundled bar package dir inside a bundle root. */
+function packageDirIn(bundleDir: string): string {
+  return path.join(bundleDir, "node_modules", "@earendil-works", "pi-coding-agent");
+}
+
+/**
+ * The bundle root Pi Scope ships, independent of how `pi` is launched.
+ *
+ * `PI_BUNDLE.dir` is null when an operator override (`SCOPE_PI_BIN`) or a global
+ * install wins the launcher resolution — but features that operate on the
+ * bundled agent itself (Settings → Update / Authentication) still need to find
+ * it. This checks the same candidate dirs for the package's `package.json` and
+ * returns the first hit, or null when no bundle is present.
+ */
+export function resolvePiBundleRoot(): string | null {
+  for (const dir of candidateBundleDirs()) {
+    try {
+      if (fs.statSync(path.join(packageDirIn(dir), "package.json")).isFile()) return dir;
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
 /** Absolute path to the Pi Scope telemetry extension, preferring the copy
  *  shipped inside the bundle (packaged) over the dev checkout's source. */
 function resolveExtension(bundleDir: string): string | null {
@@ -97,6 +120,10 @@ export interface PiBundleInfo {
   cli: string | null;
   /** Force-loaded Pi Scope extension path, when bundled. */
   extension: string | null;
+  /** The bundle root (the npm project holding `node_modules/@earendil-works/
+   *  pi-coding-agent`), when a bundle was resolved. `null` for the override and
+   *  global sources, which Pi Scope does not own and cannot update. */
+  dir: string | null;
 }
 
 /**
@@ -197,7 +224,7 @@ function resolve(): PiBundleInfo {
   //    may deliberately pin a different pi. Leave PATH/shim untouched.
   const override = (process.env.SCOPE_PI_BIN || "").trim();
   if (override) {
-    return { source: "override", bin: override, binDir: null, cli: null, extension: null };
+    return { source: "override", bin: override, binDir: null, cli: null, extension: null, dir: null };
   }
 
   // 2. Bundled pi.
@@ -214,11 +241,11 @@ function resolve(): PiBundleInfo {
     // Chat's resolver prefers SCOPE_PI_BIN; set it so every code path (and the
     // child env it builds) agrees on the bundled agent.
     process.env.SCOPE_PI_BIN = bin;
-    return { source: "bundled", bin, binDir, cli, extension };
+    return { source: "bundled", bin, binDir, cli, extension, dir };
   }
 
   // 3. Fall back to whatever `pi` global install is on PATH.
-  return { source: "global", bin: process.env.SCOPE_PI_BIN || "pi", binDir: null, cli: null, extension: null };
+  return { source: "global", bin: process.env.SCOPE_PI_BIN || "pi", binDir: null, cli: null, extension: null, dir: null };
 }
 
 export const PI_BUNDLE: PiBundleInfo = resolve();
@@ -228,6 +255,8 @@ export const PI_BIN: string = PI_BUNDLE.bin;
 export const PI_BIN_DIR: string | null = PI_BUNDLE.binDir;
 /** Force-loaded Pi Scope extension, when the bundled agent is in use. */
 export const PI_EXTENSION: string | null = PI_BUNDLE.extension;
+/** Bundle root holding the bundled pi's `node_modules`, when bundled. */
+export const PI_BUNDLE_DIR: string | null = PI_BUNDLE.dir;
 
 console.log(
   `  Pi bundle: pi -> ${PI_BIN} (${PI_BUNDLE.source}${PI_EXTENSION ? `, extension ${PI_EXTENSION}` : ""})`,

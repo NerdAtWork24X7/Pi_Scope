@@ -30,6 +30,8 @@ import {
 } from "./plugins.ts";
 import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage } from "./chat.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
+import { checkPiUpdate, updatePi } from "./pi-update.ts";
+import { listAuthProviders, startLogin, getLogin, answerLogin, cancelLogin, logoutProvider, resetAuthRuntime } from "./pi-auth.ts";
 import { keyEntries, maskSecret, setStoredKey, clearStoredKey, isValidKeyName, MAX_KEY_LENGTH, KNOWN_KEYS } from "./api-keys.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
@@ -2534,6 +2536,89 @@ async function handle(req: Request): Promise<Response> {
     } catch { /* settings absent */ }
     void refreshGoApiUsage();
     return jsonResponse({ branch, thinking, modelMeta: buildModelMeta(), goUsage: computeGoUsage() });
+  }
+
+  // ── GET /pi-update (is a newer bundled Pi coding agent available?) ──────
+  // Reports the installed version next to the npm `latest` dist-tag. Read-only
+  // and safe to call repeatedly; the Settings → Update tab drives it.
+  if (pathname === "/pi-update" && method === "GET") {
+    return jsonResponse(await checkPiUpdate());
+  }
+
+  // ── POST /pi-update (install the newest bundled Pi coding agent) ────────
+  // { action: "check"|"update" }. The install runs `npm install …@latest` in
+  // the bundle and can take a while; the handler waits for it and returns the
+  // resulting status. No server restart is needed — the next spawned pi picks
+  // up the new agent through the shim.
+  if (pathname === "/pi-update" && method === "POST") {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const action = String(body?.action ?? "check");
+    try {
+      if (action === "check") return jsonResponse(await checkPiUpdate());
+      if (action === "update") {
+        const result = await updatePi();
+        // A newer agent may add or change providers; drop the cached auth
+        // runtime so the Authentication tab reads the fresh bundle.
+        resetAuthRuntime();
+        return jsonResponse(result);
+      }
+      return jsonResponse({ error: `unknown action: ${action}` }, 400);
+    } catch (err: any) {
+      console.error("POST /pi-update failed:", err);
+      return jsonResponse({ error: String(err?.message || err) }, 500);
+    }
+  }
+
+  // ── Authentication (GUI mirror of the pi coding agent's /login) ─────────
+  // GET  /auth/providers → provider catalogue + stored credentials
+  // POST /auth/login     → { providerId, type } to start, { id, promptId,
+  //                        value } to answer a prompt, { id, cancel: true }
+  // GET  /auth/login?id= → current login session state
+  // POST /auth/logout    → { providerId }
+  if (pathname === "/auth/providers" && method === "GET") {
+    try {
+      return jsonResponse(await listAuthProviders());
+    } catch (err: any) {
+      console.error("GET /auth/providers failed:", err);
+      return jsonResponse({ error: String(err?.message || err) }, 500);
+    }
+  }
+  if (pathname === "/auth/login" && method === "GET") {
+    const session = getLogin(url.searchParams.get("id") || "");
+    if (!session) return jsonResponse({ error: "no such login session" }, 404);
+    return jsonResponse(session);
+  }
+  if (pathname === "/auth/login" && method === "POST") {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    try {
+      if (body?.cancel) {
+        const id = String(body.id || "");
+        if (!cancelLogin(id)) return jsonResponse({ error: "no such login session" }, 404);
+        return jsonResponse(getLogin(id));
+      }
+      if (body?.id && body?.promptId != null) {
+        const id = String(body.id);
+        if (!answerLogin(id, Number(body.promptId), String(body.value ?? ""))) {
+          return jsonResponse({ error: "no matching prompt" }, 409);
+        }
+        return jsonResponse(getLogin(id));
+      }
+      return jsonResponse(await startLogin(String(body?.providerId || ""), String(body?.type || "")));
+    } catch (err: any) {
+      return jsonResponse({ error: String(err?.message || err) }, 400);
+    }
+  }
+  if (pathname === "/auth/logout" && method === "POST") {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    try {
+      await logoutProvider(String(body?.providerId || ""));
+      return jsonResponse(await listAuthProviders());
+    } catch (err: any) {
+      return jsonResponse({ error: String(err?.message || err) }, 400);
+    }
   }
 
   // ── GET /settings (consolidated pi + agent-team settings snapshot) ──────

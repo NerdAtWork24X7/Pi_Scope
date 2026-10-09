@@ -45,6 +45,23 @@
   let costProvider = "all"; // "all" | "free" | provider key
   let costQuery = "";
 
+  // Update tab state. The npm check is async, so the section renders from this
+  // snapshot (seeded by GET /pi-update) while an install is in flight.
+  let piUpdateChecking = false;
+  let piUpdating = false;
+
+  // Authentication tab state (GUI mirror of pi's /login). `authData` is the
+  // provider catalogue; `authSession` is the running login (polled); `authSig`
+  // suppresses re-renders that would steal focus from a prompt input.
+  let authData = null;      // { ready, reason?, providers, credentials }
+  let authFetching = false;
+  let authError = null;
+  let authSearch = "";
+  let authSession = null;   // current LoginState
+  let authPoll = null;
+  let authSig = "";
+  let authDraft = "";       // in-progress prompt input, kept across re-renders
+
   // Model-cost resizable columns. Widths are keyed by column and persisted in
   // localStorage. `model: null` means the flexible minmax(150px, 1fr) track
   // (fills the panel); once the user drags it, it becomes a fixed pixel width.
@@ -329,10 +346,15 @@
 
   // ─── Section nav ──────────────────────────────────────────────────────────
   function setSection(sec, force) {
+    const entering = sec !== activeSec;
     activeSec = sec;
     if (el.nav) el.nav.querySelectorAll(".settings-nav-item").forEach((b) =>
       b.classList.toggle("active", b.dataset.sec === sec));
     if (force || SET) renderSection(sec);
+    // Entering the Authentication tab re-reads the provider catalogue straight
+    // from the bundled pi runtime, so a provider that pi added since the last
+    // visit appears without a Pi Scope update or a page reload.
+    if (entering && sec === "auth" && !authFetching) void loadAuth();
   }
 
   const SECTIONS = {
@@ -343,7 +365,9 @@
     skills: () => renderSkills(),
     extensions: () => renderExtensions(),
     keys: () => renderKeys(),
+    auth: () => renderAuth(),
     pi: () => renderPi(),
+    update: () => renderUpdate(),
     plugins: () => renderPlugins(),
   };
 
@@ -386,6 +410,12 @@
     if (!fn) { renderError("Unknown section"); return; }
     el.content.innerHTML = `<div class="settings-panel">${fn()}</div>`;
     wireSection(sec);
+    // The Update tab needs a registry round trip, so kick one off the first
+    // time (and only then) the section is shown; refreshPiUpdate re-renders.
+    if (sec === "update" && !SET.piUpdate && !piUpdateChecking) void refreshPiUpdate();
+    // Resume polling a login that was left running (setSection loads the
+    // provider catalogue when the tab is entered).
+    if (sec === "auth" && authSession && authSession.status === "running") ensureAuthPoll();
   }
 
   function showLoading() {
@@ -1099,7 +1129,7 @@
 
       `<div class="settings-group-div"></div>` +
       `<div class="settings-group-kicker">Provider sign-in</div>` +
-      `<div class="settings-intro">Providers with stored credentials in <code>auth.json</code>. Sign in by running <code>pi</code> in a terminal. Secrets are never shown here.</div>` +
+      `<div class="settings-intro">Providers with stored credentials in <code>auth.json</code>. Sign in from the <b>Auth</b> tab. Secrets are never shown here.</div>` +
       `<div class="set-chips">` +
       providers.map((p) => `<span class="set-chip on" title="${esc(p.type || "credential")}"><span class="set-chip-dot"></span><span class="set-chip-name">${esc(p.name)}</span></span>`).join("") +
       (providers.length ? "" : `<div class="settings-empty-sub">No providers signed in.</div>`) +
@@ -1119,6 +1149,411 @@
       (instr.length ? "" : `<div class="settings-empty-sub">No instruction files.</div>`) +
       `</div>`
     );
+  }
+
+  // ─── Update section ───────────────────────────────────────────────────────
+  // Pi Scope runs its own copy of the Pi coding agent (see the server's
+  // pi-bundle.ts). This tab reports the installed version against the one
+  // published to npm and, when a newer one exists, installs it into the bundle.
+  // A new version is picked up by the next `pi` process — i.e. the next Chat
+  // prompt — because the shim re-execs the bundle's CLI on every spawn.
+  function fmtWhen(iso) {
+    try { return new Date(iso).toLocaleTimeString(); } catch { return ""; }
+  }
+
+  function renderUpdate() {
+    const u = SET.piUpdate || null;
+    const ver = (v) => (v ? `<code>${esc(v)}</code>` : `<span class="set-update-muted">unknown</span>`);
+
+    let verdict;
+    if (piUpdating) {
+      verdict = `<span class="set-update-verdict busy">Installing update…</span>`;
+    } else if (piUpdateChecking && !u) {
+      verdict = `<span class="set-update-verdict">Checking npm for the latest version…</span>`;
+    } else if (!u) {
+      verdict = `<span class="set-update-verdict">Not checked yet.</span>`;
+    } else if (u.error) {
+      verdict = `<span class="set-update-verdict err">${esc(u.error)}</span>`;
+    } else if (u.updateAvailable) {
+      verdict = `<span class="set-update-verdict avail">Update available — ${esc(u.latest)}</span>`;
+    } else if (u.latest) {
+      verdict = `<span class="set-update-verdict ok">Up to date</span>`;
+    } else {
+      verdict = `<span class="set-update-verdict">Installed version reported.</span>`;
+    }
+
+    const row = (label, value) =>
+      `<div class="set-update-row"><span class="set-update-row-label">${esc(label)}</span>` +
+      `<span class="set-update-row-value">${value}</span></div>`;
+
+    const canUpdate = !!u && u.updateAvailable && u.updatable && !piUpdating;
+    const busy = piUpdating || piUpdateChecking;
+
+    return (
+      `<div class="settings-group">` +
+      `<div class="settings-group-kicker">Pi coding agent</div>` +
+      `<h2 class="settings-group-title">update ${scopeBadge("global")}</h2>` +
+      `<div class="settings-intro">Pi Scope runs its own copy of the Pi coding agent. ` +
+      `Check npm for a newer release and install it here — the next Chat prompt picks it up, ` +
+      `no server restart required.</div>` +
+      `<div class="set-update-card${u && u.updateAvailable ? " avail" : ""}">` +
+        row("Installed", ver(u && u.installed)) +
+        row("Latest on npm", u && u.latest ? ver(u.latest)
+          : (u ? `<span class="set-update-muted">not available</span>` : `<span class="set-update-muted">…</span>`)) +
+        row("Source", `<span class="set-scope set-scope-none">${esc(u ? u.source : "…")}</span>`) +
+        (u && u.bundleDir
+          ? row("Location", `<code class="set-update-path" title="${esc(u.bundleDir)}">${esc(u.bundleDir)}</code>`)
+          : "") +
+        row("Status", verdict) +
+      `</div>` +
+      (u && u.reason ? `<div class="set-field-hint">${esc(u.reason)}</div>` : "") +
+      `<div class="set-update-actions">` +
+        `<button type="button" class="btn-sm" id="set-update-check"${busy ? " disabled" : ""}>` +
+          `${piUpdateChecking && !piUpdating ? "Checking…" : "Check for updates"}</button>` +
+        `<button type="button" class="btn-sm primary" id="set-update-run"${canUpdate ? "" : " disabled"}>` +
+          `${piUpdating ? "Updating…" : "Update pi"}</button>` +
+        (u && u.checkedAt ? `<span class="set-update-when">checked ${esc(fmtWhen(u.checkedAt))}</span>` : "") +
+      `</div>` +
+      (u && u.error && u.output ? `<pre class="set-update-log">${esc(u.output)}</pre>` : "") +
+      `</div>`
+    );
+  }
+
+  // Check npm for the latest version and refresh the section from the response.
+  async function refreshPiUpdate() {
+    if (piUpdateChecking || piUpdating) return;
+    piUpdateChecking = true;
+    if (activeSec === "update") setSection("update", true);
+    try {
+      const { res, data } = await S.api("/pi-update");
+      SET.piUpdate = res.ok && data
+        ? data
+        : { ...(SET.piUpdate || {}), error: data?.error || `HTTP ${res.status}` };
+    } catch (e) {
+      SET.piUpdate = { ...(SET.piUpdate || {}), error: String(e?.message || e) };
+    } finally {
+      piUpdateChecking = false;
+      if (activeSec === "update") setSection("update", true);
+    }
+  }
+
+  // Run the install and refresh from the resulting status. A failure (read-only
+  // bundle, npm missing, registry down) comes back as a message we surface in
+  // the card rather than a silent no-op.
+  async function runPiUpdate() {
+    if (piUpdating || piUpdateChecking) return;
+    piUpdating = true;
+    if (activeSec === "update") setSection("update", true);
+    try {
+      const { res, data } = await S.api("/pi-update", {}, { action: "update" });
+      if (res.ok && data) {
+        SET.piUpdate = data;
+        toast(data.updateAvailable ? "Installed, but a newer version is still reported" : "Pi coding agent updated");
+      } else {
+        const msg = data?.error || "Update failed";
+        SET.piUpdate = { ...(SET.piUpdate || {}), error: msg };
+        toast(msg, true);
+      }
+    } catch (e) {
+      const msg = String(e?.message || e);
+      SET.piUpdate = { ...(SET.piUpdate || {}), error: msg };
+      toast(msg, true);
+    } finally {
+      piUpdating = false;
+      if (activeSec === "update") setSection("update", true);
+      // A live pi session keeps the binary it started with; re-arm it so the
+      // very next prompt runs the freshly installed agent.
+      rearmChat();
+    }
+  }
+
+  function wireUpdate(panel) {
+    panel.querySelector("#set-update-check")?.addEventListener("click", () => void refreshPiUpdate());
+    panel.querySelector("#set-update-run")?.addEventListener("click", () => void runPiUpdate());
+  }
+
+  // ─── Authentication section (GUI mirror of pi's /login) ───────────────────
+  // The server loads pi's own auth runtime from the bundle and drives the same
+  // interaction object `/login` uses. The page starts a login, answers its
+  // prompts and streams its events back — so OAuth sign-in (open the URL, paste
+  // the code) and API-key sign-in both work from the browser.
+
+  async function loadAuth() {
+    if (authFetching) return;
+    authFetching = true;
+    authError = null;
+    try {
+      const { res, data } = await S.api("/auth/providers");
+      if (res.ok && data) authData = data;
+      else authError = data?.error || `HTTP ${res.status}`;
+    } catch (e) {
+      authError = String(e?.message || e);
+    } finally {
+      authFetching = false;
+      refreshAuthSettings();
+    }
+  }
+
+  function refreshAuthSettings() {
+    if (activeSec === "auth") setSection("auth", true);
+  }
+
+  // Signature of a login session that matters to the UI. While a prompt is
+  // pending the event log is deliberately ignored, so a progress line arriving
+  // mid-typing can't re-render and steal focus from the input.
+  function authSessionSignature(s) {
+    if (!s) return "";
+    return `${s.status}|${s.prompt ? s.prompt.id : 0}|${s.prompt ? "-" : (s.events || []).length}`;
+  }
+
+  function authProviderRowsHtml() {
+    const providers = (authData && authData.providers) || [];
+    const q = authSearch.trim().toLowerCase();
+    const list = providers.filter((p) =>
+      !q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
+    if (!providers.length) return `<div class="settings-empty-sub">No providers offer authentication.</div>`;
+    if (!list.length) return `<div class="settings-empty-sub">No providers match “${esc(authSearch)}”.</div>`;
+    return list.map((p) => {
+      const status = p.configured
+        ? `<span class="set-scope set-scope-project" title="Effective source: ${esc(p.statusLabel)}">${esc(p.statusLabel || "configured")}</span>`
+        : `<span class="set-auth-none">not configured</span>`;
+      const actions = p.methods.map((m) => m.canLogin
+        ? `<button type="button" class="btn-sm${m.type === "oauth" ? " primary" : ""}" ` +
+          `data-auth-start="${esc(p.id)}" data-auth-type="${esc(m.type)}">${esc(m.label)}</button>`
+        : `<span class="set-auth-none" title="${esc(m.label)} — configured outside pi">${esc(m.label)}</span>`,
+      ).join("");
+      return (
+        `<div class="set-auth-prov">` +
+          `<div class="set-auth-prov-main"><span class="set-auth-prov-name">${esc(p.name)}</span>${status}</div>` +
+          `<div class="set-auth-prov-actions">${actions}</div>` +
+        `</div>`
+      );
+    }).join("");
+  }
+
+  function authEventHtml(ev) {
+    if (ev.type === "auth_url") {
+      return `<div class="set-auth-ev"><a href="${esc(ev.url)}" target="_blank" rel="noopener">Open the sign-in page ↗</a>` +
+        (ev.instructions ? `<div class="set-auth-ev-sub">${esc(ev.instructions)}</div>` : "") + `</div>`;
+    }
+    if (ev.type === "device_code") {
+      return `<div class="set-auth-ev">Go to <a href="${esc(ev.verificationUri)}" target="_blank" rel="noopener">${esc(ev.verificationUri)}</a> ` +
+        `and enter code <b class="set-auth-code">${esc(ev.userCode)}</b></div>`;
+    }
+    if (ev.type === "info") {
+      const links = (ev.links || []).map((l) =>
+        `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label || l.url)}</a>`).join(" ");
+      return `<div class="set-auth-ev">${esc(ev.message || "")}${links ? ` ${links}` : ""}</div>`;
+    }
+    return `<div class="set-auth-ev set-auth-ev-progress">${esc(ev.message || "Working…")}</div>`;
+  }
+
+  function authPromptHtml(p) {
+    if (p.type === "select") {
+      const opts = (p.options || []).map((o) =>
+        `<button type="button" class="btn-sm primary set-auth-choice" data-auth-choice="${esc(o.id)}" ` +
+        `title="${esc(o.description || o.label)}">${esc(o.label)}</button>`).join("");
+      return `<div class="set-auth-prompt"><div class="set-auth-prompt-msg">${esc(p.message)}</div>` +
+        `<div class="set-auth-choices">${opts}</div></div>`;
+    }
+    const kind = p.type === "secret" ? "password" : "text";
+    return `<div class="set-auth-prompt">` +
+      `<div class="set-auth-prompt-msg">${esc(p.message)}</div>` +
+      `<div class="set-auth-input-row">` +
+        `<input type="${kind}" class="set-input" id="set-auth-input" autocomplete="off" spellcheck="false" ` +
+        `aria-label="${esc(p.message)}" placeholder="${esc(p.placeholder || "")}" value="${esc(authDraft)}">` +
+        `<button type="button" class="btn-sm primary" id="set-auth-submit">Submit</button>` +
+      `</div></div>`;
+  }
+
+  function renderAuthLogin() {
+    const s = authSession;
+    const events = (s.events || []).map(authEventHtml).join("");
+    const prompt = s.prompt ? authPromptHtml(s.prompt) : "";
+    const busy = s.status === "running";
+    let statusLine;
+    if (s.status === "ok") statusLine = `<span class="set-update-verdict ok">Signed in ✓</span>`;
+    else if (s.status === "error") statusLine = `<span class="set-update-verdict err">${esc(s.error || "Login failed")}</span>`;
+    else if (s.status === "cancelled") statusLine = `<span class="set-update-verdict">Cancelled</span>`;
+    else statusLine = `<span class="set-update-verdict busy">Waiting for the provider…</span>`;
+
+    return (
+      `<div class="set-auth-login">` +
+        `<div class="set-auth-login-head">` +
+          `<span class="set-auth-login-title">Sign in to ${esc(s.providerName)}` +
+            `<span class="set-scope set-scope-none">${esc(s.type === "oauth" ? "account" : "API key")}</span></span>` +
+          `<button type="button" class="btn-sm" id="set-auth-cancel">${busy ? "Cancel" : "Close"}</button>` +
+        `</div>` +
+        (events ? `<div class="set-auth-events">${events}</div>` : "") +
+        prompt +
+        `<div class="set-auth-status">${statusLine}</div>` +
+      `</div>`
+    );
+  }
+
+  function renderAuth() {
+    const head =
+      `<div class="settings-group-kicker">Providers</div>` +
+      `<h2 class="settings-group-title">authentication ${scopeBadge("global")}</h2>` +
+      `<div class="settings-intro">Sign in to a model provider the same way pi's <code>/login</code> does — ` +
+      `OAuth (a browser link and, when needed, a code) or an API key. Credentials are saved to Pi Scope's ` +
+      `own agent dir <code>auth.json</code> and picked up by the next Chat prompt. Use <b>Auth</b> instead of ` +
+      `typing your key into the API Keys tab unless an extension reads it from the environment.</div>`;
+
+    if (authError) {
+      return `<div class="settings-group">${head}` +
+        `<div class="settings-empty-sub">Could not load providers: ${esc(authError)}</div>` +
+        `<button type="button" class="btn-sm" onclick="window.__settingsAuthRetry()">Retry</button></div>`;
+    }
+    if (!authData) {
+      return `<div class="settings-group">${head}<div class="settings-empty-sub">Loading providers…</div></div>`;
+    }
+    if (!authData.ready) {
+      return `<div class="settings-group">${head}` +
+        `<div class="settings-empty-sub">${esc(authData.reason || "Provider login is unavailable.")}</div></div>`;
+    }
+
+    const creds = authData.credentials || [];
+    const credRows = creds.map((c) =>
+      `<div class="set-auth-cred">` +
+        `<span class="set-auth-cred-name">${esc(c.name)}</span>` +
+        `<span class="set-scope set-scope-none">${esc(c.type === "oauth" ? "OAuth" : "API key")}</span>` +
+        `<button type="button" class="btn-sm" data-auth-logout="${esc(c.providerId)}">Sign out</button>` +
+      `</div>`).join("");
+
+    return (
+      `<div class="settings-group">` + head +
+      `<div class="settings-group-div"></div>` +
+      `<div class="settings-group-kicker">Signed in</div>` +
+      `<div class="set-auth-creds">` +
+        (creds.length ? credRows : `<div class="settings-empty-sub">No provider credentials stored yet.</div>`) +
+      `</div>` +
+      `<div class="settings-group-div"></div>` +
+      (authSession ? renderAuthLogin()
+        : `<div class="settings-group-kicker">Sign in</div>` +
+          `<input type="search" class="set-input set-auth-search" id="set-auth-search" ` +
+            `placeholder="Filter providers…" value="${esc(authSearch)}" aria-label="Filter providers">` +
+          `<div class="set-auth-list" id="set-auth-list">${authProviderRowsHtml()}</div>`) +
+      `</div>`
+    );
+  }
+
+  function bindAuthProviderButtons(root) {
+    root.querySelectorAll("[data-auth-start]").forEach((b) =>
+      b.addEventListener("click", () => void startAuth(b.dataset.authStart, b.dataset.authType))
+    );
+  }
+
+  function wireAuth(panel) {
+    const search = panel.querySelector("#set-auth-search");
+    if (search) {
+      search.addEventListener("input", () => {
+        authSearch = search.value;
+        const list = panel.querySelector("#set-auth-list");
+        if (list) { list.innerHTML = authProviderRowsHtml(); bindAuthProviderButtons(list); }
+      });
+    }
+    bindAuthProviderButtons(panel);
+    panel.querySelectorAll("[data-auth-logout]").forEach((b) =>
+      b.addEventListener("click", () => void logoutAuth(b.dataset.authLogout))
+    );
+
+    const input = panel.querySelector("#set-auth-input");
+    if (input) {
+      input.focus();
+      input.addEventListener("input", () => { authDraft = input.value; });
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); void answerAuth(input.value); }
+      });
+    }
+    panel.querySelectorAll("[data-auth-choice]").forEach((b) =>
+      b.addEventListener("click", () => void answerAuth(b.dataset.authChoice))
+    );
+    panel.querySelector("#set-auth-submit")?.addEventListener("click", () => {
+      const el = panel.querySelector("#set-auth-input");
+      if (el) void answerAuth(el.value);
+    });
+    panel.querySelector("#set-auth-cancel")?.addEventListener("click", () => void cancelAuth());
+  }
+
+  async function startAuth(providerId, type) {
+    authDraft = "";
+    try {
+      const { res, data } = await S.api("/auth/login", {}, { providerId, type });
+      if (!res.ok || !data) { toast(data?.error || "Could not start sign-in", true); return; }
+      authSession = data;
+      authSig = authSessionSignature(data);
+      refreshAuthSettings();
+      ensureAuthPoll();
+    } catch (e) {
+      toast(String(e?.message || e), true);
+    }
+  }
+
+  async function answerAuth(value) {
+    const s = authSession;
+    if (!s || !s.prompt) return;
+    const promptId = s.prompt.id;
+    authDraft = "";
+    try {
+      const { res, data } = await S.api("/auth/login", {}, { id: s.id, promptId, value: String(value || "") });
+      if (res.ok && data) applyAuthSession(data);
+      else toast(data?.error || "Could not submit", true);
+    } catch (e) {
+      toast(String(e?.message || e), true);
+    }
+  }
+
+  async function cancelAuth() {
+    const s = authSession;
+    authSession = null;
+    authSig = "";
+    authDraft = "";
+    stopAuthPoll();
+    if (s && s.status === "running") {
+      try { await S.api("/auth/login", {}, { id: s.id, cancel: true }); } catch { /* best effort */ }
+    }
+    if (s && s.status === "ok") toast("Signed in");
+    refreshAuthSettings();
+    void loadAuth();
+  }
+
+  async function logoutAuth(providerId) {
+    try {
+      const { res, data } = await S.api("/auth/logout", {}, { providerId });
+      if (res.ok && data) { authData = data; toast("Signed out"); refreshAuthSettings(); }
+      else toast(data?.error || "Sign out failed", true);
+    } catch (e) {
+      toast(String(e?.message || e), true);
+    }
+  }
+
+  // Poll a running login. Only re-render when the session's UI-relevant shape
+  // changed (see authSessionSignature) so typing into a prompt is not disturbed.
+  function ensureAuthPoll() {
+    if (authPoll) return;
+    authPoll = setInterval(() => { void pollAuthSession(); }, 700);
+  }
+  function stopAuthPoll() {
+    if (authPoll) { clearInterval(authPoll); authPoll = null; }
+  }
+  async function pollAuthSession() {
+    if (!authSession || authSession.status !== "running") { stopAuthPoll(); return; }
+    try {
+      const { res, data } = await S.api("/auth/login", { id: authSession.id });
+      if (res.ok && data) applyAuthSession(data);
+    } catch { /* transient — try again on the next tick */ }
+  }
+  function applyAuthSession(session) {
+    authSession = session;
+    if (session.status !== "running") {
+      stopAuthPoll();
+      refreshAuthSettings();
+      void loadAuth();   // reflect the new credential in "Signed in" + provider status
+      return;
+    }
+    const sig = authSessionSignature(session);
+    if (sig !== authSig) { authSig = sig; refreshAuthSettings(); }
   }
 
   // ─── Wiring ───────────────────────────────────────────────────────────────
@@ -1303,6 +1738,8 @@
 
     if (sec === "keys") wireKeys(panel);
     if (sec === "agent") wireTeams(panel);
+    if (sec === "auth") wireAuth(panel);
+    if (sec === "update") wireUpdate(panel);
     if (sec === "plugins") wirePlugins(panel);
 
     wireDataActs(panel);
@@ -1793,6 +2230,7 @@
 
   window.__settingsOnView = onView;
   window.__settingsRetry = function () { loaded = false; onView(); };
+  window.__settingsAuthRetry = function () { authError = null; authData = null; void loadAuth(); };
 
   // app.js restores the initial view with setView(STATE.view) while it executes,
   // which is BEFORE this file is parsed — so its __settingsOnView call was a

@@ -176,7 +176,9 @@ the working tree when nothing is staged) — pick the model and edit the instruc
 ### ⚙️ Settings — the whole agent, configured from the browser
 
 Manage your **Agent** defaults, **Teams**, **Models** (with the cost catalog), **Skills**,
-**Extensions**, **Workspaces**, and **Plugins** — mirroring your `pi` config, editable from the UI.
+**Extensions**, **API keys**, and **Plugins** — mirroring your `pi` config, editable from the UI. Two
+tabs manage the bundled agent itself: **Auth** is a browser form of `pi`'s `/login` (provider list
+read live from `pi`, OAuth and API-key sign-in), and **Update** installs a newer `pi` when npm has one.
 
 <p align="center">
   <img src="docs/shots/settings-dark.png" alt="Settings" width="880" />
@@ -412,6 +414,8 @@ Running from source instead of the launcher? `SCOPE_HOST=0.0.0.0 npm start` in
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. a non-standard venv: `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
 | `SCOPE_PI_BIN` | bundled `pi` | Override the `pi` executable Pi Scope launches for Chat, commit messages and subagents. Set it to use a different `pi` than the bundled one (or to stub it in tests). |
 | `SCOPE_PI_BUNDLE_DIR` | auto-detected | Where the bundled `pi` lives (`apps/scope-desktop/pi-bundle` in dev, `resources/pi` packaged). Set by the packaged launcher; only override for an out-of-tree bundle. |
+| `SCOPE_PI_REGISTRY` | `https://registry.npmjs.org` | npm registry used by Settings → Update to look for a newer bundled `pi` (point at a mirror for air-gapped installs) |
+| `SCOPE_NPM_BIN` | `npm` | `npm` executable Settings → Update runs to install a newer bundled `pi` |
 
 Chat-spawned `pi` subprocesses also get the workspace venv bin dirs prepended to
 `PATH`, and `PLAYWRIGHT_BROWSERS_PATH` restored from the user's shell rc files
