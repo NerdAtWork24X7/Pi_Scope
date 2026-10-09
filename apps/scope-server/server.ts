@@ -29,6 +29,7 @@ import {
   isEnabled as isPluginEnabled,
 } from "./plugins.ts";
 import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage } from "./chat.ts";
+import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
 import { checkPiUpdate, updatePi } from "./pi-update.ts";
 import { listAuthProviders, startLogin, getLogin, answerLogin, cancelLogin, logoutProvider, resetAuthRuntime } from "./pi-auth.ts";
@@ -192,6 +193,10 @@ function resolveProjectDir(cwdRaw?: string | null, remember = true): string | nu
  *  break the file structure. Keep the accepted set identical to the parser's. */
 const TEAM_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MEMBER_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+/** A subagent's human-facing label, written into teams.yaml as `display_name:`.
+ *  It is free text (spaces and emoji are fine) but must stay on one line and
+ *  must not contain `:`, which the line-based parser splits on. */
+const MEMBER_DISPLAY_NAME_RE = /^[^\r\n:]{0,64}$/;
 /** Model ids are written into teams.yaml as `model:` values. They are plain
  *  `provider/model` strings, so refuse anything a YAML line couldn't hold — a
  *  newline would let the value inject extra teams/members into the file. */
@@ -257,11 +262,49 @@ function parseTeamsYaml(raw: string): { teams: Record<string, any[]>; memoryMode
         else if (k === "active") memoryActive = v === "true";
       } else if (curMember) {
         if (k === "model") curMember.model = v;
+        else if (k === "display_name") curMember.displayName = v;
         else if (k === "active") curMember.active = v === "true";
       }
     }
   }
   return { teams, memoryModel, memoryActive };
+}
+
+// ─── Kanban task queue (Office → board) ─────────────────────────────────────
+// The office's tasks: Todo → Planned → In Progress → Done. The view moves
+// Planned tasks into In Progress one at a time and dispatches each to the
+// orchestrator, so the column order is FIFO by `plannedAt`.
+const TASK_STATUSES = ["todo", "planned", "in_progress", "done"];
+const TASK_MAX = 200;
+// A task's details are written in the board's big popup editor, so the note
+// holds a real brief rather than a one-liner.
+const TASK_NOTE_MAX = 4000;
+
+/** Clean stored tasks: keep usable rows, drop anything unreadable. */
+function normaliseTasks(raw: unknown): Record<string, any>[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Record<string, any>[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (out.length >= TASK_MAX) break;
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, any>;
+    const title = String(r.title ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+    if (!title) continue;
+    const id = String(r.id ?? "").trim() || `task_${crypto.createHash("sha1").update(title).digest("hex").slice(0, 10)}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const status = TASK_STATUSES.includes(String(r.status)) ? String(r.status) : "todo";
+    const task: Record<string, any> = { id, title, status };
+    const note = String(r.note ?? "").replace(/\s+/g, " ").trim().slice(0, TASK_NOTE_MAX);
+    if (note) task.note = note;
+    for (const k of ["createdAt", "plannedAt", "startedAt", "finishedAt"]) {
+      const v = Number(r[k]);
+      if (Number.isFinite(v) && v > 0) task[k] = v;
+    }
+    out.push(task);
+  }
+  return out;
 }
 
 function loadAgentTeam(proj?: string | null): Record<string, any> {
@@ -274,6 +317,13 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     mode: undefined,
     enabled: true, // agent-team-config.json `enabled` master switch (default on)
     disabledAgents: [],
+    library: [], // reference library (Office → meeting room); see library.ts
+    officeName: undefined, // the name the Office view shows at the top
+    tasks: [], // the Kanban task queue the office works through
+    // The queue runner starts PAUSED: a task parked in Planned waits for the
+    // user to press Run. `false` means the runner is dispatching; anything else
+    // (including an absent field on an older config) means paused.
+    runnerPaused: true,
     orchestratorSkills: [],
     subagentSkills: [],
     skipOrchestratorTools: [],
@@ -309,7 +359,13 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     // the project's own agent-team-config.json (per-project, like pi).
     out.chatWorkspaces = cfg.chatWorkspaces || [];
     out.chatWorkspacesRemoved = cfg.chatWorkspacesRemoved || [];
-  } catch { /* config absent */ }
+    // The reference library shown in the Office's meeting room: files and
+    // folders injected at the start of a fresh conversation (see library.ts).
+    out.library = normaliseEntries(cfg.library);
+    out.officeName = String(cfg.officeName ?? "").trim() || undefined;
+    out.tasks = normaliseTasks(cfg.tasks);
+    out.runnerPaused = cfg.runnerPaused !== false;
+  } catch { /* config absent — the defaults above stand */ }
 
   // Models the user enabled in pi settings — the authoritative model list for
   // the Chat composer dropdown.
@@ -771,6 +827,7 @@ function serializeTeamsYaml(data: { teams: Record<string, any[]>; memoryModel?: 
     lines.push(`${teamName}:`);
     for (const m of members) {
       lines.push(`  - name: ${m.name}`);
+      if (m.displayName) lines.push(`    display_name: ${m.displayName}`);
       if (m.model) lines.push(`    model: ${m.model}`);
       if (m.active === false) lines.push(`    active: false`);
     }
@@ -2824,6 +2881,24 @@ async function handle(req: Request): Promise<Response> {
           }
           break;
         }
+        // Hire with a fresh definition: create agents/<file>.md, refusing to
+        // clobber one that already exists (use saveAgentDefFile to edit those).
+        case "createAgentDefFile": {
+          const v = (value ?? {}) as { file?: unknown; content?: unknown };
+          const file = String(v.file ?? "").trim();
+          const content = typeof v.content === "string" ? v.content : "";
+          if (!/^[A-Za-z0-9_.-]+\.md$/.test(file)) return jsonResponse({ error: "invalid agent file" }, 400);
+          if (content.length > 1024 * 1024) return jsonResponse({ error: "file is too large (1 MB max)" }, 400);
+          const p = path.join(AGENTS_DIR, file);
+          if (fs.existsSync(p)) return jsonResponse({ error: `agent definition already exists: ${file}` }, 409);
+          try {
+            fs.mkdirSync(AGENTS_DIR, { recursive: true });
+            fs.writeFileSync(p, content);
+          } catch {
+            return jsonResponse({ error: `could not create ${file}` }, 500);
+          }
+          break;
+        }
         // ── Subagent definition frontmatter (agents/*.md) ──
         // `value` is { file, field, value }.
         case "setAgentDefField": {
@@ -2939,6 +3014,28 @@ async function handle(req: Request): Promise<Response> {
           });
           break;
         }
+        case "setMemberDisplayName": {
+          // The label the floor shows for a subagent ("file_reader is Bob").
+          // Scoped to one team like setMemberModel, and stored in teams.yaml so
+          // it works for members that have no agents/*.md definition. An empty
+          // value clears it, falling back to the member's real name.
+          const key = String(body.agent || "").trim();
+          const team = String(body.team || "").trim();
+          const displayName = String(body.displayName ?? "").trim();
+          if (!key) return jsonResponse({ error: "missing agent" }, 400);
+          if (!team) return jsonResponse({ error: "missing team" }, 400);
+          if (!MEMBER_DISPLAY_NAME_RE.test(displayName)) {
+            return jsonResponse({ error: "display names may be up to 64 characters, on one line" }, 400);
+          }
+          if (!readTeams(proj).teams[team]) return jsonResponse({ error: `no such team: ${team}` }, 400);
+          updateTeamsYaml(proj, (p) => {
+            const members = (p.teams || {})[team];
+            if (!Array.isArray(members)) return;
+            const mem = members.find((m) => (m.name || "").toLowerCase() === key.toLowerCase());
+            if (mem) { if (displayName) mem.displayName = displayName; else delete mem.displayName; }
+          });
+          break;
+        }
         // ── Team editor: create / rename / delete teams and their members ──
         // Writes go to the project's own .pi/settings/agents/teams.yaml, the
         // same file pi's agent-team extension reads back.
@@ -3018,6 +3115,148 @@ async function handle(req: Request): Promise<Response> {
           updateTeamsYaml(proj, (p) => {
             const members = p.teams && p.teams[team];
             if (members) p.teams[team] = members.filter((m) => (m.name || "").toLowerCase() !== name.toLowerCase());
+          });
+          break;
+        }
+        // ── The Office view's own state: its name, and the task queue ──
+        case "setOfficeName": {
+          const name = String(body.name ?? "").replace(/\s+/g, " ").trim();
+          if (name.length > 60) return jsonResponse({ error: "office names may be up to 60 characters" }, 400);
+          updateAgentConfig(proj, (cfg) => {
+            if (name) cfg.officeName = name; else delete cfg.officeName;
+          });
+          break;
+        }
+        case "addTask": {
+          const title = String(body.title ?? "").replace(/\s+/g, " ").trim();
+          const note = String(body.note ?? "").replace(/\s+/g, " ").trim().slice(0, TASK_NOTE_MAX);
+          if (!title) return jsonResponse({ error: "missing title" }, 400);
+          if (title.length > 200) return jsonResponse({ error: "task titles may be up to 200 characters" }, 400);
+          let full = false;
+          updateAgentConfig(proj, (cfg) => {
+            const list = normaliseTasks(cfg.tasks);
+            if (list.length >= TASK_MAX) full = true;
+            else {
+              const task: Record<string, any> = { id: `task_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`, title, status: "todo", createdAt: Date.now() };
+              if (note) task.note = note;
+              list.push(task);
+              cfg.tasks = list;
+            }
+          });
+          if (full) return jsonResponse({ error: `the board is full (${TASK_MAX} tasks)` }, 400);
+          break;
+        }
+        case "moveTask": {
+          const id = String(body.id ?? "").trim();
+          const status = String(body.status ?? "").trim();
+          if (!id) return jsonResponse({ error: "missing id" }, 400);
+          if (!TASK_STATUSES.includes(status)) return jsonResponse({ error: `invalid status: ${status}` }, 400);
+          let found = false;
+          updateAgentConfig(proj, (cfg) => {
+            const list = normaliseTasks(cfg.tasks);
+            const task = list.find((t) => t.id === id);
+            if (!task) return;
+            found = true;
+            const at = Date.now();
+            task.status = status;
+            // Stamp the column the task entered: Planned is worked FIFO by
+            // plannedAt, and the timestamps drive the board's own labels.
+            if (status === "planned") task.plannedAt = task.plannedAt || at;
+            if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
+            if (status === "in_progress") task.startedAt = task.startedAt || at;
+            if (status === "done") task.finishedAt = at;
+            cfg.tasks = list;
+          });
+          if (!found) return jsonResponse({ error: "no such task" }, 404);
+          break;
+        }
+        case "removeTask": {
+          const id = String(body.id ?? "").trim();
+          if (!id) return jsonResponse({ error: "missing id" }, 400);
+          updateAgentConfig(proj, (cfg) => {
+            cfg.tasks = normaliseTasks(cfg.tasks).filter((t) => t.id !== id);
+          });
+          break;
+        }
+        case "setRunnerPaused": {
+          // The board's Run / Pause switch. Paused (true) is the default: the
+          // runner hands nothing to the orchestrator until it is switched off.
+          const paused = body.paused !== false;
+          updateAgentConfig(proj, (cfg) => { cfg.runnerPaused = paused; });
+          break;
+        }
+
+        // ── Reference library (Office → meeting room) ──
+        // Files/folders the user wants this workspace's team to have at hand.
+        // Stored per project; the block is injected at the start of a fresh
+        // conversation (see the /chat route below and library.ts).
+        case "addLibraryEntry": {
+          const resolved = resolveLibraryEntry(
+            String(body.path ?? ""),
+            String(body.note ?? ""),
+            proj || TERMINAL_CWD,
+            String(body.target ?? ""),
+          );
+          if (!resolved.ok) return jsonResponse({ error: resolved.error }, 400);
+          let full = false;
+          updateAgentConfig(proj, (cfg) => {
+            const list = normaliseEntries(cfg.library);
+            const same = (e: { path: string; target?: string }) =>
+              e.path === resolved.entry.path && (e.target || "") === (resolved.entry.target || "");
+            if (list.some(same)) {
+              // Already listed for that agent: keep the note the user just gave it.
+              const at = list.findIndex(same);
+              if (resolved.entry.note) list[at] = { ...list[at], note: resolved.entry.note };
+            } else if (list.length >= LIBRARY_MAX_ENTRIES) {
+              full = true;
+            } else {
+              list.push(resolved.entry);
+            }
+            cfg.library = list;
+          });
+          if (full) return jsonResponse({ error: `the library is full (${LIBRARY_MAX_ENTRIES} entries)` }, 400);
+          break;
+        }
+        // Reassign a reference to another agent (or the whole team), and/or
+        // rewrite its note — the full-screen manager edits entries in place.
+        case "setLibraryEntry": {
+          const id = String(body.id ?? "").trim();
+          const target = String(body.target ?? "").trim();
+          const note = String(body.note ?? "").trim().slice(0, 200);
+          if (!id) return jsonResponse({ error: "missing id" }, 400);
+          if (!LIBRARY_TARGET_RE.test(target)) return jsonResponse({ error: "invalid target agent" }, 400);
+          if (note.includes("\n")) return jsonResponse({ error: "notes must fit on one line" }, 400);
+          let found = false;
+          updateAgentConfig(proj, (cfg) => {
+            const list = normaliseEntries(cfg.library);
+            const at = list.findIndex((e) => e.id === id);
+            if (at < 0) return;
+            found = true;
+            // Reassigning may collide with an entry that already covers the same
+            // file for that agent — merge into it rather than listing it twice.
+            const clash = list.findIndex((e, i) =>
+              i !== at && e.path === list[at].path && (e.target || "") === target);
+            if (clash >= 0) {
+              if (note) list[clash] = { ...list[clash], note };
+              list.splice(at, 1);
+            } else {
+              const next: any = { ...list[at], target };
+              if (note) next.note = note; else delete next.note;
+              if (!target) delete next.target;
+              list[at] = next;
+            }
+            cfg.library = list;
+          });
+          if (!found) return jsonResponse({ error: "no such reference" }, 404);
+          break;
+        }
+        case "removeLibraryEntry": {
+          const id = String(body.id ?? "").trim();
+          const p = String(body.path ?? "").trim();
+          if (!id && !p) return jsonResponse({ error: "missing id" }, 400);
+          updateAgentConfig(proj, (cfg) => {
+            cfg.library = normaliseEntries(cfg.library)
+              .filter((e) => !(id ? e.id === id : e.path === p));
           });
           break;
         }
@@ -3184,6 +3423,10 @@ async function handle(req: Request): Promise<Response> {
     if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
     return startChat({
       cwd: absCwd,
+      // The workspace's reference library rides along as a block the chat
+      // module injects at the start of a fresh conversation (and never again
+      // in that session).
+      libraryBlock: buildLibraryPrompt(readAgentConfig(absCwd).library),
       model: typeof parsed.model === "string" ? parsed.model : "",
       // The composer's thinking-level choice; pushed to the subprocess via RPC
       // set_thinking_level so it applies without a respawn (pi otherwise caches

@@ -55,6 +55,7 @@ interface ChatSession {
   resumeCallback: (() => void) | null; // prompt write deferred until a pending switch_session/new_session resolves
   stopRequested: boolean; // a /chat/stop abort was issued for the current run
   fresh: boolean; // pre-spawned "new conversation" subprocess (vs bound to a recorded session)
+  librarySent: boolean; // the reference-library block has been injected into this conversation
 }
 
 const sessions = new Map<string, ChatSession>();
@@ -358,7 +359,19 @@ function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
   // The server's own node (bundled portable Node when packaged) so pnpm-shim
   // pi binaries can find `node`.
   prepend(path.dirname(process.execPath));
-  if (PI_BIN.includes("/")) prepend(path.dirname(PI_BIN));
+  // The pi binary's dir must WIN, not merely be present: the agent-team
+  // extension spawns subagents by the bare name `pi`, so whichever `pi` comes
+  // first on PATH is the agent the orchestrator itself runs under — and the two
+  // must be the same build. A plain prepend() skips an already-inherited entry,
+  // which left the shim behind pnpm's global bin dir: subagents then ran the
+  // global pi, rejected the Pi Scope extension's flags (`Unknown option:
+  // --o-name`) and exited 1, surfacing as "<agent> failed to start".
+  if (PI_BIN.includes("/")) {
+    const dir = path.dirname(PI_BIN);
+    const at = parts.indexOf(dir);
+    if (at > 0) parts.splice(at, 1);
+    if (!parts.includes(dir)) parts.unshift(dir);
+  }
   env.PATH = parts.join(path.delimiter);
   // Playwright browser binaries (pi's web-fetch / crawl tools): the GUI
   // session that launched the server never sources the user's shell rc, so a
@@ -400,13 +413,27 @@ function resolveInteractiveShell(): string | null {
 const CHAT_SHELL = resolveInteractiveShell();
 console.log(`  Chat: pi spawn shell: ${CHAT_SHELL ?? "(direct)"}`);
 
-/** Directories chatChildEnv adds to PATH, as a delimiter-joined prefix. Re-applied
- *  inside the shell because an rc file that reassigns PATH (rather than
- *  prepending to it) would otherwise drop the venv / node / pi-bin dirs. */
+/** Directories child paths put ahead of the inherited PATH, re-applied inside
+ *  the shell because an rc file that reassigns PATH would otherwise drop the
+ *  venv / node / pi-bin dirs.
+ *
+ *  The pi binary's own directory is ALWAYS led — even when it is already on the
+ *  inherited PATH. `chatChildEnv` moves it to the front of the child env, but
+ *  the interactive shell sources the user's rc BEFORE this export runs, and an
+ *  rc that prepends a dir holding a different `pi` (e.g. pnpm's global bin,
+ *  which `~/.bashrc` / `~/.zshrc` put ahead of everything) shadows the bundled
+ *  shim. The agent-team extension spawns subagents by the bare name `pi`, so
+ *  the shadowed shim meant subagents ran the global agent and died ("<agent>
+ *  failed to start"). Leading with it here re-asserts the shim after the rc. */
 function chatPathPrefix(cwd: string): string {
   const child = String(chatChildEnv(cwd).PATH || "").split(path.delimiter).filter(Boolean);
   const inherited = new Set(String(process.env.PATH || "").split(path.delimiter).filter(Boolean));
-  return child.filter((dir) => !inherited.has(dir)).join(path.delimiter);
+  const extra = child.filter((dir) => !inherited.has(dir));
+  const piDir = PI_BIN.includes("/") ? path.dirname(PI_BIN) : "";
+  const prefix: string[] = [];
+  if (piDir) prefix.push(piDir);
+  for (const dir of extra) if (dir !== piDir) prefix.push(dir);
+  return prefix.join(path.delimiter);
 }
 
 function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatSession {
@@ -455,7 +482,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatS
     out = proc.stdout as NodeJS.ReadableStream;
   }
 
-  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh };
+  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh, librarySent: false };
 
   out.on("data", (d: Buffer) => {
     sess.buffer += d.toString();
@@ -497,7 +524,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatS
  *  after the agent settles) and a JSON `{ queued: true }` response is returned
  *  instead of a stream — the in-flight stream keeps delivering events to the
  *  client. */
-export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string }): Response {
+export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string; libraryBlock?: string }): Response {
   const { cwd, prompt } = opts;
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   if (!prompt || !prompt.trim()) {
@@ -574,9 +601,18 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
         }
       };
       writePrefCommands(false);
+      // The workspace's reference library is a preamble for a NEW conversation
+      // only: a resumed session already received it, a second turn must not
+      // repeat it, and a subprocess told to start a fresh session gets it again.
+      const promptForSend = () => {
+        const block = (opts.libraryBlock || "").trim();
+        if (!block || sessionFile || sess!.librarySent) return prompt;
+        sess!.librarySent = true;
+        return `${block}\n\n${prompt}`;
+      };
       const sendPrompt = () => {
         try {
-          sess!.proc.stdin.write(JSON.stringify({ type: "prompt", message: prompt }) + "\n");
+          sess!.proc.stdin.write(JSON.stringify({ type: "prompt", message: promptForSend() }) + "\n");
         } catch (err: any) {
           enqueue(controller, { type: "error", message: err.message || String(err) });
           enqueue(controller, { type: "done", sessionId: sid, model });
@@ -614,6 +650,7 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
         // Fresh conversation on a subprocess that was previously pointed at a
         // recorded session: start a brand-new pi session instead of continuing.
         sess!.resumedFile = null;
+        sess!.librarySent = false; // a new conversation gets the library again
         queueResume({ type: "new_session" });
       } else {
         sendPrompt();

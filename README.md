@@ -108,6 +108,78 @@ thinking budget, tools, the whole thing.
 
 *Light and dark, your choice — same session, one click apart.*
 
+### 🏢 Office — watch your agent team work
+
+The **Office** view turns your roster into a **top-down office floor**: every agent gets a
+**cubicle** — partition walls on three sides, a desk with a screen, a chair — and sits in it,
+seen from above. Agents that are **working** have their screen lit and their arms typing;
+a chair pushed back and an orange dot mean **waiting**; a greyed cubicle is **stopped** or
+idle. The floor reads like a real plan: the **orchestrator** gets its own office at the top
+(marked ★), the **meeting room** sits to its right, and the **team rooms** are laid out two
+left and two right around a center pathway. Every room is labelled at its top-left, with
+its controls at its top-right: the active team is **badged**, the others carry
+**activate**, and every team has **+ hire** — a roomy form that adds a subagent to *that*
+team with a **display name**, a model (every known model, grouped one group per provider,
+like the Settings page) and a fresh `agents/<name>.md` to grow from — its Definition
+field starts from a default template that follows the name you type, and the file it
+writes ends with the **Reference files** section described below.
+
+A cubicle's header carries its name (a real id `file_reader` can read **Bob**, and the id
+stays beside it) and its own controls: **off duty / on duty** enables or disables the
+subagent — an off-duty agent keeps its cubicle but shows an empty desk — **fire** drops it
+from the team, **md** opens its whole `agents/*.md` definition (frontmatter + prompt) in a
+full-screen editor, and **name** edits the label. The orchestrator's office carries a
+**teams** control — a manager listing every team, where you add a new one (which becomes
+active) or remove a team you no longer need. The **office's own name** hangs on the north
+wall between the window and the clock — click it to call this workspace whatever you like.
+
+The **orchestrator** gets one control of its own, because the model it runs on is the
+app's default: a **model** picker on the corner office. It lists every known model, grouped
+one group per provider, and the choice is stored in `settings.json` — the same "default
+model" the Settings page shows — and rides with every task the queue dispatches. Under
+each desk's activity line, the floor also prints that agent's running total: **tokens spent
+and what they cost** (`12.3k tok · $0.042`), refreshed from the server while it works.
+
+The north wall hangs the **Kanban board**, drawn as a small sign with a count per column,
+its run state, and what the orchestrator is on right now. Click it for the full-screen
+board: **Todo → Planned → In Progress → Done**. **＋ New task** opens a roomy popup — a
+title and a big brief field, not a cramped inline box — and the task lands in Todo; move it
+along with the arrow on its row. The runner starts **paused**: press **▶ Run** in the board
+header to work the queue. Planned tasks are then handed to the orchestrator one at a time,
+in order, each as its own chat turn, and every task lands in **Done** when its run finishes.
+Press **⏸ Pause** to stop: the task in progress is aborted and returns to Planned, and
+nothing new starts until you press Run again. A task whose run cannot settle goes back to
+Planned and waits for you to move it again, so a broken run can never spin. The board — its
+queue and the runner's paused/running state — is stored in the project's own
+`.pi/settings/agent-team-config.json` alongside the office name, so it travels with the
+workspace.
+
+The **meeting room** holds the workspace's **reference library**, drawn as a **shelf of
+books** with a badge for how many references it holds. Click it for a full-screen panel
+where each reference is a row: its path, an optional note, and the **agent it is for**
+(the whole team, the orchestrator, or one subagent); rows are reassigned and removed there,
+and new files or folders are added the same way. The library is injected as a reference
+block at the start of every **new conversation**, grouped by the agent each path belongs
+to, so the orchestrator and the subagents it dispatches know what to read — and a
+subagent hired from a room starts with a **Reference files** section in its fresh
+`agents/<name>.md`, filled from whatever is assigned to it. The library lives in the
+project's own `.pi/settings/agent-team-config.json`, so it travels with the workspace.
+
+The room is *drawn* rather than themed: windows along the outer wall, wooden desks, swivel
+chairs and red armchairs, potted plants and a carpeted floor. It keeps that warm, sunlit
+look in the dark theme too, instead of inverting with the UI.
+
+Status comes from the same source as the rest of the UI (the session's turn lifecycle), and
+each cubicle labels what its agent is doing *right now* from the live event stream —
+`→ bash`, `thinking…`, `writing…` — so you can watch a dispatch fan out across the floor.
+
+<p align="center">
+  <img src="docs/shots/office-dark.png" alt="Office view — top-down cubicles, desk token/cost totals and the orchestrator's model picker" width="880" />
+  <img src="docs/shots/office-kanban-dark.png" alt="Kanban board — Todo, Planned, In Progress, Done" width="880" />
+  <img src="docs/shots/office-library-dark.png" alt="Reference library — full-screen manager" width="880" />
+  <img src="docs/shots/office-hire-dark.png" alt="Hire — two-column form, with a Reference files template for the new agents/*.md" width="880" />
+</p>
+
 ### 🧭 Trajectory — where did the time go?
 
 The **Trajectory** view folds events into **turns** and shows a ledger of Message and Tool
@@ -186,7 +258,7 @@ read live from `pi`, OAuth and API-key sign-in), and **Update** installs a newer
 
 ### 🧩 Plugins — every feature, and yours too
 
-Every header view — **Chat, Terminal, Review, Checkpoints, Git, Single, Trajectory** — is a
+Every header view — **Chat, Terminal, Review, Checkpoints, Git, Single, Office, Trajectory** — is a
 **plugin**. Enable or disable any of them from **Settings → Plugins**: the view disappears and,
 server-side, the routes that feature owns are refused. You can add your own plugin by dropping a
 folder with a `plugin.json` (plus an optional `server.js` / `client.js`) into

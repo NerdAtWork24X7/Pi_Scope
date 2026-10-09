@@ -18,6 +18,79 @@ import * as url from "node:url";
 const HERE = path.dirname(url.fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, "..", "public");
 
+const BUILTIN_PLUGINS_DIR = path.join(HERE, "..", "plugins");
+
+/** The model registry, shaped like the real server's `modelsMeta` (provider,
+ *  context window, cost, thinking levels). One entry — anthropic's — is in the
+ *  registry but NOT in the fixture's enabledModels, which is what the model
+ *  pickers have to pick up ("all models", grouped by provider). */
+export const MODEL_META = {
+  "google/gemini-2.5-flash-lite": {
+    provider: "google",
+    contextWindow: 1_000_000,
+    maxTokens: 8192,
+    cost: { input: 0.1, output: 0.4, cacheRead: 0.02 },
+    thinkingLevels: ["off", "low", "medium", "high"],
+  },
+  "deepseek/deepseek-v4-flash": {
+    provider: "deepseek",
+    contextWindow: 128_000,
+    maxTokens: 8192,
+    cost: { input: 0.07, output: 0.28 },
+    thinkingLevels: ["off", "low", "high"],
+  },
+  "anthropic/claude-sonnet-4": {
+    provider: "anthropic",
+    contextWindow: 200_000,
+    maxTokens: 64000,
+    cost: { input: 3, output: 15 },
+    thinkingLevels: ["off", "low", "high"],
+  },
+};
+
+let pluginSnapshotCache = null;
+
+/**
+ * A `/plugins` snapshot shaped like the real server's (see plugins.ts
+ * `pluginSnapshot()`), built from the checked-in built-in manifests. All
+ * built-ins are enabled; `clientUrl` is only set for plugins that ship one.
+ */
+function pluginSnapshot() {
+  if (pluginSnapshotCache) return pluginSnapshotCache;
+  const plugins = [];
+  let dirs = [];
+  try { dirs = fs.readdirSync(BUILTIN_PLUGINS_DIR, { withFileTypes: true }); } catch { dirs = []; }
+  for (const d of dirs) {
+    if (!d.isDirectory()) continue;
+    const file = path.join(BUILTIN_PLUGINS_DIR, d.name, "plugin.json");
+    let manifest = null;
+    try { manifest = JSON.parse(fs.readFileSync(file, "utf8")); } catch { continue; }
+    const id = manifest.id || d.name;
+    const hasServer = !!manifest.server;
+    const hasClient = !!manifest.client;
+    plugins.push({
+      id,
+      name: manifest.name || id,
+      description: manifest.description || "",
+      version: manifest.version || "0.0.0",
+      author: manifest.author || "",
+      source: "builtin",
+      enabled: true,
+      core: manifest.core === true,
+      hasServer,
+      hasClient,
+      clientUrl: hasClient ? `/plugins/file/${id}/client.js` : null,
+      error: null,
+      serverRoutes: manifest.serverRoutes || [],
+      nav: manifest.nav || null,
+      ui: manifest.ui || null,
+      dir: path.dirname(file),
+    });
+  }
+  pluginSnapshotCache = { pluginsDir: null, pluginsBuiltinDir: BUILTIN_PLUGINS_DIR, configPath: null, plugins };
+  return pluginSnapshotCache;
+}
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -57,6 +130,13 @@ export function defaultTeam(opts = {}) {
       review: [{ name: "critic", model: "google/gemini-2.5-flash-lite", active: true }],
     },
     disabledAgents: [],
+    // The reference library the Office shows in its meeting room.
+    library: [],
+    // The Office view's own state: its name, the Kanban task queue, and whether
+    // the queue runner is dispatching (paused by default).
+    officeName: undefined,
+    tasks: [],
+    runnerPaused: true,
     skills: [],
     tools: [],
     skipOrchestratorTools: [],
@@ -102,6 +182,8 @@ export async function startMockBackend() {
     team: defaultTeam(),
     chatWorkspaces: [],
     chatWorkspacesRemoved: [],
+    // Subagent definitions (agents/*.md) as GET /settings returns them.
+    agentDefs: [],
   };
 
   /** Every request the page made (path/method/parsed body) — tests assert on it. */
@@ -211,7 +293,12 @@ export async function startMockBackend() {
       pathname === "/health" ||
       pathname === "/agent-team" ||
       pathname === "/events/stream" ||
-      pathname === "/settings" || pathname.startsWith("/settings/");
+      pathname === "/settings" || pathname.startsWith("/settings/") ||
+      pathname === "/plugins" ||
+      // The Files plugin's routes. Only the graph is needed: the Review view
+      // asks for it from its onSessions hook, which can run during the boot
+      // view-switch race even when another view ends up active.
+      pathname === "/files" || pathname.startsWith("/files/");
 
     if (!isAPI) return serveStatic(req, res, pathname);
 
@@ -291,11 +378,119 @@ export async function startMockBackend() {
         state.team.mode = state.team.mode === "creative" ? "standard" : "creative";
       } else if (action === "toggleMemory") {
         state.team.memoryActive = !state.team.memoryActive;
+      } else if (action === "setOfficeName") {
+        const name = String(body.name ?? "").replace(/\s+/g, " ").trim();
+        if (name.length > 60) return sendJSON(res, { error: "office names may be up to 60 characters" }, 400);
+        if (name) state.team.officeName = name; else delete state.team.officeName;
+      } else if (action === "addTask" && typeof body.title === "string") {
+        const title = body.title.replace(/\s+/g, " ").trim();
+        const note = typeof body.note === "string" ? body.note.replace(/\s+/g, " ").trim() : "";
+        if (!title) return sendJSON(res, { error: "missing title" }, 400);
+        const task = { id: `task_${(state.team.tasks || []).length + 1}`, title, status: "todo", createdAt: Date.now() };
+        if (note) task.note = note;
+        state.team.tasks = [...(state.team.tasks || []), task];
+      } else if (action === "moveTask" && typeof body.id === "string") {
+        const status = String(body.status || "");
+        if (!["todo", "planned", "in_progress", "done"].includes(status)) {
+          return sendJSON(res, { error: `invalid status: ${status}` }, 400);
+        }
+        const task = (state.team.tasks || []).find((t) => t.id === body.id);
+        if (!task) return sendJSON(res, { error: "no such task" }, 404);
+        const at = Date.now();
+        task.status = status;
+        if (status === "planned") task.plannedAt = task.plannedAt || at;
+        if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
+        if (status === "in_progress") task.startedAt = task.startedAt || at;
+        if (status === "done") task.finishedAt = at;
+      } else if (action === "removeTask" && typeof body.id === "string") {
+        state.team.tasks = (state.team.tasks || []).filter((t) => t.id !== body.id);
+      } else if (action === "setRunnerPaused") {
+        state.team.runnerPaused = body.paused !== false;
+      } else if (action === "addLibraryEntry" && typeof body.path === "string") {
+        // The real route resolves the path on disk; the mock keys on path + the
+        // agent it is for, so the same file may be listed per agent, once each.
+        const p = body.path.trim();
+        const note = typeof body.note === "string" ? body.note.trim() : "";
+        const target = typeof body.target === "string" ? body.target.trim() : "";
+        state.team.library = state.team.library || [];
+        const same = (e) => e.path === p && (e.target || "") === target;
+        const existing = state.team.library.find(same);
+        if (existing) {
+          if (note) existing.note = note;
+        } else if (p) {
+          const entry = { id: `lib_${state.team.library.length + 1}`, path: p };
+          if (note) entry.note = note;
+          if (target) entry.target = target;
+          state.team.library.push(entry);
+        }
+      } else if (action === "setLibraryEntry" && typeof body.id === "string") {
+        const list = state.team.library || [];
+        const at = list.findIndex((e) => e.id === body.id);
+        if (at >= 0) {
+          const target = typeof body.target === "string" ? body.target.trim() : "";
+          const note = typeof body.note === "string" ? body.note.trim() : "";
+          const clash = list.findIndex((e, i) => i !== at && e.path === list[at].path && (e.target || "") === target);
+          if (clash >= 0) {
+            if (note) list[clash].note = note;
+            list.splice(at, 1);
+          } else {
+            if (target) list[at].target = target; else delete list[at].target;
+            if (note) list[at].note = note; else delete list[at].note;
+          }
+        }
+      } else if (action === "removeLibraryEntry") {
+        state.team.library = (state.team.library || [])
+          .filter((e) => !(body.id ? e.id === body.id : e.path === body.path));
       } else if (action === "toggleAgent" && typeof body.agent === "string") {
         const name = body.agent.toLowerCase();
         const set = new Set(state.team.disabledAgents || []);
         if (body.disabled) set.add(name); else set.delete(name);
         state.team.disabledAgents = [...set];
+      } else if (action === "addTeam" && typeof body.team === "string") {
+        const name = body.team.trim();
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
+          return sendJSON(res, { error: "team names may use letters, digits, '-' and '_'" }, 400);
+        }
+        state.team.teams = state.team.teams || {};
+        if (!state.team.teams[name]) {
+          state.team.teams[name] = [];
+          state.team.teamsOrder = [...(state.team.teamsOrder || []), name];
+        }
+        // A team the user just created is the one they want to work on.
+        state.team.activeTeam = name;
+      } else if (action === "removeTeam" && typeof body.team === "string") {
+        const name = body.team.trim();
+        if (state.team.teams) delete state.team.teams[name];
+        state.team.teamsOrder = (state.team.teamsOrder || []).filter((t) => t !== name);
+        if (state.team.activeTeam === name) {
+          const remaining = Object.keys(state.team.teams || {});
+          if (remaining.length) state.team.activeTeam = remaining[0];
+          else delete state.team.activeTeam;
+        }
+      } else if (action === "addMember" && typeof body.team === "string" && typeof body.name === "string") {
+        const name = body.name.trim();
+        state.team.teams = state.team.teams || {};
+        const members = (state.team.teams[body.team] = state.team.teams[body.team] || []);
+        if (name && !members.some((m) => (m.name || "").toLowerCase() === name.toLowerCase())) {
+          const entry = { name };
+          if (body.model) entry.model = String(body.model);
+          if (body.displayName) entry.displayName = String(body.displayName);
+          members.push(entry);
+        }
+      } else if (action === "removeMember" && typeof body.team === "string" && typeof body.name === "string") {
+        const members = (state.team.teams || {})[body.team];
+        if (Array.isArray(members)) {
+          state.team.teams[body.team] = members.filter((m) => (m.name || "").toLowerCase() !== body.name.toLowerCase());
+        }
+      } else if (action === "setMemberDisplayName" && typeof body.team === "string" && typeof body.agent === "string") {
+        const members = (state.team.teams || {})[body.team];
+        const mem = Array.isArray(members)
+          ? members.find((m) => (m.name || "").toLowerCase() === body.agent.toLowerCase())
+          : null;
+        if (mem) {
+          const dn = String(body.displayName ?? "").trim();
+          if (dn) mem.displayName = dn; else delete mem.displayName;
+        }
       }
       return sendJSON(res, snapshotTeam());
     }
@@ -313,22 +508,7 @@ export async function startMockBackend() {
       return sendJSON(res, {
         branch: "main",
         thinking: "high",
-        modelMeta: {
-          "google/gemini-2.5-flash-lite": {
-            provider: "google",
-            contextWindow: 1_000_000,
-            maxTokens: 8192,
-            cost: { input: 0.1, output: 0.4, cacheRead: 0.02 },
-            thinkingLevels: ["off", "low", "medium", "high"],
-          },
-          "deepseek/deepseek-v4-flash": {
-            provider: "deepseek",
-            contextWindow: 128_000,
-            maxTokens: 8192,
-            cost: { input: 0.07, output: 0.28 },
-            thinkingLevels: ["off", "low", "high"],
-          },
-        },
+        modelMeta: MODEL_META,
         goUsage: null,
       });
     }
@@ -354,7 +534,64 @@ export async function startMockBackend() {
       return;
     }
 
-    if (pathname === "/settings") return sendJSON(res, { pi: {}, settingsRaw: {}, ...snapshotTeam() });
+    if (pathname === "/settings" && method === "GET") {
+      return sendJSON(res, { pi: {}, settingsRaw: {}, modelsMeta: MODEL_META, agentDefs: state.agentDefs, ...snapshotTeam() });
+    }
+    if (pathname === "/settings" && method === "POST") {
+      // Only the actions the views exercise are modelled; the rest are no-ops
+      // that still answer with the snapshot, like the real route.
+      if (body.action === "saveAgentDefFile" && body.value && typeof body.value.file === "string") {
+        const def = state.agentDefs.find((d) => d.file === body.value.file);
+        if (!def) return sendJSON(res, { error: `no such agent definition: ${body.value.file}` }, 404);
+        def.content = String(body.value.content ?? "");
+      }
+      // The Office's orchestrator picker writes the app's default model.
+      if (body.action === "setDefaultModel") state.team.defaultModel = String(body.value || "");
+      if (body.action === "createAgentDefFile" && body.value && typeof body.value.file === "string") {
+        const file = body.value.file;
+        if (state.agentDefs.some((d) => d.file === file)) {
+          return sendJSON(res, { error: `agent definition already exists: ${file}` }, 409);
+        }
+        const content = String(body.value.content ?? "");
+        const named = content.match(/^name:\s*(.+)$/m);
+        state.agentDefs.push({
+          file,
+          name: named ? named[1].trim() : file.replace(/\.md$/, ""),
+          description: "",
+          model: "",
+          tools: "",
+          thinking: "",
+          content,
+        });
+      }
+      return sendJSON(res, { pi: {}, settingsRaw: {}, modelsMeta: MODEL_META, agentDefs: state.agentDefs, ...snapshotTeam() });
+    }
+
+    // ── Files (Review) ─────────────────────────────────────────────────────
+    // The graph the Review view renders. Its real handler shells out to git, so
+    // for the mock's non-repo cwd the honest answer is the real route's own
+    // failure shape (see plugins/files/server.ts).
+    if (pathname === "/files/graph" && method === "GET") {
+      const cwd = parsed.searchParams.get("cwd") || "";
+      return sendJSON(res, {
+        cwd,
+        git: false,
+        modules: [],
+        edges: [],
+        fileNodes: [],
+        fileEdges: [],
+        changed: [],
+        head: null,
+        stats: { files: 0, modules: 0, changedFiles: 0, add: 0, del: 0, truncated: false },
+      });
+    }
+
+    // ── Plugins ────────────────────────────────────────────────────────────
+    // The client fetches this at boot to reconcile the built-in registry with
+    // the server's manifests (see public/plugins.js). Serve the REAL manifests
+    // from apps/scope-server/plugins so every built-in view stays enabled here,
+    // exactly as the real server reports them.
+    if (pathname === "/plugins") return sendJSON(res, pluginSnapshot());
 
     return sendJSON(res, { error: `mock: unhandled ${method} ${pathname}` }, 404);
   });
@@ -382,6 +619,14 @@ export async function startMockBackend() {
       state.chatWorkspacesRemoved = (team && team.chatWorkspacesRemoved) ? team.chatWorkspacesRemoved.slice() : [];
     },
     setEvents(sid, events) { state.eventsBySid[sid] = events; },
+    /** Seed the subagent definitions (agents/*.md) that GET /settings returns. */
+    setAgentDefs(defs) { state.agentDefs = defs.map((d) => ({ ...d })); },
+    /** Seed the reference library (files/folders injected at conversation start). */
+    setLibrary(entries) { state.team.library = entries.map((e) => ({ ...e })); },
+    /** Seed one session's totals, as GET /sessions/stats reports them. */
+    setStats(id, s) {
+      state.stats[id] = { total_cost: 0, total_tokens: 0, error_count: 0, models: [], ...s };
+    },
     get activeTurn() { return activeTurn; },
     requestsFor(pathname, method) {
       return requests.filter((r) => r.path === pathname && (!method || r.method === method));
@@ -394,6 +639,7 @@ export async function startMockBackend() {
       state.team = defaultTeam();
       state.chatWorkspaces = [];
       state.chatWorkspacesRemoved = [];
+      state.agentDefs = [];
       requests.length = 0;
       turns.length = 0;
       waiters.splice(0).forEach(() => {});

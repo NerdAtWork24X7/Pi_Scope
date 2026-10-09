@@ -82,6 +82,28 @@
       --glass-border: rgba(15, 17, 21, 0.08);
       --glass-shadow: 0 8px 32px rgba(15, 17, 21, 0.10);
       --bg-gradient: linear-gradient(180deg, #eaf1ff 0%, #ffffff 40%, #f4f7fb 100%);
+      /* Office illustration palette. The Office view is a *drawn room*: it keeps
+         its own warm, sunlit look instead of inverting with the UI, so every
+         colour the room uses is a token here (and the dark theme just dims the
+         same room) — see the office section near the end of this file. */
+      --office-floor: #ead9b8;
+      --office-floor-2: #e0cda8;
+      --office-wall: #9fb9ca;
+      --office-wall-dark: #7d97aa;
+      --office-frame: #6c8496;
+      --office-glass: #d9ecf5;
+      --office-wood: #c98d4d;
+      --office-wood-top: #dfab6d;
+      --office-wood-dark: #a2672f;
+      --office-chair: #3f5367;
+      --office-chair-top: #4d6479;
+      --office-armchair: #b8452f;
+      --office-armchair-top: #cd6146;
+      --office-plant: #4e9d47;
+      --office-plant-dark: #37743a;
+      --office-pot: #b06a3f;
+      --office-ink: #2b3a47;
+      --office-shadow: rgba(58, 40, 18, 0.30);
     }
 
     body[data-ds-dark-theme] {
@@ -125,6 +147,25 @@
       --glass-border: rgba(249, 250, 251, 0.10);
       --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
       --bg-gradient: linear-gradient(180deg, #1c2334 0%, #151517 40%, #0f0f11 100%);
+      /* The same room, lit a little lower so it doesn't glare out of a dark UI. */
+      --office-floor: #cbb387;
+      --office-floor-2: #c1a97c;
+      --office-wall: #7e97aa;
+      --office-wall-dark: #647d90;
+      --office-frame: #55697a;
+      --office-glass: #a8c5d2;
+      --office-wood: #ad7840;
+      --office-wood-top: #c08d55;
+      --office-wood-dark: #86592b;
+      --office-chair: #33465a;
+      --office-chair-top: #41556a;
+      --office-armchair: #9d3d29;
+      --office-armchair-top: #b04d36;
+      --office-plant: #3f8640;
+      --office-plant-dark: #2b6130;
+      --office-pot: #91562f;
+      --office-ink: #22303c;
+      --office-shadow: rgba(0, 0, 0, 0.42);
     }
 
     * {
@@ -9164,3 +9205,1031 @@ body.sidebar-collapsed .sidebar-rail {
   color: var(--red);
 }
 .scope-toast.err::before { background: var(--red); }
+
+/* ── Office view: a top-down office floor, split into rooms ─────────────── */
+
+.office-header { gap: 14px; }
+
+/* The office's own name, at the far left of the header. It reads as the view's
+   title until you hover it, when it becomes editable chrome. */
+.office-title {
+  font: inherit; font-size: 13.5px; font-weight: 600;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 3px 9px;
+  max-width: 280px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  cursor: pointer;
+}
+.office-title:hover { background: var(--surface-2); border-color: var(--border); }
+.office-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.office-counts { display: flex; gap: 12px; align-items: center; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+.office-count { display: inline-flex; align-items: center; gap: 5px; }
+.office-count.working { color: var(--green); }
+.office-count.leave { font-style: italic; }
+
+/* The office's own name, hung on the north wall between the window and the
+   clock — part of the drawing's palette, so it reads on the carpet in both
+   themes. Click it to rename; empty restores "Office". */
+.office-wall-name {
+  font-size: 12px; font-weight: 600;
+  color: color-mix(in srgb, var(--office-ink) 82%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-glass) 45%, var(--office-wall));
+  border: 2px solid var(--office-frame);
+  border-radius: 4px;
+  padding: 3px 10px;
+  max-width: 240px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  cursor: pointer;
+}
+.office-wall-name:hover { border-color: color-mix(in srgb, var(--office-frame) 55%, var(--accent)); }
+.office-wall-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The orchestrator's "teams" control: opens the Teams manager (add / remove). */
+.office-teams-btn {
+  font: inherit; font-size: 10.5px; line-height: 1;
+  padding: 3px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: color-mix(in srgb, var(--office-ink) 82%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-glass) 45%, var(--office-wall));
+  border: 1px solid var(--office-frame);
+}
+.office-teams-btn:hover { border-color: color-mix(in srgb, var(--office-frame) 55%, var(--accent)); }
+.office-teams-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.office-plate .status-dot,
+.office-count .status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--border-strong); flex-shrink: 0;
+}
+.office-plate .status-dot.green,
+.office-count .status-dot.green { background: var(--green); box-shadow: 0 0 5px var(--green); }
+.office-plate .status-dot.orange,
+.office-count .status-dot.orange { background: var(--orange); }
+.office-plate .status-dot.red,
+.office-count .status-dot.red { background: var(--red); }
+.office-plate .status-dot.gray,
+.office-count .status-dot.gray { background: var(--muted); opacity: .6; }
+
+/* The scene is the scroll container AND the positioning context for the hover
+   popup, so a popup can never be clipped by a room's rounded walls. */
+.office-scene { position: relative; flex: 1; min-height: 0; overflow: auto; padding: 18px 18px 30px; }
+
+/* The building: thick outer walls, a wall of windows up top, a south wall of
+   plants and armchairs, and the carpeted floor between them. */
+.office-building {
+  position: relative;
+  max-width: 1220px;
+  margin: 0 auto;
+  border: 12px solid var(--office-wall-dark);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--office-wall);
+  box-shadow: 0 24px 48px -30px rgba(0, 0, 0, .75), inset 0 0 0 2px var(--office-frame);
+}
+
+/* Top-down outer wall with windows, the Kanban sign, a clock and a plant. It
+   grows rather than clipping: the sign is the tallest thing on it, and a hidden
+   overflow would cut its column counts off. */
+.office-wall {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  min-height: 48px;
+  padding: 4px 26px;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--office-wall) 88%, var(--office-frame)),
+    var(--office-wall));
+  border-bottom: 3px solid var(--office-frame);
+}
+/* The south wall closes the room off, with greenery and armchairs along it. */
+.office-wall-south {
+  justify-content: space-between;
+  border-bottom: 0;
+  border-top: 3px solid var(--office-frame);
+  background: linear-gradient(0deg,
+    color-mix(in srgb, var(--office-wall) 88%, var(--office-frame)),
+    var(--office-wall));
+}
+.office-window {
+  width: 132px; height: 17px;
+  border-radius: 2px;
+  background: linear-gradient(180deg,
+    var(--office-glass),
+    color-mix(in srgb, var(--office-glass) 70%, var(--office-wall)));
+  border: 2px solid var(--office-frame);
+  box-shadow: inset 0 0 9px color-mix(in srgb, #fff 45%, transparent);
+}
+.office-whiteboard {
+  width: 120px; height: 18px; border-radius: 2px;
+  background: color-mix(in srgb, var(--office-glass) 55%, var(--office-wall));
+  border: 2px solid var(--office-frame);
+  color: color-mix(in srgb, var(--office-ink) 75%, var(--office-frame));
+  font-size: 8px; letter-spacing: .6px; text-transform: uppercase;
+  display: grid; place-items: center;
+}
+.office-clock {
+  position: relative;
+  width: 24px; height: 24px; border-radius: 50%;
+  background: color-mix(in srgb, var(--office-glass) 60%, var(--office-wall));
+  border: 2px solid var(--office-frame);
+}
+.office-hand { position: absolute; left: 50%; bottom: 50%; width: 1.5px; border-radius: 2px; background: var(--office-ink); transform-origin: 50% 100%; }
+.office-hand.h { height: 6px; animation: office-hour 90s steps(12) infinite; }
+.office-hand.m { height: 8px; animation: office-minute 40s steps(12) infinite; }
+.office-shelf { font-size: 15px; margin-left: auto; opacity: .9; }
+
+/* The wall's Kanban sign: the four columns with their counts, and what the
+   orchestrator is on. It is one button — clicking it opens the full board. The
+   slot holds it at the wall's right-hand end and repaints with the snapshot. */
+.office-wall-slot { display: flex; align-items: center; margin-left: auto; }
+.office-kanban-mini {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 4px 9px 5px;
+  border-radius: 4px;
+  font: inherit; text-align: left; cursor: pointer;
+  color: color-mix(in srgb, var(--office-ink) 82%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-glass) 55%, var(--office-wall));
+  border: 2px solid var(--office-frame);
+}
+.office-kanban-mini:hover { border-color: color-mix(in srgb, var(--office-frame) 55%, var(--accent)); }
+.office-kanban-mini:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.office-kanban-head { font-size: 8px; letter-spacing: .7px; text-transform: uppercase; opacity: .8; }
+.office-kanban-state { font-size: 8px; font-weight: 600; letter-spacing: .3px; }
+.office-kanban-state.paused { color: color-mix(in srgb, var(--orange) 75%, var(--office-ink)); }
+.office-kanban-state.running { color: color-mix(in srgb, var(--green) 70%, var(--office-ink)); }
+.office-kanban-cols { display: flex; align-items: baseline; gap: 7px; }
+.office-kmini-col { display: inline-flex; align-items: baseline; gap: 3px; font-size: 8.5px; white-space: nowrap; }
+.office-kmini-col b { font-size: 9px; }
+.office-kmini-col.in_progress { color: color-mix(in srgb, var(--green) 70%, var(--office-ink)); }
+.office-kmini-col.done { color: color-mix(in srgb, var(--accent) 60%, var(--office-ink)); }
+.office-kanban-now {
+  font-size: 8px; font-style: italic; opacity: .8;
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* A potted plant: terracotta pot with a rounded canopy of leaves. */
+.office-plant { position: relative; flex: 0 0 auto; width: 28px; height: 30px; }
+.office-plant::before {
+  content: "";
+  position: absolute; left: 50%; bottom: 0; transform: translateX(-50%);
+  width: 16px; height: 12px;
+  border-radius: 2px 2px 5px 5px;
+  background: linear-gradient(180deg, var(--office-pot), color-mix(in srgb, var(--office-pot) 65%, var(--office-ink)));
+  box-shadow: 0 3px 5px -3px var(--office-shadow);
+}
+.office-plant::after {
+  content: "";
+  position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%);
+  width: 26px; height: 20px;
+  border-radius: 52% 52% 44% 44%;
+  background: radial-gradient(circle at 38% 30%, var(--office-plant), var(--office-plant-dark));
+  box-shadow: inset 0 -3px 6px -3px var(--office-shadow);
+}
+.office-plant.tall::after { height: 26px; width: 28px; }
+
+/* A red armchair, along the walls — the reference floor's lounge seating. */
+.office-armchair {
+  position: relative; flex: 0 0 auto;
+  width: 28px; height: 24px;
+  border-radius: 7px 7px 4px 4px;
+  background: linear-gradient(180deg, var(--office-armchair-top), var(--office-armchair));
+  border: 1px solid color-mix(in srgb, var(--office-armchair) 60%, var(--office-ink));
+  box-shadow: 0 4px 7px -4px var(--office-shadow);
+}
+.office-armchair::before {
+  content: "";
+  position: absolute; left: 3px; right: 3px; top: -5px; height: 7px;
+  border-radius: 4px;
+  background: var(--office-armchair-top);
+}
+
+/* The carpeted interior: rooms laid out around a center pathway — the
+   orchestrator's office top-left with the meeting room to its right, then team
+   rooms two-left / two-right, wrapping down the floor. The wide column gap is
+   what the pathway (::before) is drawn in. */
+.office-plan {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 30px 86px;
+  padding: 26px 22px 30px;
+  background:
+    repeating-linear-gradient(0deg,
+      color-mix(in srgb, var(--office-floor-2) 80%, transparent) 0 1px,
+      transparent 1px 74px),
+    var(--office-floor);
+}
+
+/* The pathway down the middle of the floor: a striped walkway between two
+   dashed walls, drawn under the rooms so it reads as the corridor running
+   between the left and right columns. */
+.office-plan::before {
+  content: "";
+  position: absolute;
+  top: 14px; bottom: 14px;
+  left: 50%;
+  width: 46px;
+  transform: translateX(-50%);
+  border-radius: 4px;
+  border-left: 2px dashed color-mix(in srgb, var(--office-frame) 55%, transparent);
+  border-right: 2px dashed color-mix(in srgb, var(--office-frame) 55%, transparent);
+  background:
+    repeating-linear-gradient(90deg,
+      color-mix(in srgb, var(--office-floor-2) 85%, transparent) 0 4px,
+      transparent 4px 18px),
+    color-mix(in srgb, var(--office-floor) 88%, var(--office-wall));
+  pointer-events: none;
+}
+.office-plan > .office-room { position: relative; z-index: 1; }
+
+/* Placement: the orchestrator's office is the top-left cell, the meeting room
+   the cell beside it; team rooms auto-flow two-per-row beneath them. */
+.office-plan > .office-room[data-room="orchestrator"] { grid-column: 1; grid-row: 1; }
+.office-plan > .office-room[data-room="meeting"] { grid-column: 2; grid-row: 1; }
+
+/* One room: its own walls, with a header row inside them — the team's name at
+   the top-left, its actions (activate / hire) at the top-right. */
+.office-room {
+  position: relative;
+  border: 3px solid var(--office-frame);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--office-floor) 90%, var(--office-wall));
+  transition: border-color .3s ease, background .3s ease;
+}
+.office-room.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--office-frame));
+  background: color-mix(in srgb, var(--accent-soft) 32%, color-mix(in srgb, var(--office-floor) 90%, var(--office-wall)));
+}
+/* The orchestrator's own corner office, top-left of the plan. */
+.office-room.orch-room {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--office-frame));
+  background: color-mix(in srgb, var(--accent-soft) 26%, color-mix(in srgb, var(--office-floor) 90%, var(--office-wall)));
+}
+/* The room's own name is written on the carpet, so the active team's accent is
+   pulled almost all the way into the room ink: the accent alone is only ~1.7:1
+   on the beige floor. */
+.office-room.orch-room .office-room-name { color: color-mix(in srgb, var(--office-ink) 80%, var(--accent)); }
+.office-room-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 8px 0;
+  font-size: 10px; letter-spacing: .7px; text-transform: uppercase;
+  color: color-mix(in srgb, var(--office-ink) 72%, var(--office-frame));
+}
+.office-room-name { font-weight: 600; color: var(--office-ink); }
+.office-room.active .office-room-name { color: color-mix(in srgb, var(--office-ink) 80%, var(--accent)); }
+.office-room-meta { font-size: 9.5px; }
+/* The header's controls are pushed to the room's top-right corner. */
+.office-room-spacer { flex: 1 1 auto; }
+/* Every team keeps its room; the active one is badged, the others offer a way
+   to switch the roster over to them. Both sit in the room's header row, beside
+   the team's name. */
+.office-room-active,
+.office-room-pick {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 9px; letter-spacing: .5px; text-transform: uppercase;
+}
+.office-room-active {
+  color: color-mix(in srgb, var(--office-ink) 88%, var(--accent));
+  background: color-mix(in srgb, var(--office-floor) 78%, var(--accent));
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--office-frame));
+}
+.office-room-pick {
+  color: color-mix(in srgb, var(--office-ink) 88%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-floor) 86%, var(--office-wood-top));
+  border: 1px solid color-mix(in srgb, var(--office-frame) 70%, transparent);
+  cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, background .2s ease;
+}
+.office-room-pick:hover:not(:disabled) {
+  color: var(--office-ink);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-floor) 74%, var(--accent));
+}
+.office-room-pick:disabled { opacity: .7; cursor: default; }
+.office-room-floor {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 26px 16px;
+  padding: 14px 14px 16px;
+}
+/* The meeting room holds two things: the round table, and the workspace's
+   reference library (files/folders injected at the start of a conversation). */
+.office-room.meeting .office-room-floor {
+  display: grid;
+  grid-template-columns: minmax(108px, 150px) minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  min-height: 148px;
+}
+.office-meeting-set {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 148px;
+}
+.office-meeting-plant { position: absolute; left: 2px; bottom: 2px; }
+
+/* The reference library itself is a drawn shelf of books: one button, in the
+   meeting room's ink, that opens the full-screen manager. */
+.office-library {
+  position: relative;
+  align-self: center;
+  justify-self: center;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 8px 10px 6px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--office-floor) 88%, var(--office-wood-top));
+  border: 1px solid color-mix(in srgb, var(--office-frame) 70%, transparent);
+  box-shadow: 0 5px 10px -7px var(--office-shadow);
+  color: var(--office-ink);
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color .2s ease, background .2s ease, transform .2s ease;
+}
+.office-library:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-floor) 82%, var(--office-wood-top));
+  transform: translateY(-1px);
+}
+.office-library:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.office-lib-svg { width: 104px; height: 80px; display: block; }
+.lib-case { fill: var(--office-wood-dark); }
+.lib-inner { fill: color-mix(in srgb, var(--office-wood) 55%, var(--office-floor)); }
+.lib-board { fill: var(--office-wood-dark); }
+/* Four spine colours, so the shelf reads as books from across the room. */
+.lib-book.b1 { fill: color-mix(in srgb, var(--office-armchair) 80%, var(--office-wood-dark)); }
+.lib-book.b2 { fill: color-mix(in srgb, var(--office-frame) 60%, var(--office-wood-top)); }
+.lib-book.b3 { fill: color-mix(in srgb, var(--office-plant) 55%, var(--office-wood-dark)); }
+.lib-book.b4 { fill: color-mix(in srgb, var(--office-wood-top) 70%, var(--office-wood-dark)); }
+.lib-book.b5 { fill: color-mix(in srgb, var(--office-ink) 35%, var(--office-wood-top)); }
+.office-library-badge {
+  position: absolute; top: 4px; right: 6px;
+  min-width: 15px; padding: 0 4px;
+  border-radius: 8px;
+  font-size: 9.5px; line-height: 15px; text-align: center;
+  color: color-mix(in srgb, var(--office-ink) 88%, var(--accent));
+  background: color-mix(in srgb, var(--office-floor) 74%, var(--accent));
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--office-frame));
+}
+.office-library-label {
+  font-size: 9.5px; font-weight: 600; letter-spacing: .6px; text-transform: uppercase;
+  color: color-mix(in srgb, var(--office-ink) 82%, var(--office-frame));
+}
+
+/* One cubicle: three partition walls, open toward the corridor below, with a
+   desk, a screen, a chair and the agent seated in front of them (from above). */
+.office-pod {
+  position: relative;
+  /* The cubicle's header (name + its own controls) sits inside the top wall. */
+  padding: 10px 10px 8px;
+  border-top: 6px solid var(--office-frame);
+  border-left: 6px solid var(--office-frame);
+  border-right: 6px solid var(--office-frame);
+  border-radius: 3px 3px 0 0;
+  background: color-mix(in srgb, var(--office-floor) 55%, transparent);
+  transition: border-color .3s ease, box-shadow .3s ease, opacity .3s ease, background .3s ease;
+}
+.office-pod:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.office-pod.working {
+  border-color: color-mix(in srgb, var(--green) 60%, var(--office-frame));
+  background: color-mix(in srgb, var(--green) 16%, color-mix(in srgb, var(--office-floor) 55%, transparent));
+  box-shadow: 0 0 18px -6px color-mix(in srgb, var(--green) 55%, transparent);
+}
+.office-pod.waiting { border-color: color-mix(in srgb, var(--orange) 60%, var(--office-frame)); }
+.office-pod.stopped { opacity: .58; }
+.office-pod.idle { opacity: .85; }
+.office-pod.orch {
+  background: color-mix(in srgb, var(--accent-soft) 45%, color-mix(in srgb, var(--office-floor) 55%, transparent));
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--office-frame));
+}
+.office-pod.orch.working { border-color: color-mix(in srgb, var(--green) 55%, var(--accent)); }
+/* On leave: an empty desk in a dimmed cubicle. */
+.office-pod.leave { opacity: .5; border-style: dashed; }
+.office-pod.leave .office-person { display: none; }
+.office-pod.leave .office-chair { transform: translateX(-50%) translateY(6px); }
+.office-pod.leave .office-code i { opacity: .12; }
+
+.office-bubble {
+  margin-top: 3px;
+  font-size: 10.5px; line-height: 1.3;
+  color: color-mix(in srgb, var(--office-ink) 70%, var(--office-frame));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  pointer-events: none;
+}
+.office-pod.working .office-bubble { color: color-mix(in srgb, var(--office-ink) 84%, var(--green)); }
+.office-pod.leave .office-bubble { font-style: italic; }
+
+/* The desk's running totals — tokens spent and what they cost — under the
+   activity bubble. Tabular figures keep the columns from twitching as the
+   numbers move. */
+.office-stats {
+  margin-top: 2px;
+  font-size: 9.5px; line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--office-ink) 78%, var(--office-frame));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  pointer-events: none;
+}
+.office-stats[hidden] { display: none; }
+
+/* The cubicle plot: everything below is positioned from above. */
+.office-station { position: relative; height: 116px; }
+
+.office-desk {
+  position: absolute;
+  left: 16px; right: 16px; top: 12px;  height: 48px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, var(--office-wood-top), var(--office-wood));
+  border: 1px solid var(--office-wood-dark);
+  box-shadow: inset 0 2px 0 color-mix(in srgb, #fff 22%, transparent), 0 4px 8px -5px var(--office-shadow);
+  z-index: 1;
+}
+/* Top-down screen: a thin bar along the far edge of the desk, with the code the
+   agent is writing scrolling across it. */
+.office-monitor {
+  position: absolute;
+  top: 4px; left: 50%; transform: translateX(-50%);
+  width: 66px; height: 10px; border-radius: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--office-ink) 88%, var(--office-frame));
+  border: 1px solid var(--office-ink);
+  transition: background .3s ease, box-shadow .3s ease;
+}
+.office-pod.working .office-monitor {
+  background: color-mix(in srgb, var(--green) 55%, var(--office-ink));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--green) 60%, transparent);
+}
+.office-code {
+  position: absolute; inset: 1px 3px;
+  display: flex; flex-direction: column; justify-content: center; gap: 1px;
+}
+.office-code i {
+  display: block; height: 1.5px; border-radius: 1px;
+  background: color-mix(in srgb, var(--green) 92%, var(--text));
+  opacity: .25;
+}
+.office-code i:nth-child(1) { width: 68%; }
+.office-code i:nth-child(2) { width: 94%; }
+.office-code i:nth-child(3) { width: 46%; }
+/* While the agent works the lines light up one after another, like typing. */
+.office-pod.working .office-code i { animation: office-typing-code 1.15s steps(1, end) infinite; }
+.office-pod.working .office-code i:nth-child(2) { animation-delay: .38s; }
+.office-pod.working .office-code i:nth-child(3) { animation-delay: .76s; }
+.office-pod.working .office-monitor::after {
+  content: "";
+  position: absolute; top: 0; bottom: 0; width: 9px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, #fff 55%, transparent), transparent);
+  animation: office-scan 1.7s linear infinite;
+}
+.office-keyboard {
+  position: absolute;
+  bottom: 7px; left: 50%; transform: translateX(-50%);
+  width: 40px; height: 11px; border-radius: 2px;
+  background: color-mix(in srgb, var(--office-ink) 55%, var(--office-wood));
+  border: 1px solid color-mix(in srgb, var(--office-ink) 70%, transparent);
+}
+.office-mug {
+  position: absolute;
+  right: 9px; bottom: 8px;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: color-mix(in srgb, var(--office-armchair) 75%, var(--office-wood-top));
+  border: 1px solid color-mix(in srgb, var(--office-ink) 55%, transparent);
+}
+
+/* The agent, seen from above: shoulders + head + two arms on the keyboard. */
+.office-person {
+  position: absolute;
+  left: 50%; top: 58px;
+  width: 34px; height: 30px; z-index: 3;
+  transform: translateX(-50%);
+}
+.office-shoulders {
+  position: absolute; left: 0; right: 0; top: 8px; bottom: 0;
+  border-radius: 40% 40% 28% 28%;
+  background: hsl(var(--office-hue, 210) 52% 48%);
+  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+}
+.office-head {
+  position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+  width: 21px; height: 21px; border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 86%, var(--text));
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+}
+.office-arm {
+  position: absolute; top: -13px;
+  width: 7px; height: 20px; border-radius: 4px;
+  background: hsl(var(--office-hue, 210) 52% 42%);
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+}
+.office-arm-l { left: 2px; transform: rotate(7deg); }
+.office-arm-r { right: 2px; transform: rotate(-7deg); }
+.office-pod.working .office-arm-l { animation: office-type-l .3s ease-in-out infinite alternate; }
+.office-pod.working .office-arm-r { animation: office-type-r .3s ease-in-out infinite alternate; }
+.office-pod.working .office-person { animation: office-lean .9s ease-in-out infinite; }
+.office-pod.arriving .office-person { animation: office-walk-in .9s ease; }
+
+/* Top-down office chair, tucked under the desk. */
+.office-chair {
+  position: absolute;
+  left: 50%; top: 82px; transform: translateX(-50%);
+  width: 36px; height: 24px; border-radius: 12px 12px 8px 8px;
+  background: linear-gradient(180deg, var(--office-chair-top), var(--office-chair));
+  border: 1px solid color-mix(in srgb, var(--office-chair) 60%, var(--office-ink));
+  box-shadow: 0 4px 8px -5px var(--office-shadow);
+  z-index: 2;
+}
+.office-pod.waiting .office-chair { transform: translateX(-50%) translateY(3px); }
+
+/* The cubicle's header: its name plate at the top-left, the desk's controls
+   directly beneath it. */
+.office-pod-head { display: flex; flex-direction: column; gap: 4px; }
+
+/* The orchestrator's model picker — the one control the corner office carries,
+   because the model it runs on is the app's own default. Dressed like the
+   desk's other furniture: small, on the carpet's palette. */
+.office-model-row {
+  display: flex; align-items: center; gap: 5px;
+  margin-top: 1px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--office-floor) 82%, var(--office-wood-top));
+  border: 1px solid color-mix(in srgb, var(--office-frame) 60%, transparent);
+}
+.office-model-label {
+  font-size: 8.5px; letter-spacing: .5px; text-transform: uppercase;
+  color: color-mix(in srgb, var(--office-ink) 78%, var(--office-frame));
+}
+.office-orch-model {
+  flex: 1 1 auto; min-width: 0; max-width: 116px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  font: inherit; font-size: 10px;
+  color: var(--office-ink);
+  background: color-mix(in srgb, var(--office-floor) 92%, #fff);
+  border: 1px solid color-mix(in srgb, var(--office-frame) 70%, transparent);
+  cursor: pointer;
+}
+.office-orch-model:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.office-plate {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--office-floor) 82%, var(--office-wood-top));
+  border: 1px solid color-mix(in srgb, var(--office-frame) 60%, transparent);
+}
+.office-name { font-size: 12px; color: var(--office-ink); max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "file_reader is Bob": the desk leads with the display name and keeps the real
+   one beside it, so the roster id is never lost. */
+.office-realname { font-size: 9.5px; color: color-mix(in srgb, var(--office-ink) 55%, var(--office-frame)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.office-crown { display: none; font-size: 11px; color: var(--yellow, var(--accent)); }
+.office-pod.orch .office-crown { display: inline; }
+.office-leave-tag {
+  display: none;
+  margin-left: auto;
+  padding: 0 5px;
+  border: 1px solid color-mix(in srgb, var(--office-ink) 45%, transparent);
+  border-radius: 4px;
+  font-size: 9px; letter-spacing: .5px; text-transform: uppercase;
+  color: color-mix(in srgb, var(--office-ink) 72%, var(--office-frame));
+  white-space: nowrap;
+}
+.office-pod.leave .office-leave-tag { display: inline; }
+
+/* Per-desk controls, at the top-left of the cubicle under its name. */
+.office-pod-actions {
+  display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px;
+}
+.office-act {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 9px; letter-spacing: .5px; text-transform: uppercase;
+  color: color-mix(in srgb, var(--office-ink) 88%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-floor) 84%, var(--office-wood-top));
+  border: 1px solid color-mix(in srgb, var(--office-frame) 70%, transparent);
+  cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, background .2s ease;
+}
+.office-act:hover:not(:disabled) {
+  color: var(--office-ink);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-floor) 76%, var(--accent));
+}
+/* The controls are painted chips on a warm, yellow-carpeted floor. A saturated
+   green/red label would be unreadable on beige at 9px, so each chip keeps a
+   tinted background and border and pulls its label almost all the way to the
+   room ink: every one of them clears 4.5:1 on the carpet in both themes. */
+.office-act.duty {
+  color: color-mix(in srgb, var(--office-ink) 88%, var(--green));
+  background: color-mix(in srgb, var(--office-floor) 78%, var(--green));
+  border-color: color-mix(in srgb, var(--green) 45%, var(--office-frame));
+}
+.office-act.duty:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--office-ink) 94%, var(--green));
+  border-color: color-mix(in srgb, var(--green) 62%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-floor) 70%, var(--green));
+}
+.office-act.duty.off {
+  color: color-mix(in srgb, var(--office-ink) 88%, var(--orange));
+  background: color-mix(in srgb, var(--office-floor) 78%, var(--orange));
+  border-color: color-mix(in srgb, var(--orange) 45%, var(--office-frame));
+}
+.office-act.duty.off:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--office-ink) 94%, var(--orange));
+  border-color: color-mix(in srgb, var(--orange) 62%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-floor) 70%, var(--orange));
+}
+.office-act:disabled { opacity: .6; cursor: default; }
+
+/* Fire: removes the subagent from its team. It sits with the desk's other
+   controls, at the top-left of the cubicle. */
+.office-act.office-fire {
+  color: color-mix(in srgb, var(--office-ink) 88%, var(--red));
+  background: color-mix(in srgb, var(--office-floor) 78%, var(--red));
+  border-color: color-mix(in srgb, var(--red) 45%, var(--office-frame));
+}
+.office-act.office-fire:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--office-ink) 94%, var(--red));
+  border-color: color-mix(in srgb, var(--red) 62%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-floor) 70%, var(--red));
+}
+
+/* Hire: the team room's top-right corner — adds a subagent to that team. */
+.office-hire {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 9px; letter-spacing: .5px; text-transform: uppercase;
+  color: color-mix(in srgb, var(--office-ink) 88%, var(--green));
+  background: color-mix(in srgb, var(--office-floor) 78%, var(--green));
+  border: 1px solid color-mix(in srgb, var(--green) 45%, var(--office-frame));
+  cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, background .2s ease;
+}
+.office-hire:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--office-ink) 94%, var(--green));
+  border-color: color-mix(in srgb, var(--green) 65%, var(--office-frame));
+  background: color-mix(in srgb, var(--office-floor) 70%, var(--green));
+}
+.office-hire:disabled { opacity: .6; cursor: default; }
+
+/* The meeting room's round table. */
+.office-roundtable {
+  position: relative;
+  width: 58px; height: 58px; border-radius: 50%;
+  background: radial-gradient(circle at 38% 34%,
+    var(--office-wood-top),
+    var(--office-wood) 62%,
+    var(--office-wood-dark));
+  border: 2px solid var(--office-wood-dark);
+  box-shadow: 0 6px 12px -6px var(--office-shadow);
+}
+/* The meeting seats are red armchairs, like the reference floor's lounge set. */
+.office-seat {
+  position: absolute; width: 17px; height: 16px; border-radius: 5px 5px 3px 3px;
+  background: linear-gradient(180deg, var(--office-armchair-top), var(--office-armchair));
+  border: 1px solid color-mix(in srgb, var(--office-armchair) 60%, var(--office-ink));
+  box-shadow: 0 3px 5px -3px var(--office-shadow);
+}
+.office-seat.n { top: -19px; left: 50%; transform: translateX(-50%); }
+.office-seat.s { bottom: -19px; left: 50%; transform: translateX(-50%); }
+.office-seat.e { right: -19px; top: 50%; transform: translateY(-50%); }
+.office-seat.w { left: -19px; top: 50%; transform: translateY(-50%); }
+
+/* Hover popup: the agent's recent messages, the way a terminal would show them.
+   Anchored by JS inside the scroll container, never inside a room (clipping). */
+.office-pop {
+  position: absolute;
+  z-index: 40;
+  width: 276px;
+  padding: 9px 10px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 97%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 85%, transparent);
+  box-shadow: 0 18px 36px -18px rgba(0, 0, 0, .8);
+  pointer-events: none;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.office-pop-head { display: flex; align-items: center; gap: 6px; }
+.office-pop-name { font-weight: 600; color: var(--text); }
+.office-pop-role {
+  margin-left: auto;
+  font-size: 9px; letter-spacing: .6px; text-transform: uppercase; color: var(--muted);
+}
+.office-pop-meta { margin-top: 2px; font-size: 10.5px; color: var(--muted); }
+.office-pop-log {
+  margin-top: 7px; padding-top: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.office-pop-line { display: flex; gap: 6px; align-items: baseline; }
+.office-pop-time { flex: 0 0 auto; min-width: 44px; font-size: 9.5px; color: var(--muted); }
+.office-pop-text {
+  flex: 1; min-width: 0;
+  font-family: monospace, var(--emoji);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.office-pop-line.cmd .office-pop-text { color: var(--accent); }
+.office-pop-line.ok .office-pop-text { color: var(--green); }
+.office-pop-line.err .office-pop-text { color: var(--red); }
+.office-pop-line.think .office-pop-text { color: var(--muted); font-style: italic; }
+.office-pop-empty { margin-top: 7px; font-size: 11px; color: var(--muted); }
+
+/* The reference library's full-screen manager. Like the markdown editor it is
+   chrome, not part of the drawing: UI tokens, one column, nothing to misread. */
+/* Deliberately roomy: a full-screen surface, one reference per row with space
+   for the path, the note and the agent it belongs to. */
+.office-lib-backdrop {
+  position: fixed; inset: 0; z-index: 900;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, .55);
+  backdrop-filter: blur(2px);
+}
+.office-lib-panel {
+  width: min(1240px, 100%);
+  height: calc(100vh - 40px);
+  display: flex; flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 28px 60px -24px rgba(0, 0, 0, .7);
+  color: var(--text);
+}
+.office-lib-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 18px 24px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.office-lib-hd-title { font-size: 16px; font-weight: 600; }
+.office-lib-hd-sub { font-size: 12.5px; color: var(--muted); }
+.office-lib-hd-spacer { flex: 1 1 auto; }
+.office-lib-rows {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 18px 24px; overflow: auto;
+}
+.office-lib-none { padding: 14px 2px; font-size: 13.5px; color: var(--muted); max-width: 70ch; }
+.office-lib-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.5fr) 180px 34px;
+  align-items: center; gap: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.office-lib-path {
+  font-family: monospace, var(--emoji); font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.office-lib-row .office-input { padding: 7px 10px; font-size: 13px; }
+.office-lib-target { font-size: 13px; }
+.office-lib-del {
+  width: 30px; height: 30px; padding: 0;
+  border-radius: 6px; line-height: 1;
+  font-family: inherit; font-size: 15px;
+  color: color-mix(in srgb, var(--red) 55%, var(--text));
+  background: color-mix(in srgb, var(--surface-2) 80%, var(--red));
+  border: 1px solid color-mix(in srgb, var(--red) 40%, var(--border));
+  cursor: pointer;
+}
+.office-lib-del:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface-2) 62%, var(--red));
+  border-color: color-mix(in srgb, var(--red) 65%, var(--border));
+}
+.office-lib-del:disabled { opacity: .6; cursor: default; }
+.office-lib-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.5fr) 180px auto;
+  align-items: center; gap: 14px;
+  padding: 18px 24px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.office-lib-add .office-input { padding: 8px 11px; font-size: 13px; }
+.office-lib-add-btn { padding: 8px 18px; font-size: 13px; }
+
+/* The full-screen task board (Kanban). It borrows the library manager's
+   backdrop and panel chrome, and lays its four columns across the width:
+   Todo → Planned → In Progress → Done. */
+.office-board-panel { width: min(1520px, 100%); height: min(78vh, 780px); }
+.office-board-cols {
+  flex: 1 1 auto; min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px;
+  overflow: auto;
+  background: var(--surface);
+}
+.office-kcol {
+  display: flex; flex-direction: column; min-height: 0;
+  border-radius: 9px; overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.office-kcol.in_progress { border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
+.office-kcol.done { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.office-kcol-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding: 9px 12px;
+  font-size: 12px; font-weight: 600; color: var(--text);
+  background: var(--surface-3);
+  border-bottom: 1px solid var(--border);
+}
+.office-kcol-head b { font-size: 11px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.office-kcol-body {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 9px;
+}
+.office-kcol-empty { padding: 12px 4px; text-align: center; font-size: 12px; color: var(--muted); opacity: .55; }
+
+/* One task: its text, its optional note, and the moves beside it. */
+.office-task {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 8px;
+  padding: 8px 9px 8px 11px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .06);
+}
+.office-task-title { grid-column: 1; font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
+.office-task-note { grid-column: 1; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.office-task-acts { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; gap: 4px; }
+.office-task-move, .office-task-del {
+  width: 22px; height: 22px; padding: 0;
+  display: grid; place-items: center;
+  border-radius: 5px; cursor: pointer;
+  font-family: inherit; font-size: 13px; line-height: 1;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.office-task-move:hover, .office-task-del:hover { color: var(--text); background: var(--surface-3); border-color: var(--border-strong); }
+.office-task-del:hover { color: var(--red); border-color: var(--red); }
+.office-task-move:focus-visible, .office-task-del:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The New-task button lives under Todo: it opens the roomy popup editor,
+   because a task needs room to write. */
+.office-kadd {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 9px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+}
+.office-task-new { width: 100%; padding: 8px 10px; font-size: 12.5px; }
+
+/* The New-task popup: the brief gets a genuinely big editor. */
+.office-task-brief { min-height: 260px; font-size: 13px; resize: vertical; }
+
+/* The board's Run / Pause switch, in its header. */
+.office-run-toggle { min-width: 92px; }
+.office-run-toggle.running { color: var(--green); border-color: color-mix(in srgb, var(--green) 55%, var(--border)); }
+
+.office-board-now {
+  padding: 12px 18px;
+  font-size: 12.5px; color: var(--muted);
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+}
+
+/* The office's small modal forms (hire / rename). They borrow the full-screen
+   editor's backdrop and the UI's own tokens — they float above the room, so
+   they are chrome, not part of the drawing. */
+.office-dialog {
+  margin: auto;
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  display: flex; flex-direction: column;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 24px 48px -20px rgba(0, 0, 0, .6);
+  color: var(--text);
+}
+/* The hire form (name, display name, model, checkbox and the definition body)
+   gets a roomier box so no field is cramped: the short fields sit two to a row,
+   the definition body takes the full width beneath them. */
+.office-dialog-wide { width: min(920px, calc(100vw - 40px)); }
+.office-hire-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px 22px;
+  align-items: end;
+}
+.office-hire-md { align-self: center; padding-bottom: 6px; }
+.office-dialog-head {
+  display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
+  padding: 15px 20px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.office-dialog-wide .office-dialog-head { padding: 17px 24px; }
+.office-dialog-title { font-weight: 600; font-size: 14px; }
+.office-dialog-wide .office-dialog-title { font-size: 15px; }
+.office-dialog-hint { font-size: 12px; color: var(--muted); }
+.office-dialog-body {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 16px 20px;
+  max-height: 62vh; overflow: auto;
+}
+.office-dialog-wide .office-dialog-body { gap: 15px; padding: 20px 24px; max-height: none; flex: 1 1 auto; }
+.office-dialog-wide .office-input { padding: 8px 11px; font-size: 13px; }
+.office-dialog-wide .office-textarea { min-height: 168px; font-size: 13px; }
+/* The New-task brief gets a genuinely big editor, even inside the wide dialog. */
+.office-dialog-wide .office-task-brief { min-height: 260px; }
+.office-dialog-foot {
+  display: flex; justify-content: flex-end; gap: 9px;
+  padding: 12px 20px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+}
+.office-dialog-wide .office-dialog-foot { padding: 14px 24px; }
+
+/* The Teams manager (orchestrator → teams). It borrows the library manager's
+   panel chrome, with one row per team and a single add field. */
+.office-teams-panel { width: min(760px, 100%); }
+.office-teams-list {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 9px;
+  padding: 18px 24px; overflow: auto;
+  background: var(--surface);
+}
+.office-team-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 11px 14px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.office-team-name { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.office-team-row .office-room-active { margin: 0; }
+.office-team-count { font-size: 11.5px; color: var(--muted); }
+.office-team-row .office-task-acts { margin-left: auto; }
+.office-teams-panel .office-lib-add { grid-template-columns: minmax(0, 1fr) auto; }
+.office-field { display: flex; flex-direction: column; gap: 4px; }
+.office-field-label { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; color: var(--text); }
+.office-field-hint { font-size: 10.5px; color: var(--muted); }
+.office-input, .office-textarea {
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: 7px;
+  font: inherit; font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.office-textarea { font-family: monospace, var(--emoji); resize: vertical; min-height: 84px; }
+.office-input:focus, .office-textarea:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.office-check { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text); }
+.office-check code { font-family: monospace, var(--emoji); font-size: 11.5px; color: var(--muted); }
+
+.office-empty {
+  padding: 30px 0 34px;
+  display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center;
+}
+/* The empty state sits on the carpet, so it takes the room's ink, not the UI's. */
+.office-empty .settings-empty-title { color: var(--office-ink); }
+.office-empty .settings-empty-sub { color: color-mix(in srgb, var(--office-ink) 70%, var(--office-frame)); }
+
+@keyframes office-typing-code {
+  0%, 10% { opacity: .18; }
+  22%, 86% { opacity: 1; }
+  100% { opacity: .18; }
+}
+@keyframes office-scan { from { left: -10px; } to { left: 100%; } }
+@keyframes office-type-l { from { transform: rotate(7deg) translateY(0); } to { transform: rotate(7deg) translateY(-6px); } }
+@keyframes office-type-r { from { transform: rotate(-7deg) translateY(0); } to { transform: rotate(-7deg) translateY(-6px); } }
+@keyframes office-lean { 0%, 100% { transform: translateX(-50%) translateY(0); } 50% { transform: translateX(-50%) translateY(-1.5px); } }
+@keyframes office-walk-in { from { transform: translateX(-50%) translateY(52px); opacity: .15; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
+@keyframes office-minute { from { transform: translateX(-50%) rotate(0deg); } to { transform: translateX(-50%) rotate(360deg); } }
+@keyframes office-hour { from { transform: translateX(-50%) rotate(0deg); } to { transform: translateX(-50%) rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .office-pod.working .office-arm-l,
+  .office-pod.working .office-arm-r,
+  .office-pod.working .office-person,
+  .office-pod.arriving .office-person,
+  .office-pod.working .office-code i,
+  .office-pod.working .office-monitor::after,
+  .office-hand { animation: none; }
+}

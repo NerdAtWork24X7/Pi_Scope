@@ -1,8 +1,8 @@
 # Pi Scope plugins
 
 Everything you see in the header — **Chat, Terminal, Review, Checkpoints, Git,
-Single, Trajectory, Settings** — is a plugin, and so is anything you write. A
-plugin can
+Single, Office, Trajectory, Settings** — is a plugin, and so is anything you
+write. A plugin can
 
 * own a **view** (a nav button plus the pane it renders in),
 * add **HTTP routes** to the server,

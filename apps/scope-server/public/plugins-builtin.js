@@ -183,6 +183,27 @@
     },
   });
 
+  // Office is a pure visualization: it owns no server routes, only a view. It
+  // reads the same session list every other view reads (kept live by app.js's
+  // poll + SSE patching) plus the agent-team roster, and listens to the live
+  // events the host fans out to the active view. See public/office.js.
+  def("office", {
+    name: "Office",
+    description: "A live top-down office: each subagent has a cubicle with a desk, screen and chair, and animates while it works. Hire, fire, rename and enable subagents, manage teams, and keep a reference library of files and folders, straight from the floor.",
+    nav: { label: "Office", order: 65, group: "timeline", title: "Watch your agent team work" },
+    view: {
+      pane: "#office-pane",
+      display: "flex",
+      session: "none",
+      onShow: () => window.__officeOnView?.(),
+      onHide: () => window.__officeOnHide?.(),
+      onSessions: () => window.__officeOnSessions?.(),
+      onEvent: (evt) => window.__officeOnEvent?.(evt),
+      onCwd: () => window.__officeOnCwd?.(),
+      onReconnect: () => window.__officeOnReconnect?.(),
+    },
+  });
+
   // Settings is core: it hosts the Plugins manager, so it can never be turned
   // off from inside itself. Its nav button is a gear in a circular box parked in
   // the header's top-right cluster next to the live status (`slot: "right"`),

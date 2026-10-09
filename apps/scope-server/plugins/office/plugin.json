@@ -1,0 +1,16 @@
+{
+  "id": "office",
+  "name": "Office",
+  "description": "A live top-down office: each subagent has a cubicle with a desk, screen and chair, and animates while it works. Hire, fire, rename and enable subagents, manage teams, and keep a reference library of files and folders, straight from the floor.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "serverRoutes": [],
+  "nav": {
+    "label": "Office",
+    "order": 65,
+    "group": "timeline"
+  },
+  "ui": {
+    "icon": "🏢"
+  }
+}

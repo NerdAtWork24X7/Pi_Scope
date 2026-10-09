@@ -1307,7 +1307,7 @@
     fetchChatFooter(true);
     // Give the composer a sensible model the first time a workspace is opened
     // (nothing is auto-selected, so this can't happen before a click).
-    if (!CH.chatModel) CH.chatModel = defaultChatModel();
+    ensureChatModel();
     renderComposerModel();
     renderChat();
     attachThread(t); // re-attach this workspace's thread if it's still streaming
@@ -1500,6 +1500,19 @@
       if (qd) return qd;
     }
     return all[0] || "google/gemini-2.5-flash-lite";
+  }
+
+  // Give the composer a model whenever a chat workspace is open and none has
+  // been chosen yet. The model is normally seeded when the user clicks a rail
+  // workspace (selectWorkspace), but the workspace is also established without
+  // a click when a recorded session is opened from the global sidebar
+  // (window.__chatOpenSession → loadSessionChat). Without this the pill kept
+  // whatever the boot fallback / first enabled model happened to be, so it
+  // visibly "changed" (fallback → enabled[0]) and disagreed with the model the
+  // server actually ran — hence it is called from renderComposerModel too, so
+  // the pill self-heals on the next render no matter how the workspace was set.
+  function ensureChatModel() {
+    if (!CH.chatModel && CH.workspace) CH.chatModel = defaultChatModel();
   }
 
   // Reset the CURRENT workspace's free conversation to a brand-new chat: kill
@@ -2762,6 +2775,9 @@
   // ─── Composer / model chooser ─────────────────────────────────────────────
   function renderComposerModel() {
     if (!el.model) return;
+    // Seed a model when the workspace was opened without a rail click (see
+    // ensureChatModel) so the pill always names the model the agent will run.
+    ensureChatModel();
     const enabled = CH.teamData?.enabledModels || [];
     const used = new Set();
     for (const s of wsSessions(CH.workspace)) { const q = qualifiedModel(s); if (q) used.add(q); }
@@ -3805,6 +3821,13 @@
     let pendingTools = [];
     let pendingThinking = "";
     const model = s?.model || "";
+    // The recorded event stores the bare model id and its provider separately.
+    // Qualify it (see qualifiedModel) so a per-message model is provider-scoped:
+    // an unqualified value made the footer's context-window lookup miss (it
+    // keys on the qualified id) and show "ctx <tokens> tk" instead of the
+    // window percentage, and disagreed with the composer/header model.
+    const evModel = (ev) =>
+      qualifiedModel({ provider: ev.provider || s?.provider || "", model: ev.payload?.model || ev.model || model });
     for (const ev of events) {
       if (sid && ev.session_id && ev.session_id !== sid) continue;
       const p = ev.payload || {};
@@ -3818,7 +3841,7 @@
         const tools = pendingTools;
         pendingTools = [];
         const text = p.text || p.content || "";
-        msgs.push({ role: "assistant", text, thinking, tools, usage: p.usage, model: p.model || model, ts: ev.ts, recorded: true, sid: evSid });
+        msgs.push({ role: "assistant", text, thinking, tools, usage: p.usage, model: evModel(ev), ts: ev.ts, recorded: true, sid: evSid });
       } else if (ev.type === "thinking") {
         // Thinking arrives as a series of events. Some producers send chunked
         // deltas, others send a growing snapshot of the full thought — so

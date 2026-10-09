@@ -297,4 +297,54 @@ describe("agent-dir settings", () => {
       body: JSON.stringify({ action: "setMemberModel", agent: "coder", team: "nope", model: "p/x", cwd: tmpDir }),
     })).res.status, 400);
   });
+
+  // The Office view edits the roster from the floor: **name** (a display name),
+  // **fire** (drop the member) and **+ hire** (add one, with a model and a fresh
+  // agents/<name>.md). These are the writes behind those three controls.
+  test("the office's roster edits (name / fire / hire) write through to teams.yaml", async () => {
+    const teamsPath = path.join(tmpDir, ".pi", "settings", "agents", "teams.yaml");
+    fs.mkdirSync(path.dirname(teamsPath), { recursive: true });
+    fs.writeFileSync(teamsPath, [
+      "night:",
+      "  - name: orchestrator",
+      "  - name: file_reader",
+      "    model: p/one",
+      "other:",
+      "  - name: file_reader",
+      "",
+    ].join("\n"));
+
+    const post = (body) => api("/agent-team", { method: "POST", body: JSON.stringify({ ...body, cwd: tmpDir }) });
+    const members = async (team) => {
+      const { data } = await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`);
+      return data.teams[team] || [];
+    };
+
+    // A display name is stored per team, beside the model, and read back.
+    assert.ok((await post({ action: "setMemberDisplayName", team: "night", agent: "file_reader", displayName: "Bob" })).res.ok);
+    assert.equal((await members("night")).find((m) => m.name === "file_reader").displayName, "Bob");
+    assert.equal(
+      (await members("other")).find((m) => m.name === "file_reader").displayName,
+      undefined,
+      "the same-named member in another team keeps its own label",
+    );
+    assert.match(fs.readFileSync(teamsPath, "utf8"), /display_name: Bob/);
+    // One line, at most 64 characters.
+    assert.equal((await post({ action: "setMemberDisplayName", team: "night", agent: "file_reader", displayName: "x".repeat(65) })).res.status, 400);
+
+    // Fire: the member leaves the named team only.
+    assert.ok((await post({ action: "removeMember", team: "night", name: "file_reader" })).res.ok);
+    assert.equal((await members("night")).some((m) => m.name === "file_reader"), false, "fired from night");
+    assert.equal((await members("other")).some((m) => m.name === "file_reader"), true, "still a member of other");
+
+    // Hire: back on the roster with a model, plus a fresh agents/<name>.md.
+    assert.ok((await post({ action: "addMember", team: "night", name: "builder", model: "p/two" })).res.ok);
+    assert.equal((await members("night")).find((m) => m.name === "builder").model, "p/two");
+
+    const md = "---\nname: builder\ndescription: Bob\n---\n\nBuild the thing.\n";
+    assert.ok((await postSettings("createAgentDefFile", { file: "builder.md", content: md })).res.ok);
+    assert.equal(fs.readFileSync(path.join(agentDir, "agents", "builder.md"), "utf8"), md);
+    // Hiring over an existing definition is refused — that file is edited, not clobbered.
+    assert.equal((await postSettings("createAgentDefFile", { file: "coder.md", content: md })).res.status, 409);
+  });
 });
