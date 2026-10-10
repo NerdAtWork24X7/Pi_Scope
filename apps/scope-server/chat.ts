@@ -56,6 +56,8 @@ interface ChatSession {
   stopRequested: boolean; // a /chat/stop abort was issued for the current run
   fresh: boolean; // pre-spawned "new conversation" subprocess (vs bound to a recorded session)
   librarySent: boolean; // the reference-library block has been injected into this conversation
+  runState: "running" | null; // a prompt is in flight in pi (cleared when agent_settled arrives)
+  lastRun: { outcome: "done" | "error" | "aborted"; at: number } | null; // how the last run ended
 }
 
 const sessions = new Map<string, ChatSession>();
@@ -104,6 +106,23 @@ function handleLine(sess: ChatSession, line: string) {
   if (!line.trim()) return;
   let ev: any;
   try { ev = JSON.parse(line); } catch { return; }
+
+  // Completion is recorded even when no browser is reading the stream: a page
+  // that reloads away (or a second tab) abandons the response, but pi keeps
+  // running. The office queue runner reads this to settle a task whose run
+  // outlived the client that dispatched it, instead of re-dispatching it.
+  if (ev.type === "agent_settled") {
+    sess.runState = null;
+    sess.lastRun = { outcome: sess.stopRequested ? "aborted" : "done", at: Date.now() };
+    const ctrl = sess.active?.controller;
+    if (ctrl) {
+      enqueue(ctrl, { type: "done", sessionId: sess.id, model: sess.model, aborted: sess.stopRequested });
+      closeActive(sess);
+    }
+    sess.stopRequested = false;
+    return;
+  }
+
   const ctrl = sess.active?.controller;
   if (!ctrl) return; // stray event with no in-flight prompt — ignore
 
@@ -211,14 +230,6 @@ function handleLine(sess: ChatSession, line: string) {
       // bubble that triggered it (and to place an earlier run's leftover
       // tool-loop messages before that bubble).
       enqueue(ctrl, { type: "run_start" });
-      return;
-    case "agent_settled":
-      // Fully settled — no retry, compaction retry, or queued steer/follow-up
-      // remains. Only now is the turn truly done; agent_end can be followed by
-      // queued continuations, so it is never treated as completion.
-      enqueue(ctrl, { type: "done", sessionId: sess.id, model: sess.model, aborted: sess.stopRequested });
-      sess.stopRequested = false;
-      closeActive(sess);
       return;
     case "agent_end":
       // A single low-level run completed; queued steer/follow-up, retry or
@@ -482,7 +493,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatS
     out = proc.stdout as NodeJS.ReadableStream;
   }
 
-  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh, librarySent: false };
+  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh, librarySent: false, runState: null, lastRun: null };
 
   out.on("data", (d: Buffer) => {
     sess.buffer += d.toString();
@@ -504,6 +515,12 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatS
   proc.on("error", () => { sess.dead = true; });
   proc.on("close", () => {
     sess.dead = true;
+    // A process that dies mid-run is a failed run, recorded even if the browser
+    // that started it is gone (the office's queue settles the task on it).
+    if (sess.runState === "running") {
+      sess.runState = null;
+      sess.lastRun = { outcome: "error", at: Date.now() };
+    }
     const ctrl = sess.active?.controller;
     if (ctrl) {
       enqueue(ctrl, { type: "done", sessionId: id, model, error: extractPiError(sess.stderrBuf) || "process closed" });
@@ -569,6 +586,10 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       sess!.active = { controller };
+      // A prompt is now in flight: record it so a page that abandons this stream
+      // (reload) can still learn how the run ended (see chatRunStatus).
+      sess!.runState = "running";
+      sess!.lastRun = null;
       // Announce the real subprocess session id first. The browser may not have
       // one yet (no pre-spawn, or a request without a sessionId), but answers to
       // extension dialogs (POST /chat/ui) must target the actual session.
@@ -695,6 +716,16 @@ export function startChatSession(opts: { cwd: string; model?: string }): { sessi
   const sid = crypto.randomUUID();
   sessions.set(sid, spawnChat(sid, opts.cwd, model, true));
   return { sessionId: sid, reused: false };
+}
+
+/** What a chat session's run is doing right now, and how its last run ended.
+ *  `active` stays true across a client disconnect (the response stream is
+ *  abandoned but pi keeps working), so a task dispatcher that outlived its page
+ *  can tell a live run from a genuinely orphaned one. */
+export function chatRunStatus(id: string): { present: boolean; active: boolean; outcome: "done" | "error" | "aborted" | null } {
+  const sess = sessions.get(id);
+  if (!sess) return { present: false, active: false, outcome: null };
+  return { present: true, active: sess.runState === "running" && !sess.dead, outcome: sess.lastRun?.outcome ?? null };
 }
 
 /** Kill a specific chat subprocess by session ID. */

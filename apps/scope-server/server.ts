@@ -29,7 +29,7 @@ import {
   storeFor,
   isEnabled as isPluginEnabled,
 } from "./plugins.ts";
-import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage } from "./chat.ts";
+import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus } from "./chat.ts";
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
 import { checkPiUpdate, updatePi } from "./pi-update.ts";
@@ -4109,6 +4109,10 @@ const pluginKit = {
   resolveWithinCwd, cleanPaths, rejectOptionLike,
   parsePorcelainLine, porcelainStatus,
   buildRepoGraph,
+  // Chat run state, for plugins that own a background run (the Office queue):
+  // a task's dispatch outlives the page that started it, so the plugin needs to
+  // tell a still-running session from an orphan, and to stop it on Pause.
+  chatRunStatus, stopChat,
 };
 
 // Discover + activate plugins before accepting traffic so a plugin's routes are

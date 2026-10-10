@@ -1630,6 +1630,114 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
+  test("a run still in flight is adopted, never re-dispatched, when the page returns", async () => {
+    // The page that dispatched this run reloaded away while pi kept working (the
+    // Chat button hard-reloads), so the run is alive server-side. Returning must
+    // ADOPT it — a task "left In Progress" is not the same as one with no run.
+    mock.setRunStatus("live-run-1", { active: true, outcome: null });
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [{ id: "t1", title: "long running", status: "in_progress", createdAt: 1, startedAt: 2, runSessionId: "live-run-1" }],
+      },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
+    await sleep(800);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 0, "the live run is adopted, not started again");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").runSessionId, "live-run-1", "it is left alone");
+
+    // The live run now settles: the adopted task lands in Done with no dispatch.
+    mock.setRunStatus("live-run-1", { active: false, outcome: "done" });
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "done", "the adopted run settles");
+    assert.equal(mock.requestsFor("/chat", "POST").length, 0, "still no dispatch");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").runSessionId, undefined, "and the run record is cleared");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a run that finished while away settles from its recorded outcome", async () => {
+    // The wait was long enough that the run completed before the page returned:
+    // its outcome is on the server, so the task settles without any dispatch.
+    mock.setRunStatus("done-run-1", { active: false, outcome: "done" });
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [{ id: "t1", title: "finished away", status: "in_progress", createdAt: 1, startedAt: 2, runSessionId: "done-run-1" }],
+      },
+    });
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "done", "the task settles from the outcome");
+    assert.equal(mock.requestsFor("/chat", "POST").length, 0, "nothing was dispatched");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("an adopted run that failed returns its task to Planned, un-run", async () => {
+    mock.setRunStatus("err-run-1", { active: false, outcome: "error" });
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [{ id: "t1", title: "broken away", status: "in_progress", createdAt: 1, startedAt: 2, runSessionId: "err-run-1" }],
+      },
+    });
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "planned", "the failed task returns to Planned");
+    await sleep(400);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 0, "a failed run is not retried on its own");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("switching to Chat and back does not start a second run (the reported bug)", async () => {
+    // The Chat nav hard-reloads the page (`reloadChat`), which aborts the office's
+    // response stream while pi keeps working. Returning to Office must adopt that
+    // still-live run — never dispatch the task a second time.
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [{ id: "t1", title: "keep working", status: "planned", createdAt: 1, plannedAt: 2 }],
+      },
+    });
+    const turn = await mock.nextTurn();
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "in_progress", "the task is dispatched");
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1);
+
+    // Leave to Chat (full reload) and come straight back, all while the run is live.
+    await Promise.all([page.waitForNavigation({ waitUntil: "domcontentloaded" }), page.click("#btn-chat")]);
+    await page.waitForSelector("#btn-office");
+    await page.click("#btn-office");
+    await page.waitForSelector("#office-pane .office-pod");
+    await sleep(1200);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1, "the live run was adopted, not restarted");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").status, "in_progress", "and left running");
+
+    // The run the first page started now finishes; the returning page settles it.
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "text", delta: "Kept working." });
+    turn.send({ type: "done", sessionId: turn.sessionId });
+    turn.end();
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "done", "the adopted run settles to Done");
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1, "one task, one run — no redispatch");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a dispatch the server refuses is parked, never retried on its own", async () => {
+    // A fast rejection means no run started. The task goes back to Planned and is
+    // parked, so the runner cannot spin on a doomed dispatch.
+    mock.failNext("/chat", "POST", 500);
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [{ id: "t1", title: "doomed", status: "planned", createdAt: 1, plannedAt: 2 }],
+      },
+    });
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "planned", "the refused task returns to Planned");
+    await sleep(700);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1, "the task is not re-dispatched");
+    // The injected 500 is exactly the failure under test — it is logged as a page
+    // error by the harness, which is expected here.
+  });
+
   test("the board hands planned tasks to the orchestrator one at a time, in order", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],

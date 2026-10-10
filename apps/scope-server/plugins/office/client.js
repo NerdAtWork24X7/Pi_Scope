@@ -1893,8 +1893,24 @@
 
   let pumping = false;   // the queue runner is mid-dispatch
   let runAbort = null;   // AbortController for the run in flight (Pause aborts it)
-  const inFlight = new Set(); // task ids this page dispatched and has not settled
+  let pauseAbort = false; // the in-flight abort came from Pause, not from a page unload
+  const inFlight = new Set(); // task ids this page dispatched (or adopted) and has not settled
   const parked = new Set();   // ids whose run failed — never retried on their own
+  const adopted = new Set();  // ids whose run this page found recorded on the server (started by an earlier page)
+  const settling = new Set(); // ids whose adopted run is mid-write, so it settles once
+  let adoptTimer = null;      // polls the office snapshot while an adopted run is live
+
+  /** A fresh id for a dispatch's own chat session, so the run can be recognised
+   *  again if this page reloads while it is still going. */
+  function newRunId() {
+    try { return crypto.randomUUID(); } catch { return `run_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`; }
+  }
+
+  /** The live run status the server reports for a task, or null. */
+  function runStateOf(id) {
+    const map = office && office.runStates;
+    return (map && map[id]) || null;
+  }
 
   /** Repaint the open board from the roster snapshot. */
   function renderKanbanOverlay() {
@@ -1991,7 +2007,17 @@
   async function setRunnerPaused(paused) {
     if (runnerPaused() === paused) return;
     runnerPausedLocal = paused; // hold the UI steady until the write settles
-    if (paused) abortRun();
+    if (paused) {
+      abortRun();
+      // A run this page ADOPTED belongs to a session the browser that started it
+      // abandoned: abort it on the server and hand its task back to Planned.
+      const ids = [...adopted];
+      adopted.clear();
+      for (const id of ids) inFlight.delete(id);
+      for (const id of ids) {
+        try { await officePost({ action: "stopRun", id }); } catch { /* best effort */ }
+      }
+    }
     try {
       await officePost({ action: "setRunnerPaused", paused }, paused ? "Runner paused" : "Runner running");
     } catch (err) {
@@ -2003,8 +2029,12 @@
     if (!paused) void pumpTasks();
   }
 
-  /** Abort the run in flight, if any — the runner moves its task back to Planned. */
+  /** Abort the run in flight, if any — the runner moves its task back to Planned.
+   *  Flagged as a user Pause: a page unload also aborts this fetch, but must NOT
+   *  be mistaken for one (the run keeps going server-side; the next visit adopts
+   *  it instead of restarting it). */
   function abortRun() {
+    pauseAbort = true;
     if (runAbort) { try { runAbort.abort(); } catch { /* already settled */ } }
   }
 
@@ -2044,24 +2074,36 @@
    * conversation the user is having in the Chat view is never disturbed; the
    * office simply owns the response stream and watches for `done`.
    */
-  async function runTask(task) {
+  async function runTask(task, sessionId) {
     const prompt = task.note ? `${task.title}\n\n${task.note}` : String(task.title);
     const ctrl = new AbortController();
     runAbort = ctrl;
+    // A Pause aborts this fetch; a page unload aborts the same fetch, but the run
+    // carries on server-side, so "detached" (not "aborted") keeps the task In
+    // Progress for the next visit to adopt rather than restart.
+    const abortedOutcome = () => (pauseAbort ? "aborted" : "detached");
     let res;
     try {
       res = await fetch(window.apiUrl("/chat", {}), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
         // The model the user picked on the orchestrator's desk rides with every
-        // dispatch, so the floor runs the agent they chose it to be.
-        body: JSON.stringify({ cwd: state().cwd || "", prompt, model: orchModel() || undefined }),
+        // dispatch, so the floor runs the agent they chose it to be. The session
+        // id is ours: it is recorded on the task before dispatch, so the run is
+        // reclaimable if this page goes away mid-run.
+        body: JSON.stringify({ cwd: state().cwd || "", prompt, model: orchModel() || undefined, sessionId: sessionId || undefined }),
         signal: ctrl.signal,
       });
     } catch {
-      return ctrl.signal.aborted ? "aborted" : "failed";
+      // Aborted by Pause, or the page left / the link dropped while pi keeps
+      // going. Either way the dispatch is not the client's to call a failure —
+      // the recorded run state settles it (a truly gone session is recovered).
+      return abortedOutcome();
     }
-    if (!res.ok || !res.body) return ctrl.signal.aborted ? "aborted" : "failed";
+    // A fast HTTP rejection is a definitive, run-never-started failure (bad cwd,
+    // server refused the prompt): park the task rather than let it spin. An
+    // aborted request is still the Pause/unload case above.
+    if (!res.ok || !res.body) return ctrl.signal.aborted ? abortedOutcome() : "failed";
     // Read the NDJSON stream to its end: `done` means pi settled the turn.
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -2083,9 +2125,99 @@
         }
       }
     } catch {
-      return ctrl.signal.aborted ? "aborted" : "failed";
+      return ctrl.signal.aborted ? abortedOutcome() : "detached";
     }
-    return settled ? "done" : "failed";
+    if (settled) return "done";
+    // The stream ended without a clear `done`: the page may be unloading while pi
+    // keeps working, or the run already errored. The client cannot judge from
+    // here — hand the task to the recorded run state, which the adopt poll reads
+    // (and which tells a live run from a finished one).
+    return ctrl.signal.aborted && pauseAbort ? "aborted" : "detached";
+  }
+
+  /** Move a task into In Progress and record its run's chat session in ONE write,
+   *  before the run is dispatched, so a reload can recognise the live run. */
+  async function beginRun(id, sessionId) {
+    try {
+      await officePost({ action: "beginRun", id, sessionId });
+      return true;
+    } catch (err) {
+      if (S.toast) S.toast(`Could not start that task: ${errMsg(err)}`, "err");
+      return false;
+    }
+  }
+
+  /** Move an adopted task to its result column and clear its run record. The task
+   *  stays `inFlight` for the whole write, so a render racing the write cannot
+   *  re-enter and spin. A write that could not land waits for the next poll. */
+  async function settleAdopted(task) {
+    if (settling.has(task.id)) return;
+    settling.add(task.id);
+    try {
+      const rs = runStateOf(task.id);
+      const outcome = rs && rs.outcome ? rs.outcome : "error";
+      let ok;
+      if (outcome === "done") ok = await moveTask(task.id, "done", true);
+      else if (outcome === "aborted") ok = await moveTask(task.id, "planned", true);
+      else { parked.add(task.id); ok = await moveTask(task.id, "planned", true); }
+      if (!ok) return;                 // a write is already in flight — the poll retries
+      adopted.delete(task.id);
+      inFlight.delete(task.id);
+      if (outcome === "done") {
+        if (S.toast) S.toast(`Done: ${task.title}`);
+      } else if (outcome === "aborted") {
+        if (S.toast) S.toast(`Paused — “${task.title}” is back in Planned`);
+      } else if (S.toast) {
+        S.toast(`“${task.title}” could not run — it is back in Planned`, "err");
+      }
+    } finally {
+      settling.delete(task.id);
+    }
+    if (!runnerPaused()) void pumpTasks();
+  }
+
+  /** Act on one recorded-run task: recover it if its session is gone, settle it
+   *  if its run has finished, or leave it (still live) for the next poll. */
+  async function checkAdopted(task) {
+    let rs = runStateOf(task.id);
+    if (!rs || !rs.present) {
+      // The snapshot may predate the dispatch (runStates is computed at read
+      // time). Re-read before concluding the session is gone.
+      await refreshOffice(true);
+      rs = runStateOf(task.id);
+    }
+    if (!rs || !rs.present) {
+      // The run's chat session really is gone (server restarted, or the dispatch
+      // never happened): recover the task, un-parked, so it can run again.
+      adopted.delete(task.id);
+      inFlight.delete(task.id);
+      await moveTask(task.id, "planned", true);
+      if (!runnerPaused()) void pumpTasks();
+      return;
+    }
+    if (rs.active) return;             // still live — the poll keeps watching
+    await settleAdopted(task);
+  }
+
+  /** Poll the office snapshot while a run this page adopted is still live, so
+   *  its task settles (Done, or back to Planned) without anyone watching. */
+  function scheduleAdoptPoll() {
+    if (adoptTimer || !adopted.size) return;
+    adoptTimer = setTimeout(async () => {
+      adoptTimer = null;
+      // Drop ids whose task left In Progress (deleted, or moved by the user).
+      const live = new Set(tasksIn("in_progress").map((t) => t.id));
+      for (const id of [...adopted]) if (!live.has(id)) { adopted.delete(id); inFlight.delete(id); }
+      if (!adopted.size) return;
+      await refreshOffice(true);
+      for (const id of [...adopted]) {
+        const task = tasksOf().find((t) => t.id === id);
+        if (!task) { adopted.delete(id); inFlight.delete(id); continue; }
+        await checkAdopted(task);
+      }
+      void pumpTasks();
+      if (adopted.size) scheduleAdoptPoll();
+    }, 1500);
   }
 
   /**
@@ -2098,17 +2230,32 @@
     if (runnerPaused()) return;         // the runner waits for the user to press Run
     const running = currentTask();
     if (running) {
-      // A task left In Progress by someone else — an earlier page load, another
-      // tab — is not being worked on here: put it back at the head of the queue
-      // rather than stalling the board for good. Marking it in flight first
-      // keeps the repeated renders during the write from scheduling it twice.
-      if (!inFlight.has(running.id)) {
+      // This page already owns (or adopted) the run: leave it be.
+      if (inFlight.has(running.id)) { scheduleAdoptPoll(); return; }
+      const rs = runStateOf(running.id);
+      // A task with a recorded run session: while that run is still live — even
+      // though the page that dispatched it may have reloaded away — ADOPT it
+      // instead of starting a duplicate. If it already finished while we were
+      // elsewhere, settle it from the outcome the server recorded. Either way the
+      // id is marked in flight so no render can schedule it twice, and the poll
+      // watches until the run settles.
+      if (running.runSessionId && rs) {
         inFlight.add(running.id);
-        void moveTask(running.id, "planned", true).then((moved) => {
-          inFlight.delete(running.id);
-          if (moved && !runnerPaused()) void pumpTasks();
-        });
+        adopted.add(running.id);
+        void checkAdopted(running);
+        scheduleAdoptPoll();
+        return;
       }
+      // A task left In Progress with no live run — an earlier page that crashed
+      // before dispatch, another tab, a run whose session is gone — is not being
+      // worked on: put it back at the head of the queue rather than stalling the
+      // board. Marking it in flight first keeps repeated renders during the write
+      // from scheduling it twice.
+      inFlight.add(running.id);
+      void moveTask(running.id, "planned", true).then((moved) => {
+        inFlight.delete(running.id);
+        if (moved && !runnerPaused()) void pumpTasks();
+      });
       return;                           // the orchestrator is already on a task
     }
     // Skip anything whose run already failed (it waits for the user to move it
@@ -2118,11 +2265,13 @@
     if (!next) return;
     pumping = true;
     inFlight.add(next.id);
+    pauseAbort = false;
     let advanced = false;               // the run finished — look for the next
     try {
-      if (!(await moveTask(next.id, "in_progress", true))) return;
+      const sid = newRunId();
+      if (!(await beginRun(next.id, sid))) return;
       if (S.toast) S.toast(`Handing “${next.title}” to the orchestrator`);
-      const outcome = await runTask(next);
+      const outcome = await runTask(next, sid);
       if (outcome === "done") {
         await moveTask(next.id, "done", true);
         if (S.toast) S.toast(`Done: ${next.title}`);
@@ -2132,13 +2281,17 @@
         // parking it, so pressing Run picks it straight up again.
         await moveTask(next.id, "planned", true);
         if (S.toast) S.toast(`Paused — “${next.title}” is back in Planned`);
-      } else {
-        // The run did not settle: put the task back in the queue rather than
-        // losing it, and park it so the runner never spins on a failure.
+      } else if (outcome === "failed") {
+        // The dispatch never ran (the server refused it). Put the task back and
+        // park it so the runner never spins on a doomed dispatch.
         parked.add(next.id);
         await moveTask(next.id, "planned", true);
         if (S.toast) S.toast(`“${next.title}” could not run — it is back in Planned`, "err");
       }
+      // Any "detached" ending (page torn down, stream cut) leaves the task In
+      // Progress with its recorded run session: the adopt poll reads the server's
+      // run state and settles it as Done, back to Planned, or recovered — never a
+      // duplicate dispatch.
     } finally {
       pumping = false;
       inFlight.delete(next.id);
@@ -3001,8 +3154,11 @@
       },
       onSessions: () => { render(); },
       onCwd: () => {
-        // A different project gets a fresh floor: yesterday's firing does not carry.
+        // A different project gets a fresh floor: yesterday's firing does not carry,
+        // and a run adopted in the previous project is no longer ours to watch.
         firedKeys.clear();
+        adopted.clear();
+        if (adoptTimer) { clearTimeout(adoptTimer); adoptTimer = null; }
         void refreshTeam(true);
         void refreshOffice(true);
       },

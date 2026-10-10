@@ -58,6 +58,11 @@ function normaliseTasks(raw: unknown): Record<string, any>[] {
       const v = Number(r[k]);
       if (Number.isFinite(v) && v > 0) task[k] = v;
     }
+    // The chat session of the run this task is (or was) dispatched as. Persisted
+    // so a page that reloads away can tell a still-running task from an orphan
+    // instead of re-dispatching it (see runStates / `beginRun`).
+    const runSessionId = String(r.runSessionId ?? "").trim();
+    if (runSessionId) task.runSessionId = runSessionId;
     out.push(task);
   }
   return out;
@@ -107,15 +112,37 @@ export function activate(api: any): void {
     return normaliseState(null);
   }
 
+  /** Live run status (from the chat manager) for every task that dispatched one.
+   *  Feature-detected so the plugin still runs on a host that predates the hook. */
+  function runStates(state: any): Record<string, any> {
+    const status = api.kit.chatRunStatus;
+    const out: Record<string, any> = {};
+    if (typeof status !== "function") return out;
+    for (const t of state.tasks || []) if (t && t.runSessionId) out[t.id] = status(String(t.runSessionId));
+    return out;
+  }
+
+  /** Attach the derived run map, but only when there is one: a board with no
+   *  dispatched run keeps the bare `{ tasks, runnerPaused }` shape. */
+  function withRuns(state: any) {
+    const runs = runStates(state);
+    return Object.keys(runs).length ? { ...state, runStates: runs } : state;
+  }
+
+  /** The wire shape: stored state plus the derived, never-stored live run map. */
+  function snapshot(workspace: string) {
+    return withRuns(readState(workspace));
+  }
+
   function commit(workspace: string, mutate: (state: any) => any): any {
     const all = readAll();
     const next = mutate(readState(workspace));
     all[workspace] = next;
     api.store.set(KEY, all);
-    return normaliseState(next);
+    return withRuns(normaliseState(next));
   }
 
-  api.route("GET", "/office", (ctx) => readState(workspaceOf(ctx.url.searchParams.get("cwd"))));
+  api.route("GET", "/office", (ctx) => snapshot(workspaceOf(ctx.url.searchParams.get("cwd"))));
 
   api.route("POST", "/office", async (ctx) => {
     let body: any;
@@ -171,9 +198,54 @@ export function activate(api: any): void {
           if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
           if (status === "in_progress") task.startedAt = task.startedAt || at;
           if (status === "done") task.finishedAt = at;
+          // Leaving In Progress ends any recorded run: the task is no longer
+          // owned by a chat session.
+          if (status !== "in_progress") delete task.runSessionId;
           return current;
         });
         if (!found) return jsonResponse({ error: "no such task" }, 404);
+        return jsonResponse(state);
+      }
+      case "beginRun": {
+        // The queue runner announcing the chat session it is about to dispatch
+        // this task as. Recorded in ONE write with the move to In Progress, so a
+        // page that reloads while the run is live finds the session id and can
+        // tell the still-running task from an orphaned one.
+        const id = String(body.id ?? "").trim();
+        const sessionId = String(body.sessionId ?? "").trim();
+        if (!id) return jsonResponse({ error: "missing id" }, 400);
+        if (!sessionId) return jsonResponse({ error: "missing sessionId" }, 400);
+        let found = false;
+        const state = commit(workspace, (current) => {
+          const task = current.tasks.find((t: any) => t.id === id);
+          if (!task) return current;
+          found = true;
+          task.status = "in_progress";
+          task.startedAt = task.startedAt || Date.now();
+          delete task.finishedAt;
+          task.runSessionId = sessionId;
+          return current;
+        });
+        if (!found) return jsonResponse({ error: "no such task" }, 404);
+        return jsonResponse(state);
+      }
+      case "stopRun": {
+        // Stop a run this page does not own (an adopted, still-live dispatch):
+        // abort the pi run and hand its task back to Planned.
+        const id = String(body.id ?? "").trim();
+        if (!id) return jsonResponse({ error: "missing id" }, 400);
+        let stopped: string | null = null;
+        const state = commit(workspace, (current) => {
+          const task = current.tasks.find((t: any) => t.id === id);
+          if (!task) return current;
+          stopped = task.runSessionId || null;
+          task.status = "planned";
+          task.plannedAt = task.plannedAt || Date.now();
+          delete task.runSessionId;
+          delete task.startedAt;
+          return current;
+        });
+        if (stopped && typeof api.kit.stopChat === "function") api.kit.stopChat(String(stopped));
         return jsonResponse(state);
       }
       case "removeTask": {

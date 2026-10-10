@@ -188,6 +188,10 @@ export async function startMockBackend() {
     // queue and the runner switch. The real plugin keeps this in its own store
     // behind `/office` (plugins/office/server.ts), NOT in the team snapshot.
     office: {},
+    // Live chat-run status by session id, as the real server's chatRunStatus
+    // reports it: { present, active, outcome }. A task's `runSessionId` indexes
+    // this to tell a still-running dispatch from an orphan.
+    runStatus: {},
   };
 
   /** The bucket a workspace's office state lives in (the plugin keys on cwd). */
@@ -196,11 +200,16 @@ export async function startMockBackend() {
   /** An office snapshot shaped like the plugin's `GET /office` answer. */
   function officeSnapshot(cwd) {
     const s = state.office[officeKey(cwd)] || {};
+    const runStates = {};
+    for (const t of s.tasks || []) {
+      if (t.runSessionId) runStates[t.id] = state.runStatus[t.runSessionId] || { present: false, active: false, outcome: null };
+    }
     return {
       officeName: s.officeName || undefined,
       tasks: (s.tasks || []).map((t) => ({ ...t })),
       // Paused is the default: anything but an explicit false means paused.
       runnerPaused: s.runnerPaused !== false,
+      runStates,
     };
   }
 
@@ -237,6 +246,14 @@ export async function startMockBackend() {
       ended: false,
       events: [],
       send(ev) {
+        // Mirror the real server's chatRunStatus: a live run is `active` until
+        // its `done` lands, then the outcome is recorded. This is recorded even
+        // after the client has gone (a reload abandons the response, but pi keeps
+        // running and the server still reads its stdout), so it happens before
+        // the ended guard.
+        if (ev && ev.type === "done") {
+          state.runStatus[sessionId] = { present: true, active: false, outcome: ev.error ? "error" : ev.aborted ? "aborted" : "done" };
+        }
         if (turn.ended) return;
         turn.events.push(ev);
         res.write(JSON.stringify(ev) + "\n");
@@ -251,6 +268,7 @@ export async function startMockBackend() {
       },
     };
     activeTurn = turn;
+    state.runStatus[sessionId] = { present: true, active: true, outcome: null };
     const w = waiters.shift();
     if (w) w(turn);
     else turns.push(turn);
@@ -747,6 +765,29 @@ export async function startMockBackend() {
         if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
         if (status === "in_progress") task.startedAt = task.startedAt || at;
         if (status === "done") task.finishedAt = at;
+        // Leaving In Progress ends any recorded run, like the real plugin.
+        if (status !== "in_progress") delete task.runSessionId;
+      } else if (action === "beginRun") {
+        const id = String(body.id || "").trim();
+        const sessionId = String(body.sessionId || "").trim();
+        if (!id) return sendJSON(res, { error: "missing id" }, 400);
+        if (!sessionId) return sendJSON(res, { error: "missing sessionId" }, 400);
+        const task = (bucket.tasks || []).find((t) => t.id === id);
+        if (!task) return sendJSON(res, { error: "no such task" }, 404);
+        task.status = "in_progress";
+        task.startedAt = task.startedAt || Date.now();
+        delete task.finishedAt;
+        task.runSessionId = sessionId;
+      } else if (action === "stopRun") {
+        const id = String(body.id || "").trim();
+        if (!id) return sendJSON(res, { error: "missing id" }, 400);
+        const task = (bucket.tasks || []).find((t) => t.id === id);
+        if (!task) return sendJSON(res, { error: "no such task" }, 404);
+        if (task.runSessionId) delete state.runStatus[task.runSessionId];
+        task.status = "planned";
+        task.plannedAt = task.plannedAt || Date.now();
+        delete task.runSessionId;
+        delete task.startedAt;
       } else if (action === "removeTask") {
         const id = String(body.id || "").trim();
         if (!id) return sendJSON(res, { error: "missing id" }, 400);
@@ -805,6 +846,10 @@ export async function startMockBackend() {
     },
     /** The Office state the plugin route is currently holding for a workspace. */
     officeState: (cwd) => officeSnapshot(cwd),
+    /** Seed a chat run's live status (as the real chatRunStatus would report it). */
+    setRunStatus(sessionId, status) {
+      state.runStatus[sessionId] = { present: true, active: false, outcome: null, ...status };
+    },
     /** Seed one session's totals, as GET /sessions/stats reports them. */
     setStats(id, s) {
       state.stats[id] = { total_cost: 0, total_tokens: 0, error_count: 0, models: [], ...s };
@@ -827,6 +872,7 @@ export async function startMockBackend() {
       state.chatWorkspacesRemoved = [];
       state.agentDefs = [];
       state.office = {};
+      state.runStatus = {};
       requests.length = 0;
       fails.length = 0;
       turns.length = 0;

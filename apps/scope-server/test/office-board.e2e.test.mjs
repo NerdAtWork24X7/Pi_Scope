@@ -243,6 +243,45 @@ describe("the Kanban queue", () => {
     assert.ok((await snapshot()).tasks.some((t) => t.title === "persisted"));
   });
 
+  test("beginRun records the run session, and leaving In Progress clears it", async () => {
+    await post({ action: "addTask", title: "dispatched work" });
+    const id = (await snapshot()).tasks.find((t) => t.title === "dispatched work").id;
+    await post({ action: "moveTask", id, status: "planned" });
+
+    // A runner announces the chat session its dispatch will use in ONE write
+    // with the move to In Progress.
+    const began = await post({ action: "beginRun", id, sessionId: "sess-1" });
+    assert.ok(began.res.ok);
+    const t = await task(id);
+    assert.equal(t.status, "in_progress");
+    assert.equal(t.runSessionId, "sess-1", "the run session is recorded");
+    assert.ok(t.startedAt > 0, "startedAt is stamped");
+
+    // The snapshot reports the run's live status (this session is unknown to the
+    // chat manager, so it reads as gone — the orphan case the runner recovers).
+    assert.deepEqual((await snapshot()).runStates[id], { present: false, active: false, outcome: null });
+
+    // Leaving In Progress ends the run, and the derived map disappears with it.
+    await post({ action: "moveTask", id, status: "todo" });
+    assert.equal((await task(id)).runSessionId, undefined, "the run session is dropped");
+    assert.equal("runStates" in (await snapshot()), false, "a board with no run keeps the bare snapshot shape");
+  });
+
+  test("beginRun needs a session id, and stopRun returns its task to Planned", async () => {
+    await post({ action: "addTask", title: "stoppable work" });
+    const id = (await snapshot()).tasks.find((t) => t.title === "stoppable work").id;
+    await post({ action: "moveTask", id, status: "planned" });
+
+    assert.equal((await post({ action: "beginRun", id })).res.status, 400, "a session id is required");
+    assert.ok((await post({ action: "beginRun", id, sessionId: "sess-2" })).res.ok);
+
+    // stopRun (Pause on a run this page does not own) hands the task back.
+    assert.ok((await post({ action: "stopRun", id })).res.ok);
+    const t = await task(id);
+    assert.equal(t.status, "planned", "the task waits in Planned again");
+    assert.equal(t.runSessionId, undefined, "and its run record is cleared");
+  });
+
   test("an unknown action is refused, not silently accepted", async () => {
     assert.equal((await post({ action: "notAnAction" })).res.status, 400);
   });
