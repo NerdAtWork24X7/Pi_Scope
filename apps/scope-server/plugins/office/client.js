@@ -7,18 +7,25 @@
  * left, two right, wrapping down the floor), plus an ad-hoc desk room for
  * agents that ran without a team. Every team in the roster keeps a room whether
  * or not it is the active one; **+ team** in the header creates a new one.
- * Every room is labelled at its top-left with its controls at its top-right:
- * the active team is badged, the others carry **activate** (which switches the
- * roster over to them), and each team has **+ hire** — it adds a subagent to
- * that team, with a display name, a model, and a fresh `agents/<name>.md` to
- * grow from. A subagent's own cubicle
- * carries its name at the top-left, and beneath it **off duty / on duty**
- * (enable or disable the subagent), **fire** (drop them from this team), **md**
- * (its whole `agents/*.md` definition — frontmatter and prompt — in a
- * full-screen editor) and **name** (its display name: the desk then reads "Bob"
- * with `file_reader` beside it). The **meeting room** holds the workspace's
- * reference library: files and folders the user added, injected as a reference
- * block at the start of every new conversation. Every agent gets its own cubicle —
+ * Every room is labelled at its top-left with its control at its top-right: the
+ * active team is badged, the others carry **activate** (which switches the
+ * roster over to them). A desk carries its name at the top-left, then **off
+ * duty / on duty** (enable or disable the subagent) and **settings** — a popup
+ * holding the whole agent: **model**, **name** (the desk's display name: it then
+ * reads "Bob" with `file_reader` beside it), **duty**, **markdown** (its whole
+ * `agents/*.md` definition, frontmatter and prompt, in a full-screen editor),
+ * **skills**, **tools** (the orchestrator's; a subagent's popup instead shows
+ * the `skills:` / `tools:` its own `agents/<name>.md` pins, editable in place),
+ * **extensions**, and **hire** /
+ * **fire** (add a subagent to a team / drop this one). Under the seated worker
+ * each desk prints the model it runs on and the **tokens spent and what they
+ * cost**: the orchestrator's picker writes the app's default model, a team
+ * member's writes its own team row. The **meeting room** holds the office's task
+ * **Kanban board** and the workspace's reference library: files and folders the
+ * user added, injected as a reference block at the start of every new
+ * conversation. Only the **active team** is staffed, so a desk on an inactive
+ * team stays dormant even when a same-named agent is working on the active one.
+ * Every agent gets its own cubicle —
  * partition walls on three sides, a desk with a screen, a chair — and sits in it
  * seen from above. Working agents have their screen scrolling code and their
  * arms typing; a chair pushed back is "waiting"; a cubicle whose agent is
@@ -42,12 +49,18 @@
  * the same green/orange/red the rails and status dots use — so the office can
  * never disagree with the rest of the UI.
  *
- * Registered as a built-in plugin from plugins-builtin.js; its manifest lives in
- * apps/scope-server/plugins/office/plugin.json.
+ * A **standalone plugin**: this bundle, its stylesheet (client.css) and its
+ * server half (server.ts) all live in apps/scope-server/plugins/office/, and the
+ * host loads the bundle from its manifest (plugins/office/plugin.json) — nothing
+ * in the core app knows the Office exists. The view registers itself at the
+ * bottom of this file; its own state (the name, the Kanban queue and the runner
+ * switch) comes from the plugin's `/office` routes, while the roster, teams and
+ * reference library still come from the shared `/agent-team` / `/settings`
+ * endpoints the rest of the app uses.
  */
 (function () {
   const S = window.SCOPE;
-  if (!S) return;
+  if (!S || !S.Plugins) return;
   const esc = S.escapeHtml;
   const escAttr = (s) => String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -87,16 +100,20 @@
   const firedKeys = new Set(); // subagents fired this session — see floorPlan()
   let pendingTeam = null;   // team whose creation/removal is in flight
   let runnerPausedLocal = null; // optimistic Run/Pause state while its write is in flight
+  let office = null;        // latest /office snapshot: { officeName, tasks, runnerPaused }
+  let officeCwd = null;     // cwd it was fetched for
+  let officeAt = 0;         // when it was fetched
   let defByAgent = null;    // agent key -> agents/*.md definition (from /settings)
   let defsAt = 0;           // when the definitions were fetched
   let modelsMeta = null;    // provider registry (modelsMeta) from /settings
   let defaultModel = "";    // the app's default model = the orchestrator's own
+  let agentDefaultTools = null; // tools a definition without `tools:` gets (from /settings)
+  let settingsEntry = null; // { key, team } the desk settings popup is showing, or null
   const activity = new Map(); // agent key -> { text, at }
   const logs = new Map();     // agent key -> [{ kind, text, at }]   (live, newest last)
   const fetched = new Map();  // agent key -> { sid, at, lines }     (from /events)
   const pods = new Map();     // agent key -> [elements] (a key can hold desks in several team rooms)
   const byKey = new Map();    // agent key -> agent (current render)
-  const lastStatus = new Map();
 
   function state() { return window.__SCOPE_STATE || {}; }
 
@@ -136,7 +153,10 @@
     const out = [];
     const inTeams = new Set(); // every agent that holds a team desk
 
-    const agentFor = (name, model, displayName) => {
+    // `rowActive` is this team's own teams.yaml on/off flag (undefined for an
+    // agent with no roster row); `live` marks a desk whose team is the active
+    // one — the only place the running session's name-keyed off-list speaks for.
+    const agentFor = (name, model, displayName, rowActive, live = true) => {
       const key = lower(name);
       if (!key || key === "memory-summarizer") return null;
       const session = sessionFor(key);
@@ -148,7 +168,10 @@
         displayName: String(displayName || ""),
         model: model || (session && session.model) || "",
         isOrch: key === "orchestrator",
-        disabled: disabled.has(key),
+        // Duty is per team: the member's own row decides whether THIS desk is
+        // staffed, and the session-wide off-list only silences the desk of the
+        // team that is actually running.
+        disabled: rowActive === false || (live && disabled.has(key)),
         session,
       };
     };
@@ -174,7 +197,7 @@
         agents: [],
       };
       for (const m of members) {
-        const a = agentFor(m && m.name, m && m.model, m && m.displayName);
+        const a = agentFor(m && m.name, m && m.model, m && m.displayName, m && m.active, t === activeName);
         if (!a || a.isOrch) continue;
         inTeams.add(a.key);
         if (!room.agents.some((x) => x.key === a.key)) room.agents.push(a);
@@ -246,15 +269,34 @@
     return S.subagentStatus ? S.subagentStatus(s) : "gray";
   }
 
-  const POD_CLASS = { green: "working", orange: "waiting", red: "stopped", gray: "idle" };
-
-  /** The pod's state class — "leave" for an agent switched off in the roster. */
-  function podClass(agent) {
-    return agent.disabled ? "leave" : (POD_CLASS[statusOf(agent)] || "idle");
+  /**
+   * Is a desk live — does it mirror its agent's session? The orchestrator's own
+   * office and the ad-hoc desks always are; a team desk only is while its team
+   * is the active one. An inactive team is not staffed, so a same-named agent
+   * working on the active team must not light its desks up too.
+   */
+  function roomLive(room) {
+    return !room || room.kind !== "team" || !!room.active;
   }
 
-  function statusLabel(agent) {
+  /** The state a desk shows: a dormant desk (inactive team) never mirrors a session. */
+  function podStatus(agent, live) {
+    return live ? statusOf(agent) : "gray";
+  }
+
+  const POD_CLASS = { green: "working", orange: "waiting", red: "stopped", gray: "idle" };
+
+  /** The pod's state class — "leave" for an agent switched off in the roster,
+   *  "idle" for a desk on an inactive team. */
+  function podClass(agent, live = true) {
+    if (agent.disabled) return "leave";
+    if (!live) return "idle";
+    return POD_CLASS[statusOf(agent)] || "idle";
+  }
+
+  function statusLabel(agent, live = true) {
     if (agent.disabled) return "Off duty";
+    if (!live) return "Inactive team";
     switch (statusOf(agent)) {
       case "green": return "Working";
       case "orange": return "Waiting";
@@ -263,10 +305,13 @@
     }
   }
 
-  function activityOf(agent) {
-    const live = activity.get(agent.key);
-    if (live && Date.now() - live.at < ACTIVITY_TTL_MS) return live.text;
+  function activityOf(agent, live = true) {
+    // Off duty and dormant desks never claim a live label; the roster state
+    // comes first, then the room's own.
     if (agent.disabled) return "off duty";
+    if (!live) return "team inactive";
+    const hit = activity.get(agent.key);
+    if (hit && Date.now() - hit.at < ACTIVITY_TTL_MS) return hit.text;
     switch (statusOf(agent)) {
       case "green": return "working…";
       case "orange": return "waiting";
@@ -414,15 +459,20 @@
     const agent = byKey.get(popKey);
     if (!agent) { hidePop(); return; }
     const lines = popLinesFor(popKey);
-    const dot = agent.disabled ? "gray" : statusOf(agent);
+    // The popup reads the desk it is anchored to — that seat's own team row — so
+    // a member sitting on several teams reports the duty of the seat hovered,
+    // and a dormant seat (inactive team) never claims the agent is working.
+    const seat = (popAnchor && popAnchor.__officeSeat) || agent;
+    const live = !popAnchor || popAnchor.dataset.live !== "0";
+    const dot = seat.disabled ? "gray" : podStatus(seat, live);
     popEl.innerHTML =
       `<div class="office-pop-head">` +
         `<span class="status-dot ${dot}"></span>` +
-        `<span class="office-pop-name">${esc(agent.name)}</span>` +
-        `<span class="office-pop-role">${agent.isOrch ? "orchestrator" : "subagent"}</span>` +
+        `<span class="office-pop-name">${esc(seat.displayName || seat.name)}</span>` +
+        `<span class="office-pop-role">${seat.isOrch ? "orchestrator" : "subagent"}</span>` +
       `</div>` +
-      `<div class="office-pop-meta">${esc(statusLabel(agent))}${agent.model ? ` · ${esc(agent.model)}` : ""}` +
-        (agent.session ? ` · ${esc(String(agent.session.event_count ?? 0))} events` : " · no session yet") +
+      `<div class="office-pop-meta">${esc(statusLabel(seat, live))}${seat.model ? ` · ${esc(seat.model)}` : ""}` +
+        (seat.session ? ` · ${esc(String(seat.session.event_count ?? 0))} events` : " · no session yet") +
       `</div>` +
       (lines.length
         ? `<div class="office-pop-log">` + lines.map((l) =>
@@ -430,7 +480,7 @@
               `<span class="office-pop-time">${esc(S.fmtRel ? S.fmtRel(l.at) : "")}</span>` +
               `<span class="office-pop-text">${esc(l.text)}</span>` +
             `</div>`).join("") + `</div>`
-        : `<div class="office-pop-empty">${agent.disabled ? "Off duty — no activity." : "No messages yet."}</div>`);
+        : `<div class="office-pop-empty">${seat.disabled ? "Off duty — no activity." : "No messages yet."}</div>`);
   }
 
   function placePop() {
@@ -506,20 +556,24 @@
    * that animate while the agent works.
    */
   function podHtml(agent, room) {
-    const st = statusOf(agent);
-    const cls = podClass(agent);
+    const live = roomLive(room);
+    const st = podStatus(agent, live);
+    const cls = podClass(agent, live);
     const role = agent.isOrch ? "Orchestrator" : "Subagent";
     const shown = agent.displayName || agent.name;
     // Only a team member can be fired / renamed; the orchestrator's office and
     // the ad-hoc desks have no roster row behind them.
     const team = room && room.kind === "team" ? room.team : "";
-    const title = `${shown} · ${role}${agent.model ? ` · ${agent.model}` : ""} — ${activityOf(agent)}`;
+    const title = `${shown} · ${role}${agent.model ? ` · ${agent.model}` : ""} — ${activityOf(agent, live)}`;
     return (
       `<div class="office-pod ${cls}${agent.isOrch ? " orch" : ""}" data-key="${escAttr(agent.key)}"` +
+        // `data-live` marks a desk whose room is the active team (or the
+        // orchestrator / an ad-hoc desk): only those mirror the agent's session.
+        ` data-live="${live ? "1" : "0"}"` +
         (team ? ` data-team="${escAttr(team)}"` : "") +
-        ` tabindex="0" role="group" aria-label="${escAttr(`${shown}, ${role}, ${statusLabel(agent)}`)}" title="${escAttr(title)}">` +
+        ` tabindex="0" role="group" aria-label="${escAttr(`${shown}, ${role}, ${statusLabel(agent, live)}`)}" title="${escAttr(title)}">` +
         // The cubicle's header: the name at its top-left, then the desk's own
-        // controls (off duty / fire / md) directly beneath it.
+        // controls (off duty / settings) directly beneath it.
         `<div class="office-pod-head">` +
           `<div class="office-plate">` +
             `<span class="status-dot ${st}"></span>` +
@@ -528,12 +582,8 @@
             `<span class="office-crown" title="Orchestrator">★</span>` +
             `<span class="office-leave-tag">Off duty</span>` +
           `</div>` +
-          (team ? podActionsHtml(agent, team) : "") +
+          podControlsHtml(agent, team) +
           `<div class="office-bubble"></div>` +
-          `<div class="office-stats"></div>` +
-          // The orchestrator runs the floor, so it owns its model: a picker on
-          // its desk rather than a name in a team file.
-          (agent.isOrch ? orchModelHtml() : "") +
         `</div>` +
         `<div class="office-station">` +
           `<div class="office-chair"></div>` +
@@ -546,33 +596,67 @@
           `</div>` +
           personHtml(agent) +
         `</div>` +
+        // Directly under the worker: the model it runs on, and what it has
+        // spent — the two numbers the floor is read for.
+        `<div class="office-pod-foot">` +
+          (agent.isOrch || team ? modelRowHtml(agent, team) : "") +
+          `<span class="office-stats"></span>` +
+        `</div>` +
       `</div>`
     );
   }
 
-  /**
-   * A team desk's controls, at the top-left of the cubicle under its name:
-   * **off duty / on duty** (enable or disable the subagent), **fire** (drop them
-   * from this team), **name** (its display name) and **md** (its `agents/*.md`
-   * definition).
-   */
-  function podActionsHtml(agent, team) {
+  /** The gear the settings button draws: a Feather-style cog, inline so it needs
+   *  no icon font and simply takes the button's ink colour. */
+  const SETTINGS_GEAR =
+    "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 " +
+    "1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06" +
+    "a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09" +
+    "A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3" +
+    "a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06" +
+    "a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z";
+
+  /** The settings control a configurable desk carries: a round gear button that
+   *  opens that agent's whole configuration (model, name, duty, definition,
+   *  skills, tools, extensions, hire / fire) in a popup. */
+  function settingsButtonHtml(agent, team) {
     const shown = escAttr(agent.displayName || agent.name);
-    const dutyTitle = agent.disabled
-      ? `Bring ${shown} on duty — enable this subagent`
-      : `Take ${shown} off duty — disable this subagent`;
     return (
-      `<div class="office-pod-actions">` +
-        `<button class="office-act duty${agent.disabled ? " off" : ""}" type="button" data-act="duty" ` +
-          `data-agent="${escAttr(agent.key)}" title="${dutyTitle}">${agent.disabled ? "on duty" : "off duty"}</button>` +
-        `<button class="office-act office-fire" type="button" data-act="fire" data-agent="${escAttr(agent.key)}" ` +
-          `data-team="${escAttr(team)}" title="Fire ${shown} — remove them from ${escAttr(team)}">fire</button>` +
-        `<button class="office-act md" type="button" data-act="md" data-agent="${escAttr(agent.key)}" ` +
-          `title="Edit ${shown}'s markdown definition (agents/*.md)">md</button>` +
-        `<button class="office-act rename" type="button" data-act="rename" data-agent="${escAttr(agent.key)}" ` +
-          `data-team="${escAttr(team)}" title="Set ${shown}'s display name">name</button>` +
-      `</div>`
+      `<button class="office-act office-settings" type="button" data-act="settings" ` +
+        `data-agent="${escAttr(agent.key)}"` +
+        (team ? ` data-team="${escAttr(team)}"` : "") +
+        ` aria-label="Open ${shown}'s settings" ` +
+        `title="${shown}'s settings — model, name, skills, tools, extensions, hire / fire">` +
+        `<svg class="office-settings-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" ` +
+          `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+          `<circle cx="12" cy="12" r="3.1"/>` +
+          `<path d="${SETTINGS_GEAR}"/>` +
+        `</svg>` +
+      `</button>`
     );
+  }
+
+  /**
+   * A desk's own controls, under its name: **off duty / on duty** (enable or
+   * disable the subagent) and **settings**. Fire / rename / markdown used to sit
+   * here; they moved into the settings popup so the floor stays a floor.
+   */
+  function podControlsHtml(agent, team) {
+    const shown = escAttr(agent.displayName || agent.name);
+    const actions = [];
+    if (team) {
+      const dutyTitle = agent.disabled
+        ? `Bring ${shown} on duty — enable this subagent`
+        : `Take ${shown} off duty — disable this subagent`;
+      actions.push(
+        `<button class="office-act duty${agent.disabled ? " off" : ""}" type="button" data-act="duty" ` +
+          `data-agent="${escAttr(agent.key)}" data-team="${escAttr(team)}" title="${dutyTitle}">${agent.disabled ? "on duty" : "off duty"}</button>`
+      );
+    }
+    // The orchestrator and team desks configure their agent from the popup; an
+    // ad-hoc desk has no roster row behind it, so it carries no controls.
+    if (team || agent.isOrch) actions.push(settingsButtonHtml(agent, team));
+    return actions.length ? `<div class="office-pod-actions">${actions.join("")}</div>` : "";
   }
 
   /**
@@ -583,19 +667,14 @@
   function roomHtml(room) {
     const isTeam = room.kind === "team" && !!room.team;
     const busy = activating === room.team;
-    // The room's header row: the team's name at its top-left, the team actions
-    // (activate / hire) at its top-right.
+    // The room's header row: the team's name at its top-left, its activate
+    // control at its top-right. Hiring lives in an agent's settings popup now.
     const control = !isTeam ? ""
       : room.active
         ? `<span class="office-room-active" title="${escAttr(room.label)} is the active team">✓ active</span>`
         : `<button class="office-room-pick" type="button" data-team="${escAttr(room.team)}"` +
           (busy ? ` disabled` : ``) +
           ` title="Make ${escAttr(room.label)} the active team">${busy ? "activating…" : "activate"}</button>`;
-    // Hiring is a room-level action: it adds a member to *this* team (with an
-    // optional agents/<name>.md and model).
-    const hire = !isTeam ? ""
-      : `<button class="office-hire" type="button" data-team="${escAttr(room.team)}" ` +
-        `title="Hire a subagent into ${escAttr(room.label)}">+ hire</button>`;
     return (
       `<section class="office-room${room.active ? " active" : ""}" data-room="${escAttr(room.id)}">` +
         `<div class="office-room-head">` +
@@ -603,7 +682,6 @@
           `<span class="office-room-meta">${room.agents.length} desk${room.agents.length === 1 ? "" : "s"}</span>` +
           `<span class="office-room-spacer"></span>` +
           control +
-          hire +
         `</div>` +
         `<div class="office-room-floor">${room.agents.map((a) => podHtml(a, room)).join("")}</div>` +
       `</section>`
@@ -636,13 +714,13 @@
 
   /** What the office is called ("Office" until the user names it). */
   function officeName() {
-    const name = team && team.officeName ? String(team.officeName).trim() : "";
+    const name = office && office.officeName ? String(office.officeName).trim() : "";
     return name || "Office";
   }
 
   /** The office's tasks. */
   function tasksOf() {
-    return team && Array.isArray(team.tasks) ? team.tasks.slice() : [];
+    return office && Array.isArray(office.tasks) ? office.tasks.slice() : [];
   }
 
   const TASK_COLUMNS = [
@@ -656,7 +734,7 @@
    *  until the user presses Run. An absent field on an older config reads paused. */
   function runnerPaused() {
     if (runnerPausedLocal !== null) return runnerPausedLocal;
-    return !(team && team.runnerPaused === false);
+    return !(office && office.runnerPaused === false);
   }
 
   /** Tasks in one column, in queue order (Planned is worked FIFO). */
@@ -690,20 +768,75 @@
     if (data && typeof data.defaultModel === "string") defaultModel = data.defaultModel;
   }
 
+  /** The roster row for a member, scoped to one team — a member name can sit on
+   *  several teams, and every per-member setting lives on its own row. */
+  function memberRow(teamName, key) {
+    const members = (team && team.teams && team.teams[teamName]) || [];
+    return Array.isArray(members) ? members.find((x) => lower(x && x.name) === lower(key)) || null : null;
+  }
+
+  /** The model a team member runs on (its teams.yaml row), or "" for the team
+   *  default. Scoped to the team, because one agent can sit on several. */
+  function memberModel(teamName, key) {
+    const m = memberRow(teamName, key);
+    return m && m.model ? String(m.model) : "";
+  }
+
+  /** Whether a member is off duty IN ONE TEAM: its own row decides, and the
+   *  running session's off-list only speaks for the team that is active. */
+  function memberOffDuty(teamName, key) {
+    const row = memberRow(teamName, key);
+    if (row && row.active === false) return true;
+    const active = String((team && team.activeTeam) || "");
+    const off = Array.isArray(team && team.disabledAgents) ? team.disabledAgents.map(lower) : [];
+    return !!teamName && teamName === active && off.includes(lower(key));
+  }
+
   /**
-   * The orchestrator's model picker. Every model the app knows, grouped one
-   * `<optgroup>` per provider — the same list the subagent pickers use (see
-   * modelOptionsHtml) — with the current default selected.
+   * A desk's model picker, drawn under the worker. Every model the app knows,
+   * grouped one `<optgroup>` per provider, with the current choice selected.
+   * The orchestrator's picker writes the app's default model; a team member's
+   * writes its own teams.yaml row (for the team the desk sits in).
    */
-  function orchModelHtml() {
+  function modelRowHtml(agent, teamName, inPopup) {
+    const isOrch = !!agent.isOrch;
+    // A member's label is THIS desk's team row, so a member named "Bob" on one
+    // team is not called Bob on a desk whose own row has no display name.
+    const row = isOrch ? null : memberRow(teamName, agent.key);
+    const shown = (row && row.displayName) || agent.name;
+    const hint = isOrch
+      ? "The model the orchestrator runs on — the app's default model (Settings → Default model)"
+      : `The model ${shown} runs on in ${teamName} (teams.yaml)`;
+    // The desk's picker keeps the `office-orch-model` id; the copy inside the
+    // settings popup drops it (the pane already owns it).
+    const id = isOrch && !inPopup ? ` id="office-orch-model"` : "";
+    const who = isOrch ? "" : ` data-agent="${escAttr(agent.key)}" data-team="${escAttr(teamName)}"`;
     return (
-      `<label class="office-model-row" title="The model the orchestrator runs on — the app's default model (Settings → Default model)">` +
+      `<label class="office-model-row" title="${escAttr(hint)}">` +
         `<span class="office-model-label">model</span>` +
-        `<select class="office-orch-model" id="office-orch-model" aria-label="The orchestrator's model">` +
-          modelOptionsHtml(orchModel()) +
+        `<select class="office-model-select${isOrch ? " office-orch-model" : ""}"${id} ` +
+          `data-model-for="${isOrch ? "orchestrator" : "member"}"${who} ` +
+          `aria-label="${escAttr(isOrch ? "The orchestrator's model" : `The model ${shown} runs on`)}">` +
+          modelOptions(agent, isOrch ? orchModel() : memberModel(teamName, agent.key)) +
         `</select>` +
       `</label>`
     );
+  }
+
+  /** A desk picker's `<option>`s. A team member can fall back to the team
+   *  default (an empty value), exactly like the hire form; the orchestrator
+   *  always runs on a real model. */
+  function modelOptions(agent, selected) {
+    return (agent.isOrch ? "" : `<option value=""${selected ? "" : " selected"}>team default</option>`) +
+      modelOptionsHtml(selected);
+  }
+
+  /** Keep a model picker in step with the roster: rebuild its options when the
+   *  registry changes, and snap the selection to the stored model. */
+  function syncModelSelect(pick, now) {
+    const opts = (pick.dataset.modelFor === "member" ? `<option value=""${now ? "" : " selected"}>team default</option>` : "") + modelOptionsHtml(now);
+    if (pick.dataset.options !== opts) { pick.innerHTML = opts; pick.dataset.options = opts; }
+    if (pick.value !== now && [...pick.options].some((o) => o.value === now)) pick.value = now;
   }
 
   let modelBusy = false;
@@ -724,10 +857,31 @@
       render();               // put the picker back where the settings are
     } finally {
       modelBusy = false;
+      renderAgentSettings();  // and the copy in an open settings popup
     }
   }
 
-  /** The wall's compact board: a column per status with its count, and what the
+  /** Set a team member's model (teams.yaml, scoped to the desk's own team). */
+  async function setMemberModelFor(teamName, key, model) {
+    if (!teamName || !key || modelBusy) return;
+    modelBusy = true;
+    try {
+      const { res, data } = await S.api("/agent-team", {}, {
+        action: "setMemberModel", team: teamName, agent: key, model, cwd: state().cwd || "",
+      });
+      if (!res.ok || !data) throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
+      team = data; teamCwd = state().cwd || ""; teamAt = Date.now();
+      if (S.toast) S.toast(`${shownName(key, teamName)} now runs on ${model || "the team default"}`);
+    } catch (err) {
+      if (S.toast) S.toast(`Could not set the model: ${errMsg(err)}`, "err");
+    } finally {
+      modelBusy = false;
+      render();
+      renderAgentSettings();
+    }
+  }
+
+  /** The meeting room's compact board: a column per status with its count, and what the
    *  orchestrator is on. Clicking it opens the full-screen board. */
   function kanbanMiniHtml() {
     const running = currentTask();
@@ -816,7 +970,7 @@
           return false;
         }
         try {
-          await teamPost({ action: "addTask", title, note }, `Task added: ${title}`);
+          await officePost({ action: "addTask", title, note }, `Task added: ${title}`);
           return true;
         } catch (err) {
           if (S.toast) S.toast(`Could not add the task: ${errMsg(err)}`, "err");
@@ -860,7 +1014,8 @@
     );
   }
 
-  /** The meeting room: a round table with four seats, and the reference library. */
+  /** The meeting room: a round table with four seats, the office's Kanban
+   *  board, and the workspace's reference library. */
   function meetingRoomHtml() {
     return (
       `<section class="office-room meeting" data-room="meeting">` +
@@ -876,49 +1031,66 @@
               `<span class="office-seat e"></span><span class="office-seat w"></span>` +
             `</div>` +
           `</div>` +
-          libraryHtml() +
+          // The meeting room holds the office's two working surfaces: the task
+          // board, hung where the whole team can see it, and the reference
+          // library. The board's slot keeps `#office-board-host` so the render
+          // pass can repaint its counts without rebuilding the room.
+          `<div class="office-meeting-tools">` +
+            `<span class="office-meeting-board" id="office-board-host">${kanbanMiniHtml()}</span>` +
+            libraryHtml() +
+          `</div>` +
         `</div>` +
       `</section>`
     );
   }
 
-  function buildPlan(plan, agents) {
+  function buildPlan(plan) {
     if (!planEl) return;
     // Order matters: the orchestrator's office is the top-left cell and the
     // meeting room the cell beside it, so the team rooms auto-flow beneath them
     // two-per-row, either side of the center pathway (see styles.css).
     planEl.innerHTML = [orchRoomHtml(plan.orch), meetingRoomHtml(), ...plan.rooms.map(roomHtml)].join("");
     pods.clear();
-    // An agent can hold a desk in more than one team room, so collect every pod
-    // per key; status and label updates then fan out to all of them.
-    for (const el of planEl.querySelectorAll(".office-pod")) {
+    // Desks are drawn in this exact order — the orchestrator first, then each
+    // room's seats — so every pod element can remember the seat it was drawn
+    // from. A member can hold a desk in more than one team room, and each desk
+    // must keep reading ITS OWN roster row (duty, name, model included), never
+    // the first seat the plan happened to list for that agent.
+    const seats = [];
+    if (plan.orch) seats.push(plan.orch);
+    for (const r of plan.rooms) for (const a of r.agents) seats.push(a);
+    const podEls = planEl.querySelectorAll(".office-pod");
+    for (let i = 0; i < podEls.length; i++) {
+      const el = podEls[i];
+      if (seats[i]) el.__officeSeat = seats[i];
       const arr = pods.get(el.dataset.key);
       if (arr) arr.push(el); else pods.set(el.dataset.key, [el]);
     }
     renderSig = sigOf(plan);
-    lastStatus.clear();
-    for (const a of agents) lastStatus.set(a.key, statusOf(a));
   }
 
   function updatePod(agent) {
     const els = pods.get(agent.key);
     if (!els || !els.length) return;
-    const st = statusOf(agent);
-    const cls = podClass(agent);
-    const prev = lastStatus.get(agent.key);
-    lastStatus.set(agent.key, st);
-    const role = agent.isOrch ? "Orchestrator" : "Subagent";
-    const text = activityOf(agent);
-    // The desk is labelled with the display name; the real name still rides in
-    // the tooltip beside it, so "file_reader is Bob" stays discoverable.
-    const shown = agent.displayName || agent.name;
-    const title = `${shown}${agent.displayName ? ` (${agent.name})` : ""} · ${role}${agent.model ? ` · ${agent.model}` : ""} — ${text}`;
-
-    // The same agent can hold desks in several team rooms; keep them all in sync.
+    // The same agent can hold desks in several team rooms. Each desk reads its
+    // OWN seat: the seat's duty decides whether THIS desk is staffed, its
+    // display name labels it, and the active team mirrors the agent's session
+    // while an inactive team's desk stays dormant.
     for (const el of els) {
+      const seat = el.__officeSeat || agent;
+      const role = seat.isOrch ? "Orchestrator" : "Subagent";
+      const shown = seat.displayName || seat.name;
+      const l = el.dataset.live !== "0";
+      const st = podStatus(seat, l);
+      const cls = podClass(seat, l);
+      const text = activityOf(seat, l);
+      const prev = el.dataset.st || "";
+      el.dataset.st = st;
+      const title = `${shown}${seat.displayName ? ` (${seat.name})` : ""} · ${role}${seat.model ? ` · ${seat.model}` : ""} — ${text}`;
+
       el.classList.remove("working", "waiting", "stopped", "idle", "leave");
       el.classList.add(cls);
-      if (prev && prev !== "green" && st === "green" && !agent.disabled) {
+      if (prev && prev !== "green" && st === "green" && !seat.disabled) {
         // Just got to work — play the walk-in once, then let it settle.
         el.classList.add("arriving");
         setTimeout(() => el.classList.remove("arriving"), ARRIVE_MS);
@@ -936,25 +1108,27 @@
           statsEl.hidden = !line;
         }
       }
-      // The orchestrator's picker follows the settings: rebuild its options when
-      // the registry or the default changes, and snap the selection back if a
-      // write did not land.
-      const pick = el.querySelector(".office-orch-model");
+      // The desk's model picker follows the roster: rebuild its options when the
+      // registry changes, and snap the selection to the stored model.
+      const pick = el.querySelector(".office-model-select");
       if (pick) {
-        const opts = modelOptionsHtml(orchModel());
-        if (pick.dataset.options !== opts) { pick.innerHTML = opts; pick.dataset.options = opts; }
-        const now = orchModel();
-        if (pick.value !== now && [...pick.options].some((o) => o.value === now)) pick.value = now;
+        const now = pick.dataset.modelFor === "orchestrator"
+          ? orchModel()
+          : memberModel(pick.dataset.team, pick.dataset.agent);
+        syncModelSelect(pick, now);
       }
       if (el.getAttribute("title") !== title) el.setAttribute("title", title);
     }
   }
 
-  function renderCounts(agents) {
+  function renderCounts(agents, liveByKey) {
     if (!countsEl) return;
-    const live = agents.filter((a) => !a.disabled);
-    const of = (s) => live.filter((a) => statusOf(a) === s).length;
-    const leave = agents.length - live.length;
+    const on = agents.filter((a) => !a.disabled);
+    // Count a desk's own state: an agent that only sits in inactive teams reads
+    // as idle, exactly as its desks are drawn.
+    const isLive = (a) => !liveByKey || liveByKey.get(a.key) !== false;
+    const of = (s) => on.filter((a) => podStatus(a, isLive(a)) === s).length;
+    const leave = agents.length - on.length;
     countsEl.innerHTML =
       `<span class="office-count working"><span class="status-dot green"></span>${of("green")} working</span>` +
       `<span class="office-count"><span class="status-dot orange"></span>${of("orange")} waiting</span>` +
@@ -976,19 +1150,37 @@
     byKey.clear();
     for (const [k, a] of unique) byKey.set(k, a);
 
-    const sig = sigOf(plan);
-    if (sig !== renderSig) buildPlan(plan, agents);
+    // Which agents hold at least one live desk: the orchestrator, every agent
+    // on the active team, and the ad-hoc desks. An agent that only sits in
+    // inactive teams is not live, so it counts as idle.
+    const liveByKey = new Map();
+    if (plan.orch) liveByKey.set(plan.orch.key, true);
+    for (const r of plan.rooms) {
+      const l = roomLive(r);
+      for (const a of r.agents) {
+        if (l) liveByKey.set(a.key, true);
+        else if (!liveByKey.has(a.key)) liveByKey.set(a.key, false);
+      }
+    }
 
-    const live = [...unique.values()];
-    for (const a of live) updatePod(a);
-    renderCounts(live);
+    const sig = sigOf(plan);
+    if (sig !== renderSig) buildPlan(plan);
+
+    const desks = [...unique.values()];
+    for (const a of desks) updatePod(a);
+    // Duty is per desk (a member can sit on several teams), so the header counts
+    // an agent as off duty only when every seat it holds is empty.
+    const offEverywhere = new Map();
+    for (const a of agents) offEverywhere.set(a.key, (offEverywhere.get(a.key) ?? true) && a.disabled);
+    renderCounts(desks.map((a) => ({ ...a, disabled: !!offEverywhere.get(a.key) })), liveByKey);
 
     // The header's title follows the roster snapshot.
     const nameEl = pane.querySelector("#office-name");
     if (nameEl && nameEl.textContent !== officeName()) nameEl.textContent = officeName();
 
-    // So does the wall's sign, whose counts are the board's own. The click is
-    // delegated on the pane, so replacing the button keeps it working.
+    // So does the meeting room's board sign, whose counts are the board's own.
+    // The click is delegated on the pane, so replacing the button keeps it
+    // working.
     const signHost = pane.querySelector("#office-board-host");
     if (signHost) {
       const html = kanbanMiniHtml();
@@ -1000,7 +1192,7 @@
     void refreshStats(false);
     void pumpTasks();
 
-    if (emptyEl) emptyEl.hidden = live.some((a) => a.session) || live.length > 1;
+    if (emptyEl) emptyEl.hidden = desks.some((a) => a.session) || desks.length > 1;
 
     // Keep an open popup in sync with the live stream (and let go of a desk
     // that left the roster).
@@ -1037,22 +1229,28 @@
 
   function errMsg(err) { return err && err.message ? err.message : String(err); }
 
-  /** What a desk calls an agent: its display name, else its real name. */
-  function shownName(key, fallback) {
+  /** What a desk calls an agent: its display name, else its real name. With a
+   *  team, the label comes from THAT team's row, so a member named "Bob" on one
+   *  team does not borrow the name there on another. */
+  function shownName(key, teamName, fallback) {
+    const row = teamName ? memberRow(teamName, key) : null;
+    if (row && row.displayName) return row.displayName;
     const agent = byKey.get(key);
     if (!agent) return fallback || key;
     return agent.displayName || agent.name;
   }
 
-  /** Put a subagent on or off duty (enable / disable) — toggleAgent. */
-  async function setAgentActive(name, disabled, btn) {
+  /** Put a subagent on or off duty (enable / disable) — toggleAgent, scoped to
+   *  the desk's own team so the same-named member of another team keeps its
+   *  own duty. */
+  async function setAgentActive(name, disabled, teamName, btn) {
     if (!name || pendingAgent) return;
-    const shown = shownName(name);
+    const shown = shownName(name, teamName);
     pendingAgent = name;
     if (btn) btn.disabled = true;
     let ok = false;
     try {
-      const { res, data } = await S.api("/agent-team", {}, { action: "toggleAgent", agent: name, disabled, cwd: state().cwd || "" });
+      const { res, data } = await S.api("/agent-team", {}, { action: "toggleAgent", agent: name, team: teamName || "", disabled, cwd: state().cwd || "" });
       if (res.ok && data) { team = data; teamCwd = state().cwd || ""; teamAt = Date.now(); ok = true; }
       else throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
     } catch (err) {
@@ -1068,10 +1266,11 @@
     }
   }
 
-  /** The on/off-duty control just flips the subagent's current state. */
-  function toggleDuty(name, btn) {
-    const agent = byKey.get(name);
-    if (agent) void setAgentActive(name, !agent.disabled, btn);
+  /** The on/off-duty control flips the state of the desk it sits on (that
+   *  seat's own team row), not the first seat the agent happens to hold. */
+  function toggleDuty(name, teamName, btn) {
+    if (!name) return;
+    void setAgentActive(name, !memberOffDuty(teamName, name), teamName, btn);
   }
 
   /**
@@ -1079,8 +1278,8 @@
    * enable/disable flag are left alone — hiring them back is one click.
    */
   async function fireMember(teamName, name, btn) {
-    if (!teamName || !name || pendingAgent) return;
-    const shown = shownName(name);
+    if (!teamName || !name || pendingAgent) return false;
+    const shown = shownName(name, teamName);
     pendingAgent = name;
     if (btn) btn.disabled = true;
     try {
@@ -1091,9 +1290,11 @@
       if (S.toast) S.toast(`${shown} fired from ${teamName}`);
       hidePop();
       render();
+      return true;
     } catch (err) {
       if (S.toast) S.toast(`Could not fire ${shown}: ${errMsg(err)}`, "err");
       if (btn) btn.disabled = false;
+      return false;
     } finally {
       pendingAgent = null;
     }
@@ -1177,52 +1378,32 @@
           team = added.data; teamCwd = cwd; teamAt = Date.now();
           // Hired back onto a team, so they are no longer "fired" for the floor.
           firedKeys.delete(lower(name));
+          // Anything the roster write refused (a display name the server would
+          // not take, a definition that could not be created) is reported rather
+          // than silently dropped: the member did land on the team.
+          const warnings = [];
           if (displayName) {
             const named = await S.api("/agent-team", {}, { action: "setMemberDisplayName", team: teamName, agent: name, displayName, cwd });
             if (named.res.ok && named.data) team = named.data;
+            else warnings.push(named.data && named.data.error ? String(named.data.error) : `the display name was not saved (HTTP ${named.res.status})`);
           }
-          let warn = "";
-          if (createMd) {
+          // Only a MISSING definition is created. Hiring an agent back whose
+          // agents/<name>.md still exists must not fire a doomed create — the
+          // server refuses to clobber it, and the warning would be noise.
+          if (createMd && !hasAgentDef(name)) {
             const content = agentDefTemplate({ name, displayName, model, prompt });
             const def = await S.api("/settings", {}, { action: "createAgentDefFile", value: { file: `${name}.md`, content }, cwd });
-            if (!def.res.ok) warn = def.data && def.data.error ? String(def.data.error) : `HTTP ${def.res.status}`;
-            else await refreshDefs(true);
+            // A 409 just means the file is already there (and stays); only a
+            // real failure is worth telling the user about.
+            if (!def.res.ok && def.res.status !== 409) warnings.push(def.data && def.data.error ? String(def.data.error) : `HTTP ${def.res.status}`);
+            else if (def.res.ok) await refreshDefs(true);
           }
+          const warn = warnings.join("; ");
           if (S.toast) S.toast(warn ? `${name} hired — but ${warn}` : `${name} hired into ${teamName}`, warn ? "warn" : undefined);
           render();
           return true;
         } catch (err) {
           if (S.toast) S.toast(`Could not hire ${name}: ${errMsg(err)}`, "err");
-          return false;
-        }
-      },
-    });
-  }
-
-  /** Set (or clear) the label a desk shows for a subagent — setMemberDisplayName. */
-  function renameMember(teamName, name, btn) {
-    const agent = byKey.get(name);
-    if (!teamName || !agent) return;
-    openDialog({
-      title: `Name for ${agent.name}`,
-      hint: `shown on the ${teamName} desk`,
-      body: dialogField("Display name", "e.g. Bob — empty uses the real name",
-        `<input class="office-input" id="office-dlg-input" maxlength="64" spellcheck="false" autocomplete="off" ` +
-        `placeholder="${escAttr(agent.name)}" value="${escAttr(agent.displayName || "")}">`),
-      submitLabel: "Save",
-      onSubmit: async (root) => {
-        const displayName = String((root.querySelector("#office-dlg-input") || {}).value || "").trim();
-        try {
-          const { res, data } = await S.api("/agent-team", {}, {
-            action: "setMemberDisplayName", team: teamName, agent: name, displayName, cwd: state().cwd || "",
-          });
-          if (!res.ok || !data) throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
-          team = data; teamCwd = state().cwd || ""; teamAt = Date.now();
-          if (S.toast) S.toast(displayName ? `${agent.name} is now "${displayName}"` : `${agent.name} uses its real name`);
-          render();
-          return true;
-        } catch (err) {
-          if (S.toast) S.toast(`Could not rename ${agent.name}: ${errMsg(err)}`, "err");
           return false;
         }
       },
@@ -1493,6 +1674,41 @@
     }).join("");
   }
 
+  // ─── The office's own state (plugin-owned) ────────────────────────────────
+  // The name on the wall, the Kanban queue and the runner switch live in this
+  // plugin's own store behind `GET`/`POST /office` — not in the shared agent
+  // config the roster comes from. The two are fetched and repainted together.
+
+  /** Repaint everything the office snapshot feeds: the wall, the board, the
+   *  Kanban manager, and whichever full-screen surface is open. */
+  function renderOfficeState() {
+    render();
+    renderKanbanOverlay();
+    renderLibraryOverlay();
+    renderTeamsOverlay();
+    renderAgentSettings();
+  }
+
+  /** Fetch the office's own state for the current workspace (cached briefly). */
+  async function refreshOffice(force) {
+    const cwd = state().cwd || "";
+    if (!force && office && cwd === officeCwd && Date.now() - officeAt < 15_000) return;
+    try {
+      const { res, data } = await S.api("/office", cwd ? { cwd } : {});
+      if (res.ok && data) { office = data; officeCwd = cwd; officeAt = Date.now(); render(); }
+    } catch { /* keep the last snapshot — the board still draws from it */ }
+  }
+
+  /** One office-state write: keeps the snapshot, the floor and any open
+   *  full-screen surface (library, board) in step with whatever was stored. */
+  async function officePost(body, okMsg) {
+    const { res, data } = await S.api("/office", {}, { ...body, cwd: state().cwd || "" });
+    if (!res.ok || !data) throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
+    office = data; officeCwd = state().cwd || ""; officeAt = Date.now();
+    renderOfficeState();
+    if (okMsg && S.toast) S.toast(okMsg);
+  }
+
   /** One roster write: keeps the snapshot, the floor and any open full-screen
    *  surface (library, board) in step with whatever the server stored. */
   async function teamPost(body, okMsg) {
@@ -1500,10 +1716,11 @@
     if (!res.ok || !data) throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
     team = data; teamCwd = state().cwd || ""; teamAt = Date.now();
     noteDefaults(data);
-    render();                // the floor, the shelf, the wall's board
+    render();                // the floor, the shelf, the board
     renderLibraryOverlay();  // and whichever manager is open
     renderKanbanOverlay();
     renderTeamsOverlay();
+    renderAgentSettings();
     if (okMsg && S.toast) S.toast(okMsg);
   }
 
@@ -1657,12 +1874,12 @@
       hint: "shown at the top of the view",
       body: dialogField("Office name", "e.g. Night Shift HQ — empty uses \"Office\"",
         `<input class="office-input" id="office-name-input" maxlength="60" spellcheck="false" autocomplete="off" ` +
-        `placeholder="Office" value="${escAttr(team && team.officeName ? team.officeName : "")}">`),
+        `placeholder="Office" value="${escAttr(office && office.officeName ? office.officeName : "")}">`),
       submitLabel: "Save",
       onSubmit: async (root) => {
         const name = String((root.querySelector("#office-name-input") || {}).value || "").trim();
         try {
-          await teamPost({ action: "setOfficeName", name }, name ? `This office is now “${name}”` : "Office name cleared");
+          await officePost({ action: "setOfficeName", name }, name ? `This office is now “${name}”` : "Office name cleared");
           return true;
         } catch (err) {
           if (S.toast) S.toast(`Could not rename the office: ${errMsg(err)}`, "err");
@@ -1776,7 +1993,7 @@
     runnerPausedLocal = paused; // hold the UI steady until the write settles
     if (paused) abortRun();
     try {
-      await teamPost({ action: "setRunnerPaused", paused }, paused ? "Runner paused" : "Runner running");
+      await officePost({ action: "setRunnerPaused", paused }, paused ? "Runner paused" : "Runner running");
     } catch (err) {
       if (S.toast) S.toast(`Could not ${paused ? "pause" : "start"} the runner: ${errMsg(err)}`, "err");
       render();
@@ -1796,7 +2013,7 @@
     if (!id || !status || pendingTask) return false;
     pendingTask = true;
     try {
-      await teamPost({ action: "moveTask", id, status }, quiet ? undefined : `Moved to ${status.replace("_", " ")}`);
+      await officePost({ action: "moveTask", id, status }, quiet ? undefined : `Moved to ${status.replace("_", " ")}`);
       // Landing in Planned is the handover: the runner picks it up.
       if (status === "planned") void pumpTasks();
       return true;
@@ -1813,7 +2030,7 @@
     if (!id || pendingTask) return;
     pendingTask = true;
     try {
-      await teamPost({ action: "removeTask", id }, "Task deleted");
+      await officePost({ action: "removeTask", id }, "Task deleted");
     } catch (err) {
       if (S.toast) S.toast(`Could not delete that task: ${errMsg(err)}`, "err");
     } finally {
@@ -2081,6 +2298,350 @@
 
   function teamsKeys(e) { if (e.key === "Escape") closeTeamsManager(); }
 
+  // ─── A desk's settings popup ──────────────────────────────────────────────
+  // Every configurable desk (the orchestrator's office and every team member)
+  // carries one **settings** control. It opens this popup, which gathers the
+  // whole agent in one place: model, name, duty, markdown definition, skills,
+  // tools, extensions — and hire / fire. The floor itself stays a floor: no
+  // hire, fire, rename or md buttons are drawn on it any more.
+
+  /** One labelled section inside the settings popup. */
+  function settingsSection(label, hint, body) {
+    return (
+      `<section class="office-set-sec">` +
+        `<div class="office-set-sec-head">` +
+          `<span class="office-set-sec-title">${esc(label)}</span>` +
+          (hint ? `<span class="office-set-sec-hint">${esc(hint)}</span>` : "") +
+        `</div>` +
+        `<div class="office-set-sec-body">${body}</div>` +
+      `</section>`
+    );
+  }
+
+  /** A row of toggle chips — skills, tools or extensions. */
+  function settingsChips(list) {
+    if (!list.length) return `<div class="office-set-none">nothing configured</div>`;
+    return `<div class="office-set-chips">` + list.map((c) =>
+      `<button class="office-set-chip${c.on ? " on" : ""}${c.ghost ? " ghost" : ""}" type="button" ${c.attr} title="${escAttr(c.title)}">` +
+        `<span class="office-set-dot"></span>${esc(c.label)}</button>`).join("") + `</div>`;
+  }
+
+  /** The orchestrator's skill chips (agent-team-config.json `orchestratorSkills`). */
+  function skillChips(group) {
+    const skills = Array.isArray(team && team.skills) ? team.skills : [];
+    return settingsChips(skills.map((sk) => {
+      const on = !!sk.orchestrator;
+      return {
+        label: sk.name || sk.dir,
+        title: `${sk.name || sk.dir}${sk.description ? " — " + sk.description : ""}`,
+        on,
+        attr: `data-set-skill="${escAttr(sk.dir)}" data-group="${escAttr(group)}"`,
+      };
+    }));
+  }
+
+  /** The orchestrator's tool chips: the skip denylist inverts them. */
+  function toolChips() {
+    const tools = Array.isArray(team && team.tools) ? team.tools : [];
+    const skip = new Set(((team && team.skipOrchestratorTools) || []).map((t) => String(t).toLowerCase()));
+    return settingsChips(tools.map((name) => {
+      const on = !skip.has(String(name).toLowerCase());
+      return {
+        label: String(name),
+        title: `${name} — ${on ? "enabled for the orchestrator" : "skipped by the orchestrator"}`,
+        on,
+        attr: `data-set-tool="${escAttr(name)}"`,
+      };
+    }));
+  }
+
+  /** The tools a definition without a `tools:` key is launched with. */
+  function defaultToolNames() {
+    return Array.isArray(agentDefaultTools) ? agentDefaultTools : [];
+  }
+
+  /** A definition's own `skills:` list — the ONLY source of a subagent's
+   *  skills. No key and an empty key both mean it gets none: there is no shared
+   *  subagent set to inherit from. */
+  function defSkillNames(def) {
+    return def && Array.isArray(def.skills) ? def.skills : [];
+  }
+
+  /** A definition's effective `tools:` list — the names it pins, or the built-in
+   *  default list when the key is absent (the agent-team extension falls back to
+   *  it for a missing OR empty key, so there is no "no tools" state). */
+  function defToolNames(def) {
+    if (!def || def.toolsAll !== false) return defaultToolNames();
+    return Array.isArray(def.tools) ? def.tools : [];
+  }
+
+  /** The chips for a subagent definition's own `skills:` key (agents/*.md).
+   *  Clicking one pins/removes a skill in that file, exactly like the Settings
+   *  page's per-definition picker. */
+  function defSkillChips(def) {
+    const pinned = defSkillNames(def);
+    const on = new Set(pinned);
+    const catalogue = Array.isArray(team && team.skills) ? team.skills : [];
+    const known = catalogue.map((sk) => sk && sk.dir).filter(Boolean);
+    const chips = catalogue.filter((sk) => sk && sk.dir).map((sk) => ({
+      label: sk.name || sk.dir,
+      title: `${sk.name || sk.dir}${sk.description ? " — " + sk.description : ""}`,
+      on: on.has(sk.dir),
+      attr: `data-desk-skill="${escAttr(sk.dir)}" data-desk-file="${escAttr(def.file)}"`,
+    })).concat(pinned.filter((n) => !known.includes(n)).map((n) => ({
+      label: `${n} ?`,
+      title: `${n} — not found in the skills folder`,
+      on: true,
+      ghost: true,
+      attr: `data-desk-skill="${escAttr(n)}" data-desk-file="${escAttr(def.file)}"`,
+    })));
+    return settingsChips(chips);
+  }
+
+  /** The chips for a subagent definition's own `tools:` key (agents/*.md). */
+  function defToolChips(def) {
+    const pinned = defToolNames(def);
+    const on = new Set(pinned);
+    const catalogue = Array.isArray(team && team.tools) ? team.tools : [];
+    const chips = catalogue.map((name) => ({
+      label: String(name),
+      title: `${name} — ${on.has(name) ? "allowed" : "not allowed"} for this subagent`,
+      on: on.has(name),
+      attr: `data-desk-tool="${escAttr(name)}" data-desk-file="${escAttr(def.file)}"`,
+    })).concat(pinned.filter((n) => !catalogue.includes(n)).map((n) => ({
+      label: `${n} ?`,
+      title: `${n} — not among the tools pi has reported`,
+      on: true,
+      ghost: true,
+      attr: `data-desk-tool="${escAttr(n)}" data-desk-file="${escAttr(def.file)}"`,
+    })));
+    return settingsChips(chips);
+  }
+
+  /** The extension chips: which loadable extensions are on. */
+  function extChips() {
+    const exts = (Array.isArray(team && team.extensions) ? team.extensions : []).filter((e) => e && e.available !== false);
+    return settingsChips(exts.map((ex) => {
+      const on = ex.enabled !== false;
+      return {
+        label: ex.name || ex.path,
+        title: `${ex.name || ex.path} — ${on ? "loaded" : "disabled"}`,
+        on,
+        attr: `data-set-ext="${escAttr(ex.path)}"`,
+      };
+    }));
+  }
+
+  /** The popup's body for the desk it was opened from. */
+  function agentSettingsBodyHtml(entry) {
+    const agent = byKey.get(entry.key);
+    if (!agent) return `<div class="office-set-none">That desk has left the floor.</div>`;
+    const teamName = entry.team || "";
+    const isOrch = !!agent.isOrch;
+    // Every per-member setting is read from THIS desk's team row, so a member
+    // sitting on several teams shows (and writes) only its own seat's values.
+    const row = isOrch ? null : memberRow(teamName, entry.key);
+    // The label is THIS seat's: a member named "Bob" on another team keeps its
+    // real name here until this team's own row is given one.
+    const shown = (row && row.displayName) || agent.name;
+    const offDuty = !isOrch && memberOffDuty(teamName, entry.key);
+    const secs = [];
+
+    if (isOrch || teamName) {
+      secs.push(settingsSection("Model", isOrch ? "the app's default model" : `on ${teamName}`,
+        modelRowHtml(agent, teamName, true)));
+    }
+    if (!isOrch && teamName) {
+      secs.push(settingsSection("Name", "what the desk shows",
+        `<div class="office-set-row">` +
+          `<input class="office-input office-set-name" id="office-set-name" maxlength="64" spellcheck="false" ` +
+            `autocomplete="off" placeholder="${escAttr(agent.name)}" value="${escAttr((row && row.displayName) || "")}" ` +
+            `aria-label="Display name for ${escAttr(agent.name)}">` +
+          `<button class="btn-sm office-set-name-save" type="button">save name</button>` +
+        `</div>`));
+    }
+    if (!isOrch) {
+      secs.push(settingsSection("Duty", offDuty ? `off duty on ${teamName} — the desk is empty` : `on duty on ${teamName}`,
+        `<button class="btn-sm office-set-duty${offDuty ? " off" : ""}" type="button">` +
+          `${offDuty ? "bring on duty" : "take off duty"}</button>`));
+      secs.push(settingsSection("Definition", `agents/${agent.name}.md`,
+        `<button class="btn-sm office-set-md" type="button">edit markdown</button>`));
+      // The md file's own allowlists — exactly what the agent-team extension
+      // reads off agents/<name>.md when it spawns this subagent: `skills:`
+      // overrides the subagent set above, `tools:` is the child's `--tools`
+      // allowlist. Editable here as well as in Settings.
+      const def = defForAgent(agent.name);
+      const skillsHint = def
+        ? `agents/${def.file} — ${defSkillNames(def).length} pinned`
+        : `agents/${agent.name}.md — not found`;
+      const toolsHint = def
+        ? `agents/${def.file} — ${def.toolsAll !== false ? "default tool list" : `${defToolNames(def).length} pinned`}`
+        : `agents/${agent.name}.md — not found`;
+      secs.push(settingsSection("Definition skills", skillsHint,
+        def ? defSkillChips(def) : `<div class="office-set-none">No agents/${esc(agent.name)}.md definition</div>`));
+      secs.push(settingsSection("Definition tools", toolsHint,
+        def ? defToolChips(def) : `<div class="office-set-none">No agents/${esc(agent.name)}.md definition</div>`));
+    }
+    // The orchestrator's own skill + tool sets (agent-team-config.json). A
+    // subagent's are its definition's — shown as Definition skills / Definition
+    // tools above — so its popup carries no roster-level skill list.
+    if (isOrch) {
+      secs.push(settingsSection("Skills", "for the orchestrator", skillChips("orchestrator")));
+      secs.push(settingsSection("Tools", "what the orchestrator may call", toolChips()));
+    }
+    secs.push(settingsSection("Extensions", "loaded by pi", extChips()));
+    if (!isOrch && teamName) {
+      secs.push(settingsSection("Fire", `drop ${shown} from ${teamName}`,
+        `<button class="btn-sm office-set-fire" type="button">fire ${esc(shown)}</button>`));
+    }
+    if (isOrch) {
+      const rows = teamsOf();
+      const active = (team && team.activeTeam) || "";
+      const opts = rows.map((t) =>
+        `<option value="${escAttr(t.name)}"${t.name === active ? " selected" : ""}>${esc(t.name)}</option>`).join("");
+      secs.push(settingsSection("Hire", "add a subagent to a team",
+        rows.length
+          ? `<div class="office-set-row">` +
+              `<select class="office-input office-set-hire-team" aria-label="Team to hire into">${opts}</select>` +
+              `<button class="btn-sm office-set-hire" type="button">hire…</button>` +
+            `</div>`
+          : `<div class="office-set-none">No teams yet — add one from the Teams manager.</div>`));
+    }
+    return secs.join("");
+  }
+
+  /**
+   * Open one desk's settings popup. `teamName` is the desk's own team (empty
+   * for the orchestrator and the ad-hoc desks), so a member sitting on several
+   * teams edits exactly the row the desk it came from belongs to.
+   */
+  function openAgentSettings(key, teamName) {
+    if (!key || !byKey.has(key)) return;
+    closeAgentSettings();
+    settingsEntry = { key, team: teamName || "" };
+    const overlay = document.createElement("div");
+    overlay.className = "office-lib-backdrop office-settings-backdrop";
+    overlay.id = "office-settings-backdrop";
+    overlay.innerHTML =
+      `<div class="office-lib-panel office-settings-panel" role="dialog" aria-modal="true" aria-label="Agent settings">` +
+        `<div class="office-lib-head">` +
+          `<span class="office-lib-hd-title">Settings</span>` +
+          `<span class="office-lib-hd-sub" id="office-set-sub"></span>` +
+          `<span class="office-lib-hd-spacer"></span>` +
+          `<button class="btn-sm office-lib-close" type="button">Close</button>` +
+        `</div>` +
+        `<div class="office-set-body" id="office-set-body"></div>` +
+      `</div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector(".office-lib-close").addEventListener("click", closeAgentSettings);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeAgentSettings(); });
+    overlay.addEventListener("click", onSettingsClick);
+    overlay.addEventListener("change", onSettingsChange);
+    document.addEventListener("keydown", settingsKeys);
+    renderAgentSettings();
+    // A subagent's popup also shows its agents/<name>.md allowlists, which ride
+    // on /settings; load them and repaint that section when they land.
+    if (!byKey.get(key)?.isOrch) void refreshDefs(false).then(renderAgentSettings);
+    const first = overlay.querySelector("select, input, button");
+    if (first) first.focus();
+  }
+
+  /** Repaint the open settings popup from the current roster snapshot. */
+  function renderAgentSettings() {
+    const overlay = document.getElementById("office-settings-backdrop");
+    if (!overlay || !settingsEntry) return;
+    const agent = byKey.get(settingsEntry.key);
+    if (!agent) { closeAgentSettings(); return; }
+    const row = agent.isOrch || !settingsEntry.team ? null : memberRow(settingsEntry.team, settingsEntry.key);
+    const shown = (row && row.displayName) || agent.name;
+    const sub = overlay.querySelector("#office-set-sub");
+    if (sub) sub.textContent = `${shown} · ${agent.isOrch ? "orchestrator" : "subagent"}${settingsEntry.team ? ` · ${settingsEntry.team}` : ""}`;
+    const body = overlay.querySelector("#office-set-body");
+    if (body) body.innerHTML = agentSettingsBodyHtml(settingsEntry);
+  }
+
+  function closeAgentSettings() {
+    const overlay = document.getElementById("office-settings-backdrop");
+    if (overlay) overlay.remove();
+    settingsEntry = null;
+    document.removeEventListener("keydown", settingsKeys);
+  }
+
+  function settingsKeys(e) {
+    if (e.key !== "Escape") return;
+    // A sub-dialog (hire / markdown) sits above the popup; it closes itself.
+    if (document.getElementById("office-dlg-backdrop") || document.getElementById("office-md-backdrop")) return;
+    closeAgentSettings();
+  }
+
+  /** A settings write: POST the roster action, then repaint the popup. */
+  async function settingsPost(body) {
+    try {
+      await teamPost(body);
+    } catch (err) {
+      if (S.toast) S.toast(`Could not update that setting: ${errMsg(err)}`, "err");
+    }
+  }
+
+  /** Save the display name an agent's settings popup is showing. */
+  async function saveSettingsName() {
+    if (!settingsEntry) return;
+    const input = document.getElementById("office-set-name");
+    const displayName = String((input && input.value) || "").trim();
+    const name = settingsEntry.key;
+    try {
+      await teamPost({ action: "setMemberDisplayName", team: settingsEntry.team, agent: name, displayName },
+        displayName ? `${name} is now “${displayName}”` : `${name} uses its real name`);
+    } catch (err) {
+      if (S.toast) S.toast(`Could not rename ${name}: ${errMsg(err)}`, "err");
+    }
+  }
+
+  function onSettingsChange(e) {
+    const pick = e.target;
+    if (!pick || !pick.classList || !pick.classList.contains("office-model-select")) return;
+    if (pick.dataset.modelFor === "orchestrator") void setOrchestratorModel(pick.value);
+    else if (pick.dataset.team) void setMemberModelFor(pick.dataset.team, pick.dataset.agent, pick.value);
+  }
+
+  function onSettingsClick(e) {
+    if (!settingsEntry) return;
+    const t = e.target;
+    const hit = (sel) => t.closest && t.closest(sel);
+    if (hit(".office-set-name-save")) { void saveSettingsName(); return; }
+    if (hit(".office-set-duty")) {
+      // The popup's duty button flips THIS team's row, which is what it shows.
+      void setAgentActive(settingsEntry.key, !memberOffDuty(settingsEntry.team, settingsEntry.key), settingsEntry.team, null)
+        .finally(() => renderAgentSettings());
+      return;
+    }
+    const md = hit(".office-set-md");
+    if (md) { void editAgentMarkdown(settingsEntry.key, md); return; }
+    const fire = hit(".office-set-fire");
+    if (fire) {
+      void fireMember(settingsEntry.team, settingsEntry.key, fire).then((ok) => { if (ok) closeAgentSettings(); });
+      return;
+    }
+    const hire = hit(".office-set-hire");
+    if (hire) {
+      const sel = document.querySelector(".office-set-hire-team");
+      void hireMember(sel && sel.value);
+      return;
+    }
+    const skill = hit("[data-set-skill]");
+    if (skill) { void settingsPost({ action: "toggleSkill", dir: skill.dataset.setSkill }); return; }
+    const tool = hit("[data-set-tool]");
+    if (tool) { void settingsPost({ action: "toggleTool", tool: tool.dataset.setTool }); return; }
+    const ext = hit("[data-set-ext]");
+    if (ext) { void settingsPost({ action: "toggleExtension", path: ext.dataset.setExt }); return; }
+    // A subagent's OWN allowlists live in agents/<name>.md, not in the roster —
+    // these write that file through /settings (see toggleDefList).
+    const defSkill = hit("[data-desk-skill]");
+    if (defSkill) { void toggleDefList("skills", defSkill.dataset.deskFile, defSkill.dataset.deskSkill); return; }
+    const defTool = hit("[data-desk-tool]");
+    if (defTool) void toggleDefList("tools", defTool.dataset.deskFile, defTool.dataset.deskTool);
+  }
+
   /**
    * The subagent definitions (agents/*.md) ride along with the settings
    * snapshot; the office needs them so a desk's **md** control can open the
@@ -2097,15 +2658,82 @@
       // so does the default model the orchestrator runs on.
       if (data.modelsMeta) modelsMeta = data.modelsMeta;
       noteDefaults(data);
-      if (!Array.isArray(data.agentDefs)) return;
-      const map = new Map();
-      for (const d of data.agentDefs) {
-        if (!d || !d.file) continue;
-        map.set(lower(d.name || String(d.file).replace(/\.md$/i, "")), d);
-      }
-      defByAgent = map;
-      defsAt = Date.now();
+      if (Array.isArray(data.agentDefaultTools)) agentDefaultTools = data.agentDefaultTools;
+      if (Array.isArray(data.agentDefs)) cacheDefs(data.agentDefs);
     } catch { /* keep whatever we had — the md control retries on the next open */ }
+  }
+
+  /** Index definitions by agent key (the definition's name, or its file's base
+   *  name when the frontmatter has none) so a desk can find its agents/*.md. */
+  function cacheDefs(list) {
+    const map = new Map();
+    for (const d of list) {
+      if (!d || !d.file) continue;
+      map.set(lower(d.name || String(d.file).replace(/\.md$/i, "")), d);
+    }
+    defByAgent = map;
+    defsAt = Date.now();
+  }
+
+  /** The cached definition for a desk's agent key, or null when there is none. */
+  function defForAgent(name) {
+    if (!defByAgent) return null;
+    const key = lower(name);
+    if (defByAgent.has(key)) return defByAgent.get(key);
+    for (const d of defByAgent.values()) {
+      if (d && lower(String(d.file || "").replace(/\.md$/i, "")) === key) return d;
+    }
+    return null;
+  }
+
+  /** The cached definition for a file name (chips carry the file, not the key). */
+  function defByFile(file) {
+    if (!defByAgent || !file) return null;
+    for (const d of defByAgent.values()) if (d && d.file === file) return d;
+    return null;
+  }
+
+  /** Write one of a definition's allowlist keys (`skills:` / `tools:`) into its
+   *  markdown through /settings, then re-index from the fresh snapshot. */
+  async function setDefList(file, key, names) {
+    const action = key === "skills" ? "setAgentDefSkills" : "setAgentDefTools";
+    const { res, data } = await S.api("/settings", {}, {
+      action, value: { file, [key]: names }, cwd: state().cwd || "",
+    });
+    if (!res.ok || !data) throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
+    if (Array.isArray(data.agentDefaultTools)) agentDefaultTools = data.agentDefaultTools;
+    if (Array.isArray(data.agentDefs)) cacheDefs(data.agentDefs);
+  }
+
+  /** Flip one name in a subagent's own `skills:` / `tools:` key. A definition
+   *  that currently inherits is materialized first, so one chip click never
+   *  drops the names it already had. */
+  async function toggleDefList(kind, file, name) {
+    const def = defByFile(file);
+    if (!def) { if (S.toast) S.toast(`No agents/${file} definition to edit`, "warn"); return; }
+    const cur = kind === "skills" ? defSkillNames(def) : defToolNames(def);
+    const next = cur.includes(name) ? cur.filter((x) => x !== name) : [...cur, name];
+    try {
+      await setDefList(file, kind, next);
+      renderAgentSettings();
+      if (S.toast) S.toast(`agents/${file}: ${next.length} ${kind}`);
+    } catch (err) {
+      if (S.toast) S.toast(`Could not update agents/${file}: ${errMsg(err)}`, "err");
+    }
+  }
+
+  /** Does this agent already have an agents/<name>.md definition? The cached
+   *  definitions are keyed by name OR file base, so check both. A cache that
+   *  never loaded answers false and lets the create be attempted (a 409 then
+   *  means the file is already there and is treated as benign). */
+  function hasAgentDef(name) {
+    if (!defByAgent) return false;
+    const key = lower(name);
+    if (defByAgent.has(key)) return true;
+    for (const d of defByAgent.values()) {
+      if (lower(String((d && d.file) || "").replace(/\.md$/i, "")) === key) return true;
+    }
+    return false;
   }
 
   /** Open a subagent's agents/*.md (frontmatter + prompt) in the full-screen editor. */
@@ -2215,11 +2843,10 @@
             `<span class="office-plant"></span>` +
             `<span class="office-window"></span>` +
             // The office's own name, hung on the wall between the window and
-            // the clock — the top of the building, beside the Kanban sign.
+            // the clock. The Kanban board lives in the meeting room below.
             `<button class="office-title office-wall-name" id="office-name" type="button" ` +
               `title="Rename this office">${esc(officeName())}</button>` +
             `<span class="office-clock"><span class="office-hand h"></span><span class="office-hand m"></span></span>` +
-            `<span class="office-wall-slot" id="office-board-host">${kanbanMiniHtml()}</span>` +
           `</div>` +
           `<div class="office-plan" id="office-plan"></div>` +
           `<div class="office-empty" id="office-empty" hidden>` +
@@ -2243,8 +2870,11 @@
     popEl = pane.querySelector("#office-pop");
 
     pane.querySelector("#office-refresh").addEventListener("click", () => {
-      team = null;
+      // Force a refetch but keep the roster we have: if the request fails the
+      // office must go on drawing the last good floor (see refreshTeam's catch),
+      // not drop the roster to null and show an empty building.
       void refreshTeam(true);
+      void refreshOffice(true);
     });
 
     // The office's name (on the wall) is edited in a dialog; empty restores "Office".
@@ -2277,25 +2907,25 @@
     // over to that team (the same POST /agent-team the Agent-Team rail uses).
     planEl.addEventListener("click", (e) => {
       const t = e.target;
-      const hire = t.closest && t.closest(".office-hire");
-      if (hire && !hire.disabled) { void hireMember(hire.dataset.team); return; }
       const pick = t.closest && t.closest(".office-room-pick");
       if (pick && !pick.disabled) { void activateTeam(pick.dataset.team, pick); return; }
       const lib = t.closest && t.closest("#office-library-open");
       if (lib) { openLibrary(); return; }
       const teamsBtn = t.closest && t.closest("#office-teams-open");
       if (teamsBtn) { openTeamsManager(); return; }
-      const act = t.closest && t.closest(".office-act, .office-fire");
+      // The desk's own controls: off duty (a quick toggle) and settings (the
+      // agent's whole configuration, in a popup).
+      const act = t.closest && t.closest(".office-act");
       if (!act || act.disabled) return;
-      if (act.dataset.act === "fire") void fireMember(act.dataset.team, act.dataset.agent, act);
-      else if (act.dataset.act === "duty") toggleDuty(act.dataset.agent, act);
-      else if (act.dataset.act === "rename") renameMember(act.dataset.team, act.dataset.agent, act);
-      else if (act.dataset.act === "md") void editAgentMarkdown(act.dataset.agent, act);
+      if (act.dataset.act === "duty") toggleDuty(act.dataset.agent, act.dataset.team || "", act);
+      else if (act.dataset.act === "settings") openAgentSettings(act.dataset.agent, act.dataset.team || "");
     });
-    // The orchestrator's model picker: a change is a settings write.
+    // A desk's model picker: a change is a settings / teams.yaml write.
     planEl.addEventListener("change", (e) => {
       const pick = e.target;
-      if (pick && pick.id === "office-orch-model") void setOrchestratorModel(pick.value);
+      if (!pick || !pick.classList || !pick.classList.contains("office-model-select")) return;
+      if (pick.dataset.modelFor === "orchestrator") void setOrchestratorModel(pick.value);
+      else if (pick.dataset.team) void setMemberModelFor(pick.dataset.team, pick.dataset.agent, pick.value);
     });
     // Opening the shelf from the keyboard behaves like clicking it.
     planEl.addEventListener("keydown", (e) => {
@@ -2319,43 +2949,68 @@
   }
   function stopTicker() { if (ticker) { clearInterval(ticker); ticker = null; } }
 
-  window.__officeOnView = function () {
-    const el = document.getElementById("office-pane");
-    if (!el) return;
-    if (!pane || pane !== el) build(el);
-    void refreshTeam(false);
-    void refreshDefs(false);
-    render();
-    startTicker();
-  };
+  // ─── Plugin registration ──────────────────────────────────────────────────
 
-  window.__officeOnHide = function () {
-    stopTicker();
-    hidePop();
-    // The full-screen surfaces are chrome; leaving the view takes them with it.
-    closeLibrary();
-    closeKanban();
-    closeTeamsManager();
-  };
+  /**
+   * The plugin's own stylesheet, co-located with this bundle and fetched from
+   * the same plugin directory. `document.currentScript` is this <script> (the
+   * host injects it dynamically), so its `?token=` carries over and the sheet
+   * needs no knowledge of the host's auth scheme.
+   */
+  function loadStyles() {
+    const src = document.currentScript && document.currentScript.src;
+    if (!src) return;
+    const href = src.replace(/client\.js(\?|$)/, "client.css$1");
+    if (!href || href === src || document.querySelector(`link[href="${href}"]`)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    document.head.appendChild(link);
+  }
 
-  window.__officeOnSessions = function () { render(); };
-
-  window.__officeOnCwd = function () {
-    // A different project gets a fresh floor: yesterday's firing does not carry.
-    firedKeys.clear();
-    void refreshTeam(true);
-  };
-
-  window.__officeOnReconnect = function () { void refreshTeam(true); void refreshDefs(true); };
-
-  window.__officeOnEvent = function (evt) {
-    noteActivity(evt);
-    render();
-  };
-
-  // app.js restores the initial view with setView(STATE.view) while it executes,
-  // which is BEFORE this file is parsed — so that onShow call was a no-op and a
-  // boot that lands directly on Office would sit on an empty pane. Re-issue the
-  // notification now that the hook exists.
-  if (state().view === "office") window.__officeOnView();
+  S.Plugins.register({
+    id: "office",
+    name: "Office",
+    description:
+      "A live top-down office: each subagent has a cubicle with a desk, screen and chair, and animates while it works. Hire, fire, rename and enable subagents, manage teams, and keep a reference library of files and folders, straight from the floor.",
+    nav: { label: "Office", order: 65, group: "timeline", title: "Watch your agent team work" },
+    view: {
+      // The host creates this pane inside <main> for the plugin (ensurePane).
+      pane: "#office-pane",
+      display: "flex",
+      session: "none",
+      render: (paneEl) => { loadStyles(); build(paneEl); },
+      onShow: () => {
+        const el = document.getElementById("office-pane");
+        if (!el) return;
+        if (!pane || pane !== el) build(el);
+        void refreshTeam(false);
+        void refreshOffice(false);
+        void refreshDefs(false);
+        render();
+        startTicker();
+      },
+      onHide: () => {
+        stopTicker();
+        hidePop();
+        // The full-screen surfaces are chrome; leaving the view takes them with it.
+        closeLibrary();
+        closeKanban();
+        closeTeamsManager();
+        closeAgentSettings();
+      },
+      onSessions: () => { render(); },
+      onCwd: () => {
+        // A different project gets a fresh floor: yesterday's firing does not carry.
+        firedKeys.clear();
+        void refreshTeam(true);
+        void refreshOffice(true);
+      },
+      onReconnect: () => { void refreshTeam(true); void refreshOffice(true); void refreshDefs(true); },
+      onEvent: (evt) => {
+        noteActivity(evt);
+        render();
+      },
+    },
+  });
 })();

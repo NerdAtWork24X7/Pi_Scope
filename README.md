@@ -116,32 +116,42 @@ seen from above. Agents that are **working** have their screen lit and their arm
 a chair pushed back and an orange dot mean **waiting**; a greyed cubicle is **stopped** or
 idle. The floor reads like a real plan: the **orchestrator** gets its own office at the top
 (marked ★), the **meeting room** sits to its right, and the **team rooms** are laid out two
-left and two right around a center pathway. Every room is labelled at its top-left, with
-its controls at its top-right: the active team is **badged**, the others carry
-**activate**, and every team has **+ hire** — a roomy form that adds a subagent to *that*
-team with a **display name**, a model (every known model, grouped one group per provider,
-like the Settings page) and a fresh `agents/<name>.md` to grow from — its Definition
-field starts from a default template that follows the name you type, and the file it
-writes ends with the **Reference files** section described below.
+left and two right around a center pathway. Only the **active team** is staffed, so its
+desks are the ones that animate; the same subagent sitting on an inactive team stays
+dormant there, even while it works on the active one. Every room is labelled at its
+top-left, with its control at its top-right: the active team is **badged**, the others carry
+**activate**.
+
+Under each seated worker a desk prints the **model** it runs on and what it has spent so
+far — **tokens and cost** (`12.3k tok · $0.042`), refreshed from the server while it
+works. The model control lists every known model, grouped one group per provider, like the
+Settings page: the **orchestrator**'s writes the app's default model in `settings.json` (the
+same "default model" the Settings page shows, and the model every queued task is dispatched
+on), while a **subagent**'s writes its own `teams.yaml` row — per team, so the same agent can
+run a different model on each team it sits on. Every per-member control follows the same rule:
+the desk's **off duty** toggle, its **name** and **fire** touch only the row of the team that
+desk sits in, so a member on several teams keeps its own model, label and duty on each.
 
 A cubicle's header carries its name (a real id `file_reader` can read **Bob**, and the id
-stays beside it) and its own controls: **off duty / on duty** enables or disables the
-subagent — an off-duty agent keeps its cubicle but shows an empty desk — **fire** drops it
-from the team, **md** opens its whole `agents/*.md` definition (frontmatter + prompt) in a
-full-screen editor, and **name** edits the label. The orchestrator's office carries a
-**teams** control — a manager listing every team, where you add a new one (which becomes
-active) or remove a team you no longer need. The **office's own name** hangs on the north
-wall between the window and the clock — click it to call this workspace whatever you like.
+stays beside it), then its own **off duty / on duty** control — an off-duty agent keeps its
+cubicle but shows an empty desk — and a round **settings** gear. That popup gathers the whole
+agent in
+one place: its **model**, its **name** (the display label), **duty**, **markdown** (its whole
+`agents/*.md` definition, frontmatter + prompt, in a full-screen editor), the **skills**,
+**tools** and **extensions** it is enabled for (the orchestrator's own allowlists, or — for a
+subagent — the `skills:` and `tools:` its `agents/<name>.md` pins, editable right there), and
+**fire** — or, on
+the orchestrator's desk, **hire**: a roomy form that adds a subagent to the team you pick,
+with a display name, a model and a fresh `agents/<name>.md` to grow from. Its Definition
+field starts from a default template that follows the name you type, and the file it
+writes ends with the **Reference files** section described below. The orchestrator's office
+also carries a **teams** control — a manager listing every team, where you add a new one
+(which becomes active) or remove a team you no longer need. The **office's own name** hangs
+on the north wall between the window and the clock — click it to call this workspace
+whatever you like.
 
-The **orchestrator** gets one control of its own, because the model it runs on is the
-app's default: a **model** picker on the corner office. It lists every known model, grouped
-one group per provider, and the choice is stored in `settings.json` — the same "default
-model" the Settings page shows — and rides with every task the queue dispatches. Under
-each desk's activity line, the floor also prints that agent's running total: **tokens spent
-and what they cost** (`12.3k tok · $0.042`), refreshed from the server while it works.
-
-The north wall hangs the **Kanban board**, drawn as a small sign with a count per column,
-its run state, and what the orchestrator is on right now. Click it for the full-screen
+The **meeting room** hangs the **Kanban board**, drawn as a small sign with a count per
+column, its run state, and what the orchestrator is on right now. Click it for the full-screen
 board: **Todo → Planned → In Progress → Done**. **＋ New task** opens a roomy popup — a
 title and a big brief field, not a cramped inline box — and the task lands in Todo; move it
 along with the arrow on its row. The runner starts **paused**: press **▶ Run** in the board
@@ -150,18 +160,18 @@ in order, each as its own chat turn, and every task lands in **Done** when its r
 Press **⏸ Pause** to stop: the task in progress is aborted and returns to Planned, and
 nothing new starts until you press Run again. A task whose run cannot settle goes back to
 Planned and waits for you to move it again, so a broken run can never spin. The board — its
-queue and the runner's paused/running state — is stored in the project's own
-`.pi/settings/agent-team-config.json` alongside the office name, so it travels with the
-workspace.
+queue and the runner's paused/running state — is kept by the Office plugin itself, per
+workspace, in its own store (`~/.pi-scope/plugins/.data/office.json`), and read and written
+over the plugin's own `/office` routes.
 
-The **meeting room** holds the workspace's **reference library**, drawn as a **shelf of
-books** with a badge for how many references it holds. Click it for a full-screen panel
+The **meeting room** also holds the workspace's **reference library**, drawn as a **shelf
+of books** with a badge for how many references it holds. Click it for a full-screen panel
 where each reference is a row: its path, an optional note, and the **agent it is for**
 (the whole team, the orchestrator, or one subagent); rows are reassigned and removed there,
 and new files or folders are added the same way. The library is injected as a reference
 block at the start of every **new conversation**, grouped by the agent each path belongs
 to, so the orchestrator and the subagents it dispatches know what to read — and a
-subagent hired from a room starts with a **Reference files** section in its fresh
+subagent hired from the settings popup starts with a **Reference files** section in its fresh
 `agents/<name>.md`, filled from whatever is assigned to it. The library lives in the
 project's own `.pi/settings/agent-team-config.json`, so it travels with the workspace.
 
@@ -247,10 +257,19 @@ the working tree when nothing is staged) — pick the model and edit the instruc
 
 ### ⚙️ Settings — the whole agent, configured from the browser
 
-Manage your **Agent** defaults, **Teams**, **Models** (with the cost catalog), **Skills**,
-**Extensions**, **API keys**, and **Plugins** — mirroring your `pi` config, editable from the UI. Two
+Manage your **Agent** defaults, **Teams**, **Models** (with the cost catalog), **Extensions**,
+**API keys**, and **Plugins** — mirroring your `pi` config, editable from the UI. Two
 tabs manage the bundled agent itself: **Auth** is a browser form of `pi`'s `/login` (provider list
 read live from `pi`, OAuth and API-key sign-in), and **Update** installs a newer `pi` when npm has one.
+
+The **SubAgent** tab lists every `agents/*.md` definition as a collapsible card named after the
+subagent, with its own **skills** and **tools** pickers: the chips write that file's
+`skills:` / `tools:` keys — the two allowlists the agent-team extension reads when it spawns that
+subagent — while **Edit** opens the whole file (frontmatter + prompt) for everything else. Below
+the definitions sits an **Orchestrator** card for the main agent itself: its **Skills** chips toggle
+which installed skills it is offered (`orchestratorSkills`) and its **Tools** chips toggle which
+catalogue tools it uses (off adds the name to `skipOrchestratorTools`). `agent-team-config.json`
+holds no subagent skills or tools — the definition files are the single source of truth for those.
 
 <p align="center">
   <img src="docs/shots/settings-dark.png" alt="Settings" width="880" />
@@ -482,7 +501,8 @@ Running from source instead of the launcher? `SCOPE_HOST=0.0.0.0 npm start` in
 | `SCOPE_AGENT_DIR` | `~/.pi-scope/agent` | Pi Scope's **own** pi agent dir (settings, API keys, model store, sessions). The bundled `pi` is pinned here via `PI_CODING_AGENT_DIR`, so it never touches the global pi agent dir. |
 | `SCOPE_SETTINGS_JSON` | `<agentDir>/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
 | `SCOPE_SKILLS_DIR` | `<agentDir>/skills` | Override the skills directory scanned for the agent-team sidebar |
-| `SCOPE_PLUGINS_DIR` | `~/.pi-scope/plugins` | Where user plugins live (enable/disable state in `plugins.json`, namespaced state in `.data/`) |
+| `SCOPE_PLUGINS_DIR` | `~/.pi-scope/plugins` | Where user plugins live. Enable/disable state is in `plugins.json` and **every plugin's own settings live in `.data/<id>.json`** (`api.store`) — a feature's settings belong to the plugin that owns the feature, not to pi's `settings.json`. A user plugin with a built-in's `id` overrides it, which is how one is swapped or upgraded |
+| `SCOPE_BUILTIN_PLUGINS_DIR` | beside the server module | Override where the built-in feature plugins are discovered (the packaged build ships them in `server-bundle/plugins`) |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. a non-standard venv: `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
 | `SCOPE_PI_BIN` | bundled `pi` | Override the `pi` executable Pi Scope launches for Chat, commit messages and subagents. Set it to use a different `pi` than the bundled one (or to stub it in tests). |
 | `SCOPE_PI_BUNDLE_DIR` | auto-detected | Where the bundled `pi` lives (`apps/scope-desktop/pi-bundle` in dev, `resources/pi` packaged). Set by the packaged launcher; only override for an out-of-tree bundle. |
@@ -519,7 +539,11 @@ where state is persisted — and copy the working example in
 - **UI:** vanilla-JS, zero frameworks — `apps/scope-server/public/`. Views are plugins:
   `plugins.js` is the client host/registry, `plugins-builtin.js` registers the shipped views
   (`single`, `trajectory`, `chat`, `terminal`, `files`, `checkpoints`, `git`, `settings`), and
-  `app.js` `setView()` is registry-driven — it knows no view by name.
+  `app.js` `setView()` is registry-driven — it knows no view by name. **Office** is the
+  standalone one: its client bundle, stylesheet and server module all live in
+  `apps/scope-server/plugins/office/`, and the host loads them from its manifest like any
+  third-party plugin's — so `cp -r apps/scope-server/plugins/office ~/.pi-scope/plugins/`
+  installs a user copy that overrides the built-in one.
 - **Plugins:** `apps/scope-server/plugins.ts` is the server host (discovery, enable/disable,
   route gating, event hooks, per-plugin storage); `apps/scope-server/plugins/` holds the built-in
   feature manifests; `examples/plugins/` has an installable example. Docs:

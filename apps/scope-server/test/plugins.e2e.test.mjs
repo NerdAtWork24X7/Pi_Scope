@@ -24,7 +24,10 @@ const SERVER = path.join(ROOT, "apps", "scope-server", "server.ts");
 const EXAMPLE_PLUGIN = path.join(ROOT, "examples", "plugins", "hello-insights");
 
 const TOKEN = "plugin-test-token";
-const BUILTIN_VIEWS = ["chat", "terminal", "files", "checkpoints", "git", "single", "trajectory", "settings"];
+// Every built-in view. `office` is the standalone one: its client bundle is not
+// in index.html — the host loads it from plugins/office/client.js at sync time,
+// exactly like a user plugin's.
+const BUILTIN_VIEWS = ["chat", "terminal", "files", "checkpoints", "git", "single", "office", "trajectory", "settings"];
 
 let browser;
 let child;
@@ -265,6 +268,50 @@ describe("plugin host (client)", () => {
     await page.waitForFunction(() => window.SCOPE?.Plugins?.isSynced?.() === true);
     await page.waitForFunction(() => window.__SCOPE_STATE?.view === "hello-insights");
     assert.notEqual(await page.locator("#hello-insights-pane").evaluate((e) => e.style.display), "none");
+    await page.close();
+  });
+
+  test("a built-in plugin's own client bundle, view and server route work end to end", async () => {
+    // The Office is the standalone built-in: it ships client.js + client.css +
+    // server.ts in its plugin directory, so this drives the whole path against
+    // the real server — the host serving the bundle, the view registering
+    // itself, and a write landing in the plugin's own store via /office.
+    const page = await browser.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e?.message ?? e)));
+    await page.goto(`${base}/?token=${TOKEN}#view=office`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#office-pane .office-room");
+    assert.equal(await page.locator("#btn-office.active").count(), 1, "the Office view is active");
+
+    // The plugin's own stylesheet came with the bundle: the room's palette is
+    // defined by client.css, not by the core stylesheet.
+    const floor = await page.locator("#office-pane .office-scene").evaluate((el) =>
+      getComputedStyle(el).getPropertyValue("--office-floor").trim());
+    assert.match(floor, /^#|rgb/, `the office palette is loaded (${floor || "missing"})`);
+
+    await page.click("#office-name");
+    await page.waitForSelector("#office-name-input");
+    await page.fill("#office-name-input", "Night Shift HQ");
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await page.waitForFunction(() => document.getElementById("office-name")?.textContent === "Night Shift HQ");
+
+    // The write reached the plugin's route…
+    const { res, data } = await api(`/office?cwd=${encodeURIComponent(ROOT)}`);
+    assert.ok(res.ok);
+    assert.equal(data.officeName, "Night Shift HQ");
+    // …and its own store, which is namespaced per plugin. The view's cwd is the
+    // server's launch dir, so the bucket is found rather than assumed.
+    const store = JSON.parse(fs.readFileSync(path.join(pluginsDir, ".data", "office.json"), "utf8"));
+    assert.ok(
+      Object.values(store.workspaces).some((w) => w.officeName === "Night Shift HQ"),
+      "the office name is in the plugin's own store",
+    );
+
+    // Disabling the plugin takes the view away with it (routes and bundle).
+    await api("/plugins", { method: "POST", body: JSON.stringify({ action: "disable", id: "office" }) });
+    assert.equal((await api("/office")).res.status, 403, "the plugin's routes are gated");
+    await api("/plugins", { method: "POST", body: JSON.stringify({ action: "enable", id: "office" }) });
+    assert.deepEqual(errors, []);
     await page.close();
   });
 

@@ -146,7 +146,7 @@ Done: header button → view → own HTTP route → own persistent counters.
 
 | Root | Purpose |
 |---|---|
-| `apps/scope-server/plugins/<id>/` | Built-in feature plugins shipped with the app (`plugin.json` + their route handler in `server.ts`; the client specs live in `public/plugins-builtin.js`). |
+| `apps/scope-server/plugins/<id>/` | Built-in feature plugins shipped with the app (`plugin.json` + their route handler in `server.ts`; their client specs live in `public/plugins-builtin.js` — or, like the Office, ship their own `client.js` bundle and register themselves). |
 | `~/.pi-scope/plugins/<id>/` | **Your plugins.** Override the location with `SCOPE_PLUGINS_DIR` (**must be an absolute path** — see [Gotchas](#gotchas-and-hard-rules)). |
 
 Enable/disable state is persisted to `~/.pi-scope/plugins/plugins.json`. Per
@@ -155,11 +155,20 @@ plugin state written through `api.store` lands in `~/.pi-scope/plugins/.data/`.
 A user plugin with the same `id` as a built-in **overrides** it — that is how you
 swap out a shipped feature without patching the app.
 
-Built-ins keep their server half beside the manifest: the Files, Git and
-Checkpoints routes live in `plugins/files/server.ts`, `plugins/git/server.ts` and
-`plugins/checkpoints/server.ts`. Those modules are ordinary plugins — they just
+Built-ins keep their server half beside the manifest: the Files, Git,
+Checkpoints and Office routes live in `plugins/files/server.ts`,
+`plugins/git/server.ts`, `plugins/checkpoints/server.ts` and
+`plugins/office/server.ts`. Those modules are ordinary plugins — they just
 receive a few extra host primitives through `api.kit` (below) instead of
 re-importing `server.ts`.
+
+The Office is the reference for a **fully standalone built-in**: manifest, server
+module, client bundle and stylesheet all in `plugins/office/`, with its own
+`/office` route prefix and its own `api.store` state — nothing about it lives in
+`server.ts`, `public/`, or `index.html`. A built-in that ships a `client.js` is
+served at `/plugins/file/<id>/<client>` and loaded by the host exactly like a
+user plugin's bundle, and may fetch its own sibling files (e.g. a stylesheet)
+from that same directory.
 
 The server discovers both roots at boot and re-scans on **Settings → Plugins →
 Reload plugins**.
@@ -297,10 +306,30 @@ export function activate(api) {
 ```
 
 The kit exposes `fs`, `path`, `jsonResponse`, `textResponse`, `readBody`,
-`intParam`, `intOrNull`, `validateCwd`, `readSettingsJson`,
-`DEFAULT_COMMIT_TEMPLATE`, `generateCommitMessage`, `git`, `gitTry`,
-`gitConfigArgs`, `ensureGitRepo`, `resolveWithinCwd`, `cleanPaths`,
-`rejectOptionLike`, `parsePorcelainLine`, `porcelainStatus`, `buildRepoGraph`.
+`intParam`, `intOrNull`, `validateCwd`, `resolveProjectDir`, `readSettingsJson`,
+`DEFAULT_COMMIT_TEMPLATE`, `generateCommitMessage`, `git`,
+`gitTry`, `gitConfigArgs`, `ensureGitRepo`, `resolveWithinCwd`, `cleanPaths`,
+`rejectOptionLike`, `parsePorcelainLine`, `porcelainStatus`, `buildRepoGraph`,
+and `legacyOfficeState` (a one-time migration reader the Office plugin uses to
+import a workspace's pre-plugin name/board; nothing else should need it).
+
+`readSettingsJson()` is pi's `settings.json` — read-only, for the keys pi itself
+owns (`defaultModel`, `theme`, `editorPaddingX`, …). It is **not** where a
+plugin's own settings go.
+
+**Your settings belong in `api.store`**, which persists per plugin at
+`<plugins dir>/.data/<your-id>.json` — one namespaced file per plugin, next to
+`plugins.json`, so a plugin carries its settings with it and a copy installed in
+`~/.pi-scope/plugins/` shares nothing with the built-in it replaces. That is
+exactly how the Git feature keeps its commit-message model and template (the
+plugin reads and writes `commitModel` / `commitTemplate`). Never write to
+`settings.json`: those keys are pi's, and a user's `~/.pi-scope` stays readable
+by a future pi that has never heard of your plugin.
+
+```js
+const model = api.store.get("commitModel", "");   // your key, your file
+api.store.set("commitModel", "anthropic/claude");
+```
 **`api.kit` is an internal contract**, not a public plugin API: it exists because
 the built-ins need it, and it changes with the host. Treat every member as
 optional and feature-detect (`api.kit?.gitTry`). If you need something it does
@@ -413,12 +442,13 @@ options, `view.settings` for a full section.
 1. **Boot** — the server discovers and activates every enabled plugin with a
    server entry, then serves the UI. `public/plugins.js` registers the built-in
    specs synchronously, then `sync()` reconciles against `GET /plugins`: hides
-   disabled views, dynamically loads user `client.js` bundles (sequentially, in
-   Settings-list order), re-renders the nav, and finally fires
+   disabled views, dynamically loads every enabled `client.js` bundle that is not
+   registered yet — user plugins and built-ins that ship one (the Office) alike,
+   sequentially, in Settings-list order — re-renders the nav, and finally fires
    `scope:plugins-ready`.
-2. **Deep links** — `#view=my-plugin` works for a user plugin: the host captures
-   the requested id before `app.js` rewrites the hash and applies it once the
-   bundle has registered.
+2. **Deep links** — `#view=my-plugin` works for any plugin with a client bundle:
+   the host captures the requested id before `app.js` rewrites the hash and
+   applies it once the bundle has registered.
 3. **Enable / disable** — Settings → Plugins toggles `POST /plugins
    { action: "enable"|"disable", id }`. Disabling tears down the plugin's routes
    and event hooks and persists to `plugins.json`; enabling re-activates it.
@@ -537,6 +567,30 @@ in the header.
 
 ---
 
+## Installing a built-in as a user plugin
+
+A user plugin with the same `id` as a built-in **overrides** it. That is how a
+shipped feature can be swapped or upgraded without rebuilding the app — the
+Office is the worked example, because it is a complete plugin (manifest, server
+module, client bundle, stylesheet):
+
+```bash
+mkdir -p ~/.pi-scope/plugins
+cp -r apps/scope-server/plugins/office ~/.pi-scope/plugins/
+```
+
+Settings → Plugins → **⟳ Reload plugins** now reports it as `source: user`,
+loading it from your plugins dir: the host serves that copy's `client.js` /
+`client.css` at `/plugins/file/office/…`, runs that copy's `/office` routes, and
+`GET /plugins` shows its `dir`, `version` and `name`. Delete the directory and
+reload to fall back to the shipped copy.
+
+Its state does not move with it: the plugin's store is namespaced by **plugin
+id** (`<plugins dir>/.data/office.json`), so a swapped-in copy picks up the
+boards, names and runner state the built-in one had left there.
+
+---
+
 ## How the pieces fit
 
 ```
@@ -550,6 +604,7 @@ plugin.json ─┬─► server (plugins.ts)  ── routes · event hooks · st
 * `apps/scope-server/plugins.ts` — server plugin host (discovery, activation,
   route registry, gating, storage).
 * `apps/scope-server/public/plugins.js` — client plugin host / registry.
-* `apps/scope-server/public/plugins-builtin.js` — the built-in feature specs.
+* `apps/scope-server/public/plugins-builtin.js` — the built-in feature specs
+  (the Office is not here: it registers itself from its own `client.js`).
 * `apps/scope-server/public/settings.js` — Settings → Plugins list, the gear
   popup host and `ctx.field` / `ctx.wire`.

@@ -1,5 +1,7 @@
 // End-to-end tests for the Office view, run in headless Chromium against the
-// mock backend in ./mock-backend.mjs (which serves the real public/ assets).
+// mock backend in ./mock-backend.mjs (which serves the real public/ assets, and
+// the plugin's own client bundle from plugins/office/ — the Office is a
+// standalone plugin, so nothing about it lives in public/ or index.html).
 //
 //   node --test apps/scope-server/test/office.e2e.test.mjs
 //
@@ -44,9 +46,10 @@ afterEach(async () => {
 });
 
 /** Seed sessions + team, then load the app directly on the Office view. */
-async function boot({ sessions = [], team, events, defs } = {}) {
+async function boot({ sessions = [], team, events, defs, office } = {}) {
   mock.setSessions(sessions);
   mock.setTeam(team || defaultTeam());
+  if (office) mock.setOffice(office);
   if (defs) mock.setAgentDefs(defs);
   if (events) for (const [sid, list] of Object.entries(events)) mock.setEvents(sid, list);
   context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -196,6 +199,44 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
+  test("a desk on an inactive team stays dormant even when the same agent works on the active team", async () => {
+    // The same subagent sits on both teams. Only the active team is staffed, so
+    // its desk lights up while the inactive team's desk for that agent must not.
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "file_reader", last_turn_event: "turn_start" })],
+      team: defaultTeam({
+        activeTeam: "alpha",
+        teamsOrder: ["alpha", "beta"],
+        teams: {
+          alpha: [{ name: "orchestrator" }, { name: "file_reader" }],
+          beta: [{ name: "file_reader" }],
+        },
+      }),
+    });
+    const desk = (t) => page.locator(`#office-pane .office-room[data-room="team:${t}"] .office-pod[data-key="file_reader"]`);
+
+    // The active team's desk animates the running subagent…
+    await page.waitForFunction(() =>
+      document.querySelector('#office-pane .office-room[data-room="team:alpha"] .office-pod[data-key="file_reader"]')?.classList.contains("working"),
+    );
+    assert.ok(await desk("alpha").evaluate((el) => el.classList.contains("working")), "the active team's desk is working");
+
+    // …and the inactive team's desk for the same agent stays idle.
+    assert.equal(await desk("beta").evaluate((el) => el.classList.contains("working")), false, "the inactive team's desk never lights up");
+    assert.ok(await desk("beta").evaluate((el) => el.classList.contains("idle")), "it reads as idle instead");
+    assert.match(await desk("beta").getAttribute("title"), /team inactive/i);
+    assert.match(await desk("alpha").getAttribute("title"), /working/i);
+
+    // Making the other team active moves the live status with it.
+    await page.locator('#office-pane .office-room[data-room="team:beta"] .office-room-pick').click();
+    await page.waitForFunction(() =>
+      document.querySelector('#office-pane .office-room[data-room="team:beta"] .office-pod[data-key="file_reader"]')?.classList.contains("working"),
+    );
+    assert.ok(await desk("beta").evaluate((el) => el.classList.contains("working")), "the newly active team's desk works");
+    assert.equal(await desk("alpha").evaluate((el) => el.classList.contains("working")), false, "and the old active team's desk goes dormant");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
   test("firing a subagent removes it from the team, and hiring adds one back", async () => {
     await boot({
       sessions: [
@@ -208,21 +249,36 @@ describe("office view", () => {
     });
     await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
 
-    // Fire is the cubicle's own top-right control; the orchestrator is not on a
-    // roster, so it has none.
-    assert.equal(await pod("orchestrator").locator(".office-fire").count(), 0, "the orchestrator cannot be fired");
-    assert.equal(await pod("builder").locator(".office-fire").count(), 1, "a team desk offers Fire");
-    await pod("builder").locator(".office-fire").click();
+    // The floor carries no hire / fire / md / name controls: each desk has just
+    // its own **off duty** toggle and the **settings** popup that gathers them.
+    for (const sel of [".office-fire", ".office-hire", '.office-act[data-act="md"]', '.office-act[data-act="rename"]']) {
+      assert.equal(await page.locator(`#office-pane ${sel}`).count(), 0, `${sel} is not drawn on the floor`);
+    }
+    assert.equal(await pod("orchestrator").locator('.office-act[data-act="settings"]').count(), 1, "the orchestrator configures from settings");
+    assert.equal(await pod("builder").locator('.office-act[data-act="settings"]').count(), 1, "a team desk offers settings");
+    assert.equal(await pod("orchestrator").locator(".office-act.duty").count(), 0, "the orchestrator has no duty toggle");
+
+    // Fire lives in the desk's settings popup now.
+    await pod("builder").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    assert.match(await page.textContent("#office-set-sub"), /builder/);
+    assert.equal(await page.locator("#office-settings-backdrop .office-set-fire").count(), 1, "the popup carries fire");
+    await page.click("#office-settings-backdrop .office-set-fire");
     // The desk leaves the floor — not just the room: a fired subagent's old
     // sessions must not resurrect it under "Ad-hoc desks".
     await page.waitForFunction(() => !document.querySelector('#office-pane .office-pod[data-key="builder"]'));
+    await page.waitForSelector("#office-settings-backdrop", { state: "detached" });
     assert.equal((mock.state.team.teams.dev || []).some((m) => m.name === "builder"), false, "the subagent left the team");
     assert.equal(await page.locator('#office-pane .office-room[data-room="team:dev"] .office-pod').count(), 0, "the desk left its room");
     assert.equal(await page.locator('#office-pane .office-pod').count(), 2, "only the orchestrator and critic keep desks");
 
-    // Hire lives on the team room's top-right: it adds a member, with a display
-    // name, a model and a fresh agents/<name>.md definition.
-    await page.click('#office-pane .office-room[data-room="team:dev"] .office-hire');
+    // Hire lives in the orchestrator's settings popup: choose a team, then the
+    // roomy form opens and adds a member — a display name, a model and a fresh
+    // agents/<name>.md definition.
+    await pod("orchestrator").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.selectOption("#office-settings-backdrop .office-set-hire-team", "dev");
+    await page.click("#office-settings-backdrop .office-set-hire");
     await page.waitForSelector("#office-dlg-backdrop");
     assert.equal(await page.inputValue("#office-hire-name"), "", "the hire form starts empty");
     // Definition starts from the default template, and its opening line follows
@@ -295,7 +351,8 @@ describe("office view", () => {
 
     // Hiring someone with no references yet still gets the section, as a
     // commented skeleton, so every subagent definition has the same shape.
-    await page.click('#office-pane .office-room[data-room="team:review"] .office-hire');
+    await page.selectOption("#office-settings-backdrop .office-set-hire-team", "review");
+    await page.click("#office-settings-backdrop .office-set-hire");
     await page.waitForSelector("#office-dlg-backdrop");
     await page.fill("#office-hire-name", "writer");
     await page.click("#office-dlg-backdrop .office-dialog-ok");
@@ -333,6 +390,174 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
+  test("a subagent's duty is per team — one desk's toggle leaves the other team's seat alone", async () => {
+    // `builder` sits on both dev and review. Teams are independent, so taking
+    // the member off duty on one desk must not darken the other team's seat.
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({
+        teams: {
+          dev: [
+            { name: "orchestrator", model: "google/gemini-2.5-flash-lite", active: true },
+            { name: "builder", model: "google/gemini-2.5-flash-lite", active: true },
+          ],
+          review: [{ name: "builder", model: "google/gemini-2.5-flash-lite", active: true }],
+        },
+      }),
+    });
+    const deskIn = (room) => page.locator(`#office-pane .office-room[data-room="team:${room}"] .office-pod[data-key="builder"] .office-act.duty`);
+    const row = (teamName) => (mock.state.team.teams[teamName] || []).find((m) => m.name === "builder");
+    await deskIn("review").waitFor();
+
+    // The inactive `review` team's desk: only its own roster row flips, and the
+    // running session's off-list (which speaks for the active team) is untouched.
+    await deskIn("review").click();
+    await page.waitForSelector('#office-pane .office-room[data-room="team:review"] .office-pod[data-key="builder"] .office-act.duty.off');
+    assert.equal(row("review").active, false, "the review row goes off duty");
+    assert.equal(row("dev").active, true, "the dev row keeps its own duty");
+    assert.equal(mock.state.team.disabledAgents.includes("builder"), false, "the running team's off-list is untouched");
+    assert.ok(!(await deskIn("dev").evaluate((el) => el.classList.contains("off"))), "the dev desk stays on duty");
+
+    // The active team's desk does silence the running session; with both seats
+    // empty the header counts the agent as off duty.
+    await deskIn("dev").click();
+    await page.waitForSelector('#office-pane .office-room[data-room="team:dev"] .office-pod[data-key="builder"] .office-act.duty.off');
+    assert.equal(row("dev").active, false, "the dev row goes off duty");
+    assert.ok(mock.state.team.disabledAgents.includes("builder"), "the active team's off-list names the member");
+    assert.equal(row("review").active, false, "the review row is still off duty");
+    assert.match(await counts(), /1\s*off duty/);
+
+    // …and bringing one seat back leaves the other team's row alone.
+    await deskIn("review").click();
+    await page.waitForSelector('#office-pane .office-room[data-room="team:review"] .office-pod[data-key="builder"] .office-act.duty:not(.off)');
+    assert.equal(row("review").active, true, "the review row is back on duty");
+    assert.equal(row("dev").active, false, "and the dev row is untouched by the review desk");
+    assert.ok(mock.state.team.disabledAgents.includes("builder"), "the active team's desk is still the one off duty");
+    assert.ok(await deskIn("dev").evaluate((el) => el.classList.contains("off")), "the dev seat is still empty");
+
+    // The settings popup follows the desk it was opened from: dev is off duty,
+    // review is on, and the popup's own duty button flips only that team.
+    const settingsIn = (room) => page.locator(`#office-pane .office-room[data-room="team:${room}"] .office-pod[data-key="builder"] .office-act[data-act="settings"]`);
+    await settingsIn("dev").click();
+    await page.waitForSelector("#office-settings-backdrop");
+    assert.match(await page.textContent("#office-settings-backdrop"), /off duty on dev/);
+    assert.equal(await page.locator("#office-settings-backdrop .office-set-duty.off").count(), 1, "the popup offers to bring the dev seat back");
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#office-settings-backdrop", { state: "detached" });
+
+    await settingsIn("review").click();
+    await page.waitForSelector("#office-settings-backdrop");
+    assert.match(await page.textContent("#office-settings-backdrop"), /on duty on review/);
+    await page.click("#office-settings-backdrop .office-set-duty");
+    await page.waitForFunction(() => document.querySelector("#office-settings-backdrop")?.textContent.includes("off duty on review"));
+    assert.equal(row("review").active, false, "the popup's button flips the review row");
+    assert.equal(row("dev").active, false, "and leaves the dev row as it was");
+    await page.keyboard.press("Escape");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("switching teams keeps each team's own duty", async () => {
+    // `builder` sits on both dev and review. Duty set on the team we leave must
+    // not follow the member to the team we switch to: the running session's
+    // off-list is rebuilt from the roster of whichever team is active.
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({
+        activeTeam: "dev",
+        teams: {
+          dev: [
+            { name: "orchestrator", model: "google/gemini-2.5-flash-lite", active: true },
+            { name: "builder", model: "google/gemini-2.5-flash-lite", active: true },
+          ],
+          review: [{ name: "builder", model: "google/gemini-2.5-flash-lite", active: true }],
+        },
+      }),
+    });
+    const deskIn = (room) => page.locator(`#office-pane .office-room[data-room="team:${room}"] .office-pod[data-key="builder"] .office-act.duty`);
+    const row = (teamName) => (mock.state.team.teams[teamName] || []).find((m) => m.name === "builder");
+    await deskIn("dev").waitFor();
+
+    // Off duty on the RUNNING team (dev): its row flips and the off-list names it.
+    await deskIn("dev").click();
+    await page.waitForSelector('#office-pane .office-room[data-room="team:dev"] .office-pod[data-key="builder"] .office-act.duty.off');
+    assert.equal(row("dev").active, false, "the dev row goes off duty");
+    assert.ok(mock.state.team.disabledAgents.includes("builder"), "the running team's off-list names it");
+
+    // Switch to review, whose own roster still has builder: it comes on duty
+    // there, because duty never crosses teams.
+    await page.click('#office-pane .office-room[data-room="team:review"] .office-room-pick[data-team="review"]');
+    await page.waitForSelector('#office-pane .office-room[data-room="team:review"].active');
+    assert.equal(row("review").active, true, "the review roster row is untouched");
+    assert.equal(mock.state.team.disabledAgents.includes("builder"), false, "the new running team's off-list follows its own rows");
+    assert.ok(!(await deskIn("review").evaluate((el) => el.classList.contains("off"))), "the review desk is on duty");
+
+    // …and back on dev the seat is empty again, read from dev's own row.
+    await page.click('#office-pane .office-room[data-room="team:dev"] .office-room-pick[data-team="dev"]');
+    await page.waitForSelector('#office-pane .office-room[data-room="team:dev"].active');
+    assert.ok(mock.state.team.disabledAgents.includes("builder"), "dev's off-list names it again");
+    assert.ok(await deskIn("dev").evaluate((el) => el.classList.contains("off")), "the dev seat is empty again");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("each desk paints its own team's duty, not another seat's", async () => {
+    // `builder` is off duty on the inactive night team and on duty on the
+    // running day team. Each desk must read its own roster row: the night seat
+    // is empty, the day seat is staffed.
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({
+        activeTeam: "day",
+        teamsOrder: ["night", "day"],
+        teams: {
+          night: [{ name: "builder", active: false }],
+          day: [{ name: "builder", active: true }],
+        },
+      }),
+    });
+    const podIn = (room) => page.locator(`#office-pane .office-room[data-room="team:${room}"] .office-pod[data-key="builder"]`);
+    await podIn("day").waitFor();
+    assert.ok(await podIn("night").evaluate((el) => el.classList.contains("leave")), "the off-duty night seat is empty");
+    assert.ok(!(await podIn("day").evaluate((el) => el.classList.contains("leave"))), "the on-duty day seat is staffed");
+    assert.match(await podIn("day").locator(".office-act.duty").textContent(), /off duty/i, "the day seat offers to go off duty");
+    assert.match(await podIn("night").locator(".office-act.duty").textContent(), /on duty/i, "the night seat offers to come back");
+
+    // Clicking the running seat's duty reads THAT seat's state (night is off,
+    // day is on): day goes off duty and the already-off night seat is untouched.
+    await podIn("day").locator(".office-act.duty").click();
+    await until(() => (mock.state.team.teams.day || []).some((m) => m.name === "builder" && m.active === false), "the day seat goes off duty");
+    assert.equal((mock.state.team.teams.night || []).find((m) => m.name === "builder").active, false, "the night seat is untouched");
+    await page.waitForSelector('#office-pane .office-room[data-room="team:day"] .office-pod[data-key="builder"].leave');
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("the hover popup reports the seat it is anchored to", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder", last_turn_event: "turn_start" })],
+      team: defaultTeam({
+        activeTeam: "day",
+        teamsOrder: ["night", "day"],
+        teams: {
+          night: [{ name: "builder", active: false }],
+          day: [{ name: "builder", active: true }],
+        },
+      }),
+    });
+    const podIn = (room) => page.locator(`#office-pane .office-room[data-room="team:${room}"] .office-pod[data-key="builder"]`);
+    await podIn("day").waitFor();
+
+    // The dormant night seat reports off duty…
+    await podIn("night").hover();
+    await page.waitForFunction(() => /Off duty/.test(document.getElementById("office-pop")?.textContent || ""), null, { timeout: 10_000 });
+
+    // …while the running day seat reports the agent's real status.
+    await podIn("day").hover();
+    await page.waitForFunction(() => {
+      const t = document.getElementById("office-pop")?.textContent || "";
+      return /Working/.test(t) && !/Off duty/.test(t);
+    }, null, { timeout: 10_000 });
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
   test("a subagent can be given a display name while keeping its real one", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "file_reader" })],
@@ -344,15 +569,12 @@ describe("office view", () => {
     assert.match(await plate().textContent(), /file_reader/, "the desk starts with the real name");
     assert.equal(await plate().locator(".office-realname").count(), 0, "no separate real name yet");
 
-    await pod("file_reader").locator(".office-act.rename").click();
-    // The single-field rename dialog stays compact — it is not the wide one.
-    assert.equal(
-      await page.locator("#office-dlg-backdrop .office-dialog").evaluate((el) => el.classList.contains("office-dialog-wide")),
-      false,
-      "only the hire form gets the wide layout",
-    );
-    await page.fill("#office-dlg-input", "Bob");
-    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    // The name is edited in the desk's settings popup, beside the model.
+    await pod("file_reader").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    assert.equal(await page.locator("#office-settings-backdrop .office-set-name").count(), 1, "the popup carries the name field");
+    await page.fill("#office-set-name", "Bob");
+    await page.click("#office-settings-backdrop .office-set-name-save");
     await page.waitForFunction(() =>
       document.querySelector('#office-pane .office-pod[data-key="file_reader"] .office-name')?.textContent === "Bob",
     );
@@ -553,7 +775,10 @@ describe("office view", () => {
       defs: [{ file: "builder.md", name: "builder", description: "Builds things", model: "", tools: "", thinking: "", content }],
     });
 
-    await pod("builder").locator('.office-act[data-act="md"]').click();
+    // The definition is opened from the desk's settings popup.
+    await pod("builder").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.click("#office-settings-backdrop .office-set-md");
     const ta = page.locator("#office-md-backdrop .def-editor-text");
     await ta.waitFor({ state: "visible" });
     assert.equal(await ta.inputValue(), content, "the whole file opens, frontmatter included");
@@ -680,38 +905,35 @@ describe("office view", () => {
       return b;
     };
 
-    // The team room: its name at the top-left, activate / + hire at the top-right.
+    // The team room: its name at the top-left, its activate badge at the
+    // top-right. Hiring moved into the orchestrator's settings popup.
     const room = await box('.office-room[data-room="team:dev"]');
     const rName = await box('.office-room[data-room="team:dev"] .office-room-name');
     const rActive = await box('.office-room[data-room="team:dev"] .office-room-active');
-    const rHire = await box('.office-room[data-room="team:dev"] .office-hire');
     const mid = room.x + room.width / 2;
     assert.ok(rName.x + rName.width < mid, "the team's name sits in the room's left half");
     assert.ok(rName.y < room.y + room.height / 3, "the name is in the room's top band");
     assert.ok(rActive.x > mid && rActive.x + rActive.width <= room.x + room.width, "the active badge is at the top-right");
-    assert.ok(rHire.x > mid && rHire.x + rHire.width <= room.x + room.width, "+ hire is at the top-right too");
-    assert.ok(Math.abs(rActive.y - rName.y) < 8, "the name and the room actions share the header row");
-    assert.ok(rHire.x >= rActive.x + rActive.width - 1, "hire is the rightmost control");
+    assert.equal(await page.locator('#office-pane .office-room[data-room="team:dev"] .office-hire').count(), 0, "the room header no longer hires");
 
     // An inactive team shows its Activate control in the same place.
     const pick = await box('.office-room[data-room="team:review"] .office-room-pick');
     assert.ok(pick.x > room.x + room.width, "activate sits at the right of its own room too");
     assert.match(await page.locator('#office-pane .office-room[data-room="team:review"] .office-room-pick').textContent(), /activate/i);
 
-    // The cubicle: the name at its top-left, then off duty / fire / md beneath it.
+    // The cubicle: the name at its top-left, then off duty / settings beneath it.
     const pod = await box('.office-pod[data-key="builder"]');
     const pName = await box('.office-pod[data-key="builder"] .office-name');
     const station = await box('.office-pod[data-key="builder"] .office-station');
     const duty = await box('.office-pod[data-key="builder"] .office-act.duty');
-    const fire = await box('.office-pod[data-key="builder"] .office-fire');
-    const md = await box('.office-pod[data-key="builder"] .office-act[data-act="md"]');
+    const settings = await box('.office-pod[data-key="builder"] .office-act[data-act="settings"]');
     assert.ok(pName.x < pod.x + pod.width / 2, "the subagent's name is at the cubicle's top-left");
     assert.ok(pName.y < station.y, "the name sits above the desk");
-    for (const [what, b] of [["off duty", duty], ["fire", fire], ["md", md]]) {
+    for (const [what, b] of [["off duty", duty], ["settings", settings]]) {
       assert.ok(b.y < station.y, `${what} is in the cubicle's top band, above the desk`);
       assert.ok(b.x >= pod.x && b.x + b.width <= pod.x + pod.width, `${what} is inside the cubicle`);
     }
-    assert.ok(duty.x < fire.x && fire.x < md.x, "the controls run off duty → fire → md");
+    assert.ok(duty.x < settings.x, "the controls run off duty → settings");
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
@@ -722,7 +944,16 @@ describe("office view", () => {
         makeSession({ session_id: "s2", cwd: WS, agent_name: "critic" }),
       ],
       team: defaultTeam({
-        disabledAgents: ["critic"],
+        // Duty is per team: `critic` sits on the inactive `review` team, so its
+        // own roster row carries the off-duty flag (the session-wide
+        // `disabledAgents` list only silences the team that is running).
+        teams: {
+          dev: [
+            { name: "orchestrator", model: "google/gemini-2.5-flash-lite", active: true },
+            { name: "builder", model: "google/gemini-2.5-flash-lite", active: true },
+          ],
+          review: [{ name: "critic", model: "google/gemini-2.5-flash-lite", active: false }],
+        },
         library: [{ id: "lib_1", path: `${WS}/docs/arch.md`, note: "the API map" }],
       }),
     });
@@ -764,9 +995,8 @@ describe("office view", () => {
         "activity label": '.office-pod[data-key="builder"] .office-bubble',
         "off-duty tag": '.office-pod[data-key="critic"] .office-leave-tag',
         "off duty button": '.office-pod[data-key="builder"] .office-act.duty',
-        "fire button": '.office-pod[data-key="builder"] .office-fire',
-        "md button": '.office-pod[data-key="builder"] .office-act[data-act="md"]',
-        "hire button": '.office-room[data-room="team:dev"] .office-hire',
+        "settings button": '.office-pod[data-key="builder"] .office-act[data-act="settings"]',
+        "model label": '.office-pod[data-key="builder"] .office-model-label',
         "active badge": '.office-room[data-room="team:dev"] .office-room-active',
         "activate button": '.office-room[data-room="team:review"] .office-room-pick',
         "library label": ".office-library-label",
@@ -868,7 +1098,17 @@ describe("office view", () => {
         makeSession({ session_id: SID, cwd: WS, agent_name: "builder" }),
         makeSession({ session_id: "s2", cwd: WS, agent_name: "critic", last_turn_event: "turn_start" }),
       ],
-      team: defaultTeam({ disabledAgents: ["critic"] }),
+      // Off duty on the member's OWN row (the inactive `review` team), which
+      // is where per-team duty lives now.
+      team: defaultTeam({
+        teams: {
+          dev: [
+            { name: "orchestrator", model: "google/gemini-2.5-flash-lite", active: true },
+            { name: "builder", model: "google/gemini-2.5-flash-lite", active: true },
+          ],
+          review: [{ name: "critic", model: "google/gemini-2.5-flash-lite", active: false }],
+        },
+      }),
     });
     await page.waitForFunction(() =>
       document.querySelector('#office-pane .office-pod[data-key="critic"]')?.classList.contains("leave"),
@@ -997,9 +1237,9 @@ describe("office view", () => {
     await page.waitForSelector("#office-dlg-backdrop", { state: "detached" });
 
     // The write lands in the roster, the header follows, and it is one write.
-    assert.equal(mock.state.team.officeName, "Night Shift HQ", "the server stored the name");
+    assert.equal(mock.officeState().officeName, "Night Shift HQ", "the server stored the name");
     await page.waitForFunction(() => document.getElementById("office-name")?.textContent === "Night Shift HQ");
-    const writes = mock.requestsFor("/agent-team", "POST").filter((r) => r.body.action === "setOfficeName");
+    const writes = mock.requestsFor("/office", "POST").filter((r) => r.body.action === "setOfficeName");
     assert.equal(writes.length, 1, "renaming is a single roster write");
 
     // It hangs on the north wall, right of the window and left of the clock.
@@ -1020,7 +1260,7 @@ describe("office view", () => {
     await page.fill("#office-name-input", "");
     await page.click("#office-dlg-backdrop .office-dialog-ok");
     await page.waitForFunction(() => document.getElementById("office-name")?.textContent === "Office");
-    assert.equal(mock.state.team.officeName, undefined, "clearing the name drops it from the config");
+    assert.equal(mock.officeState().officeName, undefined, "clearing the name drops it from the plugin's store");
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
@@ -1033,8 +1273,9 @@ describe("office view", () => {
     });
     await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
 
-    // The corner office owns the picker — it runs the floor — and a subagent's
-    // desk does not: their models live in their team rows.
+    // The corner office owns the default-model picker; a subagent's own picker
+    // (see the test below) writes its team row instead, so it never carries
+    // this one.
     const pick = pod("orchestrator").locator("#office-orch-model");
     assert.equal(await pick.count(), 1, "the orchestrator's desk carries a model picker");
     assert.equal(await pick.isVisible(), true, "and it is drawn on the desk");
@@ -1070,6 +1311,172 @@ describe("office view", () => {
     // The choice survives a reload — it was stored, not just drawn.
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => document.getElementById("office-orch-model")?.value === "deepseek/deepseek-v4-flash");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a subagent's desk carries its own model picker, under the worker, writing its team row", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({ teams: { dev: [{ name: "orchestrator" }, { name: "builder" }], review: [{ name: "critic" }] } }),
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+
+    // The picker and the totals live in the desk's foot — below the seated
+    // worker, not up in its header.
+    const foot = pod("builder").locator(".office-pod-foot");
+    assert.equal(await foot.locator(".office-model-select").count(), 1, "the model picker is in the foot");
+    assert.equal(await foot.locator(".office-stats").count(), 1, "and so are the totals");
+    const person = await pod("builder").locator(".office-person").boundingBox();
+    const footBox = await foot.boundingBox();
+    assert.ok(footBox.y >= person.y, "the foot sits below the worker");
+
+    // A member with no model reads as the team default; choosing one writes the
+    // member's own teams.yaml row (the orchestrator's writes settings.json).
+    const pick = pod("builder").locator(".office-model-select");
+    assert.equal(await pick.getAttribute("data-model-for"), "member");
+    assert.equal(await pick.inputValue(), "", "no model yet means the team default");
+    await pick.selectOption("deepseek/deepseek-v4-flash");
+    await until(() => (mock.state.team.teams.dev.find((m) => m.name === "builder") || {}).model === "deepseek/deepseek-v4-flash", "the member's model is written");
+    const posts = mock.requestsFor("/agent-team", "POST").filter((r) => r.body.action === "setMemberModel");
+    assert.equal(posts.length, 1, "the picker writes teams.yaml");
+    assert.equal(posts[0].body.team, "dev", "scoped to the desk's own team");
+    assert.equal(posts[0].body.agent, "builder");
+    assert.equal(await page.locator("#office-pane .office-model-select").count(), 3, "every desk carries one");
+    await page.waitForFunction(() => document.querySelector('#office-pane .office-pod[data-key="builder"] .office-model-select')?.value === "deepseek/deepseek-v4-flash");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("the settings popup gathers skills, tools, extensions and duty, and writes them through", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({
+        tools: ["bash", "read"],
+        skills: [
+          { name: "planner", dir: "planner", description: "plan things", orchestrator: true, subagent: false },
+          { name: "reviewer", dir: "reviewer", description: "review things", orchestrator: false, subagent: true },
+        ],
+        extensions: [{ name: "agent-team", path: "/home/u/.pi/extensions/agent-team.ts", available: true, enabled: true }],
+      }),
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+
+    const popup = () => page.locator("#office-settings-backdrop");
+    const on = (sel) => popup().locator(sel).evaluate((el) => el.classList.contains("on"));
+
+    // A subagent's popup: extensions, duty, definition and fire. Skills and
+    // tools are no longer roster toggles — a subagent's are its own
+    // agents/<name>.md, and this fixture has no definition for builder.
+    await pod("builder").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    assert.equal(await popup().locator("[data-set-skill]").count(), 0, "a subagent has no roster-level skill set");
+    assert.equal(await popup().locator("[data-set-tool]").count(), 0, "tools are the orchestrator's");
+    assert.equal(await popup().locator("[data-desk-skill]").count(), 0, "nor any pinned skills without a definition");
+    assert.match(await popup().textContent(), /No agents\/builder\.md definition/, "which the panel says out loud");
+    assert.equal(await popup().locator(".office-set-md").count(), 1, "the markdown definition is here");
+    assert.equal(await popup().locator(".office-set-duty").count(), 1, "so is duty");
+    assert.equal(await popup().locator(".office-set-fire").count(), 1, "and fire");
+
+    // Extensions toggle from here, and the write goes to the roster.
+    await popup().locator("[data-set-ext]").click();
+    await until(() => mock.state.team.extensions[0].enabled === false, "the extension is disabled");
+
+    // The orchestrator's popup carries tools and hire, and no fire / duty.
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#office-settings-backdrop", { state: "detached" });
+    await pod("orchestrator").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    assert.equal(await popup().locator("[data-set-tool]").count(), 2, "the orchestrator's tools are listed");
+    assert.equal(await on('[data-set-tool="bash"]'), true, "an enabled tool reads as on");
+    await popup().locator('[data-set-tool="bash"]').click();
+    await until(() => (mock.state.team.skipOrchestratorTools || []).some((t) => String(t).toLowerCase() === "bash"), "the tool is skipped");
+
+    // So do its skills: the roster-level set belongs to the orchestrator alone.
+    assert.equal(await popup().locator("[data-set-skill]").count(), 2, "the orchestrator's skills are listed");
+    assert.equal(await on('[data-set-skill="reviewer"]'), false, "one it has not turned on reads as off");
+    await popup().locator('[data-set-skill="reviewer"]').click();
+    await until(() => mock.state.team.skills.find((s) => s.dir === "reviewer").orchestrator === true, "the skill turns on for the orchestrator");
+    assert.equal(await popup().locator(".office-set-hire").count(), 1, "the orchestrator hires from here");
+    assert.equal(await popup().locator(".office-set-fire").count(), 0, "the orchestrator cannot be fired");
+    assert.equal(await popup().locator(".office-set-duty").count(), 0, "and has no duty toggle");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a subagent's popup references its own agents/*.md skills and tools, and writes them through", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({
+        tools: ["bash", "read", "grep"],
+        skills: [
+          { name: "planner", dir: "planner", description: "plan things", orchestrator: true, subagent: false },
+          { name: "reviewer", dir: "reviewer", description: "review things", orchestrator: false, subagent: true },
+        ],
+      }),
+      // builder.md pins its own skill and tool; critic.md carries neither key, so
+      // it gets no skills and the default tool list.
+      defs: [
+        { file: "builder.md", name: "builder", skills: ["planner"], tools: ["read"], toolsAll: false,
+          content: "---\nname: builder\nskills: planner\ntools: read\n---\n\nBuild.\n" },
+        { file: "critic.md", name: "critic",
+          content: "---\nname: critic\n---\n\nCritique.\n" },
+      ],
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+
+    const popup = () => page.locator("#office-settings-backdrop");
+    const on = (sel) => popup().locator(sel).evaluate((el) => el.classList.contains("on"));
+
+    await pod("builder").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.waitForSelector('#office-settings-backdrop [data-desk-tool="read"]');
+
+    // The definition's OWN pickers: the md file pins planner + read, so those
+    // read as on and everything else as off.
+    assert.equal(await popup().locator("[data-desk-skill]").count(), 2, "every discovered skill is offered");
+    assert.equal(await on('[data-desk-skill="planner"]'), true, "the md-pinned skill reads as on");
+    assert.equal(await on('[data-desk-skill="reviewer"]'), false, "one it does not pin reads as off");
+    assert.equal(await popup().locator("[data-desk-tool]").count(), 3, "every reported tool is offered");
+    assert.equal(await on('[data-desk-tool="read"]'), true, "the md-pinned tool reads as on");
+    assert.equal(await on('[data-desk-tool="bash"]'), false);
+
+    // Clicking writes the definition file — not the roster — and repaints.
+    await popup().locator('[data-desk-tool="bash"]').click();
+    await until(() => {
+      const d = mock.state.agentDefs.find((x) => x.file === "builder.md");
+      return d && d.toolsAll === false && d.tools.includes("bash") && d.tools.length === 2;
+    }, "the tool is written into agents/builder.md");
+    await page.waitForFunction(() => document.querySelector('#office-settings-backdrop [data-desk-tool="bash"]')?.classList.contains("on"));
+    assert.equal(
+      mock.requestsFor("/settings", "POST").some((r) => r.body.action === "setAgentDefTools" && r.body.value.file === "builder.md"),
+      true,
+      "the write goes through setAgentDefTools",
+    );
+    // The roster is untouched: this is a file write, not a team toggle.
+    assert.equal(
+      mock.requestsFor("/agent-team", "POST").length,
+      0,
+      "nothing was written to teams.yaml / agent-team-config.json",
+    );
+
+    await popup().locator('[data-desk-skill="reviewer"]').click();
+    await until(() => {
+      const d = mock.state.agentDefs.find((x) => x.file === "builder.md");
+      return d && d.skills.includes("reviewer") && d.skills.includes("planner");
+    }, "the skill is written into agents/builder.md");
+
+    // A definition with no allowlists gets none and falls back to the default
+    // tool list — never an empty chip row.
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#office-settings-backdrop", { state: "detached" });
+    await pod("critic").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.waitForSelector('#office-settings-backdrop [data-desk-tool="read"]');
+    assert.equal(await on('[data-desk-skill="reviewer"]'), false, "an absent skills: key pins nothing");
+    assert.equal(await on('[data-desk-skill="planner"]'), false, "so no skill reads as on");
+    assert.match(await popup().locator(".office-set-sec", { hasText: "Definition skills" }).locator(".office-set-sec-hint").textContent(), /0 pinned/);
+    assert.equal(await on('[data-desk-tool="read"]'), true, "an absent tools: key uses the default tool list");
+    assert.equal(await on('[data-desk-tool="grep"]'), true);
+    assert.equal(await on('[data-desk-tool="bash"]'), false, "and nothing beyond it");
+    assert.match(await popup().locator(".office-set-sec", { hasText: "Definition tools" }).locator(".office-set-sec-hint").textContent(), /default tool list/);
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
@@ -1114,25 +1521,31 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
-  test("the wall carries the board, and the full board lays out four columns", async () => {
+  test("the meeting room carries the board, and the full board lays out four columns", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
-      team: defaultTeam({
+      office: {
         tasks: [
           { id: "t1", title: "draft the plan", status: "todo", createdAt: 1 },
           { id: "t2", title: "ship it", status: "done", createdAt: 2, finishedAt: 3 },
         ],
-      }),
+      },
     });
     await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
 
-    // The board hangs on the north wall: one sign, with a count per column.
+    // The board hangs in the meeting room: one sign, with a count per column.
     const sign = page.locator("#office-board-open");
-    assert.equal(await sign.count(), 1, "the wall carries the board");
-    const wall = await page.locator("#office-pane .office-wall").first().boundingBox();
+    assert.equal(await sign.count(), 1, "the meeting room carries the board");
+    const meeting = await page.locator('#office-pane .office-room[data-room="meeting"]').boundingBox();
     const signBox = await sign.boundingBox();
-    assert.ok(signBox.y >= wall.y && signBox.y + signBox.height <= wall.y + wall.height, "the sign hangs on the wall");
+    assert.ok(signBox.x >= meeting.x && signBox.x + signBox.width <= meeting.x + meeting.width, "the sign sits inside the meeting room");
+    assert.ok(signBox.y >= meeting.y && signBox.y + signBox.height <= meeting.y + meeting.height, "and within its walls");
+    assert.equal(await page.locator("#office-pane .office-wall #office-board-open").count(), 0, "the north wall no longer carries it");
     assert.match(await sign.locator(".office-kanban-head").textContent(), /kanban/i);
+    // It shares the room with the meeting table and the reference library.
+    const table = await page.locator('#office-pane .office-room[data-room="meeting"] .office-roundtable').boundingBox();
+    assert.ok(signBox.x >= table.x + table.width - 2, "the board sits beside the meeting table");
+    assert.equal(await page.locator('#office-pane .office-room[data-room="meeting"] #office-library-open').count(), 1, "and the shelf shares the room");
     assert.deepEqual(
       await sign.locator(".office-kmini-col").allTextContents(),
       ["Todo1", "Planned0", "In Progress0", "Done1"],
@@ -1173,15 +1586,15 @@ describe("office view", () => {
     await page.fill("#office-task-note", "before the demo — check the migration section");
     await page.click("#office-dlg-backdrop .office-dialog-ok");
     await page.waitForSelector("#office-dlg-backdrop", { state: "detached" });
-    await until(() => mock.state.team.tasks.length === 3, "the task is stored");
-    const added = mock.state.team.tasks.find((t) => t.title === "review the draft");
+    await until(() => mock.officeState().tasks.length === 3, "the task is stored");
+    const added = mock.officeState().tasks.find((t) => t.title === "review the draft");
     assert.equal(added.status, "todo", "a new task starts in Todo");
     assert.match(added.note, /migration section/, "the brief is stored on the task");
     await page.waitForFunction(() =>
       [...document.querySelectorAll('#office-board-backdrop .office-kcol.todo .office-task-title')]
         .some((el) => el.textContent === "review the draft"),
     );
-    assert.equal(await sign.locator(".office-kmini-col.todo b").textContent(), "2", "the wall sign follows");
+    assert.equal(await sign.locator(".office-kmini-col.todo b").textContent(), "2", "the meeting-room sign follows");
 
     // Escape closes the board, as it does the other full-screen surfaces.
     await page.keyboard.press("Escape");
@@ -1194,10 +1607,10 @@ describe("office view", () => {
     // so the queue must not stall behind it forever.
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
-      team: defaultTeam({
+      office: {
         runnerPaused: false,
         tasks: [{ id: "t1", title: "interrupted work", status: "in_progress", createdAt: 1, startedAt: 2 }],
-      }),
+      },
     });
     await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
 
@@ -1212,7 +1625,7 @@ describe("office view", () => {
     turn.send({ type: "text", delta: "Carried on." });
     turn.send({ type: "done", sessionId: turn.sessionId });
     turn.end();
-    await until(() => mock.state.team.tasks.find((t) => t.id === "t1").status === "done", "the task finishes");
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "done", "the task finishes");
     assert.equal(mock.requestsFor("/chat", "POST").length, 1, "and it runs once, not twice");
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
@@ -1220,7 +1633,7 @@ describe("office view", () => {
   test("the board hands planned tasks to the orchestrator one at a time, in order", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
-      team: defaultTeam({ runnerPaused: false }),
+      office: { runnerPaused: false },
     });
     await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
     // The orchestrator runs on the model its desk is set to.
@@ -1255,7 +1668,7 @@ describe("office view", () => {
         .some((el) => el.textContent === "first task"),
     );
     const turn1 = await mock.nextTurn();
-    await until(() => mock.state.team.tasks.find((t) => t.title === "first task").status === "in_progress", "the first task is in progress");
+    await until(() => mock.officeState().tasks.find((t) => t.title === "first task").status === "in_progress", "the first task is in progress");
     const posts = () => mock.requestsFor("/chat", "POST");
     assert.equal(posts().length, 1, "the first task was dispatched");
     assert.equal(posts()[0].body.prompt, "first task", "the task's title is the prompt");
@@ -1272,14 +1685,14 @@ describe("office view", () => {
     );
     await sleep(400);
     assert.equal(posts().length, 1, "only one task runs at a time");
-    assert.equal(mock.state.team.tasks.find((t) => t.title === "second task").status, "planned", "the second waits in Planned");
+    assert.equal(mock.officeState().tasks.find((t) => t.title === "second task").status, "planned", "the second waits in Planned");
 
     // 5. The run finishes: the task moves to Done by itself.
     turn1.send({ type: "msg_start" });
     turn1.send({ type: "text", delta: "All done." });
     turn1.send({ type: "done", sessionId: turn1.sessionId });
     turn1.end();
-    await until(() => mock.state.team.tasks.find((t) => t.title === "first task").status === "done", "the first task finishes");
+    await until(() => mock.officeState().tasks.find((t) => t.title === "first task").status === "done", "the first task finishes");
     assert.deepEqual(await colTitles("done"), ["first task"], "the finished task lands in Done");
 
     // 6-7. The runner picks up the next planned task without being asked.
@@ -1296,7 +1709,7 @@ describe("office view", () => {
     turn2.send({ type: "text", delta: "Done too." });
     turn2.send({ type: "done", sessionId: turn2.sessionId });
     turn2.end();
-    await until(() => mock.state.team.tasks.find((t) => t.title === "second task").status === "done", "the second task finishes");
+    await until(() => mock.officeState().tasks.find((t) => t.title === "second task").status === "done", "the second task finishes");
     await page.waitForFunction(() =>
       document.querySelectorAll('#office-board-backdrop .office-kcol.done .office-task-title').length === 2,
     );
@@ -1314,7 +1727,7 @@ describe("office view", () => {
     turn3.send({ type: "error", error: "boom" });
     turn3.send({ type: "done", error: "boom", sessionId: turn3.sessionId });
     turn3.end();
-    await until(() => mock.state.team.tasks.find((t) => t.title === "third task").status === "planned", "the failed task returns to Planned");
+    await until(() => mock.officeState().tasks.find((t) => t.title === "third task").status === "planned", "the failed task returns to Planned");
     assert.deepEqual(await colTitles("planned"), ["third task"], "the task is not lost");
     assert.equal(await pageErrors.length, 0, pageErrors.join("\n"));
   });
@@ -1322,14 +1735,14 @@ describe("office view", () => {
   test("the board starts paused, and Run is what works the queue", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
-      team: defaultTeam({ tasks: [{ id: "t1", title: "queued work", status: "planned", createdAt: 1, plannedAt: 2 }] }),
+      office: { tasks: [{ id: "t1", title: "queued work", status: "planned", createdAt: 1, plannedAt: 2 }] },
     });
     await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
 
     // The default is paused: a task sitting in Planned is never dispatched until
     // the user asks for it.
     await sleep(400);
-    assert.equal(mock.state.team.runnerPaused, true, "the runner defaults to paused");
+    assert.equal(mock.officeState().runnerPaused, true, "the runner defaults to paused");
     assert.equal(mock.requestsFor("/chat", "POST").length, 0, "a planned task waits for Run");
 
     // The board's switch starts the queue.
@@ -1345,21 +1758,21 @@ describe("office view", () => {
 
     turn.send({ type: "done", sessionId: turn.sessionId });
     turn.end();
-    await until(() => mock.state.team.tasks.find((t) => t.id === "t1").status === "done", "the task finishes");
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "done", "the task finishes");
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
   test("pausing aborts the run in flight and returns its task to Planned", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
-      team: defaultTeam({
+      office: {
         runnerPaused: false,
         tasks: [{ id: "t1", title: "long task", status: "planned", createdAt: 1, plannedAt: 2 }],
-      }),
+      },
     });
     await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
     const turn = await mock.nextTurn();
-    await until(() => mock.state.team.tasks.find((t) => t.id === "t1").status === "in_progress", "the task starts");
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "in_progress", "the task starts");
 
     await page.click("#office-board-open");
     await page.waitForSelector("#office-board-backdrop");
@@ -1367,9 +1780,9 @@ describe("office view", () => {
     await page.click("#office-run-toggle");
 
     // The run is aborted and its task goes back to the queue — not to Done.
-    await until(() => mock.state.team.tasks.find((t) => t.id === "t1").status === "planned", "the task returns to Planned");
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "planned", "the task returns to Planned");
     await page.waitForFunction(() => document.getElementById("office-run-toggle")?.textContent === "▶ Run");
-    assert.equal(mock.state.team.runnerPaused, true, "the server was told to pause");
+    assert.equal(mock.officeState().runnerPaused, true, "the server was told to pause");
     assert.match(await page.textContent("#office-board-now"), /paused/i);
     assert.equal(mock.requestsFor("/chat", "POST").length, 1, "the task ran once and was not redispatched");
 
@@ -1377,5 +1790,270 @@ describe("office view", () => {
     turn.send({ type: "done", sessionId: turn.sessionId });
     turn.end();
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  // ── Coverage the suite above does not touch ──────────────────────────────
+
+  test("refreshing the roster refetches it, and a failed refresh keeps the last floor", async () => {
+    await boot({ sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })] });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+
+    // A team added on the server behind the page's back shows up after refresh.
+    mock.state.team.teams.ops = [{ name: "deployer" }];
+    mock.state.team.teamsOrder = [...mock.state.team.teamsOrder, "ops"];
+    await page.click("#office-refresh");
+    await page.waitForSelector('#office-pane .office-room[data-room="team:ops"]');
+    assert.equal(await pod("deployer").count(), 1);
+
+    // A refresh that fails must not blank the floor it is already drawing: the
+    // office falls back to the roster it has.
+    mock.failNext("/agent-team", "GET", 500);
+    await page.click("#office-refresh");
+    await sleep(400);
+    assert.equal(await page.locator('#office-pane .office-room[data-room="team:ops"]').count(), 1, "the last good roster stays on the floor");
+    assert.equal(await pod("deployer").count(), 1, "and so do its desks");
+  });
+
+  test("a board task moves backwards and can be deleted", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      office: {
+        tasks: [
+          { id: "t1", title: "keep me", status: "done", createdAt: 1, finishedAt: 2 },
+          { id: "t2", title: "drop me", status: "todo", createdAt: 3 },
+        ],
+      },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop");
+
+    // Done -> In Progress via the row's own back control.
+    await board().locator('.office-task[data-id="t1"] .office-task-move[data-move="in_progress"]').click();
+    await page.waitForFunction(() =>
+      document.querySelector('#office-board-backdrop .office-kcol.in_progress .office-task-title')?.textContent === "keep me");
+    const moved = mock.officeState().tasks.find((t) => t.id === "t1");
+    assert.equal(moved.status, "in_progress");
+    assert.ok(moved.startedAt > 0, "entering In Progress stamps startedAt");
+
+    // Delete removes just that task from the board and the server.
+    await board().locator('.office-task[data-id="t2"] .office-task-del').click();
+    await page.waitForFunction(() => !document.querySelector('#office-board-backdrop .office-task[data-id="t2"]'));
+    assert.equal(mock.officeState().tasks.some((t) => t.id === "t2"), false);
+    assert.deepEqual(await colTitles("in_progress"), ["keep me"], "the other task is untouched");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a task's brief rides with the dispatch prompt", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [{ id: "t1", title: "draft the plan", note: "cover the migration", status: "planned", createdAt: 1, plannedAt: 2 }],
+      },
+    });
+    const turn = await mock.nextTurn();
+    await until(() => mock.requestsFor("/chat", "POST").length === 1, "the task dispatches");
+    assert.equal(mock.requestsFor("/chat", "POST")[0].body.prompt, "draft the plan\n\ncover the migration", "title and brief together");
+    turn.send({ type: "done", sessionId: turn.sessionId });
+    turn.end();
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "done", "the task finishes");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a hire with an invalid or duplicate name is refused without a write", async () => {
+    await boot({ sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })] });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    await pod("orchestrator").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.click("#office-settings-backdrop .office-set-hire");
+    await page.waitForSelector("#office-dlg-backdrop");
+
+    // `builder` is already on dev: the form refuses it and stays open.
+    await page.fill("#office-hire-name", "builder");
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await sleep(200);
+    assert.equal(await page.locator("#office-dlg-backdrop").count(), 1, "the dialog stays open on a duplicate");
+
+    // A name the server would reject never reaches it either.
+    await page.fill("#office-hire-name", "bad name!");
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await sleep(200);
+    assert.equal(
+      mock.requestsFor("/agent-team", "POST").filter((r) => r.body.action === "addMember").length,
+      0,
+      "no addMember write for a duplicate or invalid name",
+    );
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("an invalid or duplicate team name is refused without a write", async () => {
+    await boot({ sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })] });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    await page.click("#office-teams-open");
+    await page.waitForSelector("#office-teams-backdrop");
+
+    for (const name of ["dev", "bad name!"]) {
+      await page.fill("#office-team-new", name);
+      await page.click("#office-teams-backdrop .office-lib-add-btn");
+      await sleep(200);
+    }
+    assert.equal(
+      mock.requestsFor("/agent-team", "POST").filter((r) => r.body.action === "addTeam").length,
+      0,
+      "no addTeam write for a duplicate or invalid name",
+    );
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("the settings popup's model picker writes the model it shows", async () => {
+    await boot({ sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })] });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+
+    // The orchestrator's popup writes the app's default model, and the floor's
+    // own picker follows it.
+    await pod("orchestrator").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.selectOption("#office-settings-backdrop .office-model-select", "anthropic/claude-sonnet-4");
+    await until(() => mock.state.team.defaultModel === "anthropic/claude-sonnet-4", "the default model is written");
+    await page.waitForFunction(() => document.getElementById("office-orch-model")?.value === "anthropic/claude-sonnet-4");
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#office-settings-backdrop", { state: "detached" });
+
+    // A member's popup writes that member's own teams.yaml row.
+    await pod("builder").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.selectOption("#office-settings-backdrop .office-model-select", "deepseek/deepseek-v4-flash");
+    await until(() =>
+      (mock.state.team.teams.dev.find((m) => m.name === "builder") || {}).model === "deepseek/deepseek-v4-flash",
+      "the member's model is written");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a member on two teams keeps each desk's own model", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({
+        activeTeam: "dev",
+        teamsOrder: ["dev", "review"],
+        teams: {
+          dev: [{ name: "orchestrator" }, { name: "builder", model: "google/gemini-2.5-flash-lite" }],
+          review: [{ name: "builder", model: "deepseek/deepseek-v4-flash" }],
+        },
+      }),
+    });
+    const deskIn = (t) => page.locator(`#office-pane .office-room[data-room="team:${t}"] .office-pod[data-key="builder"]`);
+    await deskIn("review").waitFor();
+    assert.equal(await deskIn("dev").locator(".office-model-select").inputValue(), "google/gemini-2.5-flash-lite");
+    assert.equal(await deskIn("review").locator(".office-model-select").inputValue(), "deepseek/deepseek-v4-flash");
+
+    // Changing one desk writes only its own team row; the other seat is left
+    // exactly as it was, on the floor and in the file.
+    await deskIn("dev").locator(".office-model-select").selectOption("anthropic/claude-sonnet-4");
+    await until(() =>
+      (mock.state.team.teams.dev.find((m) => m.name === "builder") || {}).model === "anthropic/claude-sonnet-4",
+      "the dev row is written");
+    assert.equal(await deskIn("review").locator(".office-model-select").inputValue(), "deepseek/deepseek-v4-flash", "the review desk is untouched");
+    assert.equal((mock.state.team.teams.review.find((m) => m.name === "builder") || {}).model, "deepseek/deepseek-v4-flash");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("roster text is escaped, never markup", async () => {
+    const nasty = '<img src=x onerror="window.__pwned=1">';
+    const disp = 'Bob "B" <b>x</b>';
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({
+        teamsOrder: ["dev"],
+        teams: { dev: [{ name: "builder", displayName: disp }] },
+        library: [{ id: "lib_1", path: `${WS}/docs/arch.md`, note: nasty }],
+      }),
+      office: { tasks: [{ id: "t1", title: nasty, status: "todo", createdAt: 1 }] },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    assert.equal(await page.evaluate(() => window.__pwned), undefined, "no injected script ran");
+    assert.equal(await page.locator("#office-pane .office-pod").count(), 2, "no injected pods");
+    assert.equal(await pod("builder").locator(".office-name").textContent(), disp, "the display name is shown as text");
+    assert.equal(await pod("builder").locator(".office-name b").count(), 0, "and not parsed as markup");
+
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop");
+    assert.equal(await page.locator("#office-board-backdrop .office-task-title").first().textContent(), nasty);
+    assert.equal(await page.locator("#office-board-backdrop .office-task-title img").count(), 0);
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("removing every team leaves a floor with just the orchestrator", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({ activeTeam: "dev", teamsOrder: ["dev"], teams: { dev: [{ name: "builder" }] } }),
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    await page.click("#office-teams-open");
+    await page.waitForSelector("#office-teams-backdrop");
+    await page.click('#office-teams-backdrop .office-team-row[data-team="dev"] .office-team-del');
+    await until(() => Object.keys(mock.state.team.teams || {}).length === 0, "every team is gone");
+    await page.waitForFunction(() => document.querySelectorAll('#office-pane .office-room[data-room^="team:"]').length === 0);
+
+    // The orchestrator keeps its office, the meeting room stays, and the member
+    // that ran without a team now holds an ad-hoc desk.
+    assert.equal(await pod("orchestrator").count(), 1);
+    assert.equal(await page.locator('#office-pane .office-room[data-room="meeting"]').count(), 1);
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("hiring back an agent whose definition still exists leaves it untouched", async () => {
+    const content = "---\nname: file_reader\n---\n\nRead files.\n";
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      defs: [{ file: "file_reader.md", name: "file_reader", content }],
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    await pod("orchestrator").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.selectOption("#office-settings-backdrop .office-set-hire-team", "dev");
+    await page.click("#office-settings-backdrop .office-set-hire");
+    await page.waitForSelector("#office-dlg-backdrop");
+    assert.equal(await page.locator("#office-hire-md").isChecked(), true, "the create checkbox starts on");
+    await page.fill("#office-hire-name", "file_reader");
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await page.waitForSelector("#office-dlg-backdrop", { state: "detached" });
+
+    // The member lands on the team; the definition that already exists is never
+    // clobbered and never re-created (which the server would refuse).
+    await until(() => (mock.state.team.teams.dev || []).some((m) => m.name === "file_reader"), "the member is hired");
+    assert.equal(
+      mock.requestsFor("/settings", "POST").filter((r) => r.body.action === "createAgentDefFile").length,
+      0,
+      "no doomed create was fired",
+    );
+    assert.equal(mock.state.agentDefs.find((d) => d.file === "file_reader.md").content, content, "the definition is untouched");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a display name the server refuses is reported, not dropped", async () => {
+    await boot({ sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })] });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    await pod("orchestrator").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.selectOption("#office-settings-backdrop .office-set-hire-team", "review");
+    await page.click("#office-settings-backdrop .office-set-hire");
+    await page.waitForSelector("#office-dlg-backdrop");
+    await page.fill("#office-hire-name", "writer");
+    // A colon cannot live in a teams.yaml value line, so the server refuses it.
+    await page.fill("#office-hire-display", "Bob: the writer");
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await page.waitForSelector("#office-dlg-backdrop", { state: "detached" });
+
+    await until(() => (mock.state.team.teams.review || []).some((m) => m.name === "writer"), "the member is hired");
+    assert.equal(
+      (mock.state.team.teams.review.find((m) => m.name === "writer") || {}).displayName,
+      undefined,
+      "the refused name was not stored",
+    );
+    // The hire still reports the part that failed instead of pretending success.
+    await page.waitForFunction(() => /hired — but/.test(document.getElementById("scope-toast")?.textContent || ""));
+    assert.ok(await page.locator("#scope-toast").evaluate((el) => el.classList.contains("warn")), "the toast warns");
   });
 });

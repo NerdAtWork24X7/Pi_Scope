@@ -26,6 +26,7 @@ import {
   runPluginRoute,
   emitPluginEvent,
   resolvePluginFile,
+  storeFor,
   isEnabled as isPluginEnabled,
 } from "./plugins.ts";
 import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage } from "./chat.ts";
@@ -118,6 +119,22 @@ try {
 const TEAMS_YAML = process.env.SCOPE_TEAMS_YAML ?? path.join(AGENT_DIR, "agents", "teams.yaml");
 const AGENT_CONFIG = process.env.SCOPE_AGENT_CONFIG ?? path.join(AGENT_DIR, "agent-team-config.json");
 const SETTINGS_JSON = process.env.SCOPE_SETTINGS_JSON ?? path.join(AGENT_DIR, "settings.json");
+// The Git feature's settings (the commit-message model and its instruction
+// template) are that plugin's own state, so they live in the plugin store —
+// `<plugins dir>/.data/git.json`, the same file the plugin's `api.store` reads
+// and writes. They must not ride in pi's settings.json (pi has no idea what they
+// mean): `editorPaddingX` and friends stay there precisely because pi reads them
+// from it. See readGitSettings / settingsSnapshot below.
+const GIT_PLUGIN_ID = "git";
+/** legacy settings.json key → the key it is stored under in the plugin's store. */
+const GIT_SETTINGS_KEYS: Record<string, string> = {
+  gitCommitModel: "commitModel",
+  gitCommitTemplate: "commitTemplate",
+};
+/** Where the Git fields lived before the store: the interim per-feature file (a
+ *  short-lived Pi Scope file) and, older still, pi's settings.json. Imported
+ *  once — see seedGitSettings — so nobody's model or template is lost. */
+const LEGACY_GIT_SETTINGS_JSON = path.join(AGENT_DIR, "git_setting.json");
 const SKILLS_DIR = process.env.SCOPE_SKILLS_DIR ?? path.join(AGENT_DIR, "skills");
 // Other agent-dir config the Settings page manages: per-extension enablement,
 // the project-trust store, custom themes, and the subagent definitions. All
@@ -270,43 +287,6 @@ function parseTeamsYaml(raw: string): { teams: Record<string, any[]>; memoryMode
   return { teams, memoryModel, memoryActive };
 }
 
-// ─── Kanban task queue (Office → board) ─────────────────────────────────────
-// The office's tasks: Todo → Planned → In Progress → Done. The view moves
-// Planned tasks into In Progress one at a time and dispatches each to the
-// orchestrator, so the column order is FIFO by `plannedAt`.
-const TASK_STATUSES = ["todo", "planned", "in_progress", "done"];
-const TASK_MAX = 200;
-// A task's details are written in the board's big popup editor, so the note
-// holds a real brief rather than a one-liner.
-const TASK_NOTE_MAX = 4000;
-
-/** Clean stored tasks: keep usable rows, drop anything unreadable. */
-function normaliseTasks(raw: unknown): Record<string, any>[] {
-  if (!Array.isArray(raw)) return [];
-  const out: Record<string, any>[] = [];
-  const seen = new Set<string>();
-  for (const item of raw) {
-    if (out.length >= TASK_MAX) break;
-    if (!item || typeof item !== "object") continue;
-    const r = item as Record<string, any>;
-    const title = String(r.title ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
-    if (!title) continue;
-    const id = String(r.id ?? "").trim() || `task_${crypto.createHash("sha1").update(title).digest("hex").slice(0, 10)}`;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const status = TASK_STATUSES.includes(String(r.status)) ? String(r.status) : "todo";
-    const task: Record<string, any> = { id, title, status };
-    const note = String(r.note ?? "").replace(/\s+/g, " ").trim().slice(0, TASK_NOTE_MAX);
-    if (note) task.note = note;
-    for (const k of ["createdAt", "plannedAt", "startedAt", "finishedAt"]) {
-      const v = Number(r[k]);
-      if (Number.isFinite(v) && v > 0) task[k] = v;
-    }
-    out.push(task);
-  }
-  return out;
-}
-
 function loadAgentTeam(proj?: string | null): Record<string, any> {
   const out: Record<string, any> = {
     teams: {},
@@ -318,14 +298,7 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     enabled: true, // agent-team-config.json `enabled` master switch (default on)
     disabledAgents: [],
     library: [], // reference library (Office → meeting room); see library.ts
-    officeName: undefined, // the name the Office view shows at the top
-    tasks: [], // the Kanban task queue the office works through
-    // The queue runner starts PAUSED: a task parked in Planned waits for the
-    // user to press Run. `false` means the runner is dispatching; anything else
-    // (including an absent field on an older config) means paused.
-    runnerPaused: true,
     orchestratorSkills: [],
-    subagentSkills: [],
     skipOrchestratorTools: [],
     tools: [],
     skills: [],
@@ -352,7 +325,6 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     out.enabled = cfg.enabled !== false;
     out.disabledAgents = cfg.disabledAgents || [];
     out.orchestratorSkills = cfg.orchestratorSkills || [];
-    out.subagentSkills = cfg.subagentSkills || [];
     out.skipOrchestratorTools = cfg.skipOrchestratorTools || [];
     // Chat view workspaces: directories the user added explicitly, plus
     // session-derived workspaces the user removed from the list. Stored in
@@ -362,9 +334,6 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     // The reference library shown in the Office's meeting room: files and
     // folders injected at the start of a fresh conversation (see library.ts).
     out.library = normaliseEntries(cfg.library);
-    out.officeName = String(cfg.officeName ?? "").trim() || undefined;
-    out.tasks = normaliseTasks(cfg.tasks);
-    out.runnerPaused = cfg.runnerPaused !== false;
   } catch { /* config absent — the defaults above stand */ }
 
   // Models the user enabled in pi settings — the authoritative model list for
@@ -375,32 +344,52 @@ function loadAgentTeam(proj?: string | null): Record<string, any> {
     out.defaultModel = settings.defaultModel;
   } catch { /* settings absent */ }
 
-  // Skills: all discovered from the skills dir, annotated with which agent
-  // group (orchestrator/subagent) currently has them enabled.
+  // Skills: all discovered from the skills dir, annotated with whether the
+  // ORCHESTRATOR has them enabled (agent-team-config.json `orchestratorSkills`).
+  // There is no subagent set: a subagent's skills are its own `agents/*.md`
+  // `skills:` key — the single source of truth — and ride on the definitions.
   const orchSet = new Set(out.orchestratorSkills || []);
-  const subSet = new Set(out.subagentSkills || []);
   out.skills = discoverSkills().map((s) => ({
     ...s,
     orchestrator: orchSet.has(s.dir),
-    subagent: subSet.has(s.dir),
   }));
   out.extensions = discoverExtensions();
 
-  // Orchestrator tools: the web server can't query pi's live tool registry, so
-  // the list is rebuilt from (a) tool names observed in captured llm_request
-  // events — pi sends its ACTIVE allowlist with every provider request, so the
-  // union across captures ≈ pi's allTools() — and (b) the configured skip
-  // denylist (real tool names even if never observed, e.g. on a fresh machine).
+  // Tool catalogue: the web server can't query pi's live tool registry, so the
+  // list is rebuilt from four sources that together cover every name a subagent
+  // may be allowed to call:
+  //   (a) pi's own built-in tools (always available, captured events or not);
+  //   (b) tool names the installed agent-dir extensions register;
+  //   (c) tool names observed in captured llm_request events — pi sends its
+  //       ACTIVE allowlist with every provider request, so the union across
+  //       captures catches dynamic/package-provided names (MCP, npm extensions)
+  //       the source scan can't see;
+  //   (d) the configured skip denylist (real tool names even on a fresh machine).
   // The internal dispatch routing tools are excluded, mirroring pi's allTools().
   const ROUTING_TOOLS = new Set(["dispatch_agent", "dispatch_agents"]);
   const toolNames = new Map<string, string>(); // lowercased key → display name
-  const addTool = (n: string) => {
-    const key = String(n).toLowerCase();
-    if (key && !ROUTING_TOOLS.has(key) && !toolNames.has(key)) toolNames.set(key, String(n));
+  const toolSources = new Map<string, Set<string>>(); // lowercased key → extension names
+  const addTool = (n: string, source?: string) => {
+    const name = String(n).trim();
+    const key = name.toLowerCase();
+    if (!key || ROUTING_TOOLS.has(key)) return;
+    if (!toolNames.has(key)) toolNames.set(key, name);
+    if (source) {
+      let set = toolSources.get(key);
+      if (!set) { set = new Set(); toolSources.set(key, set); }
+      set.add(source);
+    }
   };
+  for (const t of PI_BUILTIN_TOOLS) addTool(t);
+  for (const e of discoverExtensionTools()) addTool(e.tool, e.extension);
   for (const t of observedOrchestratorTools()) addTool(t);
   for (const t of out.skipOrchestratorTools) addTool(t);
   out.tools = Array.from(toolNames.values()).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  // Which extension(s) register each tool, so the picker can group extension
+  // tools apart from pi's built-ins. Empty array = built-in / observed.
+  out.toolSources = Object.fromEntries(
+    Array.from(toolNames.keys()).map((key) => [key, Array.from(toolSources.get(key) ?? [])])
+  );
   return out;
 }
 
@@ -434,6 +423,78 @@ function readSettingsJson(): Record<string, any> {
   try { return JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8")); } catch { return {}; }
 }
 
+/**
+ * One-time import of the Git fields into the plugin store, from wherever they
+ * used to live: the interim `git_setting.json` (Pi Scope's own file, read first
+ * because it is the more recent home) and then pi's settings.json, whose copy is
+ * removed so it only holds what pi itself understands. A value already in the
+ * store wins; a settings.json without those keys is never rewritten.
+ */
+function seedGitSettings(store: { get: (k: string, d?: unknown) => unknown; set: (k: string, v: unknown) => void }): void {
+  const carried: Record<string, unknown> = {};
+  try {
+    const interim = JSON.parse(fs.readFileSync(LEGACY_GIT_SETTINGS_JSON, "utf8"));
+    for (const [legacy, key] of Object.entries(GIT_SETTINGS_KEYS)) {
+      if (interim[legacy] !== undefined) carried[key] = interim[legacy];
+    }
+  } catch { /* absent — never had one */ }
+  let fromPi: Record<string, any> | null = null;
+  try { fromPi = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8")); } catch { /* absent */ }
+  let tookFromPi = false;
+  if (fromPi) {
+    for (const [legacy, key] of Object.entries(GIT_SETTINGS_KEYS)) {
+      if (fromPi[legacy] === undefined) continue;
+      if (!(key in carried)) carried[key] = fromPi[legacy];
+      delete fromPi[legacy];
+      tookFromPi = true;
+    }
+  }
+  for (const [key, value] of Object.entries(carried)) {
+    if (store.get(key) === undefined) store.set(key, value);
+  }
+  try {
+    if (tookFromPi && fromPi) fs.writeFileSync(SETTINGS_JSON, JSON.stringify(fromPi, null, 2) + "\n");
+    // The interim file has been overtaken by the store; drop it so there is one
+    // source of truth rather than a stale copy that looks authoritative.
+    if (fs.existsSync(LEGACY_GIT_SETTINGS_JSON)) fs.unlinkSync(LEGACY_GIT_SETTINGS_JSON);
+    if (Object.keys(carried).length) {
+      console.log(`[settings] moved ${Object.keys(carried).join(", ")} → the ${GIT_PLUGIN_ID} plugin store`);
+    }
+  } catch (err) {
+    // A read-only agent dir must not stop the Git view from working: the values
+    // are in the store by now, which is what the plugin reads.
+    console.error("[settings] failed to finish moving the Git fields:", err);
+  }
+}
+
+let gitStoreReady = false;
+
+/** The Git plugin's store, with its one-time import run first. */
+function gitStore(): ReturnType<typeof storeFor> {
+  const store = storeFor(GIT_PLUGIN_ID);
+  if (!gitStoreReady) {
+    gitStoreReady = true;
+    seedGitSettings(store);
+  }
+  return store;
+}
+
+const storeString = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/** The Git feature's settings, out of its own plugin store. */
+function readGitSettings(): { gitCommitModel: string; gitCommitTemplate: string } {
+  const store = gitStore();
+  return {
+    gitCommitModel: storeString(store.get("commitModel")),
+    gitCommitTemplate: storeString(store.get("commitTemplate")),
+  };
+}
+
+/** Set one of the Git feature's settings in the plugin's store. */
+function setGitSettingsField(key: string, value: unknown): void {
+  gitStore().set(GIT_SETTINGS_KEYS[key] ?? key, value);
+}
+
 /** Read agent-team-config.json as a plain object (absent → {}). */
 function readAgentConfig(proj?: string | null): Record<string, any> {
   try { return JSON.parse(fs.readFileSync(readAgentConfigPathFor(proj || TERMINAL_CWD), "utf8")); } catch { return {}; }
@@ -463,6 +524,7 @@ function apiKeysSnapshot(proj?: string | null): Record<string, any>[] {
 function loadSettingsSnapshot(proj?: string | null): Record<string, any> {
   const team = loadAgentTeam(proj);
   const settings = readSettingsJson();
+  const git = readGitSettings();
   const cfg = readAgentConfig(proj);
   return {
     ...team,
@@ -474,10 +536,10 @@ function loadSettingsSnapshot(proj?: string | null): Record<string, any> {
     plugins: pluginSnapshot(),
     // Model used by Git → "generate commit message". Empty = fall back to the
     // agent's default model at generation time.
-    gitCommitModel: typeof settings.gitCommitModel === "string" ? settings.gitCommitModel : "",
+    gitCommitModel: typeof git.gitCommitModel === "string" ? git.gitCommitModel : "",
     // Instruction template for the same feature. Empty = built-in default; the
     // default is also returned so the Settings textarea can show it as a hint.
-    gitCommitTemplate: typeof settings.gitCommitTemplate === "string" ? settings.gitCommitTemplate : "",
+    gitCommitTemplate: typeof git.gitCommitTemplate === "string" ? git.gitCommitTemplate : "",
     gitCommitTemplateDefault: DEFAULT_COMMIT_TEMPLATE,
     // settings.json
     settingsRaw: {
@@ -514,6 +576,10 @@ function loadSettingsSnapshot(proj?: string | null): Record<string, any> {
     instructions: readInstructions(),
     providers: readProviders(),
     agentDefs: discoverAgentDefs(),
+    // The tool list a definition without its own `tools:` key is launched with
+    // (the agent-team extension's built-in default) — the UI shows it as the
+    // inherited state of a subagent's tool picker.
+    agentDefaultTools: AGENT_DEF_DEFAULT_TOOLS,
     // Shared vocabulary for form controls
     thinkingLevels: THINKING_LEVELS,
     modelsMeta: buildModelMeta(),
@@ -546,6 +612,26 @@ function setSettingsNested(paths: string[], value: unknown): void {
 function readTeams(proj: string | null): { teams: Record<string, any[]>; memoryModel?: string; memoryActive?: boolean } {
   try { return parseTeamsYaml(fs.readFileSync(readTeamsPathFor(proj || TERMINAL_CWD), "utf8")); }
   catch { return { teams: {} }; }
+}
+
+/**
+ * `disabledAgents` is the RUNNING session's name-keyed off-list, and a session
+ * staffs exactly one team (the active one). Rebuild it from that team's own
+ * roster rows so duty stays per team: a member taken off duty on a team we are
+ * leaving must not silence the same-named member of the team we switch to, and
+ * the roster rows remain the single source of truth for duty.
+ */
+function reconcileDisabledAgents(proj: string | null): void {
+  const teams = readTeams(proj).teams;
+  const named = String(readAgentConfig(proj).activeTeam || "");
+  const active = named && teams[named] ? named : Object.keys(teams)[0] || "";
+  const members = active ? teams[active] : undefined;
+  const off = Array.isArray(members)
+    ? members
+        .filter((m) => m && m.active === false && String(m.name || "").trim())
+        .map((m) => String(m.name).toLowerCase())
+    : [];
+  updateAgentConfig(proj, (cfg) => { cfg.disabledAgents = off; });
 }
 
 /** Set a list-valued agent-team-config.json field (destructiveTools / skipOrchestratorTools). */
@@ -594,6 +680,76 @@ function discoverExtensions(): { path: string; enabled: boolean; name: string; a
     let available = false;
     try { available = fs.statSync(abs).isFile(); } catch { /* file missing */ }
     out.push({ path: parsed.path, enabled: parsed.enabled, name, available });
+  }
+  return out;
+}
+
+/**
+ * pi's own built-in tools, from `dist/core/tools/`. These are always available
+ * to a session (`--no-builtin-tools` aside), so the subagent tool picker offers
+ * them before any captured event names them — a fresh machine with no
+ * llm_request captures would otherwise show an empty catalogue.
+ */
+const PI_BUILTIN_TOOLS = ["bash", "edit", "find", "grep", "ls", "powershell", "read", "write"];
+
+/** Directories under an extension that never contain source: skip them so the
+ *  scan stays cheap even when an extension vendors a virtualenv (web_fetch). */
+const EXTENSION_SCAN_SKIP = new Set(["node_modules", "venv", "dist", "build", "coverage"]);
+
+/**
+ * Tool names the installed agent-dir extensions register.
+ *
+ * pi discovers every `.ts` under `<agentDir>/extensions/` *in addition to* the
+ * paths listed in settings.json (see pi-bundle.ts), so the whole tree is walked
+ * — an extension that registers its tools from an imported module (agent-team →
+ * integrations.ts) is covered because the directory is scanned recursively, one
+ * extension name per top-level entry. Names come off `registerTool({ name: … })`
+ * calls; anything dynamic (MCP servers, npm-package extensions) is left to the
+ * captured-event source in loadAgentTeam.
+ */
+function discoverExtensionTools(): { tool: string; extension: string }[] {
+  const files = new Map<string, string>(); // absolute .ts path → extension name
+  const walk = (p: string, extension: string): void => {
+    let st: fs.Stats;
+    try { st = fs.statSync(p); } catch { return; }
+    if (st.isDirectory()) {
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(p, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name.startsWith(".") || EXTENSION_SCAN_SKIP.has(e.name)) continue;
+        walk(path.join(p, e.name), extension);
+      }
+    } else if (p.endsWith(".ts")) {
+      files.set(p, extension);
+    }
+  };
+  // Every top-level entry of the extensions dir is one extension: a file uses
+  // its stem (browser.ts → browser), a directory its name (custom-tools).
+  const extensionsDir = path.join(AGENT_DIR, "extensions");
+  try {
+    for (const e of fs.readdirSync(extensionsDir, { withFileTypes: true })) {
+      if (e.name.startsWith(".") || EXTENSION_SCAN_SKIP.has(e.name)) continue;
+      walk(path.join(extensionsDir, e.name), e.name.replace(/\.ts$/, ""));
+    }
+  } catch { /* extensions dir absent — nothing to scan */ }
+  // settings.json may also list extensions outside that dir (npm packages,
+  // absolute paths); discoverExtensions() resolved those entries for us.
+  for (const ex of discoverExtensions()) {
+    walk(path.isAbsolute(ex.path) ? ex.path : path.join(AGENT_DIR, ex.path), ex.name);
+  }
+
+  const registerToolRe = /registerTool\s*\([\s\S]{0,240}?name\s*:\s*["'`]([A-Za-z0-9][A-Za-z0-9_.:-]*)["'`]/g;
+  const seen = new Set<string>();
+  const out: { tool: string; extension: string }[] = [];
+  for (const [file, extension] of files) {
+    let src = "";
+    try { src = fs.readFileSync(file, "utf8"); } catch { continue; }
+    for (const m of src.matchAll(registerToolRe)) {
+      const key = `${m[1].toLowerCase()}|${extension}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ tool: m[1], extension });
+    }
   }
   return out;
 }
@@ -768,10 +924,49 @@ function frontmatterFields(lines: string[]): Record<string, string> {
   return out;
 }
 
+/** The tools a subagent gets when its definition has no `tools:` key. Mirrors
+ *  the agent-team extension's parseAgentFile fallback in
+ *  `extensions/agent-team/config.ts` (`fm.tools || "read,grep,find,ls"`) — the
+ *  reference the UI has to agree with, because pi is launched with
+ *  `--tools <that list>` for such a subagent, and the two keys are read from the
+ *  same `agents/*.md` frontmatter this module writes. */
+const AGENT_DEF_DEFAULT_TOOLS = ["read", "grep", "find", "ls"];
+
+/** Split a frontmatter list value the way the agent-team extension does
+ *  (comma-separated, whitespace-trimmed, empties dropped). `undefined` — the
+ *  key is absent — stays distinguishable from an empty list, because for
+ *  `skills:` the two mean opposite things. */
+function splitFrontmatterList(value: string | undefined): string[] {
+  if (value === undefined) return [];
+  return value.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+/** One subagent definition (`agents/*.md`). `skills` and `tools` are the two
+ *  per-subagent allowlist keys the agent-team extension reads when it spawns
+ *  that subagent (`--tools` from `tools:`, `--skill` per name from `skills:`).
+ *  `skills` is the frontmatter `skills:` list — skill DIRECTORY names, the form
+ *  pi's resolveSkillPath resolves to `<agentDir>/skills/<name>/SKILL.md`. It is
+ *  the ONLY source of a subagent's skills: an absent (or empty) key means the
+ *  subagent gets none, so there is no "inherit" state to report. For `tools:`
+ *  there IS one — the extension falls back to its built-in default list for an
+ *  absent OR empty key (`fm.tools || DEFAULT`) — so `toolsAll` records that the
+ *  definition is on that default list rather than pinning its own. */
+interface AgentDefInfo {
+  file: string;
+  name: string;
+  description: string;
+  model: string;
+  tools: string[];
+  toolsAll: boolean;
+  thinking: string;
+  skills: string[];
+  content: string;
+}
+
 /** Subagent definitions from <agentDir>/agents/*.md, with parsed frontmatter
  *  plus the whole file text (so the Settings page can open it in an editor). */
-function discoverAgentDefs(): { file: string; name: string; description: string; model: string; tools: string; thinking: string; content: string }[] {
-  const out: { file: string; name: string; description: string; model: string; tools: string; thinking: string; content: string }[] = [];
+function discoverAgentDefs(): AgentDefInfo[] {
+  const out: AgentDefInfo[] = [];
   let files: string[] = [];
   try { files = fs.readdirSync(AGENTS_DIR).filter((f) => f.endsWith(".md")); } catch { return out; }
   for (const file of files) {
@@ -779,13 +974,19 @@ function discoverAgentDefs(): { file: string; name: string; description: string;
       const raw = fs.readFileSync(path.join(AGENTS_DIR, file), "utf8");
       const fm = splitFrontmatter(raw);
       const f = fm ? frontmatterFields(fm.lines) : {};
+      // A bare `tools:` key means the same thing to the extension as a missing
+      // one, so both read as the default-list state — anything else would show
+      // the definition as having no tools while pi launches it with all four.
+      const tools = splitFrontmatterList(f.tools);
       out.push({
         file,
         name: f.name || file.replace(/\.md$/, ""),
         description: f.description || "",
         model: f.model || "",
-        tools: f.tools || "",
+        tools,
+        toolsAll: tools.length === 0,
         thinking: f.thinking || "",
+        skills: splitFrontmatterList(f.skills),
         content: raw,
       });
     } catch { /* unreadable — skip */ }
@@ -793,8 +994,55 @@ function discoverAgentDefs(): { file: string; name: string; description: string;
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Fields of a subagent .md the editor may write back. */
+/** Fields of a subagent .md the editor may write back. `skills` is deliberately
+ *  not one of them: it is a comma-separated list like `tools:`, so it is written
+ *  through setAgentDefSkills, the writer that keeps the list form (and can drop
+ *  the key) instead of pasting a whole value into the frontmatter line. */
 const AGENT_DEF_FIELDS = new Set(["description", "model", "tools", "thinking"]);
+
+/** A name in a subagent's `skills:` / `tools:` list. Enforced on write because
+ *  the value is interpolated into a frontmatter line: a newline or a colon
+ *  could inject extra keys (and a name with a path separator could point the
+ *  skill loader at another directory). */
+const AGENT_DEF_LIST_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/** Write one of a subagent's comma-separated allowlist keys (`skills:` /
+ *  `tools:`) into its frontmatter.
+ *
+ *   names === null  → remove the key (the default tool list for `tools:`; for
+ *                     `skills:` the same as an empty key — no skills)
+ *   names === []    → write a bare key (pi reads a bare `skills:` as "no skills";
+ *                     a bare `tools:` is the default list again)
+ *   names           → `skills: a, b` / `tools: bash, grep`
+ *
+ * Both keys are written here because the agent-team extension parses them the
+ * same way (comma-separated, whitespace-trimmed). The rest of the file — other
+ * frontmatter keys and the prompt body — is left byte-for-byte, like
+ * setAgentDefField.
+ */
+function setAgentDefList(file: string, key: "skills" | "tools", names: string[] | null): void {
+  if (!/^[A-Za-z0-9_.-]+\.md$/.test(file)) throw new Error("invalid agent file");
+  const p = path.join(AGENTS_DIR, file);
+  const raw = fs.readFileSync(p, "utf8");
+  const fm = splitFrontmatter(raw);
+  const lines = fm ? fm.lines : [];
+  const body = fm ? fm.body : raw;
+  const idx = lines.findIndex((l) => { const i = l.indexOf(":"); return i > 0 && l.slice(0, i).trim() === key; });
+  if (names === null) {
+    if (idx >= 0) lines.splice(idx, 1);
+  } else {
+    // A bare `skills:` is the only way to say "none": frontmatterKV reads it as
+    // an empty string and pi's parseAgentSkills turns that into an empty list.
+    const line = names.length ? `${key}: ${names.join(", ")}` : `${key}:`;
+    if (idx >= 0) lines[idx] = line;
+    else lines.push(line);
+  }
+  fs.writeFileSync(p, `---\n${lines.join("\n")}\n---\n${body}`);
+}
+
+/** The `skills:` / `tools:` writers the Settings page and the Office popup use. */
+function setAgentDefSkills(file: string, names: string[] | null): void { setAgentDefList(file, "skills", names); }
+function setAgentDefTools(file: string, names: string[] | null): void { setAgentDefList(file, "tools", names); }
 
 /** Update one frontmatter field of a subagent definition, preserving the rest of
  *  the file. An empty value removes the field. */
@@ -848,6 +1096,25 @@ function updateTeamsYaml(proj: string | null, mutate: (p: { teams: Record<string
   const writePath = proj ? projectTeamsYamlPath(proj) : projectTeamsYamlPath(TERMINAL_CWD);
   fs.mkdirSync(path.dirname(writePath), { recursive: true });
   fs.writeFileSync(writePath, serializeTeamsYaml(parsed));
+}
+
+/**
+ * The Office view's own state — its name, the Kanban queue and the runner
+ * switch — used to live in a workspace's `agent-team-config.json` and be served
+ * by `POST /agent-team`. It belongs to the Office plugin now, which keeps it in
+ * its own store; this reads the old copy ONCE so an existing name and board are
+ * not silently lost when its plugin seeds a workspace for the first time (see
+ * plugins/office/server.ts). Nothing writes the old fields any more.
+ */
+function legacyOfficeState(proj: string): Record<string, any> | null {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(readAgentConfigPathFor(proj || TERMINAL_CWD), "utf8"));
+    const hasBoard = Array.isArray(cfg.tasks) && cfg.tasks.length > 0;
+    if (cfg.officeName || hasBoard || cfg.runnerPaused === false) {
+      return { officeName: cfg.officeName, tasks: cfg.tasks, runnerPaused: cfg.runnerPaused };
+    }
+  } catch { /* config absent — nothing to migrate */ }
+  return null;
 }
 
 function updateAgentConfig(proj: string | null, mutate: (cfg: any) => void): void {
@@ -2702,15 +2969,15 @@ async function handle(req: Request): Promise<Response> {
         case "setDefaultModel":
           setSettingsField("defaultModel", String(value || ""));
           break;
-        // Model for the Git view's AI commit-message generator (Pi Scope's own
-        // field in settings.json; empty falls back to defaultModel).
+        // Model for the Git view's AI commit-message generator (stored in the
+        // Git plugin's own store; empty falls back to defaultModel).
         case "setGitCommitModel":
-          setSettingsField("gitCommitModel", String(value || ""));
+          setGitSettingsField("gitCommitModel", String(value || ""));
           break;
         // Instruction template for the commit-message generator (placeholders
         // {{branch}} {{source}} {{files}} {{diff}}); empty = built-in default.
         case "setGitCommitTemplate":
-          setSettingsField("gitCommitTemplate", String(value || ""));
+          setGitSettingsField("gitCommitTemplate", String(value || ""));
           break;
         case "setDefaultProvider":
           setSettingsField("defaultProvider", String(value || ""));
@@ -2899,6 +3166,39 @@ async function handle(req: Request): Promise<Response> {
           }
           break;
         }
+        // ── A subagent's skill / tool allowlits (agents/*.md `skills:` /
+        // `tools:`) ── the two keys the agent-team extension reads when it spawns
+        // that subagent. `value` is { file, skills } / { file, tools }: null to
+        // drop the key (the subagent inherits the global subagent skill set, or
+        // the built-in default tool list), an array of names otherwise —
+        // possibly empty for skills, meaning "this subagent gets no skills"
+        // (pi reads a bare `skills:` that way; a bare `tools:` is read as the
+        // default list, so the UI never writes one). Names are shape-checked and
+        // de-duplicated; a name that is not installed is accepted (pi logs it as
+        // unknown) so a definition written by hand is never un-editable.
+        case "setAgentDefSkills":
+        case "setAgentDefTools": {
+          const key = action === "setAgentDefSkills" ? "skills" : "tools";
+          const v = (value ?? {}) as Record<string, unknown>;
+          const file = String(v.file ?? "").trim();
+          if (!/^[A-Za-z0-9_.-]+\.md$/.test(file)) return jsonResponse({ error: "invalid agent file" }, 400);
+          const raw = v[key];
+          let names: string[] | null = null;
+          if (raw !== null && raw !== undefined) {
+            if (!Array.isArray(raw)) return jsonResponse({ error: `${key} must be an array or null` }, 400);
+            const list = raw.map((s) => String(s).trim()).filter(Boolean);
+            if (list.length > 100) return jsonResponse({ error: `too many ${key} (100 max)` }, 400);
+            const bad = list.find((s) => !AGENT_DEF_LIST_NAME_RE.test(s));
+            if (bad) return jsonResponse({ error: `invalid ${key} name: ${bad}` }, 400);
+            names = [...new Set(list)];
+          }
+          try {
+            setAgentDefList(file, key, names);
+          } catch {
+            return jsonResponse({ error: `no such agent definition: ${file}` }, 404);
+          }
+          break;
+        }
         // ── Subagent definition frontmatter (agents/*.md) ──
         // `value` is { file, field, value }.
         case "setAgentDefField": {
@@ -2943,6 +3243,8 @@ async function handle(req: Request): Promise<Response> {
       switch (action) {
         case "setTeam":
           updateAgentConfig(proj, (cfg) => { cfg.activeTeam = body.team; });
+          // The off-list follows the team we switch to, never the one we left.
+          reconcileDisabledAgents(proj);
           break;
         case "toggleMode":
           updateAgentConfig(proj, (cfg) => { cfg.mode = cfg.mode === "creative" ? "standard" : "creative"; });
@@ -2980,18 +3282,25 @@ async function handle(req: Request): Promise<Response> {
         case "toggleAgent": {
           const key = String(body.agent || "").toLowerCase();
           const disabled = !!body.disabled;
+          // Duty is per team: the same member name can sit on several teams and
+          // each keeps its own on/off state (one desk per team on the floor).
+          // A named team flips only that roster row; without one (older callers)
+          // every row holding the member flips, as before.
+          const team = String(body.team || "").trim();
+          if (team && !readTeams(proj).teams[team]) return jsonResponse({ error: `no such team: ${team}` }, 400);
           updateTeamsYaml(proj, (p) => {
-            for (const members of Object.values(p.teams || {})) {
-              const mem = (members as any[]).find((m) => (m.name || "").toLowerCase() === key);
+            const teams = p.teams || {};
+            const lists: any[][] = team ? [teams[team] || []] : Object.values(teams);
+            for (const members of lists) {
+              const mem = members.find((m) => (m.name || "").toLowerCase() === key);
               if (mem) mem.active = !disabled;
             }
           });
-          updateAgentConfig(proj, (cfg) => {
-            cfg.disabledAgents = cfg.disabledAgents || [];
-            const set = new Set(cfg.disabledAgents.map((s: string) => s.toLowerCase()));
-            if (disabled) set.add(key); else set.delete(key);
-            cfg.disabledAgents = Array.from(set);
-          });
+          // `disabledAgents` is the RUNNING session's name-keyed off-list, so it
+          // only speaks for the active team: a desk on an inactive team must not
+          // silence the same-named member of the team that is actually running.
+          const activeTeam = String(readAgentConfig(proj).activeTeam || "");
+          if (!team || team === activeTeam) reconcileDisabledAgents(proj);
           break;
         }
         case "setMemberModel": {
@@ -3051,6 +3360,7 @@ async function handle(req: Request): Promise<Response> {
           });
           // A team the user just created is the one they want to work on.
           updateAgentConfig(proj, (cfg) => { cfg.activeTeam = name; });
+          reconcileDisabledAgents(proj);
           break;
         }
         case "renameTeam": {
@@ -3072,6 +3382,7 @@ async function handle(req: Request): Promise<Response> {
             p.teams = next;
           });
           updateAgentConfig(proj, (cfg) => { if (cfg.activeTeam === from) cfg.activeTeam = to; });
+          reconcileDisabledAgents(proj);
           break;
         }
         case "removeTeam": {
@@ -3085,6 +3396,7 @@ async function handle(req: Request): Promise<Response> {
             if (remaining.length) cfg.activeTeam = remaining[0];
             else delete cfg.activeTeam;
           });
+          reconcileDisabledAgents(proj);
           break;
         }
         case "addMember": {
@@ -3105,6 +3417,7 @@ async function handle(req: Request): Promise<Response> {
             if (newMemberModel) entry.model = newMemberModel;
             members.push(entry);
           });
+          reconcileDisabledAgents(proj);
           break;
         }
         case "removeMember": {
@@ -3116,77 +3429,14 @@ async function handle(req: Request): Promise<Response> {
             const members = p.teams && p.teams[team];
             if (members) p.teams[team] = members.filter((m) => (m.name || "").toLowerCase() !== name.toLowerCase());
           });
+          // A member that leaves the running team drops off its off-list too.
+          reconcileDisabledAgents(proj);
           break;
         }
-        // ── The Office view's own state: its name, and the task queue ──
-        case "setOfficeName": {
-          const name = String(body.name ?? "").replace(/\s+/g, " ").trim();
-          if (name.length > 60) return jsonResponse({ error: "office names may be up to 60 characters" }, 400);
-          updateAgentConfig(proj, (cfg) => {
-            if (name) cfg.officeName = name; else delete cfg.officeName;
-          });
-          break;
-        }
-        case "addTask": {
-          const title = String(body.title ?? "").replace(/\s+/g, " ").trim();
-          const note = String(body.note ?? "").replace(/\s+/g, " ").trim().slice(0, TASK_NOTE_MAX);
-          if (!title) return jsonResponse({ error: "missing title" }, 400);
-          if (title.length > 200) return jsonResponse({ error: "task titles may be up to 200 characters" }, 400);
-          let full = false;
-          updateAgentConfig(proj, (cfg) => {
-            const list = normaliseTasks(cfg.tasks);
-            if (list.length >= TASK_MAX) full = true;
-            else {
-              const task: Record<string, any> = { id: `task_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`, title, status: "todo", createdAt: Date.now() };
-              if (note) task.note = note;
-              list.push(task);
-              cfg.tasks = list;
-            }
-          });
-          if (full) return jsonResponse({ error: `the board is full (${TASK_MAX} tasks)` }, 400);
-          break;
-        }
-        case "moveTask": {
-          const id = String(body.id ?? "").trim();
-          const status = String(body.status ?? "").trim();
-          if (!id) return jsonResponse({ error: "missing id" }, 400);
-          if (!TASK_STATUSES.includes(status)) return jsonResponse({ error: `invalid status: ${status}` }, 400);
-          let found = false;
-          updateAgentConfig(proj, (cfg) => {
-            const list = normaliseTasks(cfg.tasks);
-            const task = list.find((t) => t.id === id);
-            if (!task) return;
-            found = true;
-            const at = Date.now();
-            task.status = status;
-            // Stamp the column the task entered: Planned is worked FIFO by
-            // plannedAt, and the timestamps drive the board's own labels.
-            if (status === "planned") task.plannedAt = task.plannedAt || at;
-            if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
-            if (status === "in_progress") task.startedAt = task.startedAt || at;
-            if (status === "done") task.finishedAt = at;
-            cfg.tasks = list;
-          });
-          if (!found) return jsonResponse({ error: "no such task" }, 404);
-          break;
-        }
-        case "removeTask": {
-          const id = String(body.id ?? "").trim();
-          if (!id) return jsonResponse({ error: "missing id" }, 400);
-          updateAgentConfig(proj, (cfg) => {
-            cfg.tasks = normaliseTasks(cfg.tasks).filter((t) => t.id !== id);
-          });
-          break;
-        }
-        case "setRunnerPaused": {
-          // The board's Run / Pause switch. Paused (true) is the default: the
-          // runner hands nothing to the orchestrator until it is switched off.
-          const paused = body.paused !== false;
-          updateAgentConfig(proj, (cfg) => { cfg.runnerPaused = paused; });
-          break;
-        }
-
         // ── Reference library (Office → meeting room) ──
+        // The office's *own* state (its name, the Kanban queue and the runner
+        // switch) is no longer here: it is owned by the Office plugin, which
+        // serves it over its own `/office` routes (plugins/office/server.ts).
         // Files/folders the user wants this workspace's team to have at hand.
         // Stored per project; the block is injected at the start of a fresh
         // conversation (see the /chat route below and library.ts).
@@ -3261,15 +3511,17 @@ async function handle(req: Request): Promise<Response> {
           break;
         }
         case "toggleSkill": {
-          const group = body.group; // "orchestrator" | "subagent"
+          // Orchestrator-only: a subagent's skills are its own `agents/*.md`
+          // `skills:` key (written through setAgentDefSkills), so there is no
+          // subagent set to toggle here. A stale `group` is ignored rather than
+          // refused — every caller that sends one means the orchestrator.
           const dir = String(body.dir || "");
           if (!dir) return jsonResponse({ error: "missing skill" }, 400);
           updateAgentConfig(proj, (cfg) => {
-            const key = group === "orchestrator" ? "orchestratorSkills" : "subagentSkills";
-            const arr: string[] = cfg[key] || [];
+            const arr: string[] = cfg.orchestratorSkills || [];
             const set = new Set(arr);
             if (set.has(dir)) set.delete(dir); else set.add(dir);
-            cfg[key] = Array.from(set);
+            cfg.orchestratorSkills = Array.from(set);
           });
           break;
         }
@@ -3851,7 +4103,8 @@ wssRef = attachTerminal(server, {
 const pluginKit = {
   fs, path,
   jsonResponse, textResponse, readBody, intParam, intOrNull,
-  validateCwd, readSettingsJson, DEFAULT_COMMIT_TEMPLATE, generateCommitMessage,
+  validateCwd, resolveProjectDir, legacyOfficeState,
+  readSettingsJson, DEFAULT_COMMIT_TEMPLATE, generateCommitMessage,
   git, gitTry, gitConfigArgs, ensureGitRepo,
   resolveWithinCwd, cleanPaths, rejectOptionLike,
   parsePorcelainLine, porcelainStatus,

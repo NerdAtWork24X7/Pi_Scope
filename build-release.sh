@@ -23,7 +23,7 @@ echo "[build] bundling the Pi coding agent (pi-bundle)..."
 cp "$ROOT/extension/pi-scope.ts" "$LAUNCHER/pi-bundle/pi-scope.ts"
 
 echo "[build] bundling SCOPE server (TS -> JS; node-pty/ws kept external)..."
-mkdir -p server-bundle/public
+mkdir -p server-bundle/public server-bundle/plugins
 npx esbuild "$ROOT/apps/scope-server/server.ts" \
   --bundle --platform=node --target=node22 --format=esm \
   --external:node-pty --external:ws \
@@ -31,6 +31,10 @@ npx esbuild "$ROOT/apps/scope-server/server.ts" \
 
 echo "[build] copying WebUI assets..."
 cp -r "$ROOT/apps/scope-server/public/." "$LAUNCHER/server-bundle/public/"
+# The built-in plugins (feature server modules + their client bundles, e.g. the
+# Office view) are loaded from disk at runtime, so they travel beside server.js.
+# plugins.ts resolves BUILTIN_DIR next to the host module for exactly this.
+cp -r "$ROOT/apps/scope-server/plugins/." "$LAUNCHER/server-bundle/plugins/"
 cp "$ROOT/apps/scope-desktop/icon.png" "$LAUNCHER/server-bundle/icon.png"
 
 echo "[build] writing server-bundle/package.json (type:module) to silence ESM warning..."

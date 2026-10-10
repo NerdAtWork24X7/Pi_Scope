@@ -20,6 +20,11 @@ const PUBLIC_DIR = path.join(HERE, "..", "public");
 
 const BUILTIN_PLUGINS_DIR = path.join(HERE, "..", "plugins");
 
+/** The tools a subagent definition without its own `tools:` key gets, mirroring
+ *  the real server's `agentDefaultTools` (the agent-team extension's built-in
+ *  fallback list). */
+export const AGENT_DEFAULT_TOOLS = ["read", "grep", "find", "ls"];
+
 /** The model registry, shaped like the real server's `modelsMeta` (provider,
  *  context window, cost, thinking levels). One entry — anthropic's — is in the
  *  registry but NOT in the fixture's enabledModels, which is what the model
@@ -132,11 +137,6 @@ export function defaultTeam(opts = {}) {
     disabledAgents: [],
     // The reference library the Office shows in its meeting room.
     library: [],
-    // The Office view's own state: its name, the Kanban task queue, and whether
-    // the queue runner is dispatching (paused by default).
-    officeName: undefined,
-    tasks: [],
-    runnerPaused: true,
     skills: [],
     tools: [],
     skipOrchestratorTools: [],
@@ -184,11 +184,39 @@ export async function startMockBackend() {
     chatWorkspacesRemoved: [],
     // Subagent definitions (agents/*.md) as GET /settings returns them.
     agentDefs: [],
+    // The Office plugin's own state, per workspace: its name, the Kanban task
+    // queue and the runner switch. The real plugin keeps this in its own store
+    // behind `/office` (plugins/office/server.ts), NOT in the team snapshot.
+    office: {},
   };
+
+  /** The bucket a workspace's office state lives in (the plugin keys on cwd). */
+  const officeKey = (cwd) => String(cwd || state.cwd || "(default)");
+
+  /** An office snapshot shaped like the plugin's `GET /office` answer. */
+  function officeSnapshot(cwd) {
+    const s = state.office[officeKey(cwd)] || {};
+    return {
+      officeName: s.officeName || undefined,
+      tasks: (s.tasks || []).map((t) => ({ ...t })),
+      // Paused is the default: anything but an explicit false means paused.
+      runnerPaused: s.runnerPaused !== false,
+    };
+  }
+
+  /** The mutable bucket behind a workspace's office state. */
+  function officeBucket(cwd) {
+    const key = officeKey(cwd);
+    state.office[key] = state.office[key] || { tasks: [] };
+    return state.office[key];
+  }
 
   /** Every request the page made (path/method/parsed body) — tests assert on it. */
   const requests = [];
   const sseClients = new Set();
+  // Injected failures (see failNext): the next matching API call answers with
+  // an error, so a test can prove a view keeps its last good data.
+  const fails = [];
 
   // ── Chat stream scripting ────────────────────────────────────────────────
   const turns = []; // completed-but-not-yet-awaited turns
@@ -242,11 +270,39 @@ export async function startMockBackend() {
     }
   }
 
+  /** Mirror the server: `disabledAgents` is the running session's off-list and
+   *  follows the active team's own roster rows, so duty never crosses teams. */
+  function reconcileDisabledAgents() {
+    const teams = state.team.teams || {};
+    const named = state.team.activeTeam || "";
+    const active = named && teams[named] ? named : Object.keys(teams)[0] || "";
+    const members = active ? teams[active] : undefined;
+    state.team.disabledAgents = Array.isArray(members)
+      ? members
+          .filter((m) => m && m.active === false && String(m.name || "").trim())
+          .map((m) => String(m.name).toLowerCase())
+      : [];
+  }
+
   function snapshotTeam() {
     return {
       ...state.team,
       chatWorkspaces: state.chatWorkspaces.slice(),
       chatWorkspacesRemoved: state.chatWorkspacesRemoved.slice(),
+    };
+  }
+
+  /** A /settings snapshot shaped like the real route's: the model registry, the
+   *  default tool list a definition inherits, the subagent definitions, and the
+   *  agent-team state the page reads alongside them. */
+  function settingsSnapshot() {
+    return {
+      pi: {},
+      settingsRaw: {},
+      modelsMeta: MODEL_META,
+      agentDefaultTools: AGENT_DEFAULT_TOOLS,
+      agentDefs: state.agentDefs,
+      ...snapshotTeam(),
     };
   }
 
@@ -292,6 +348,8 @@ export async function startMockBackend() {
       pathname === "/sessions" || pathname.startsWith("/sessions/") ||
       pathname === "/health" ||
       pathname === "/agent-team" ||
+      // The Office plugin's own routes (its name / Kanban queue / runner).
+      pathname === "/office" ||
       pathname === "/events/stream" ||
       pathname === "/settings" || pathname.startsWith("/settings/") ||
       pathname === "/plugins" ||
@@ -300,6 +358,31 @@ export async function startMockBackend() {
       // view-switch race even when another view ends up active.
       pathname === "/files" || pathname.startsWith("/files/");
 
+    // ── Plugin files (client bundles + stylesheets) ────────────────────────
+    // The real host serves any file inside a plugin's own directory here, which
+    // is how a standalone plugin's client.js / client.css reach the browser.
+    if (pathname.startsWith("/plugins/file/")) {
+      const rest = pathname.slice("/plugins/file/".length);
+      const slash = rest.indexOf("/");
+      if (slash <= 0) { res.writeHead(404, { "content-type": "text/plain" }); res.end("not found"); return; }
+      const id = decodeURIComponent(rest.slice(0, slash));
+      const rel = decodeURIComponent(rest.slice(slash + 1));
+      const full = path.join(BUILTIN_PLUGINS_DIR, id, rel);
+      if (!full.startsWith(BUILTIN_PLUGINS_DIR)) { res.writeHead(403); res.end("forbidden"); return; }
+      let body;
+      try { body = fs.readFileSync(full); } catch {
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("not found");
+        return;
+      }
+      res.writeHead(200, {
+        "content-type": MIME[path.extname(full)] || "application/octet-stream",
+        "cache-control": "no-store",
+      });
+      res.end(body);
+      return;
+    }
+
     if (!isAPI) return serveStatic(req, res, pathname);
 
     const raw = method === "GET" || method === "DELETE" ? "" : await readBody(req);
@@ -307,6 +390,13 @@ export async function startMockBackend() {
     if (raw) { try { body = JSON.parse(raw); } catch { body = {}; } }
     req.__body = body;
     requests.push({ method, path: pathname, query: Object.fromEntries(parsed.searchParams), body });
+
+    // An injected failure for the next matching call (see failNext).
+    const failAt = fails.findIndex((f) => f.path === pathname && (!f.method || f.method === method));
+    if (failAt >= 0) {
+      const f = fails.splice(failAt, 1)[0];
+      return sendJSON(res, { error: "injected failure" }, f.status || 500);
+    }
 
     // ── Health ─────────────────────────────────────────────────────────────
     if (pathname === "/health") return sendJSON(res, { ok: true, cwd: state.cwd, version: "test" });
@@ -374,38 +464,11 @@ export async function startMockBackend() {
         state.sessions = state.sessions.filter((s) => (s.cwd || "(unknown)") !== body.path);
       } else if (action === "setTeam" && typeof body.team === "string") {
         state.team.activeTeam = body.team;
+        reconcileDisabledAgents();
       } else if (action === "toggleMode") {
         state.team.mode = state.team.mode === "creative" ? "standard" : "creative";
       } else if (action === "toggleMemory") {
         state.team.memoryActive = !state.team.memoryActive;
-      } else if (action === "setOfficeName") {
-        const name = String(body.name ?? "").replace(/\s+/g, " ").trim();
-        if (name.length > 60) return sendJSON(res, { error: "office names may be up to 60 characters" }, 400);
-        if (name) state.team.officeName = name; else delete state.team.officeName;
-      } else if (action === "addTask" && typeof body.title === "string") {
-        const title = body.title.replace(/\s+/g, " ").trim();
-        const note = typeof body.note === "string" ? body.note.replace(/\s+/g, " ").trim() : "";
-        if (!title) return sendJSON(res, { error: "missing title" }, 400);
-        const task = { id: `task_${(state.team.tasks || []).length + 1}`, title, status: "todo", createdAt: Date.now() };
-        if (note) task.note = note;
-        state.team.tasks = [...(state.team.tasks || []), task];
-      } else if (action === "moveTask" && typeof body.id === "string") {
-        const status = String(body.status || "");
-        if (!["todo", "planned", "in_progress", "done"].includes(status)) {
-          return sendJSON(res, { error: `invalid status: ${status}` }, 400);
-        }
-        const task = (state.team.tasks || []).find((t) => t.id === body.id);
-        if (!task) return sendJSON(res, { error: "no such task" }, 404);
-        const at = Date.now();
-        task.status = status;
-        if (status === "planned") task.plannedAt = task.plannedAt || at;
-        if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
-        if (status === "in_progress") task.startedAt = task.startedAt || at;
-        if (status === "done") task.finishedAt = at;
-      } else if (action === "removeTask" && typeof body.id === "string") {
-        state.team.tasks = (state.team.tasks || []).filter((t) => t.id !== body.id);
-      } else if (action === "setRunnerPaused") {
-        state.team.runnerPaused = body.paused !== false;
       } else if (action === "addLibraryEntry" && typeof body.path === "string") {
         // The real route resolves the path on disk; the mock keys on path + the
         // agent it is for, so the same file may be listed per agent, once each.
@@ -443,9 +506,19 @@ export async function startMockBackend() {
           .filter((e) => !(body.id ? e.id === body.id : e.path === body.path));
       } else if (action === "toggleAgent" && typeof body.agent === "string") {
         const name = body.agent.toLowerCase();
-        const set = new Set(state.team.disabledAgents || []);
-        if (body.disabled) set.add(name); else set.delete(name);
-        state.team.disabledAgents = [...set];
+        // Duty is per team: a named team flips only that roster row (the same
+        // member can sit on several teams and each keeps its own state).
+        const team = typeof body.team === "string" ? body.team.trim() : "";
+        if (team && !(state.team.teams || {})[team]) {
+          return sendJSON(res, { error: `no such team: ${team}` }, 400);
+        }
+        const lists = team ? [state.team.teams[team]] : Object.values(state.team.teams || {});
+        for (const members of lists) {
+          const mem = (members || []).find((m) => (m.name || "").toLowerCase() === name);
+          if (mem) mem.active = !body.disabled;
+        }
+        // `disabledAgents` only speaks for the running (active) team.
+        if (!team || team === state.team.activeTeam) reconcileDisabledAgents();
       } else if (action === "addTeam" && typeof body.team === "string") {
         const name = body.team.trim();
         if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
@@ -458,6 +531,7 @@ export async function startMockBackend() {
         }
         // A team the user just created is the one they want to work on.
         state.team.activeTeam = name;
+        reconcileDisabledAgents();
       } else if (action === "removeTeam" && typeof body.team === "string") {
         const name = body.team.trim();
         if (state.team.teams) delete state.team.teams[name];
@@ -467,6 +541,7 @@ export async function startMockBackend() {
           if (remaining.length) state.team.activeTeam = remaining[0];
           else delete state.team.activeTeam;
         }
+        reconcileDisabledAgents();
       } else if (action === "addMember" && typeof body.team === "string" && typeof body.name === "string") {
         const name = body.name.trim();
         state.team.teams = state.team.teams || {};
@@ -477,20 +552,50 @@ export async function startMockBackend() {
           if (body.displayName) entry.displayName = String(body.displayName);
           members.push(entry);
         }
+        reconcileDisabledAgents();
       } else if (action === "removeMember" && typeof body.team === "string" && typeof body.name === "string") {
         const members = (state.team.teams || {})[body.team];
         if (Array.isArray(members)) {
           state.team.teams[body.team] = members.filter((m) => (m.name || "").toLowerCase() !== body.name.toLowerCase());
         }
+        reconcileDisabledAgents();
       } else if (action === "setMemberDisplayName" && typeof body.team === "string" && typeof body.agent === "string") {
         const members = (state.team.teams || {})[body.team];
         const mem = Array.isArray(members)
           ? members.find((m) => (m.name || "").toLowerCase() === body.agent.toLowerCase())
           : null;
+        const dn = String(body.displayName ?? "").trim();
+        // Mirror the real server: one line, up to 64 characters, and no colon
+        // (the line-based teams.yaml parser splits on it).
+        if (!/^[^\r\n:]{0,64}$/.test(dn)) {
+          return sendJSON(res, { error: "display names may be up to 64 characters, on one line" }, 400);
+        }
         if (mem) {
-          const dn = String(body.displayName ?? "").trim();
           if (dn) mem.displayName = dn; else delete mem.displayName;
         }
+      } else if (action === "setMemberModel" && typeof body.team === "string" && typeof body.agent === "string") {
+        const members = (state.team.teams || {})[body.team];
+        const mem = Array.isArray(members)
+          ? members.find((m) => (m.name || "").toLowerCase() === String(body.agent).toLowerCase())
+          : null;
+        if (mem) {
+          const model = String(body.model || "").trim();
+          if (model) mem.model = model; else delete mem.model;
+        }
+      } else if (action === "toggleSkill" && typeof body.dir === "string") {
+        // Orchestrator-only, like the real route: a subagent's skills are its
+        // own agents/*.md `skills:` key (setAgentDefSkills), never a team field.
+        const sk = (state.team.skills || []).find((s) => s.dir === body.dir);
+        if (sk) sk.orchestrator = !sk.orchestrator;
+      } else if (action === "toggleTool" && typeof body.tool === "string") {
+        const key = String(body.tool).toLowerCase();
+        const arr = Array.isArray(state.team.skipOrchestratorTools) ? [...state.team.skipOrchestratorTools] : [];
+        const i = arr.findIndex((t) => String(t).toLowerCase() === key);
+        if (i >= 0) arr.splice(i, 1); else arr.push(String(body.tool));
+        state.team.skipOrchestratorTools = arr;
+      } else if (action === "toggleExtension" && typeof body.path === "string") {
+        const ex = (state.team.extensions || []).find((e) => e.path === body.path);
+        if (ex) ex.enabled = ex.enabled === false;
       }
       return sendJSON(res, snapshotTeam());
     }
@@ -535,15 +640,32 @@ export async function startMockBackend() {
     }
 
     if (pathname === "/settings" && method === "GET") {
-      return sendJSON(res, { pi: {}, settingsRaw: {}, modelsMeta: MODEL_META, agentDefs: state.agentDefs, ...snapshotTeam() });
-    }
-    if (pathname === "/settings" && method === "POST") {
+      return sendJSON(res, settingsSnapshot());
+    }    if (pathname === "/settings" && method === "POST") {
       // Only the actions the views exercise are modelled; the rest are no-ops
       // that still answer with the snapshot, like the real route.
       if (body.action === "saveAgentDefFile" && body.value && typeof body.value.file === "string") {
         const def = state.agentDefs.find((d) => d.file === body.value.file);
         if (!def) return sendJSON(res, { error: `no such agent definition: ${body.value.file}` }, 404);
         def.content = String(body.value.content ?? "");
+      }
+      // A subagent's own allowlists (agents/*.md `skills:` / `tools:`): the
+      // Settings picker and a desk's popup both write these, so the mock keeps
+      // the parsed fields in step the way the real frontmatter writer does
+      // (null drops the key → the definition inherits again).
+      if (body.action === "setAgentDefSkills" || body.action === "setAgentDefTools") {
+        const key = body.action === "setAgentDefSkills" ? "skills" : "tools";
+        const def = state.agentDefs.find((d) => d.file === body.value.file);
+        if (!def) return sendJSON(res, { error: `no such agent definition: ${body.value.file}` }, 404);
+        const names = body.value[key];
+        const list = names === null || names === undefined
+          ? []
+          : [...new Set(names.map((n) => String(n).trim()).filter(Boolean))];
+        def[key] = list;
+        // `tools:` still has a default-list state worth tracking (the extension's
+        // built-in list, which a missing OR empty key selects); `skills:` does
+        // not — absent and empty both mean none.
+        if (key === "tools") def.toolsAll = list.length === 0;
       }
       // The Office's orchestrator picker writes the app's default model.
       if (body.action === "setDefaultModel") state.team.defaultModel = String(body.value || "");
@@ -559,12 +681,14 @@ export async function startMockBackend() {
           name: named ? named[1].trim() : file.replace(/\.md$/, ""),
           description: "",
           model: "",
-          tools: "",
+          tools: [],
+          toolsAll: true,
           thinking: "",
+          skills: [],
           content,
         });
       }
-      return sendJSON(res, { pi: {}, settingsRaw: {}, modelsMeta: MODEL_META, agentDefs: state.agentDefs, ...snapshotTeam() });
+      return sendJSON(res, settingsSnapshot());
     }
 
     // ── Files (Review) ─────────────────────────────────────────────────────
@@ -584,6 +708,55 @@ export async function startMockBackend() {
         head: null,
         stats: { files: 0, modules: 0, changedFiles: 0, add: 0, del: 0, truncated: false },
       });
+    }
+
+    // ── Office (the plugin's own routes) ───────────────────────────────────
+    // Mirrors plugins/office/server.ts: the view's name, its Kanban queue and
+    // the runner switch are plugin-owned, so they do NOT ride on /agent-team.
+    if (pathname === "/office" && method === "GET") {
+      return sendJSON(res, officeSnapshot(parsed.searchParams.get("cwd")));
+    }
+    if (pathname === "/office" && method === "POST") {
+      const action = String(body.action || "");
+      const bucket = officeBucket(body.cwd);
+      const collapse = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
+      if (action === "setOfficeName") {
+        const name = collapse(body.name);
+        if (name.length > 60) return sendJSON(res, { error: "office names may be up to 60 characters" }, 400);
+        if (name) bucket.officeName = name; else delete bucket.officeName;
+      } else if (action === "addTask") {
+        const title = collapse(body.title);
+        const note = collapse(body.note);
+        if (!title) return sendJSON(res, { error: "missing title" }, 400);
+        if (title.length > 200) return sendJSON(res, { error: "task titles may be up to 200 characters" }, 400);
+        const task = { id: `task_${(bucket.tasks || []).length + 1}`, title, status: "todo", createdAt: Date.now() };
+        if (note) task.note = note;
+        bucket.tasks = [...(bucket.tasks || []), task];
+      } else if (action === "moveTask") {
+        const id = String(body.id || "").trim();
+        const status = String(body.status || "");
+        if (!id) return sendJSON(res, { error: "missing id" }, 400);
+        if (!["todo", "planned", "in_progress", "done"].includes(status)) {
+          return sendJSON(res, { error: `invalid status: ${status}` }, 400);
+        }
+        const task = (bucket.tasks || []).find((t) => t.id === id);
+        if (!task) return sendJSON(res, { error: "no such task" }, 404);
+        const at = Date.now();
+        task.status = status;
+        if (status === "planned") task.plannedAt = task.plannedAt || at;
+        if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
+        if (status === "in_progress") task.startedAt = task.startedAt || at;
+        if (status === "done") task.finishedAt = at;
+      } else if (action === "removeTask") {
+        const id = String(body.id || "").trim();
+        if (!id) return sendJSON(res, { error: "missing id" }, 400);
+        bucket.tasks = (bucket.tasks || []).filter((t) => t.id !== id);
+      } else if (action === "setRunnerPaused") {
+        bucket.runnerPaused = body.paused !== false;
+      } else {
+        return sendJSON(res, { error: `unknown action: ${action}` }, 400);
+      }
+      return sendJSON(res, officeSnapshot(body.cwd));
     }
 
     // ── Plugins ────────────────────────────────────────────────────────────
@@ -623,6 +796,15 @@ export async function startMockBackend() {
     setAgentDefs(defs) { state.agentDefs = defs.map((d) => ({ ...d })); },
     /** Seed the reference library (files/folders injected at conversation start). */
     setLibrary(entries) { state.team.library = entries.map((e) => ({ ...e })); },
+    /** Seed the Office plugin's own state for a workspace (name / queue / runner). */
+    setOffice(o = {}, cwd) {
+      const bucket = officeBucket(cwd);
+      if ("officeName" in o) { if (o.officeName) bucket.officeName = o.officeName; else delete bucket.officeName; }
+      if (Array.isArray(o.tasks)) bucket.tasks = o.tasks.map((t) => ({ ...t }));
+      if ("runnerPaused" in o) bucket.runnerPaused = o.runnerPaused !== false;
+    },
+    /** The Office state the plugin route is currently holding for a workspace. */
+    officeState: (cwd) => officeSnapshot(cwd),
     /** Seed one session's totals, as GET /sessions/stats reports them. */
     setStats(id, s) {
       state.stats[id] = { total_cost: 0, total_tokens: 0, error_count: 0, models: [], ...s };
@@ -630,6 +812,10 @@ export async function startMockBackend() {
     get activeTurn() { return activeTurn; },
     requestsFor(pathname, method) {
       return requests.filter((r) => r.path === pathname && (!method || r.method === method));
+    },
+    /** Fail the NEXT matching API call with `status` (default 500). */
+    failNext(pathname, method = "GET", status = 500) {
+      fails.push({ path: pathname, method, status });
     },
     /** Reset every piece of per-test state (called from beforeEach). */
     reset() {
@@ -640,7 +826,9 @@ export async function startMockBackend() {
       state.chatWorkspaces = [];
       state.chatWorkspacesRemoved = [];
       state.agentDefs = [];
+      state.office = {};
       requests.length = 0;
+      fails.length = 0;
       turns.length = 0;
       waiters.splice(0).forEach(() => {});
       activeTurn = null;

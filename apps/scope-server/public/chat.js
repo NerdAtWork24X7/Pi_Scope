@@ -685,14 +685,17 @@
         const tool = e.target.closest(".at-chip[data-tool]");
         if (tool) { postTeam({ action: "toggleTool", tool: tool.dataset.tool }, { liveConfig: true }); return; }
         const skill = e.target.closest(".at-chip[data-dir]");
-        if (skill) { postTeam({ action: "toggleSkill", group: skill.dataset.group, dir: skill.dataset.dir }); return; }
+        if (skill) { postTeam({ action: "toggleSkill", dir: skill.dataset.dir }); return; }
         const ext = e.target.closest(".at-chip[data-path]");
         if (ext) { postTeam({ action: "toggleExtension", path: ext.dataset.path }); return; }
         const sub = e.target.closest(".at-chip.sub[data-agent]");
         if (sub) {
           const name = sub.dataset.agent || "";
           const off = new Set(CH.teamData?.disabledAgents || []).has(name.toLowerCase());
-          postTeam({ action: "toggleAgent", agent: name, disabled: !off });
+          // Duty is per team: the rail lists the active team's subagents, so
+          // its toggle names that team (and leaves the same-named member of
+          // every other team alone).
+          postTeam({ action: "toggleAgent", agent: name, team: CH.teamData?.activeTeam || "", disabled: !off });
           return;
         }
         const sidChip = e.target.closest(".at-chip[data-sid]");
@@ -1090,24 +1093,24 @@
 
     const orchSt = orch ? S.subagentStatus(orch) : "gray";
 
-    // Skills are divided into orchestrator vs subagent groups; membership is
-    // persisted in agent-team-config.json (orchestratorSkills / subagentSkills).
-    // Each group section lists all discovered skills with per-group on/off, so
-    // a skill can be enabled for the orchestrator, subagents, both, or neither.
+    // The orchestrator's skills: membership is persisted in
+    // agent-team-config.json `orchestratorSkills`. A subagent's skills are its
+    // own `agents/*.md` `skills:` key — the single source of truth, edited in
+    // Settings → Skills / SubAgent — so the Subagents section below has no skill
+    // list of its own.
     const skills = td.skills || [];
-    const skillItem = (sk, group, on) =>
-      `<div class="at-chip${on ? " on" : ""}" data-dir="${esc(sk.dir)}" data-group="${group}" title="${esc(sk.name)}${sk.description ? " — " + esc(sk.description) : ""}">` +
+    const skillItem = (sk, on) =>
+      `<div class="at-chip${on ? " on" : ""}" data-dir="${esc(sk.dir)}" title="${esc(sk.name)}${sk.description ? " — " + esc(sk.description) : ""}">` +
       `<span class="at-chip-dot"></span>` +
       `<span class="at-chip-name">${esc(sk.name)}</span>` +
       `</div>`;
     // Skills preceded by a single "skills" separator row (label + rule + count).
-    const skillGroupsBody = (group) => {
+    const skillGroupsBody = () => {
       if (!skills.length) return "";
-      const isOn = (sk) => (group === "orchestrator" ? !!sk.orchestrator : !!sk.subagent);
-      const onCount = skills.filter(isOn).length;
+      const onCount = skills.filter((sk) => !!sk.orchestrator).length;
       return (
         `<div class="at-group-label"><span>skills</span><span class="at-group-line"></span><span class="at-group-n">${onCount}/${skills.length}</span></div>` +
-        skills.map((sk) => skillItem(sk, group, isOn(sk))).join("")
+        skills.map((sk) => skillItem(sk, !!sk.orchestrator)).join("")
       );
     };
 
@@ -1116,7 +1119,7 @@
       `<span class="at-orch-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4c0 1.1-.45 2.1-1.17 2.83A4 4 0 0 1 18 12.5V14H6v-1.5a4 4 0 0 1 3.17-3.67A3.99 3.99 0 0 1 8 6a4 4 0 0 1 4-4z"/><path d="M6 14v3a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-3"/></svg></span>` +
       `<span class="at-orch-meta"><span class="at-orch-name">Orchestrator</span>` +
       `<span class="at-orch-status status-dot ${orchSt}"></span></span></div>` +
-      (skills.length ? `<div class="at-chips">` + skillGroupsBody("orchestrator") + `</div>` : "")
+      (skills.length ? `<div class="at-chips">` + skillGroupsBody() + `</div>` : "")
     );
 
     // Orchestrator tools (what the orchestrator may call), mirroring the pi
@@ -1164,7 +1167,10 @@
     else {
       for (const tn of teamNames) {
         const members = teams[tn] || [];
-        const activeCount = members.filter((m) => m.active !== false && !disabled.has((m.name || "").toLowerCase())).length;
+        // Duty is per team: this team's own rows decide, and the running
+        // session's off-list only silences the team that is actually active.
+        const live = tn === activeTeam;
+        const activeCount = members.filter((m) => m.active !== false && !(live && disabled.has((m.name || "").toLowerCase()))).length;
         const isActive = tn === activeTeam;
         const isViewed = tn === viewedTeam;
         teamBody +=
@@ -1193,7 +1199,7 @@
         const sess = roleSessions
           .slice()
           .sort((a, b) => (Date.parse(b.last_ts) || 0) - (Date.parse(a.last_ts) || 0))[0];
-        const isDisabled = disabled.has(lname);
+        const isDisabled = m.active === false || (viewedTeam === activeTeam && disabled.has(lname));
         const enabled = !isDisabled;
         const st = sess ? S.subagentStatus(sess) : "gray";
         // The subagent whose transcript is on screen. (This used to read
@@ -1208,9 +1214,6 @@
           `</div>`;
       }
     }
-    // Subagent skills follow the members, separated by a thin divider (mirrors
-    // the pi agent-team sidebar layout).
-    if (skills.length) subBody += `<div class="at-sep"></div><div class="at-chips">` + skillGroupsBody("subagent") + `</div>`;
     // Wrap member chips in the flex-wrap container so several share a row.
     subBody = `<div class="at-chips">` + subBody + `</div>`;
     html += atSection("subagents", "Subagents", subBody, { count: members.length });

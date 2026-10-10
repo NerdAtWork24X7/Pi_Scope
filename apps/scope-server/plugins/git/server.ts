@@ -333,13 +333,21 @@ export function activate(api: any): void {
 
     const branch = gitTry(absCwd, ["rev-parse", "--abbrev-ref", "HEAD"]).out.trim();
     const files = gitTry(absCwd, ["diff", ...(source === "staged" ? ["--cached"] : []), "--name-only"]).out.trim();
+    // The commit-message model/template are this feature's own settings, kept in
+    // the plugin's own store (`<plugins dir>/.data/git.json` — the same file the
+    // settings writers in server.ts write); only the default-model fallback comes
+    // from pi's settings.json.
+    const setting = (key: string) => {
+      const v = api.store.get(key);
+      return typeof v === "string" ? v.trim() : "";
+    };
     const settings = readSettingsJson();
-    const configured = typeof settings.gitCommitModel === "string" ? settings.gitCommitModel.trim() : "";
+    const configured = setting("commitModel");
     const model = configured || String(settings.defaultModel || "").trim() || "google/gemini-2.5-flash-lite";
 
     // The user's instruction template (Settings → Models), with placeholders
     // substituted. An empty setting means the built-in default.
-    const templateCfg = typeof settings.gitCommitTemplate === "string" ? settings.gitCommitTemplate.trim() : "";
+    const templateCfg = setting("commitTemplate");
     const template = templateCfg || DEFAULT_COMMIT_TEMPLATE;
     const usesDiffSlot = /\{\{\s*diff\s*\}\}/.test(template);
     const rendered = template

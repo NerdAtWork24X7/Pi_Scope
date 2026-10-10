@@ -31,10 +31,16 @@ import { pathToFileURL } from "node:url";
 
 // ─── Locations ──────────────────────────────────────────────────────────────
 
-const PROJECT_ROOT = path.resolve(import.meta.dirname, "../..");
-
-/** Built-in plugins shipped with the app (feature modules + examples). */
-export const BUILTIN_DIR = path.join(PROJECT_ROOT, "apps", "scope-server", "plugins");
+/**
+ * Built-in plugins shipped with the app (feature modules + examples).
+ *
+ * Resolved next to the host module so the same path works in both layouts: the
+ * repo (`apps/scope-server/plugins`, where server.ts lives) and a packaged build
+ * (`server-bundle/plugins`, beside the bundled server.js — see build-release.sh).
+ * `SCOPE_BUILTIN_PLUGINS_DIR` overrides it.
+ */
+export const BUILTIN_DIR =
+  process.env.SCOPE_BUILTIN_PLUGINS_DIR ?? path.join(import.meta.dirname, "plugins");
 
 /** User plugins. Override with SCOPE_PLUGINS_DIR (e.g. to keep them in-repo). */
 export const USER_DIR =
@@ -68,7 +74,7 @@ export interface PluginManifest {
    * coarse gate (its own routes are always served while it is enabled).
    */
   serverRoutes?: string[];
-  /** Optional nav/UI metadata (built-in clients keep their own view wiring). */
+  /** Optional nav/UI metadata for a feature plugin's own nav entry. */
   nav?: { label?: string; order?: number; group?: string };
   /** Free-form fields copied into the snapshot for the UI. */
   ui?: Record<string, unknown>;
@@ -86,7 +92,7 @@ export interface PluginRecord {
   enabled: boolean;
   hasServer: boolean;
   hasClient: boolean;
-  /** URL the browser can load a client bundle from (user plugins). */
+  /** URL the browser can load a client bundle from, or null without a client. */
   clientUrl: string | null;
   /** Set when the plugin failed to load — surfaced in Settings. */
   error: string | null;
@@ -273,7 +279,11 @@ export function discover(): PluginRecord[] {
       enabled: manifest.defaultEnabled !== false && !disabled.has(manifest.id),
       hasServer: !!serverEntry && fs.existsSync(serverEntry),
       hasClient: !!clientEntry && fs.existsSync(clientEntry),
-      clientUrl: source === "user" && clientEntry && fs.existsSync(clientEntry)
+      // Any plugin — built-in or user — may ship a client bundle. Built-ins
+      // used to be hard-wired into index.html; serving them through the same
+      // `/plugins/file/` route (and the same dynamic <script> load) is what lets
+      // one be a self-contained plugin directory (see plugins/office).
+      clientUrl: clientEntry && fs.existsSync(clientEntry)
         ? `/plugins/file/${encodeURIComponent(manifest.id)}/${manifest.client!.split(path.sep).join("/")}`
         : null,
       error: null,
@@ -303,6 +313,26 @@ function comparePlugins(a: PluginRecord, b: PluginRecord): number {
 
 function storeFile(id: string): string {
   return path.join(STORE_DIR, `${id}.json`);
+}
+
+/**
+ * The namespaced store instances handed out so far, keyed by plugin id.
+ *
+ * A plugin's store is memoised per id on purpose: the host may also read it (the
+ * Git feature's settings are read by core for the Settings snapshot), and two
+ * handles over one file would each cache their own copy — a write through one
+ * would be invisible to the other.
+ */
+const stores = new Map<string, PluginApi["store"]>();
+
+/** The store for `id` (`<USER_DIR>/.data/<id>.json`), created once per id. */
+export function storeFor(id: string): PluginApi["store"] {
+  let store = stores.get(id);
+  if (!store) {
+    store = makeStore(id);
+    stores.set(id, store);
+  }
+  return store;
 }
 
 function makeStore(id: string): PluginApi["store"] {
@@ -373,7 +403,7 @@ function makeApi(record: PluginRecord, host: PluginHost): PluginApi {
     onEvent: (handler) => {
       eventHooks.push({ pluginId: record.id, handler });
     },
-    store: makeStore(record.id),
+    store: storeFor(record.id),
   };
 }
 

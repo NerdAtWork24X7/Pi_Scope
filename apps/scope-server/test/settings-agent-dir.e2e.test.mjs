@@ -151,6 +151,16 @@ describe("agent-dir settings", () => {
     // open agents/<file>.md without a second round trip.
     assert.match(data.agentDefs[0].content, /^---\nname: coder\n/);
     assert.ok(data.agentDefs[0].content.includes("You are a coder."));
+    // A definition with no `skills:` key gets no skills: the file is the only
+    // source, so there is no "inherit" state left to report (and no flag for it).
+    assert.deepEqual(data.agentDefs[0].skills, []);
+    assert.equal("skillsAll" in data.agentDefs[0], false, "the retired inherit flag is gone");
+    // `tools:` is the other per-subagent allowlist the agent-team extension
+    // reads at spawn. Absent again means "inherit" — here the built-in default
+    // tool list, which the snapshot spells out so the UI can show it.
+    assert.deepEqual(data.agentDefs[0].tools, ["bash", "read"], "the frontmatter tools list is parsed");
+    assert.equal(data.agentDefs[0].toolsAll, false, "the key is present");
+    assert.deepEqual(data.agentDefaultTools, ["read", "grep", "find", "ls"], "the inherited default tool list rides along");
 
     const agents = data.instructions.find((i) => i.file === "AGENTS.md");
     assert.equal(agents.exists, true);
@@ -298,9 +308,58 @@ describe("agent-dir settings", () => {
     })).res.status, 400);
   });
 
-  // The Office view edits the roster from the floor: **name** (a display name),
-  // **fire** (drop the member) and **+ hire** (add one, with a model and a fresh
-  // agents/<name>.md). These are the writes behind those three controls.
+  test("taking a subagent off duty is scoped to one team only", async () => {
+    // The same member sits on two teams: each keeps its own duty, and only the
+    // RUNNING team's off-list (`disabledAgents`) speaks for it.
+    const teamsPath = path.join(tmpDir, ".pi", "settings", "agents", "teams.yaml");
+    fs.mkdirSync(path.dirname(teamsPath), { recursive: true });
+    fs.writeFileSync(teamsPath, ["alpha:", "  - name: coder", "beta:", "  - name: coder", ""].join("\n"));
+
+    const post = (body) => api("/agent-team", { method: "POST", body: JSON.stringify({ ...body, cwd: tmpDir }) });
+    const row = async (team) => {
+      const { data } = await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`);
+      return (data.teams[team] || []).find((m) => m.name === "coder");
+    };
+    const offList = async () => (await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`)).data.disabledAgents || [];
+
+    // `alpha` is the team that runs.
+    assert.ok((await post({ action: "setTeam", team: "alpha" })).res.ok);
+
+    // Off duty on the inactive team: only that row flips.
+    assert.ok((await post({ action: "toggleAgent", agent: "coder", team: "beta", disabled: true })).res.ok);
+    assert.equal((await row("beta")).active, false, "beta's row goes off duty");
+    assert.equal((await row("alpha")).active, undefined, "alpha's row keeps its own duty");
+    assert.ok(!(await offList()).includes("coder"), "the running team's off-list is untouched");
+
+    // Off duty on the ACTIVE team: the row flips and the session's off-list names it.
+    assert.ok((await post({ action: "toggleAgent", agent: "coder", team: "alpha", disabled: true })).res.ok);
+    assert.equal((await row("alpha")).active, false, "alpha's row goes off duty");
+    assert.ok((await offList()).includes("coder"), "the active team's off-list names the member");
+
+    // Back on duty in beta: alpha's row and the off-list stay off.
+    assert.ok((await post({ action: "toggleAgent", agent: "coder", team: "beta", disabled: false })).res.ok);
+    assert.notEqual((await row("beta")).active, false, "beta is back on duty");
+    assert.equal((await row("alpha")).active, false, "alpha's row is untouched");
+    assert.ok((await offList()).includes("coder"), "and the active team's off-list is untouched");
+
+    // Switching the running team must not carry duty across: a member left off
+    // duty on the team we leave cannot silence the same-named member of the
+    // team we switch to, which was never touched.
+    assert.ok((await post({ action: "setTeam", team: "beta" })).res.ok);
+    assert.notEqual((await row("beta")).active, false, "beta's coder is still on duty");
+    assert.ok(!(await offList()).includes("coder"), "the running team's off-list follows its own rows");
+    // …and coming back restores the team we left from its own roster row.
+    assert.ok((await post({ action: "setTeam", team: "alpha" })).res.ok);
+    assert.equal((await row("alpha")).active, false, "alpha's coder is still off duty");
+    assert.ok((await offList()).includes("coder"), "alpha's off-list names it again");
+
+    // An unknown team is refused rather than silently fanning out to everyone.
+    assert.equal((await post({ action: "toggleAgent", agent: "coder", team: "nope", disabled: true })).res.status, 400);
+  });
+
+  // The Office view edits the roster from a desk's **settings** popup: **name**
+  // (a display name), **fire** (drop the member) and **hire** (add one, with a
+  // model and a fresh agents/<name>.md). These are the writes behind them.
   test("the office's roster edits (name / fire / hire) write through to teams.yaml", async () => {
     const teamsPath = path.join(tmpDir, ".pi", "settings", "agents", "teams.yaml");
     fs.mkdirSync(path.dirname(teamsPath), { recursive: true });
@@ -346,5 +405,133 @@ describe("agent-dir settings", () => {
     assert.equal(fs.readFileSync(path.join(agentDir, "agents", "builder.md"), "utf8"), md);
     // Hiring over an existing definition is refused — that file is edited, not clobbered.
     assert.equal((await postSettings("createAgentDefFile", { file: "coder.md", content: md })).res.status, 409);
+  });
+});
+
+// Each subagent definition carries its OWN skills and tools (agents/<file>.md
+// `skills:` / `tools:`) — the single source of truth for that subagent, distinct
+// from the ORCHESTRATOR's set in agent-team-config.json. `skills:` is the whole
+// story: no key and an empty key both mean "no skills". `tools:` keeps an absent
+// state that means something, because the agent-team extension then falls back
+// to its built-in default tool list.
+describe("per-subagent skills", () => {
+  const alphaPath = () => path.join(agentDir, "agents", "alpha.md");
+  const readAlpha = () => fs.readFileSync(alphaPath(), "utf8");
+  const snapshot = async () => (await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`)).data;
+  const defByFile = (data, file) => data.agentDefs.find((d) => d.file === file);
+
+  test("the snapshot reports each definition's own allowlist", async () => {
+    fs.writeFileSync(alphaPath(), "---\nname: alpha\ntools: read\nskills: flet, graphify\n---\n\nAlpha prompt.\n");
+    const data = await snapshot();
+    const alpha = defByFile(data, "alpha.md");
+    assert.deepEqual(alpha.skills, ["flet", "graphify"], "the comma-separated frontmatter list is parsed");
+
+    const coder = defByFile(data, "coder.md");
+    assert.deepEqual(coder.skills, [], "no skills: key means no skills");
+    fs.rmSync(alphaPath());
+  });
+
+  test("a definition's skills are pinned, replaced, emptied and dropped in place", async () => {
+    fs.writeFileSync(alphaPath(), "---\nname: alpha\ntools: read\n---\n\nAlpha prompt.\n");
+
+    // Pin two skills: they arrive as one comma-separated line, and nothing else
+    // in the file moves.
+    assert.ok((await postSettings("setAgentDefSkills", { file: "alpha.md", skills: ["flet", "graphify"] })).res.ok);
+    assert.equal(readAlpha(), "---\nname: alpha\ntools: read\nskills: flet, graphify\n---\n\nAlpha prompt.\n");
+
+    // Replace, de-duplicating: still exactly one skills: line.
+    assert.ok((await postSettings("setAgentDefSkills", { file: "alpha.md", skills: ["graphify", "graphify", "flet"] })).res.ok);
+    assert.match(readAlpha(), /^skills: graphify, flet$/m);
+    assert.equal((readAlpha().match(/^skills:/gm) || []).length, 1);
+
+    // An empty list is an EMPTY key (pi: no skills).
+    assert.ok((await postSettings("setAgentDefSkills", { file: "alpha.md", skills: [] })).res.ok);
+    assert.match(readAlpha(), /^skills:$/m);
+    assert.deepEqual(defByFile(await snapshot(), "alpha.md").skills, []);
+
+    // null removes the key — the same outcome, since a definition has no skills
+    // without its own list either way.
+    assert.ok((await postSettings("setAgentDefSkills", { file: "alpha.md", skills: null })).res.ok);
+    assert.equal(/^skills:/m.test(readAlpha()), false, "the key is gone");
+    assert.deepEqual(defByFile(await snapshot(), "alpha.md").skills, []);
+    assert.equal(readAlpha(), "---\nname: alpha\ntools: read\n---\n\nAlpha prompt.\n", "only the skills line ever changed");
+    fs.rmSync(alphaPath());
+  });
+
+  test("malformed input is refused without touching the file", async () => {
+    fs.writeFileSync(alphaPath(), "---\nname: alpha\n---\n\nbody\n");
+    const before = readAlpha();
+    const bad = [
+      { file: "alpha.md", skills: "flet" },                    // not an array
+      { file: "alpha.md", skills: ["ok", "bad name"] },        // shape
+      { file: "alpha.md", skills: ["ok", "sneaky\nx: 1"] },    // frontmatter injection
+      { file: "alpha.md", skills: ["../../etc/passwd"] },      // path-ish
+      { file: "alpha.md", skills: Array.from({ length: 101 }, (_, i) => `s${i}`) },
+      { file: "../evil.md", skills: ["flet"] },                // traversal in the file name
+    ];
+    for (const v of bad) {
+      assert.equal((await postSettings("setAgentDefSkills", v)).res.status, 400, JSON.stringify(v));
+    }
+    assert.equal(readAlpha(), before, "a rejected request never writes");
+    assert.equal((await postSettings("setAgentDefSkills", { file: "nope.md", skills: [] })).res.status, 404);
+
+    // A well-formed name that is not installed is accepted — pi logs it as an
+    // unknown skill, and refusing it would make a hand-written definition
+    // impossible to edit from the UI.
+    assert.ok((await postSettings("setAgentDefSkills", { file: "alpha.md", skills: ["not-installed"] })).res.ok);
+    assert.match(readAlpha(), /^skills: not-installed$/m);
+    fs.rmSync(alphaPath());
+  });
+});
+
+// The other half of a definition's own allowlist: agents/<file>.md `tools:`,
+// which the agent-team extension passes to the spawned child as `--tools`. It
+// is written like `skills:` — one comma-separated line, everything else left
+// byte-for-byte — but there is no "empty key" state to preserve, because an
+// absent OR empty key both mean the built-in default tool list. So the UI only
+// offers Default (drop the key) or a pinned list.
+describe("per-subagent tools", () => {
+  const betaPath = () => path.join(agentDir, "agents", "beta.md");
+  const readBeta = () => fs.readFileSync(betaPath(), "utf8");
+  const snapshot = async () => (await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`)).data;
+  const defByFile = (data, file) => data.agentDefs.find((d) => d.file === file);
+
+  test("a definition's tools are pinned, replaced and dropped in place", async () => {
+    fs.writeFileSync(betaPath(), "---\nname: beta\nskills: flet\n---\n\nBeta prompt.\n");
+
+    assert.ok((await postSettings("setAgentDefTools", { file: "beta.md", tools: ["bash", "grep"] })).res.ok);
+    assert.equal(readBeta(), "---\nname: beta\nskills: flet\ntools: bash, grep\n---\n\nBeta prompt.\n", "only a tools: line is added");
+    assert.deepEqual(defByFile(await snapshot(), "beta.md").tools, ["bash", "grep"]);
+
+    // Replace, de-duplicating: still exactly one tools: line.
+    assert.ok((await postSettings("setAgentDefTools", { file: "beta.md", tools: ["grep", "grep", "read"] })).res.ok);
+    assert.match(readBeta(), /^tools: grep, read$/m);
+    assert.equal((readBeta().match(/^tools:/gm) || []).length, 1);
+
+    // null drops the key → the subagent is launched with the default tool list.
+    assert.ok((await postSettings("setAgentDefTools", { file: "beta.md", tools: null })).res.ok);
+    assert.equal(/^tools:/m.test(readBeta()), false, "the key is gone");
+    assert.equal(defByFile(await snapshot(), "beta.md").toolsAll, true);
+    assert.equal(readBeta(), "---\nname: beta\nskills: flet\n---\n\nBeta prompt.\n", "only the tools line ever changed");
+    fs.rmSync(betaPath());
+  });
+
+  test("malformed input is refused without touching the file", async () => {
+    fs.writeFileSync(betaPath(), "---\nname: beta\n---\n\nbody\n");
+    const before = readBeta();
+    const bad = [
+      { file: "beta.md", tools: "bash" },                     // not an array
+      { file: "beta.md", tools: ["ok", "bad name"] },          // shape
+      { file: "beta.md", tools: ["ok", "sneaky\nx: 1"] },     // frontmatter injection
+      { file: "beta.md", tools: ["../../etc/passwd"] },       // path-ish
+      { file: "beta.md", tools: Array.from({ length: 101 }, (_, i) => `t${i}`) },
+      { file: "../evil.md", tools: ["bash"] },                // traversal in the file name
+    ];
+    for (const v of bad) {
+      assert.equal((await postSettings("setAgentDefTools", v)).res.status, 400, JSON.stringify(v));
+    }
+    assert.equal(readBeta(), before, "a rejected request never writes");
+    assert.equal((await postSettings("setAgentDefTools", { file: "nope.md", tools: [] })).res.status, 404);
+    fs.rmSync(betaPath());
   });
 });

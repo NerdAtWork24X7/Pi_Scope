@@ -37,6 +37,9 @@
   // the SubAgent → agent teams list. Empty by default, so every team renders as
   // just its name until the user opens it.
   const expandedTeams = new Set();
+  // Subagent definition files (agents/*.md) whose skill/tool pickers are open in
+  // the SubAgent → definitions list. Empty by default, matching the teams list.
+  const expandedDefs = new Set();
   let SET = null;          // latest /settings snapshot
   let loaded = false;      // first/only fetch done
   let fetching = false;
@@ -331,9 +334,17 @@
     if (!SET) return;
     for (const k of ["teams", "teamsOrder", "activeTeam", "mode", "memoryModel",
       "memoryActive", "disabledAgents", "skills", "extensions", "chatWorkspaces",
-      "chatWorkspacesRemoved", "enabledModels", "defaultModel", "orchestratorSkills",
-      "subagentSkills"]) {
+      "chatWorkspacesRemoved", "enabledModels", "defaultModel", "orchestratorSkills"]) {
       if (k in data) SET[k] = data[k];
+    }
+    // A few fields the panel reads through `agentConfigRaw` also ride on the
+    // /agent-team response (which carries no agentConfigRaw of its own). Without
+    // this mirror the orchestrator tool chips — and the Tool-policy text field —
+    // kept the pre-click value even though the write had landed.
+    if (SET.agentConfigRaw) {
+      for (const k of ["enabled", "skipOrchestratorTools"]) {
+        if (k in data) SET.agentConfigRaw[k] = data[k];
+      }
     }
   }
 
@@ -359,10 +370,11 @@
 
   const SECTIONS = {
     // Teams is not a separate tab any more: the agent-team roster lives inside
-    // the SubAgent tab, so both render as one panel.
-    agent: () => renderAgent() + renderTeams(),
+    // the SubAgent tab, so both render as one panel. The former Skills tab was
+    // folded in here too — the orchestrator's skills card and the bulk subagent
+    // skill/tool groups render under SubAgent, so there is no separate tab.
+    agent: () => renderAgent() + renderTeams() + renderCapabilities(),
     models: () => renderModels(),
-    skills: () => renderSkills(),
     extensions: () => renderExtensions(),
     keys: () => renderKeys(),
     auth: () => renderAuth(),
@@ -605,6 +617,138 @@
     const disabled = new Set(strList(SET.disabledAgents));
     const cr = SET.agentConfigRaw || {};
     const defs = strList(SET.agentDefs);
+    const skills = strList(SET.skills);
+    const allDirs = skills.map((sk) => sk.dir);
+    // The per-definition skill picker. pi resolves a frontmatter name to
+    // <agentDir>/skills/<name>/SKILL.md, so the chips toggle DIRECTORY names.
+    // The definition's `skills:` key is the ONLY source of a subagent's skills:
+    // no key and an empty key both mean it gets none, so there is no inherit
+    // state to show (the Skills tab's Subagents group reads these same keys).
+    const defSkills = (d) => {
+      const pinned = strList(d.skills);
+      const on = new Set(pinned);
+      // A pinned name that no longer resolves (skill removed, or written by
+      // hand) still needs a chip, or the user could never drop it again.
+      const ghosts = pinned.filter((n) => !allDirs.includes(n));
+      const chips = skills.map((sk) =>
+        `<button type="button" class="set-chip${on.has(sk.dir) ? " on" : ""}${sk.settingsEnabled === false ? " unloaded" : ""}" ` +
+        `data-def-skill="${esc(d.file)}" data-def-dir="${esc(sk.dir)}" ` +
+        `title="${esc(sk.name)}${sk.description ? " — " + esc(sk.description) : ""}${sk.settingsEnabled === false ? " (not loaded in pi sessions)" : ""}">` +
+        `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(sk.name)}</span></button>`
+      ).join("") + ghosts.map((n) =>
+        `<button type="button" class="set-chip on ghost" data-def-skill="${esc(d.file)}" data-def-dir="${esc(n)}" ` +
+        `title="${esc(n)} — not found in the skills folder">` +
+        `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(n)} ?</span></button>`
+      ).join("");
+      const state = `${pinned.length}/${allDirs.length} pinned`;
+      // Label + state + controls on their own line, chips on a full-width line
+      // below: a wrapping chip grid no longer drags the label out of alignment
+      // with the Tools picker (the old single flex row centred every control
+      // vertically against a multi-row chip block).
+      return (
+        `<div class="set-def-group">` +
+        `<div class="set-def-group-head">` +
+        `<span class="set-def-group-label">Skills</span>` +
+        `<span class="set-def-group-state">${esc(state)}</span>` +
+        `<button type="button" class="btn-sm set-def-group-btn${!pinned.length ? " on" : ""}" data-def-skills-none="${esc(d.file)}" ` +
+        `title="Give this subagent no skills (writes an empty skills: key)">None</button>` +
+        // The chips can only offer what is installed; this adds any name to the
+        // definition's `skills:` key (a name with no skills/<dir> is accepted by
+        // pi — it just logs it as unknown — and is flagged here as a ghost chip).
+        `<span class="set-def-group-add">` +
+        `<input type="text" class="set-input set-def-skills-input" placeholder="add skill" ` +
+        `list="set-def-skill-options" data-def-skills-input="${esc(d.file)}" spellcheck="false" autocomplete="off" ` +
+        `aria-label="Add a skill to ${esc(d.name)}">` +
+        `<button type="button" class="btn-sm" data-def-skills-add="${esc(d.file)}" ` +
+        `title="Add this skill to ${esc(d.name)}'s skills: key">Add</button>` +
+        `</span>` +
+        `</div>` +
+        `<div class="set-chips set-def-chips">` +
+        (chips || `<span class="set-def-skills-empty">no skills discovered</span>`) +
+        `</div>` +
+        `</div>`
+      );
+    };
+
+    // The per-definition tool picker: the other half of what the agent-team
+    // extension reads off agents/*.md before it spawns that subagent (`--tools`).
+    // Unlike `skills:` there is no "none" state — the extension falls back to its
+    // built-in default list for an absent OR empty key — so the only two states
+    // are the default (no key) and a pinned list. The catalogue is pi's own
+    // built-in tools plus every tool the installed extensions register (the
+    // server folds in anything captured events have seen too); a pinned name
+    // outside it stays visible as a ghost chip so it can still be dropped.
+    const allToolNames = strList(SET.tools);
+    const defaultToolNames = strList(SET.agentDefaultTools);
+    const toolSources = SET.toolSources || {};
+    const toolExts = (name) => strList(toolSources[String(name).toLowerCase()]);
+    const defTools = (d) => {
+      const pinned = d.toolsAll ? null : strList(d.tools);
+      const effective = pinned === null ? defaultToolNames : pinned;
+      const on = new Set(effective);
+      const chipsFor = (name) => {
+        const exts = toolExts(name);
+        const verb = on.has(name) ? "allowed for" : "not allowed for";
+        const from = exts.length ? ` · registered by ${exts.join(", ")}` : "";
+        return (
+          `<button type="button" class="set-chip${on.has(name) ? " on" : ""}" ` +
+          `data-def-tool="${esc(d.file)}" data-def-tool-name="${esc(name)}" ` +
+          `title="${esc(verb + " " + d.name + from)}">` +
+          `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(name)}</span></button>`
+        );
+      };
+      const ghosts = effective.filter((n) => !allToolNames.includes(n));
+      const ghostChips = ghosts.map((n) =>
+        `<button type="button" class="set-chip on ghost" data-def-tool="${esc(d.file)}" data-def-tool-name="${esc(n)}" ` +
+        `title="${esc(n)} — not among the tools pi or its extensions register">` +
+        `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(n)} ?</span></button>`
+      ).join("");
+      // Group the chips by where each tool comes from, so the extensions'
+      // registered tools read apart from pi's own built-ins.
+      const builtinNames = allToolNames.filter((n) => !toolExts(n).length);
+      const extNames = allToolNames.filter((n) => toolExts(n).length);
+      const srcRow = (label, names) =>
+        names.length
+          ? `<div class="set-def-tool-src"><span class="set-def-tool-src-label">${esc(label)}</span>` +
+            `<div class="set-chips set-def-chips">${names.map(chipsFor).join("")}</div></div>`
+          : "";
+      const chipArea =
+        srcRow("built-in", builtinNames) +
+        srcRow("extensions", extNames) +
+        (ghosts.length
+          ? `<div class="set-def-tool-src"><span class="set-def-tool-src-label">other</span>` +
+            `<div class="set-chips set-def-chips">${ghostChips}</div></div>`
+          : "");
+      // Count only catalogue tools, so the ratio stays meaningful when a pinned
+      // name is one no extension registers and pi does not report (ghost chips).
+      const onCount = allToolNames.filter((n) => on.has(n)).length;
+      const state = pinned === null
+        ? `default · ${onCount}/${allToolNames.length}`
+        : `${onCount}/${allToolNames.length} pinned`;
+      return (
+        `<div class="set-def-group set-def-tools">` +
+        `<div class="set-def-group-head">` +
+        `<span class="set-def-group-label">Tools</span>` +
+        `<span class="set-def-group-state">${esc(state)}</span>` +
+        `<button type="button" class="btn-sm set-def-group-btn${pinned === null ? " on" : ""}" data-def-tools-default="${esc(d.file)}" ` +
+        `title="Use the default tool list (removes this definition's tools: key)">Default</button>` +
+        // Chips only offer the known catalogue; this adds any name to the
+        // definition's `tools:` key (a name pi does not know is refused by the
+        // agent at spawn — the extension logs it — and is flagged as a ghost).
+        `<span class="set-def-group-add">` +
+        `<input type="text" class="set-input set-def-skills-input" placeholder="add tool" ` +
+        `list="set-def-tool-options" data-def-tools-input="${esc(d.file)}" spellcheck="false" autocomplete="off" ` +
+        `aria-label="Add a tool to ${esc(d.name)}">` +
+        `<button type="button" class="btn-sm" data-def-tools-add="${esc(d.file)}" ` +
+        `title="Add this tool to ${esc(d.name)}'s tools: key">Add</button>` +
+        `</span>` +
+        `</div>` +
+        `<div class="set-def-tool-srcs">` +
+        (chipArea || `<div class="set-chips set-def-chips"><span class="set-def-skills-empty">no tools known yet</span></div>`) +
+        `</div>` +
+        `</div>`
+      );
+    };
 
     let teamHtml = "";
     if (!order.length) {
@@ -652,11 +796,14 @@
             ? `<div class="set-members">` +
               members.map((m) => {
                 const name = m.name || "";
-                const off = disabled.has(name.toLowerCase()) || m.active === false;
+                // Duty is per team: the member's own row decides, and the
+                // session-wide off-list (`disabledAgents`) only speaks for the
+                // team that is actually running.
+                const off = m.active === false || (tn === activeTeam && disabled.has(name.toLowerCase()));
                 const model = m.model || "";
                 return (
                   `<div class="set-member">` +
-                  `<label class="set-member-toggle"><input type="checkbox" data-agent="${esc(name)}" data-disabled="${off}"${off ? "" : " checked"}>` +
+                  `<label class="set-member-toggle"><input type="checkbox" data-agent="${esc(name)}" data-agent-team="${esc(tn)}" data-disabled="${off}"${off ? "" : " checked"}>` +
                   `<span class="set-toggle-track sm"><span class="set-toggle-knob"></span></span></label>` +
                   `<span class="set-member-name">${esc(name)}</span>` +
                   memberModelSelect(name, tn, model) +
@@ -700,15 +847,39 @@
         `<input type="text" class="set-input" value="${esc(strList(cr.skipOrchestratorTools).join(", "))}" data-act="setSkipOrchestratorTools">`) +
       `<div class="settings-group-div"></div>` +
       `<div class="settings-group-kicker">Subagent definitions</div>` +
-      `<div class="settings-intro">One row per <code>agents/*.md</code>. <b>Edit</b> opens the whole file (frontmatter + prompt) in a full-screen editor.</div>` +
+      `<div class="settings-intro">One row per <code>agents/*.md</code>, collapsed to the subagent's name — click the chevron (or the name) to open its <code>skills:</code> and <code>tools:</code> pickers. Each definition carries its own keys in that file — the only place a subagent's capabilities are set: pick the chips, or type a name into <b>add skill</b> / <b>add tool</b>. <b>None</b> writes an empty <code>skills:</code> key (the subagent gets no skills); <b>Default</b> removes the <code>tools:</code> key so the built-in default tool list applies. <b>Edit</b> opens the whole file (frontmatter + prompt) in a full-screen editor.</div>` +
+      `<datalist id="set-def-skill-options">` +
+      skills.map((sk) => `<option value="${esc(sk.dir)}">${esc(sk.name)}</option>`).join("") +
+      `</datalist>` +
+      `<datalist id="set-def-tool-options">` +
+      allToolNames.map((t) => `<option value="${esc(t)}"></option>`).join("") +
+      `</datalist>` +
       `<div class="set-defs">` +
-      defs.map((d) =>
-        `<div class="set-def-row">` +
-        `<span class="set-def-name">${esc(d.name)}</span>` +
-        `<span class="set-def-file">agents/${esc(d.file)}</span>` +
-        `<button type="button" class="btn-sm" data-agentdef-edit="${esc(d.file)}">Edit</button>` +
-        `</div>`
-      ).join("") +
+      defs.map((d) => {
+        // Collapsed by default, like a team: the header carries the subagent's
+        // NAME and a one-line summary, and the pickers only render when open.
+        const open = expandedDefs.has(d.file);
+        const skillCount = strList(d.skills).length;
+        const summary = `${skillCount} skill${skillCount === 1 ? "" : "s"} · ` +
+          (d.toolsAll ? "default tools" : `${strList(d.tools).length} tools`);
+        return (
+          `<div class="set-def-row${open ? "" : " collapsed"}">` +
+          `<div class="set-def-head" data-def-head="${esc(d.file)}">` +
+          `<button type="button" class="set-def-toggle" data-def-toggle="${esc(d.file)}" ` +
+          `aria-expanded="${open ? "true" : "false"}" title="${open ? "Collapse" : "Expand"} ${esc(d.name)}">` +
+          `${open ? "▾" : "▸"}</button>` +
+          `<span class="set-def-name">${esc(d.name)}</span>` +
+          `<span class="set-def-file">agents/${esc(d.file)}</span>` +
+          `<span class="set-def-summary">${esc(summary)}</span>` +
+          `<button type="button" class="btn-sm" data-agentdef-edit="${esc(d.file)}">Edit</button>` +
+          `</div>` +
+          `<div class="set-def-body">` +
+          defSkills(d) +
+          defTools(d) +
+          `</div>` +
+          `</div>`
+        );
+      }).join("") +
       (defs.length ? "" : `<div class="settings-empty-sub">No subagent definitions found in <code>agents/</code>.</div>`) +
       `</div>` +
       `</div>`
@@ -901,55 +1072,92 @@
     );
   }
 
-  // ─── Skills ───────────────────────────────────────────────────────────────
-  function renderSkills() {
+  // ─── Orchestrator card (skills + tools) ───────────────────────────────────
+  // The orchestrator gets its own card, shaped like a subagent definition: the
+  // Skills group toggles which installed skills the main agent is offered
+  // (agent-team-config.json `orchestratorSkills`), and the Tools group toggles
+  // which catalogue tools it uses — OFF adds the name to `skipOrchestratorTools`,
+  // the same denylist the agent-team sidebar edits.
+  function renderCapabilities() {
     const skills = strList(SET.skills);
-    if (!skills.length) {
-      return `<div class="settings-group"><div class="settings-group-kicker">Skills</div><h2 class="settings-group-title">skills ${scopeBadge("project")}</h2>` +
-        `<div class="settings-empty-sub">No skills discovered in Pi Scope's agent dir (<code>skills/</code>).</div></div>`;
-    }
-    const group = (g, label) => {
-      const isOn = (sk) => (g === "orchestrator" ? !!sk.orchestrator : !!sk.subagent);
-      const on = skills.filter(isOn).length;
+    const cr = SET.agentConfigRaw || {};
+    const allToolNames = strList(SET.tools);
+    const toolSources = SET.toolSources || {};
+    const toolExts = (name) => strList(toolSources[String(name).toLowerCase()]);
+
+    const orchOn = new Set(skills.filter((sk) => sk.orchestrator).map((sk) => sk.dir));
+    const orchChips = skills.map((sk) => {
+      const on = orchOn.has(sk.dir);
+      const note = sk.settingsEnabled === false ? " (not loaded in pi sessions)" : "";
       return (
-        `<div class="set-skill-group">` +
-        `<div class="set-skill-head"><span>${label}</span><span class="set-skill-count">${on}/${skills.length}</span></div>` +
-        `<div class="set-chips">` +
-        skills.map((sk) =>
-          `<button type="button" class="set-chip${isOn(sk) ? " on" : ""}" data-dir="${esc(sk.dir)}" data-group="${g}" title="${esc(sk.name)}${sk.description ? " — " + esc(sk.description) : ""}">` +
-          `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(sk.name)}</span></button>`
-        ).join("") +
-        `</div></div>`
+        `<button type="button" class="set-chip${on ? " on" : ""}${sk.settingsEnabled === false ? " unloaded" : ""}" ` +
+        `data-dir="${esc(sk.dir)}" data-group="orchestrator" ` +
+        `title="${esc(sk.name)}${sk.description ? " — " + esc(sk.description) : ""}${note}">` +
+        `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(sk.name)}</span></button>`
+      );
+    }).join("");
+
+    // The orchestrator's tools are stored as a denylist (`skipOrchestratorTools`),
+    // so a chip reads ON when the tool is offered (not skipped).
+    const skip = new Set(strList(cr.skipOrchestratorTools).map((t) => String(t).toLowerCase()));
+    const isOn = (name) => !skip.has(String(name).toLowerCase());
+    const toolChip = (name) => {
+      const on = isOn(name);
+      const exts = toolExts(name);
+      const from = exts.length ? ` · registered by ${exts.join(", ")}` : "";
+      return (
+        `<button type="button" class="set-chip${on ? " on" : ""}" data-orch-tool="${esc(name)}" ` +
+        `title="${esc(name)} — ${on ? "offered to" : "skipped by"} the orchestrator${from}">` +
+        `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(name)}</span></button>`
       );
     };
-    // Third axis: the default pi skills — whether pi loads the skill at all
-    // (settings.json `skills` +/- entries). Distinct from the
-    // orchestrator/subagent membership above, which is agent-team-config.json
-    // state.
-    const loadGroup = () => {
-      const isOn = (sk) => sk.settingsEnabled !== false;
-      const on = skills.filter(isOn).length;
-      return (
-        `<div class="set-skill-group">` +
-        `<div class="set-skill-head"><span>Default pi skills</span><span class="set-skill-count">${on}/${skills.length}</span></div>` +
-        `<div class="set-chips">` +
-        skills.map((sk) =>
-          `<button type="button" class="set-chip${isOn(sk) ? " on" : ""}" data-skill-load="${esc(sk.dir)}" title="Load ${esc(sk.name)} in pi sessions (settings.json skills)">` +
-          `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(sk.name)}</span></button>`
-        ).join("") +
-        `</div></div>`
-      );
-    };
-    return (
-      `<div class="settings-group">` +
-      `<div class="settings-group-kicker">Skills</div>` +
-      `<h2 class="settings-group-title">capabilities ${scopeBadge("project")}</h2>` +
-      `<div class="settings-intro">Three independent axes: whether pi <b>loads</b> a skill at all (<code>settings.json</code>), and whether its tools are offered to the <b>orchestrator</b> / <b>subagents</b> (<code>agent-team-config.json</code>).</div>` +
-      loadGroup() +
-      group("orchestrator", "Orchestrator") +
-      group("subagent", "Subagents") +
-      `</div>`
-    );
+    const builtinNames = allToolNames.filter((n) => !toolExts(n).length);
+    const extNames = allToolNames.filter((n) => toolExts(n).length);
+    const srcRow = (label, names) =>
+      names.length
+        ? `<div class="set-def-tool-src"><span class="set-def-tool-src-label">${esc(label)}</span>` +
+          `<div class="set-chips set-def-chips">${names.map(toolChip).join("")}</div></div>`
+        : "";
+    const toolArea =
+      srcRow("built-in", builtinNames) + srcRow("extensions", extNames) ||
+      `<div class="set-chips set-def-chips"><span class="set-def-skills-empty">no tools known yet</span></div>`;
+    const toolsOn = allToolNames.filter(isOn).length;
+
+    const open = expandedDefs.has("__orchestrator__");
+    const skillState = `${orchOn.size}/${skills.length} skills`;
+    const toolState = `${toolsOn}/${allToolNames.length} tools`;
+    const orchestratorCard =
+      `<div class="set-def-row${open ? "" : " collapsed"}">` +
+      `<div class="set-def-head" data-def-head="__orchestrator__">` +
+      `<button type="button" class="set-def-toggle" data-def-toggle="__orchestrator__" ` +
+      `aria-expanded="${open ? "true" : "false"}" title="${open ? "Collapse" : "Expand"} Orchestrator">${open ? "▾" : "▸"}</button>` +
+      `<span class="set-def-name">Orchestrator</span>` +
+      `<span class="set-def-file">main agent</span>` +
+      `<span class="set-def-summary">${esc(skillState)} · ${esc(toolState)}</span>` +
+      `</div>` +
+      `<div class="set-def-body">` +
+      `<div class="set-def-group">` +
+      `<div class="set-def-group-head">` +
+      `<span class="set-def-group-label">Skills</span>` +
+      `<span class="set-def-group-state">${esc(orchOn.size + "/" + skills.length + " offered")}</span>` +
+      `</div>` +
+      `<div class="set-chips set-def-chips">` +
+      (orchChips || `<span class="set-def-skills-empty">no skills discovered</span>`) +
+      `</div>` +
+      `</div>` +
+      `<div class="set-def-group set-def-orch-tools">` +
+      `<div class="set-def-group-head">` +
+      `<span class="set-def-group-label">Tools</span>` +
+      `<span class="set-def-group-state">${esc(toolsOn + "/" + allToolNames.length + " available")}</span>` +
+      `</div>` +
+      `<div class="set-def-tool-srcs">${toolArea}</div>` +
+      `</div>` +
+      `</div>` +
+      `</div>`;
+
+    // No section header — the card labels itself. The divider keeps it visually
+    // separate from the subagent definitions above it.
+    return `<div class="settings-group-div"></div><div class="set-defs">${orchestratorCard}</div>`;
   }
 
   // ─── Extensions ───────────────────────────────────────────────────────────
@@ -1765,12 +1973,15 @@
       b.addEventListener("click", () => postTeam("setTeam", { team: b.dataset.select }))
     );
 
-    // Member toggles (agent on/off) and per-member model edits.
+    // Member toggles (agent on/off) and per-member model edits. Duty is
+    // per team: the checkbox carries the row's own team, so turning a member
+    // off here leaves the same-named member of another team on.
     panel.querySelectorAll('input[data-agent]').forEach((node) =>
       node.addEventListener("change", () => {
         const name = node.dataset.agent;
+        const team = node.dataset.agentTeam || "";
         const nowDisabled = !node.checked;
-        postTeam("toggleAgent", { agent: name, disabled: nowDisabled });
+        postTeam("toggleAgent", { agent: name, team, disabled: nowDisabled });
       })
     );
     panel.querySelectorAll('select[data-member-model]').forEach((node) =>
@@ -1785,13 +1996,13 @@
       })
     );
 
-    // Skill chips: orchestrator/subagent membership (data-dir/data-group) and
-    // the separate "default pi skills" settings.json toggle (data-skill-load).
+    // Orchestrator card chips: skill membership (data-dir/data-group) and tool
+    // enablement (data-orch-tool), both written to agent-team-config.json.
     panel.querySelectorAll(".set-chip[data-dir]").forEach((chip) =>
       chip.addEventListener("click", () => postTeam("toggleSkill", { group: chip.dataset.group, dir: chip.dataset.dir }))
     );
-    panel.querySelectorAll(".set-chip[data-skill-load]").forEach((chip) =>
-      chip.addEventListener("click", () => postTeam("toggleSkillSetting", { dir: chip.dataset.skillLoad }))
+    panel.querySelectorAll(".set-chip[data-orch-tool]").forEach((chip) =>
+      chip.addEventListener("click", () => void postTeam("toggleTool", { tool: chip.dataset.orchTool }))
     );
 
     // Per-extension orchestrator/subagent enablement (extensions/extensions.json).
@@ -1836,6 +2047,123 @@
     // editor for the whole agents/<file>.md.
     panel.querySelectorAll("[data-agentdef-edit]").forEach((b) =>
       b.addEventListener("click", () => openAgentDefEditor(b.dataset.agentdefEdit))
+    );
+
+    // Collapse/expand a subagent definition's pickers. The chevron toggles, and
+    // so does the definition's NAME in the header (the Edit button is excluded).
+    // The body stays in the DOM (hidden by the `collapsed` class), so a toggle
+    // is a class flip — no re-render, and any focus inside the pickers survives.
+    const toggleDef = (file) => {
+      const open = !expandedDefs.has(file);
+      if (open) expandedDefs.add(file); else expandedDefs.delete(file);
+      const btn = panel.querySelector(`.set-def-toggle[data-def-toggle="${CSS.escape(file)}"]`);
+      btn?.closest(".set-def-row")?.classList.toggle("collapsed", !open);
+      if (btn) {
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        btn.textContent = open ? "▾" : "▸";
+      }
+    };
+    panel.querySelectorAll("[data-def-toggle]").forEach((b) =>
+      b.addEventListener("click", () => toggleDef(b.dataset.defToggle))
+    );
+    panel.querySelectorAll("[data-def-head]").forEach((head) => {
+      const name = head.querySelector(".set-def-name");
+      if (!name) return;
+      name.classList.add("clickable");
+      name.addEventListener("click", () => toggleDef(head.dataset.defHead));
+    });
+
+    // Per-definition skills (agents/*.md `skills:`). Clicking a chip pins the
+    // list; the definition's own key is the only source of its skills, so a
+    // dropped key and an empty one mean the same thing (None writes the empty
+    // key, which reads as "this subagent gets no skills").
+    const defsByFile = new Map(strList(SET.agentDefs).map((d) => [d.file, d]));
+    const effectiveDefSkills = (d) => strList(d.skills);
+    const setDefSkills = (d, next, message) =>
+      postSettings("setAgentDefSkills", { file: d.file, skills: next }, message);
+    panel.querySelectorAll("[data-def-skill]").forEach((chip) =>
+      chip.addEventListener("click", () => {
+        const d = defsByFile.get(chip.dataset.defSkill);
+        if (!d) { toast("Unknown subagent definition", true); return; }
+        const dir = chip.dataset.defDir;
+        const cur = effectiveDefSkills(d);
+        const next = cur.includes(dir) ? cur.filter((x) => x !== dir) : [...cur, dir];
+        setDefSkills(d, next, `${d.name}: ${next.length} skill${next.length === 1 ? "" : "s"}`);
+      })
+    );
+    panel.querySelectorAll("[data-def-skills-none]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const d = defsByFile.get(b.dataset.defSkillsNone);
+        if (d) setDefSkills(d, [], `${d.name}: no skills`);
+      })
+    );
+    // Add-by-name: appends to the definition's `skills:` key (pinning the list
+    // first when it currently inherits), so a skill that is not installed yet —
+    // or one the user knows by name — can still be granted.
+    const addDefSkill = (file) => {
+      const d = defsByFile.get(file);
+      if (!d) { toast("Unknown subagent definition", true); return; }
+      const input = panel.querySelector(`[data-def-skills-input="${file}"]`);
+      const name = (input?.value || "").trim();
+      if (!name) { toast("Type a skill name first", true); return; }
+      const cur = effectiveDefSkills(d);
+      if (cur.includes(name)) { toast(`${name} is already on for ${d.name}`, true); return; }
+      setDefSkills(d, [...cur, name], `${d.name}: ${name} added`);
+    };
+    panel.querySelectorAll("[data-def-skills-add]").forEach((b) =>
+      b.addEventListener("click", () => addDefSkill(b.dataset.defSkillsAdd))
+    );
+    panel.querySelectorAll("[data-def-skills-input]").forEach((inp) =>
+      inp.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        addDefSkill(inp.dataset.defSkillsInput);
+      })
+    );
+
+    // Per-definition tools (agents/*.md `tools:`) — the same picker the
+    // agent-team extension reads as `--tools` when it spawns that subagent. No
+    // "None": an absent OR empty key both mean the built-in default list, so
+    // Default (drop the key) is the only way back and a chip click pins the
+    // list, materializing the inherited one first so nothing is silently lost.
+    const effectiveDefTools = (d) => d.toolsAll ? strList(SET.agentDefaultTools) : strList(d.tools);
+    const setDefTools = (d, next, message) =>
+      postSettings("setAgentDefTools", { file: d.file, tools: next }, message);
+    panel.querySelectorAll("[data-def-tool]").forEach((chip) =>
+      chip.addEventListener("click", () => {
+        const d = defsByFile.get(chip.dataset.defTool);
+        if (!d) { toast("Unknown subagent definition", true); return; }
+        const name = chip.dataset.defToolName;
+        const cur = effectiveDefTools(d);
+        const next = cur.includes(name) ? cur.filter((x) => x !== name) : [...cur, name];
+        setDefTools(d, next, `${d.name}: ${next.length} tool${next.length === 1 ? "" : "s"}`);
+      })
+    );
+    panel.querySelectorAll("[data-def-tools-default]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const d = defsByFile.get(b.dataset.defToolsDefault);
+        if (d) setDefTools(d, null, `${d.name} uses the default tool list`);
+      })
+    );
+    const addDefTool = (file) => {
+      const d = defsByFile.get(file);
+      if (!d) { toast("Unknown subagent definition", true); return; }
+      const input = panel.querySelector(`[data-def-tools-input="${file}"]`);
+      const name = (input?.value || "").trim();
+      if (!name) { toast("Type a tool name first", true); return; }
+      const cur = effectiveDefTools(d);
+      if (cur.includes(name)) { toast(`${name} is already on for ${d.name}`, true); return; }
+      setDefTools(d, [...cur, name], `${d.name}: ${name} added`);
+    };
+    panel.querySelectorAll("[data-def-tools-add]").forEach((b) =>
+      b.addEventListener("click", () => addDefTool(b.dataset.defToolsAdd))
+    );
+    panel.querySelectorAll("[data-def-tools-input]").forEach((inp) =>
+      inp.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        addDefTool(inp.dataset.defToolsInput);
+      })
     );
 
     // Model chips remove + add.
