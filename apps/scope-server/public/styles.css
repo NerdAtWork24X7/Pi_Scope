@@ -39,92 +39,124 @@
     :root {
       /* Emoji-capable fallbacks appended to every font stack via var(--emoji). */
       --emoji: 'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif;
-      /* DeepSeek design tokens (deepseek-harness ui-theme). Light theme first —
-         this is chat.deepseek.com's default look: white surfaces, DeepSeek
-         blue #4176e6 accent, neutral-bluish grays. */
+      /* ── superdesign-alpha "Amber Terminal Noir" design system ──────────────
+         Dark-mode-default engineering-console palette: near-black surfaces,
+         hairline borders, sharp rectangles, one rationed amber accent. The
+         light theme is the same system on warm paper ("amber on paper").
+         Geometry, type and motion tokens (declared at the bottom of this
+         block) are shared by both themes; only the palette differs. */
       color-scheme: light;
-      --bg: #ffffff;
-      --surface: #f9fafb;
-      --surface-2: #f1f3f5;
+      --bg: #f7f7f5;
+      --surface: #ffffff;
+      --surface-2: #f2f2ef;
       --surface-3: #ffffff;
-      --border: #e1e5ee;
-      --border-strong: #cdd3da;
-      --hairline: rgba(0, 0, 0, 0.06);
-      --hairline-strong: rgba(0, 0, 0, 0.12);
-      --text: #0f1115;
-      --muted: #61666b;
-      --accent: #4176e6;
-      --accent-strong: #5686fe;
-      --accent-soft: #edf3fe;
-      --accent-hover: #f3f7ff;
-      --row-hover: #f1f3f5;
-      --row-error: rgba(239, 68, 68, 0.06);
+      --border: #e4e4e7;
+      --border-strong: #d4d4d8;
+      --hairline: rgba(10, 10, 10, 0.07);
+      --hairline-strong: rgba(10, 10, 10, 0.14);
+      --text: #0a0a0a;
+      --muted: #52525b;
+      --text-subtle: #71717a;
+      --accent: #b45309;
+      --accent-rgb: 180, 83, 9;
+      --accent-strong: #92400e;
+      --accent-soft: #fef3c7;
+      --accent-hover: #fffbeb;
+      --row-hover: #f2f2ef;
+      --row-error: rgba(220, 38, 38, 0.07);
       --on-accent: #ffffff;
-      --green: #22c55e;
-      --red: #ef4444;
-      --orange: #f59e0b;
+      --green: #059669;
+      --red: #dc2626;
+      --orange: #ea580c;
       --amber: #b45309;
       --purple: #7c3aed;
       --cyan: #0891b2;
-      --yellow: #dd8629;
-      --pill-bg: #f1f3f5;
-      --tint-green: #e6faed;
-      --tint-red: #fee2e2;
-      --tint-orange: #fef5e7;
-      --tint-blue: #e4edfd;
-      --tint-purple: #efe9fe;
-      --tint-cyan: #e0f4f7;
-      --diff-add: #16a34a;
+      --yellow: #ca8a04;
+      --pill-bg: #f2f2ef;
+      --tint-green: #ecfdf5;
+      --tint-red: #fef2f2;
+      --tint-orange: #fff7ed;
+      --tint-blue: #fef9c3;
+      --tint-purple: #f5f3ff;
+      --tint-cyan: #ecfeff;
+      --diff-add: #059669;
       --diff-del: #dc2626;
-      --diff-change: #dd8629;
-      --glass-bg: rgba(255, 255, 255, 0.50);
-      --glass-bg-strong: rgba(255, 255, 255, 0.72);
-      --glass-border: rgba(15, 17, 21, 0.08);
-      --glass-shadow: 0 8px 32px rgba(15, 17, 21, 0.10);
-      --bg-gradient: linear-gradient(180deg, #eaf1ff 0%, #ffffff 40%, #f4f7fb 100%);
+      --diff-change: #b45309;
+      --glass-bg: rgba(255, 255, 255, 0.72);
+      --glass-bg-strong: rgba(255, 255, 255, 0.94);
+      --glass-border: rgba(10, 10, 10, 0.08);
+      --glass-shadow: 0 24px 64px rgba(10, 10, 10, 0.12);
+      --bg-gradient: linear-gradient(180deg, #fcfcfb 0%, #f7f7f5 45%, #f1f1ee 100%);
+      --grid-line: rgba(10, 10, 10, 0.030);
+      --shadow-panel: 0 0 0 1px var(--hairline), 0 24px 64px rgba(10, 10, 10, 0.10);
+      --shadow-card: 0 0 0 1px var(--hairline), 0 8px 32px rgba(10, 10, 10, 0.07);
+      --glow-accent: 0 0 24px rgba(var(--accent-rgb), 0.25);
+
+      /* Shared geometry / type / motion — identical in both themes. */
+      --mono: 'MesloLGS NFM', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+      --font-display: 'Clash Grotesk', 'Satoshi', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      --font-body: 'Satoshi', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      --r-sharp: 2px;
+      --r-control: 6px;
+      --r-btn: 8px;
+      --r-card: 12px;
+      --r-panel: 16px;
+      --r-pill: 9999px;
+      --grid-size: 26px 26px;
+      --grid: linear-gradient(var(--grid-line) 1px, transparent 1px), linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+      --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+      --ease-std: cubic-bezier(0.4, 0, 0.2, 1);
+      --dur-slow: 700ms;
+      --dur-fast: 150ms;
     }
 
     body[data-ds-dark-theme] {
       color-scheme: dark;
-      --bg: #151517;
-      --surface: #1b1b1c;
-      --surface-2: #232324;
-      --surface-3: #2c2c2e;
-      --border: #2c2c2e;
-      --border-strong: #353638;
-      --hairline: rgba(255, 255, 255, 0.06);
-      --hairline-strong: rgba(255, 255, 255, 0.12);
-      --text: #f9fafb;
-      --muted: #adb2b8;
-      --accent: #5686fe;
-      --accent-strong: #67aefe;
-      --accent-soft: rgba(86, 134, 254, 0.16);
-      --accent-hover: rgba(86, 134, 254, 0.10);
-      --row-hover: #232324;
-      --row-error: rgba(242, 90, 90, 0.14);
-      --on-accent: #ffffff;
-      --green: #22c55e;
-      --red: #f25a5a;
-      --orange: #f59e0b;
-      --amber: #fbbf24;
+      --bg: #0a0a0a;
+      --surface: #121212;
+      --surface-2: #141414;
+      --surface-3: #1a1a1a;
+      --border: #2a2a2a;
+      --border-strong: #3f3f46;
+      --hairline: rgba(255, 255, 255, 0.08);
+      --hairline-strong: rgba(255, 255, 255, 0.16);
+      --text: #ffffff;
+      --muted: #71717a;
+      --text-subtle: #a1a1aa;
+      --accent: #f5c400;
+      --accent-rgb: 245, 196, 0;
+      --accent-strong: #ffd740;
+      --accent-soft: rgba(245, 196, 0, 0.12);
+      --accent-hover: rgba(245, 196, 0, 0.07);
+      --row-hover: #141414;
+      --row-error: rgba(220, 38, 38, 0.12);
+      --on-accent: #0a0a0a;
+      --green: #10b981;
+      --red: #dc2626;
+      --orange: #ff5a3c;
+      --amber: #f5c400;
       --purple: #a78bfa;
       --cyan: #22d3ee;
-      --yellow: #fbbf24;
-      --pill-bg: #232324;
-      --tint-green: #233c2c;
-      --tint-red: #570c0c;
-      --tint-orange: #27241f;
-      --tint-blue: #34415b;
-      --tint-purple: #3b2d5e;
-      --tint-cyan: #123a3e;
-      --diff-add: #4ed17e;
-      --diff-del: #f25a5a;
-      --diff-change: #f7ad31;
-      --glass-bg: rgba(27, 27, 28, 0.50);
-      --glass-bg-strong: rgba(27, 27, 28, 0.72);
-      --glass-border: rgba(249, 250, 251, 0.10);
-      --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-      --bg-gradient: linear-gradient(180deg, #1c2334 0%, #151517 40%, #0f0f11 100%);
+      --yellow: #f5c400;
+      --pill-bg: #141414;
+      --tint-green: rgba(16, 185, 129, 0.14);
+      --tint-red: rgba(220, 38, 38, 0.14);
+      --tint-orange: rgba(255, 90, 60, 0.14);
+      --tint-blue: rgba(245, 196, 0, 0.10);
+      --tint-purple: rgba(167, 139, 250, 0.14);
+      --tint-cyan: rgba(34, 211, 238, 0.12);
+      --diff-add: #10b981;
+      --diff-del: #dc2626;
+      --diff-change: #f5c400;
+      --glass-bg: rgba(18, 18, 18, 0.72);
+      --glass-bg-strong: rgba(18, 18, 18, 0.94);
+      --glass-border: rgba(255, 255, 255, 0.08);
+      --glass-shadow: 0 24px 64px rgba(0, 0, 0, 0.60);
+      --bg-gradient: linear-gradient(180deg, #121212 0%, #0a0a0a 45%, #050505 100%);
+      --grid-line: rgba(255, 255, 255, 0.025);
+      --shadow-panel: 0 0 0 1px var(--hairline), 0 24px 64px rgba(0, 0, 0, 0.55);
+      --shadow-card: 0 0 0 1px var(--hairline), 0 8px 32px rgba(0, 0, 0, 0.45);
+      --glow-accent: 0 0 24px rgba(var(--accent-rgb), 0.25);
     }
 
     * {
@@ -134,7 +166,7 @@
     }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace, var(--emoji);
+      font-family: var(--font-body), var(--emoji);
       background: var(--bg);
       color: var(--text);
       height: 100vh;
@@ -207,7 +239,7 @@
       flex-wrap: wrap;
       min-width: 0;
       border: 1px solid var(--border);
-      border-radius: 4px;
+      border-radius: var(--r-control);
       overflow: hidden
     }
 
@@ -218,7 +250,7 @@
       color: var(--muted);
       border: none;
       cursor: pointer;
-      font-family: monospace, var(--emoji)
+      font-family: var(--mono), var(--emoji)
     }
 
     .view-toggle button.active {
@@ -309,7 +341,7 @@
       z-index: 1000;
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 5px;
+      border-radius: var(--r-control);
       padding: 3px;
       box-shadow: 0 4px 14px rgba(0, 0, 0, .5);
       min-width: 120px
@@ -326,10 +358,10 @@
       background: none;
       border: none;
       color: var(--text);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13.5px;
       padding: 6px 10px;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       cursor: pointer
     }
 
@@ -356,7 +388,7 @@
       cursor: pointer;
       font-size: 16.5px;
       padding: 1px 6px;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       line-height: 1
     }
 
@@ -426,10 +458,10 @@
       padding: 4px 6px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       color: var(--text);
       font-size: 15px;
-      font-family: monospace, var(--emoji)
+      font-family: var(--mono), var(--emoji)
     }
 
     .sidebar-filters input:focus,
@@ -464,7 +496,7 @@
 
     #session-list::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px
+      border-radius: var(--r-sharp)
     }
 
     .session-item {
@@ -534,7 +566,7 @@
     }
 
     .session-item .uuid {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       color: var(--muted);
       font-size: 11.5px
     }
@@ -572,7 +604,7 @@
     .session-item .name-model {
       color: var(--muted);
       font-weight: 400;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 11.5px
     }
 
@@ -586,7 +618,7 @@
       text-align: center;
       font-size: 16px;
       color: var(--muted);
-      border-radius: 4px;
+      border-radius: var(--r-control);
       cursor: pointer;
       display: none;
       z-index: 2
@@ -709,10 +741,10 @@
       padding: 3px 6px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       color: var(--text);
       font-size: 15px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       width: 120px
     }
 
@@ -729,7 +761,7 @@
 
     .fchip {
       padding: 1px 6px;
-      border-radius: 7px;
+      border-radius: var(--r-btn);
       font-size: 12px;
       cursor: pointer;
       background: var(--pill-bg);
@@ -748,7 +780,7 @@
       font-weight: 600;
       font-size: 11px;
       padding: 1px 7px;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       background: var(--surface-2);
       color: var(--text)
     }
@@ -784,7 +816,7 @@
       color: var(--muted);
       font-weight: 400;
       font-size: 11px;
-      font-family: monospace, var(--emoji)
+      font-family: var(--mono), var(--emoji)
     }
 
     .turn-header .turn-request {
@@ -815,9 +847,9 @@
       background: var(--pill-bg);
       border: 1px solid var(--border);
       color: var(--muted);
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       cursor: pointer;
-      font-family: monospace, var(--emoji)
+      font-family: var(--mono), var(--emoji)
     }
 
     .btn-sm:hover {
@@ -846,7 +878,7 @@
 
     #event-view::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px
+      border-radius: var(--r-sharp)
     }
 
     .evt-row {
@@ -855,7 +887,7 @@
       padding: 3px 8px;
       border-bottom: 1px solid var(--hairline);
       cursor: pointer;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 15px;
       line-height: 1.5
     }
@@ -901,7 +933,7 @@
     .pill {
       display: inline-block;
       padding: 1px 5px;
-      border-radius: 6px;
+      border-radius: var(--r-control);
       font-size: 12px;
       font-weight: 600;
       text-transform: uppercase;
@@ -990,7 +1022,7 @@
       display: inline-block;
       margin-left: 4px;
       padding: 1px 6px;
-      border-radius: 6px;
+      border-radius: var(--r-control);
       font-size: 12px;
       font-weight: 650;
       letter-spacing: 0.1px;
@@ -1021,7 +1053,7 @@
     .evt-detail pre {
       background: var(--bg);
       padding: 5px;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       overflow-x: auto;
       font-size: 13.5px;
       color: var(--muted);
@@ -1039,7 +1071,7 @@
       font-size: 16.5px;
       cursor: pointer;
       padding: 1px 4px;
-      border-radius: 3px
+      border-radius: var(--r-sharp)
     }
 
     .evt-detail .copy-btn:hover {
@@ -1056,7 +1088,7 @@
       font-size: 16.5px;
       cursor: pointer;
       padding: 1px 4px;
-      border-radius: 3px
+      border-radius: var(--r-sharp)
     }
 
     .evt-detail .wrap-btn:hover {
@@ -1066,18 +1098,18 @@
     .exit-chip {
       display: inline-block;
       padding: 1px 5px;
-      border-radius: 5px;
+      border-radius: var(--r-control);
       font-size: 13.5px;
       margin-right: 4px
     }
 
     .exit-chip.ok {
-      background: #1a3a2a;
+      background: var(--tint-green);
       color: var(--green)
     }
 
     .exit-chip.err {
-      background: #3a1a1a;
+      background: var(--tint-red);
       color: var(--red)
     }
 
@@ -1107,7 +1139,7 @@
       border: 1px solid var(--accent);
       color: var(--accent);
       padding: 3px 12px;
-      border-radius: 10px;
+      border-radius: var(--r-card);
       font-size: 15px;
       cursor: pointer;
       z-index: 10;
@@ -1144,7 +1176,7 @@
       flex-direction: column;
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: var(--r-card);
       overflow: hidden
     }
 
@@ -1232,7 +1264,7 @@
     .llm-pre {
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       padding: 10px;
       overflow: auto;
       max-height: 240px;
@@ -1251,7 +1283,7 @@
     }
 
     .llm-tools li {
-      font-family: monospace, var(--emoji)
+      font-family: var(--mono), var(--emoji)
     }
 
     .llm-empty {
@@ -1263,7 +1295,7 @@
 
     .llm-args {
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       border-collapse: collapse;
       width: 100%;
       font-size: 12px;
@@ -1284,7 +1316,7 @@
       padding: 6px 10px;
       border-bottom: 1px solid var(--border);
       color: var(--muted);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       word-break: break-word
     }
 
@@ -1341,8 +1373,8 @@
     .snav-sid code {
       background: var(--pill-bg);
       padding: 1px 5px;
-      border-radius: 4px;
-      font-family: monospace, var(--emoji)
+      border-radius: var(--r-control);
+      font-family: var(--mono), var(--emoji)
     }
 
     .snav-tags {
@@ -1354,7 +1386,7 @@
       display: inline-block;
       background: var(--pill-bg);
       border: 1px solid var(--border);
-      border-radius: 5px;
+      border-radius: var(--r-control);
       padding: 0 5px;
       margin-right: 3px;
       color: var(--muted);
@@ -1385,7 +1417,7 @@
 
     .snav-value {
       color: var(--text);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13px
     }
 
@@ -1405,7 +1437,7 @@
     }
 
     .snav-perf .snav-value {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .snav-context {
@@ -1424,7 +1456,7 @@
     }
 
     .snav-context-fig {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
       color: var(--text)
     }
@@ -1438,7 +1470,7 @@
     .snav-context-bar {
       height: 5px;
       background: var(--pill-bg);
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       overflow: hidden
     }
 
@@ -1463,7 +1495,7 @@
     .snav-model-pill {
       background: var(--pill-bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-control);
       padding: 3px 8px
     }
 
@@ -1473,7 +1505,7 @@
 
     body.layout-form .snav-model-pill {
       padding: 5px 11px;
-      border-radius: 8px
+      border-radius: var(--r-btn)
     }
 
     body.layout-form .snav-model-pill .snav-label {
@@ -1513,7 +1545,7 @@
     #sidebar-show {
       width: 28px;
       height: 28px;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       flex-shrink: 0;
       opacity: 0.75;
       color: var(--muted);
@@ -1534,7 +1566,7 @@
     #btn-clear-all {
       width: 28px;
       height: 28px;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       flex-shrink: 0;
       opacity: 0.75;
       color: var(--muted);
@@ -1593,11 +1625,11 @@
       justify-content: center;
       width: 34px;
       height: 34px;
-      border-radius: 7px;
+      border-radius: var(--r-btn);
       background: var(--pill-bg);
       border: 1px solid var(--border);
       color: var(--text);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-weight: 700;
       font-size: 14px;
       cursor: pointer;
@@ -1658,7 +1690,7 @@
     }
 
     body.layout-form .view-toggle {
-      border-radius: 6px
+      border-radius: var(--r-control)
     }
 
     body.layout-form .view-toggle button {
@@ -1667,7 +1699,7 @@
 
     body.layout-form #btn-theme {
       padding: 3px 9px;
-      border-radius: 6px;
+      border-radius: var(--r-control);
       font-size: 15px
     }
 
@@ -1718,7 +1750,7 @@
 
     body.layout-form .fchip {
       padding: 3px 9px;
-      border-radius: 9px;
+      border-radius: var(--r-btn);
       font-size: 12px;
       text-transform: lowercase;
       letter-spacing: 0.15px
@@ -1732,7 +1764,7 @@
 
     body.layout-form .btn-sm {
       padding: 3px 8px;
-      border-radius: 6px
+      border-radius: var(--r-control)
     }
 
     body.layout-form .evt-row {
@@ -1751,7 +1783,7 @@
 
     body.layout-form .pill {
       padding: 3px 8px;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       font-size: 12px;
       text-transform: lowercase;
       letter-spacing: 0.4px;
@@ -1779,7 +1811,7 @@
 
     body.layout-form .pause-toast {
       padding: 6px 16px;
-      border-radius: 14px;
+      border-radius: var(--r-panel);
       bottom: 14px;
       font-size: 14px
     }
@@ -1810,16 +1842,16 @@
     body.layout-form .snav-sid code {
       font-size: 11.5px;
       padding: 2px 7px;
-      border-radius: 6px
+      border-radius: var(--r-control)
     }
 
     body.layout-form .snav-model {
       display: inline-block;
       padding: 2px 8px;
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-control);
       background: var(--pill-bg);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 11.5px;
       color: var(--text)
     }
@@ -1835,16 +1867,16 @@
       display: inline-block;
       padding: 2px 8px;
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-control);
       background: var(--pill-bg);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 11px;
       color: var(--muted)
     }
 
     body.layout-form .snav-tag {
       padding: 2px 9px;
-      border-radius: 6px;
+      border-radius: var(--r-control);
       font-size: 11px;
       border: 1px solid var(--border)
     }
@@ -1862,7 +1894,7 @@
       padding: 5px 11px;
       background: var(--pill-bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       line-height: 1
     }
 
@@ -1931,7 +1963,7 @@
 
     body.layout-form .snav-context-bar {
       height: 6px;
-      border-radius: 4px
+      border-radius: var(--r-control)
     }
 
     /* ─── Form-mode event emoji map ─────────────────────────────────── */
@@ -2054,9 +2086,9 @@
       align-items: center;
       gap: 8px;
       padding: 5px 7px;
-      border-radius: 4px;
+      border-radius: var(--r-control);
       cursor: pointer;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13.5px;
     }
 
@@ -2073,7 +2105,7 @@
       font-size: 11px;
       font-weight: 700;
       padding: 0 5px;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       flex-shrink: 0;
       width: 18px;
       text-align: center;
@@ -2136,7 +2168,7 @@
 
     .diff-filename {
       color: var(--text);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .diff-spacer {
@@ -2195,13 +2227,13 @@
       position: sticky;
       top: 0;
       z-index: 2;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .diff-lines {
       flex: 1;
       overflow: auto;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13px;
       line-height: 18px;
       margin: 0;
@@ -2290,7 +2322,7 @@
       gap: 4px;
       padding: 3px 7px;
       cursor: pointer;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13.5px;
       color: var(--muted);
       user-select: none;
@@ -2326,7 +2358,7 @@
       line-height: 16px;
       padding: 0;
       border: 1px solid var(--border);
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       background: var(--surface);
       color: var(--text);
       cursor: pointer;
@@ -2355,7 +2387,7 @@
     .diff-toobig {
       color: var(--muted);
       padding: 20px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     /* ─── Review diagram (dependency graph + change overlay) ─────────── */
@@ -2393,10 +2425,10 @@
     }
 
     .diagram-toolbar input[type="text"] {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       color: var(--text);
       font-size: 13px;
       padding: 3px 6px;
@@ -2469,7 +2501,7 @@
     .dnode text {
       fill: var(--muted);
       font-size: 10px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       text-anchor: middle;
       pointer-events: none;
     }
@@ -2582,7 +2614,7 @@
     }
 
     .dcluster-title {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 11px;
       font-weight: 600;
       text-anchor: start;
@@ -2590,7 +2622,7 @@
 
     /* Second heading line: change summary, smaller than the area name. */
     .dcluster-sub {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 8.5px;
       font-weight: 500;
       text-anchor: start;
@@ -2598,7 +2630,7 @@
     }
 
     .dfolder {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 9px;
       fill: var(--muted);
       text-anchor: start;
@@ -2621,7 +2653,7 @@
       flex-wrap: wrap;
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 5px;
+      border-radius: var(--r-control);
       padding: 4px 8px;
       font-size: 11px;
       color: var(--muted);
@@ -2637,7 +2669,7 @@
     .dsw {
       width: 11px;
       height: 8px;
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
       display: inline-block;
       border: 1.5px solid var(--border);
       background: var(--surface);
@@ -2696,7 +2728,7 @@
     }
 
     .dside-title {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       color: var(--text);
       word-break: break-all;
     }
@@ -2740,7 +2772,7 @@
 
     .dstat {
       background: var(--pill-bg);
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       padding: 1px 6px;
       color: var(--muted);
       font-size: 11.5px;
@@ -2762,7 +2794,7 @@
 
     .dprogress {
       height: 6px;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       background: var(--pill-bg);
       overflow: hidden;
       margin: 6px 0 4px;
@@ -2778,7 +2810,7 @@
       align-items: center;
       gap: 6px;
       padding: 4px 2px;
-      border-radius: 4px;
+      border-radius: var(--r-control);
     }
 
     .dchanged:hover {
@@ -2795,7 +2827,7 @@
       font-size: 10px;
       font-weight: 700;
       padding: 0 4px;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       flex-shrink: 0;
     }
 
@@ -2830,7 +2862,7 @@
     }
 
     .dchanged-path {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       color: var(--text);
       cursor: pointer;
       overflow: hidden;
@@ -2859,7 +2891,7 @@
     .drisk {
       font-size: 10.5px;
       padding: 0 5px;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       text-transform: uppercase;
       letter-spacing: 0.3px;
     }
@@ -2890,7 +2922,7 @@
       gap: 6px;
       padding: 3px 2px;
       cursor: pointer;
-      border-radius: 4px;
+      border-radius: var(--r-control);
     }
 
     .drel:hover {
@@ -2898,7 +2930,7 @@
     }
 
     .drel-name {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       color: var(--text);
       overflow: hidden;
       text-overflow: ellipsis;
@@ -2933,10 +2965,10 @@
       gap: 10px;
       padding: 8px 10px;
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-control);
       margin-bottom: 8px;
       background: var(--surface);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13.5px;
     }
 
@@ -2991,7 +3023,7 @@
     .cp-modal-box {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       padding: 18px;
       width: min(360px, 90vw);
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
@@ -3006,7 +3038,7 @@
     .cp-modal-subtitle {
       font-size: 12.5px;
       color: var(--muted);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       margin-bottom: 12px;
       word-break: break-all;
     }
@@ -3023,9 +3055,9 @@
       padding: 6px 8px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 4px;
+      border-radius: var(--r-control);
       color: var(--text);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 14px;
       margin-bottom: 16px;
     }
@@ -3048,7 +3080,7 @@
       color: var(--muted);
       cursor: pointer;
       padding: 3px 6px;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       line-height: 1;
       display: inline-flex;
       align-items: center;
@@ -3083,7 +3115,7 @@
       background: #fff;
       /* Round the white quiet-zone card so it reads as a deliberate object
          rather than a raw image dump. */
-      border-radius: 10px;
+      border-radius: var(--r-card);
       margin-bottom: 12px;
     }
 
@@ -3095,7 +3127,7 @@
     }
 
     .phone-qr-fallback {
-      color: #555;
+      color: var(--muted);
       font-size: 13px;
       padding: 40px 0;
     }
@@ -3110,11 +3142,11 @@
     .phone-url {
       flex: 1;
       min-width: 0;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 4px;
+      border-radius: var(--r-control);
       padding: 7px 8px;
       color: var(--text);
       /* The URL is one long unbreakable token; wrap it instead of letting the
@@ -3133,10 +3165,10 @@
     }
 
     .phone-chip {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
       padding: 3px 9px;
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       border: 1px solid var(--border);
       background: var(--bg);
       color: var(--muted);
@@ -3172,20 +3204,20 @@
     }
 
     .phone-note code {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       padding: 1px 5px;
     }
 
     .phone-cmd {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12.5px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 5px;
+      border-radius: var(--r-control);
       padding: 9px 10px;
       color: var(--text);
       overflow-x: auto;
@@ -3207,10 +3239,10 @@
       padding: 3px 6px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       color: var(--text);
       font-size: 15px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       width: 160px;
     }
 
@@ -3220,7 +3252,7 @@
     }
 
     #trajectory-label {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       color: var(--text);
       font-size: 13.5px;
       white-space: nowrap;
@@ -3233,7 +3265,7 @@
       margin-left: auto;
       color: var(--muted);
       font-size: 13px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     #trajectory-overview {
@@ -3264,7 +3296,7 @@
       padding-left: 6px;
       font-size: 11px;
       color: var(--muted);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -3279,14 +3311,14 @@
       padding: 3px 8px 5px;
       font-size: 11px;
       color: var(--muted);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .tov-legend .tov-sw {
       display: inline-block;
       width: 9px;
       height: 9px;
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
       margin-right: 3px;
       vertical-align: -1px;
     }
@@ -3312,7 +3344,7 @@
 
     .tov-bar {
       position: absolute;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       cursor: pointer;
       opacity: 0.85;
     }
@@ -3349,7 +3381,7 @@
       display: block;
       height: 100%;
       background: rgba(255, 255, 255, 0.4);
-      border-radius: 3px 0 0 3px;
+      border-radius: var(--r-sharp) 0 0 var(--r-sharp);
     }
 
     /* Dispatch ledger row: chips link to the subagents the call spawned. */
@@ -3364,17 +3396,17 @@
       border: 1px solid var(--accent);
       background: color-mix(in srgb, var(--accent) 12%, transparent);
       color: var(--accent);
-      border-radius: 10px;
+      border-radius: var(--r-card);
       padding: 1px 8px;
       font-size: 11.5px;
       cursor: pointer;
       white-space: nowrap;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .traj-disp-chip:hover {
       background: var(--accent);
-      color: #fff;
+      color: var(--on-accent);
     }
 
     .traj-agent.flash {
@@ -3389,7 +3421,7 @@
     #trajectory-ledger {
       flex: 1;
       overflow-y: auto;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13.5px;
       min-height: 0;
       position: relative;
@@ -3401,7 +3433,7 @@
 
     #trajectory-ledger::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
     }
 
     .traj-row {
@@ -3464,7 +3496,7 @@
 
     .traj-col-cost {
       color: var(--orange);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
     }
 
@@ -3603,7 +3635,7 @@
     .traj-agent-name {
       font-weight: 700;
       color: var(--accent);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .traj-agent-tag {
@@ -3612,7 +3644,7 @@
       letter-spacing: 0.5px;
       color: var(--muted);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       padding: 0 6px;
       flex-shrink: 0;
     }
@@ -3703,12 +3735,12 @@
       border: 1px solid var(--border);
       background: var(--pill-bg);
       color: var(--muted);
-      border-radius: 6px;
+      border-radius: var(--r-control);
       font-size: 13px;
       line-height: 1;
       cursor: pointer;
       padding: 0;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .traj-inspector-actions button:hover {
@@ -3749,7 +3781,7 @@
       display: grid;
       grid-template-columns: 52px 1fr;
       gap: 3px 10px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
     }
 
@@ -3804,8 +3836,8 @@
       font-size: 11px;
       line-height: 1;
       padding: 2px 6px;
-      border-radius: 4px;
-      font-family: monospace, var(--emoji);
+      border-radius: var(--r-control);
+      font-family: var(--mono), var(--emoji);
     }
 
     .traj-sec-copy:hover {
@@ -3816,7 +3848,7 @@
     .traj-detail-section pre {
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-control);
       padding: 8px;
       overflow: auto;
       max-height: 280px;
@@ -3839,7 +3871,7 @@
       border: 1px solid var(--accent);
       color: var(--accent);
       padding: 4px 12px;
-      border-radius: 10px;
+      border-radius: var(--r-card);
       font-size: 14px;
       cursor: pointer;
       z-index: 10;
@@ -3884,10 +3916,10 @@
     }
 
     .git-branch-chip {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
       padding: 1px 8px;
-      border-radius: 9px;
+      border-radius: var(--r-btn);
       background: var(--tint-blue);
       color: var(--accent);
       border: 1px solid var(--border);
@@ -3903,7 +3935,7 @@
     }
 
     .git-sync {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
       color: var(--muted);
     }
@@ -3970,7 +4002,7 @@
 
     .git-side-scroll::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
     }
 
     .git-section {
@@ -3996,7 +4028,7 @@
       font-size: 10px;
       background: var(--pill-bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       padding: 0 6px;
       color: var(--muted);
     }
@@ -4011,7 +4043,7 @@
       gap: 6px;
       padding: 3px 10px 3px 6px;
       cursor: pointer;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13px;
       border-bottom: 1px solid var(--hairline);
     }
@@ -4035,7 +4067,7 @@
       font-weight: 700;
       width: 16px;
       text-align: center;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       padding: 1px 0;
       flex-shrink: 0;
     }
@@ -4094,7 +4126,7 @@
       border: 1px solid var(--border);
       background: var(--pill-bg);
       color: var(--muted);
-      border-radius: 4px;
+      border-radius: var(--r-control);
       cursor: pointer;
     }
 
@@ -4132,7 +4164,7 @@
       border: none;
       color: var(--muted);
       cursor: pointer;
-      border-radius: 5px;
+      border-radius: var(--r-control);
       font-family: inherit;
     }
 
@@ -4170,7 +4202,7 @@
 
     .git-tabpane::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
     }
 
     /* Changes tab: pinned file header above the scrolling diff. */
@@ -4192,7 +4224,7 @@
       padding: 8px 12px;
       border-bottom: 1px solid var(--border);
       background: var(--surface);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .git-diff-header .gdh-file {
@@ -4231,11 +4263,11 @@
 
     .git-diff-scroll::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
     }
 
     .git-diff {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12.5px;
       line-height: 1.5;
       padding: 8px 10px;
@@ -4283,7 +4315,7 @@
     }
 
     .git-split {
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12.5px;
       line-height: 1.5;
       padding-bottom: 12px;
@@ -4382,10 +4414,10 @@
       padding: 7px 9px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-control);
       color: var(--text);
       font-size: 13px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       line-height: 1.4;
     }
 
@@ -4430,7 +4462,7 @@
 
     .git-history-list::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
     }
 
     .git-commit-row {
@@ -4439,7 +4471,7 @@
       height: 48px;
       border-bottom: 1px solid var(--hairline);
       cursor: pointer;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .git-commit-row:hover {
@@ -4498,10 +4530,10 @@
       font-size: 10.5px;
       line-height: 1;
       padding: 2px 7px;
-      border-radius: 9px;
+      border-radius: var(--r-btn);
       font-weight: 600;
       white-space: nowrap;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace, var(--emoji);
+      font-family: var(--font-body), var(--emoji);
     }
 
     .git-ref-check {
@@ -4612,7 +4644,7 @@
 
     .git-detail-scroll::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
     }
 
     /* ─── Fullscreen detail pane ────────────────────────────────────── */
@@ -4621,7 +4653,7 @@
       inset: 16px;
       z-index: 500;
       height: auto;
-      border-radius: 10px;
+      border-radius: var(--r-card);
       border: 1px solid var(--border);
       box-shadow: 0 0 0 1px rgba(0, 0, 0, .3), 0 16px 48px rgba(0, 0, 0, .5);
       background: var(--bg);
@@ -4636,7 +4668,7 @@
       position: fixed;
       inset: 16px;
       z-index: 500;
-      border-radius: 10px;
+      border-radius: var(--r-card);
       border: 1px solid var(--border);
       box-shadow: 0 0 0 1px rgba(0, 0, 0, .3), 0 16px 48px rgba(0, 0, 0, .5);
       background: var(--bg);
@@ -4660,7 +4692,7 @@
       background: var(--accent-soft);
       border-bottom: 1px solid var(--border);
       font-size: 12.5px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       flex-shrink: 0;
     }
 
@@ -4679,7 +4711,7 @@
       align-items: center;
       gap: 10px;
       padding: 8px 0 4px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13px;
       flex-wrap: wrap;
     }
@@ -4690,7 +4722,7 @@
       align-items: center;
       gap: 10px;
       padding: 6px 0;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       flex-wrap: wrap;
     }
 
@@ -4715,9 +4747,9 @@
       padding: 10px 14px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-control);
       color: var(--text);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13px;
       line-height: 1.5;
       resize: none;
@@ -4732,7 +4764,7 @@
 
     .git-detail-file-link {
       cursor: pointer;
-      border-radius: 4px;
+      border-radius: var(--r-control);
       padding: 4px 6px;
       margin: 0 -6px;
     }
@@ -4746,7 +4778,7 @@
       padding: 6px 10px;
       background: var(--tint-red);
       color: var(--red);
-      border-radius: 5px;
+      border-radius: var(--r-control);
       font-size: 13px;
       font-weight: 600;
     }
@@ -4795,7 +4827,7 @@
       color: var(--muted);
       font-size: 12px;
       margin-top: 1px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .git-detail-row {
@@ -4807,7 +4839,7 @@
 
     .git-detail-hash {
       color: var(--accent);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12.5px;
     }
 
@@ -4815,7 +4847,7 @@
       margin: 12px 0;
       padding: 10px;
       background: var(--surface-2);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
     }
 
     .git-detail-title {
@@ -4839,7 +4871,7 @@
       align-items: center;
       gap: 7px;
       padding: 3px 0;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12.5px;
       color: var(--text);
     }
@@ -4871,7 +4903,7 @@
 
     .git-changes-sidebar::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
     }
 
     .git-changes-sidebar-file {
@@ -4879,7 +4911,7 @@
       align-items: center;
       gap: 6px;
       padding: 4px 10px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
       color: var(--muted);
       cursor: pointer;
@@ -4918,7 +4950,7 @@
 
     .git-changes-main::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 2px;
+      border-radius: var(--r-sharp);
     }
 
     .git-menu {
@@ -4927,7 +4959,7 @@
       min-width: 230px;
       background: var(--glass-bg-strong);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       box-shadow: var(--glass-shadow);
       padding: 4px;
     }
@@ -4941,7 +4973,7 @@
       color: var(--text);
       background: none;
       border: none;
-      border-radius: 5px;
+      border-radius: var(--r-control);
       cursor: pointer;
     }
 
@@ -4973,7 +5005,7 @@
     .git-modal-box {
       background: var(--glass-bg-strong);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: var(--r-card);
       box-shadow: var(--glass-shadow);
       padding: 16px 20px;
       min-width: 340px;
@@ -5000,10 +5032,10 @@
       padding: 7px 10px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--r-control);
       color: var(--text);
       font-size: 13px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       margin-bottom: 14px;
     }
 
@@ -5021,7 +5053,7 @@
     .git-modal-btn {
       padding: 6px 16px;
       font-size: 13px;
-      border-radius: 6px;
+      border-radius: var(--r-control);
       cursor: pointer;
       border: 1px solid var(--border);
       background: var(--bg);
@@ -5034,7 +5066,7 @@
 
     .git-modal-btn.primary {
       background: var(--accent);
-      color: #fff;
+      color: var(--on-accent);
       border-color: var(--accent);
     }
 
@@ -5058,7 +5090,7 @@
       gap: 8px;
       padding: 6px 12px;
       border-bottom: 1px solid var(--hairline);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13px;
     }
 
@@ -5101,10 +5133,10 @@
       padding: 4px 8px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 5px;
+      border-radius: var(--r-control);
       color: var(--text);
       font-size: 13px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .git-remote-item {
@@ -5113,7 +5145,7 @@
       gap: 8px;
       padding: 6px 12px;
       border-bottom: 1px solid var(--hairline);
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 13px;
     }
 
@@ -5142,10 +5174,10 @@
       padding: 4px 8px;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 5px;
+      border-radius: var(--r-control);
       color: var(--text);
       font-size: 13px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
 
     .gsm-status {
@@ -5154,15 +5186,15 @@
       height: 18px;
       line-height: 18px;
       text-align: center;
-      border-radius: 4px;
+      border-radius: var(--r-control);
       font-size: 11px;
       font-weight: 700;
       flex-shrink: 0;
     }
 
     .gsm-status.ok {
-      background: #56d36426;
-      color: #56d364;
+      background: var(--tint-green);
+      color: var(--green);
     }
 
     .gsm-status.uninitialized {
@@ -5171,13 +5203,13 @@
     }
 
     .gsm-status.dirty {
-      background: #f0883e26;
-      color: #f0883e;
+      background: var(--tint-orange);
+      color: var(--orange);
     }
 
     .gsm-status.merge-conflict {
-      background: #f8514926;
-      color: #f85149;
+      background: var(--tint-red);
+      color: var(--red);
     }
 
     .git-submodule-bulk {
@@ -5200,7 +5232,7 @@
 
     .git-log-msg {
       padding: 10px 12px;
-      font-family: monospace, var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
       color: var(--muted);
       white-space: pre-wrap;
@@ -5320,7 +5352,7 @@
       font-weight: 600;
       letter-spacing: 0;
       background: var(--pill-bg);
-      border-radius: 10px;
+      border-radius: var(--r-card);
       padding: 1px 8px;
       font-size: 10.5px;
       color: var(--muted);
@@ -5346,7 +5378,7 @@
       margin: 2px 0;
       cursor: pointer;
       border: 1px solid transparent;
-      border-radius: 10px;
+      border-radius: var(--r-card);
       transition: background 0.12s ease, border-color 0.12s ease;
     }
     .chat-ws:hover {
@@ -5367,12 +5399,12 @@
       align-items: center;
       justify-content: center;
       flex-shrink: 0;
-      border-radius: 5px;
+      border-radius: var(--r-control);
       transition: background 0.12s ease, color 0.12s ease, transform 0.12s ease;
     }
     .chat-ws:hover .chat-ws-caret {
       background: var(--row-hover);
-      color: var(--fg);
+      color: var(--text);
     }
     .chat-ws.active .chat-ws-caret {
       color: var(--accent);
@@ -5380,7 +5412,7 @@
     .chat-ws-icon {
       width: 24px;
       height: 24px;
-      border-radius: 7px;
+      border-radius: var(--r-btn);
       background: var(--surface-2);
       border: 1px solid var(--border);
       color: var(--muted);
@@ -5434,7 +5466,7 @@
       font-weight: 600;
       color: var(--muted);
       background: var(--pill-bg);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       padding: 0 6px;
       flex-shrink: 0;
     }
@@ -5449,7 +5481,7 @@
       align-items: center;
       gap: 7px;
       padding: 5px 6px;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       cursor: pointer;
       font-size: 12px;
     }
@@ -5487,7 +5519,7 @@
       font-size: 11px;
       color: var(--muted);
       padding: 4px 6px;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       user-select: none;
       position: relative;
     }
@@ -5521,7 +5553,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 5px;
+      border-radius: var(--r-control);
       transition: color 0.12s ease, background 0.12s ease;
     }
     .ws-sess-fold:hover .ws-sess-fold-caret {
@@ -5569,7 +5601,7 @@
       text-align: center;
       font-size: 16px;
       color: var(--muted);
-      border-radius: 4px;
+      border-radius: var(--r-control);
       cursor: pointer;
       display: none;
       z-index: 2;
@@ -5585,7 +5617,7 @@
       background: transparent;
       border: 1px solid var(--border);
       color: var(--muted);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       font-size: 10.5px;
       font-weight: 600;
       padding: 3px 10px;
@@ -5611,17 +5643,17 @@
       width: 100%;
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       color: var(--text);
       font-size: 11.5px;
       padding: 6px 8px;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
     .chat-ws-browse {
       background: var(--pill-bg);
       border: 1px solid var(--border);
       color: var(--text);
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       font-size: 11px;
       padding: 6px 9px;
       cursor: pointer;
@@ -5690,7 +5722,7 @@
     .chat-header-sub {
       font-size: 11.5px;
       color: var(--muted);
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
     .chat-header-state {
       display: inline-flex;
@@ -5702,7 +5734,7 @@
       letter-spacing: 0.4px;
       color: var(--green);
       background: var(--tint-green);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       padding: 2px 8px;
       white-space: nowrap;
     }
@@ -5736,11 +5768,11 @@
     }
     .chat-header-model {
       font-size: 11px;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
       color: var(--muted);
       background: var(--pill-bg);
       border: 1px solid var(--border);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       padding: 3px 10px;
       max-width: 260px;
       overflow: hidden;
@@ -5760,7 +5792,7 @@
       align-items: center;
       justify-content: center;
       border: 1px solid transparent;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       background: transparent;
       color: var(--muted);
       font-size: 15px;
@@ -5883,7 +5915,7 @@
       max-width: 940px;
       width: 100%;
       padding: 12px 8px;
-      border-radius: 12px;
+      border-radius: var(--r-card);
       animation: chat-msg-in 0.22s ease both;
     }
     @keyframes chat-msg-in {
@@ -5896,16 +5928,16 @@
     .chat-msg-avatar {
       width: 30px;
       height: 30px;
-      border-radius: 9px;
+      border-radius: var(--r-btn);
       flex-shrink: 0;
       background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 70%);
-      color: #fff;
+      color: var(--on-accent);
       display: flex;
       align-items: center;
       justify-content: center;
       font-size: 14px;
       font-weight: 700;
-      box-shadow: 0 2px 8px rgba(65, 118, 230, 0.28);
+      box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.28);
       margin-top: 2px;
     }
     .chat-msg-body {
@@ -5943,13 +5975,13 @@
       font-size: 10.5px;
       color: var(--accent);
       background: var(--accent-soft);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       padding: 1px 8px;
       max-width: 240px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
     .chat-msg-time {
       font-size: 10.5px;
@@ -5977,7 +6009,7 @@
       align-items: center;
       justify-content: center;
       border: none;
-      border-radius: 6px;
+      border-radius: var(--r-control);
       background: transparent;
       color: var(--muted);
       font-size: 13px;
@@ -5993,10 +6025,10 @@
     /* Bubbles & text */
     .chat-bubble-user {
       background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
-      color: #fff;
-      border-radius: 16px 16px 5px 16px;
+      color: var(--on-accent);
+      border-radius: var(--r-card) var(--r-card) var(--r-sharp) var(--r-card);
       padding: 10px 15px;
-      box-shadow: 0 2px 10px rgba(65, 118, 230, 0.22);
+      box-shadow: 0 2px 10px rgba(var(--accent-rgb), 0.22);
     }
     .chat-bubble-text {
       white-space: pre-wrap;
@@ -6052,11 +6084,11 @@
       border-bottom-color: var(--accent);
     }
     .chat-text code {
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12.5px;
       background: var(--pill-bg);
       border: 1px solid var(--border);
-      border-radius: 5px;
+      border-radius: var(--r-control);
       padding: 1px 5px;
       color: var(--accent);
     }
@@ -6095,7 +6127,7 @@
     .chat-code {
       margin: 4px 0 14px;
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: var(--r-card);
       overflow: hidden;
       background: var(--surface-2);
       box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
@@ -6115,7 +6147,7 @@
       text-transform: uppercase;
       letter-spacing: 0.8px;
       color: var(--muted);
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -6125,7 +6157,7 @@
       align-items: center;
       gap: 5px;
       border: none;
-      border-radius: 6px;
+      border-radius: var(--r-control);
       background: transparent;
       color: var(--muted);
       font-size: 11px;
@@ -6142,7 +6174,7 @@
       margin: 0;
       padding: 12px 14px;
       overflow-x: auto;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12.5px;
       line-height: 1.6;
       color: var(--text);
@@ -6161,7 +6193,7 @@
     .chat-thinking {
       margin: 2px 0 10px;
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: var(--r-card);
       overflow: hidden;
       background: var(--surface);
     }
@@ -6212,7 +6244,7 @@
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 12px;
       line-height: 1.6;
       color: var(--muted);
@@ -6231,7 +6263,7 @@
       align-items: center;
       gap: 7px;
       border: 1px solid var(--border);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       background: var(--surface);
       color: var(--text);
       font-size: 11.5px;
@@ -6283,7 +6315,7 @@
     }
     .chat-tool-call {
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: var(--r-card);
       overflow: hidden;
       background: var(--surface);
       box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
@@ -6363,7 +6395,7 @@
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 11.5px;
       line-height: 1.55;
       color: var(--muted);
@@ -6377,7 +6409,7 @@
     }
     .chat-tool-call pre::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
     }
     .chat-tool-call pre::-webkit-scrollbar-thumb:hover {
       background: var(--muted);
@@ -6397,7 +6429,7 @@
     /* Ask/questionnaire cards — pi's ask_user_question dialog rendered inline */
     .chat-ask {
       border: 1px solid var(--accent);
-      border-radius: 12px;
+      border-radius: var(--r-card);
       background: var(--surface);
       box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
       padding: 10px 12px 11px;
@@ -6431,7 +6463,7 @@
       height: 20px;
       line-height: 18px;
       text-align: center;
-      border-radius: 6px;
+      border-radius: var(--r-control);
       border: 1px solid transparent;
       background: transparent;
       color: var(--muted);
@@ -6454,7 +6486,7 @@
       gap: 9px;
       text-align: left;
       border: 1px solid var(--border);
-      border-radius: 9px;
+      border-radius: var(--r-btn);
       background: var(--bg);
       color: var(--text);
       padding: 7px 10px;
@@ -6482,7 +6514,7 @@
       color: var(--muted);
       font-size: 11px;
       font-weight: 700;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
     .chat-ask-opt-b {
       display: flex;
@@ -6518,7 +6550,7 @@
       background: var(--bg);
       border: 1px solid var(--border);
       color: var(--text);
-      border-radius: 9px;
+      border-radius: var(--r-btn);
       padding: 7px 10px;
       font: inherit;
       font-size: 12.5px;
@@ -6533,7 +6565,7 @@
       border: 1px solid var(--accent);
       background: var(--accent);
       color: var(--on-accent, #fff);
-      border-radius: 9px;
+      border-radius: var(--r-btn);
       padding: 6px 14px;
       font-size: 12px;
       font-weight: 600;
@@ -6582,7 +6614,7 @@
       padding: 7px 10px;
       border-left: 3px solid var(--accent);
       background: var(--surface);
-      border-radius: 6px;
+      border-radius: var(--r-control);
     }
     .chat-asks-i {
       display: flex;
@@ -6615,7 +6647,7 @@
       max-width: 100%;
       margin: 10px 0 2px;
       padding: 3px 11px 3px 9px;
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       background: var(--accent-soft);
       border: 1px solid var(--border);
     }
@@ -6715,9 +6747,9 @@
       color: var(--muted);
       background: var(--pill-bg);
       border: 1px solid var(--border);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       padding: 1px 9px;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
     }
     .chat-badge-model {
       color: var(--accent);
@@ -6798,7 +6830,7 @@
       border: 1px solid var(--border);
       background: linear-gradient(180deg, var(--surface-3), var(--surface));
       color: var(--text);
-      border-radius: 14px;
+      border-radius: var(--r-panel);
       padding: 12px 14px;
       font-size: 12.5px;
       line-height: 1.45;
@@ -6813,7 +6845,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 9px;
+      border-radius: var(--r-btn);
       background: var(--accent-soft);
       font-size: 14px;
       transition: all 0.18s ease;
@@ -6821,11 +6853,11 @@
     .chat-chip:hover {
       border-color: var(--accent);
       transform: translateY(-2px);
-      box-shadow: 0 8px 22px rgba(65, 118, 230, 0.22), 0 0 0 1px rgba(65, 118, 230, 0.15);
+      box-shadow: 0 8px 22px rgba(var(--accent-rgb), 0.22), 0 0 0 1px rgba(var(--accent-rgb), 0.15);
     }
     .chat-chip:hover .chat-chip-icon {
       background: var(--accent);
-      box-shadow: 0 0 14px rgba(65, 118, 230, 0.5);
+      box-shadow: 0 0 14px rgba(var(--accent-rgb), 0.5);
     }
     .chat-hero-note {
       margin-top: 18px;
@@ -6881,13 +6913,13 @@
     /* Dictation level meter — the bar only lines up in a monospace face, and
        tabular numerals keep the clock from shifting as the seconds tick. */
     .chat-stt-bar {
-      font-family: var(--mono, monospace);
+      font-family: var(--mono);
       font-size: 11px;
       letter-spacing: 1px;
       flex-shrink: 0;
     }
     .chat-stt-clock {
-      font-family: var(--mono, monospace);
+      font-family: var(--mono);
       font-variant-numeric: tabular-nums;
       flex-shrink: 0;
     }
@@ -6910,19 +6942,19 @@
       display: flex;
       flex-direction: column;
       border: 1px solid var(--border-strong);
-      border-radius: 18px;
+      border-radius: var(--r-panel);
       background: var(--surface);
       box-shadow: 0 6px 30px rgba(0, 0, 0, 0.10);
       transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
     .chat-composer-box:focus-within {
       border-color: var(--accent);
-      box-shadow: 0 6px 30px rgba(65, 118, 230, 0.18);
+      box-shadow: 0 6px 30px rgba(var(--accent-rgb), 0.18);
     }
     #chat-input {
       width: 100%;
       border: none;
-      border-radius: 18px 18px 0 0;
+      border-radius: var(--r-card) var(--r-card) 0 0;
       background: transparent;
       color: var(--text);
       caret-color: var(--text);
@@ -7006,9 +7038,9 @@
       border: 1px solid var(--border);
       background: var(--surface-2);
       color: var(--text);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       font-size: 11.5px;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
       /* generous right padding: room for the native dropdown chevron so the
          label never runs into (or past) the pill's right edge */
       padding: 3px 26px 3px 12px;
@@ -7022,7 +7054,7 @@
     #chat-model:focus-visible,
     #chat-thinking:focus-visible {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(65, 118, 230, 0.16);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.16);
     }
     #chat-model:disabled,
     #chat-thinking:disabled {
@@ -7041,7 +7073,7 @@
       cursor: pointer;
       flex-shrink: 0;
       transition: all 0.14s ease;
-      box-shadow: 0 2px 8px rgba(65, 118, 230, 0.3);
+      box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.3);
     }
     .chat-send:hover {
       background: var(--accent-strong);
@@ -7066,7 +7098,7 @@
       gap: 6px;
       padding: 4px 11px;
       border: 1px solid var(--border);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       background: var(--surface-2);
       color: var(--muted);
       font-size: 10px;
@@ -7091,7 +7123,7 @@
     }
     .chat-steer:focus-visible {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(65, 118, 230, 0.16);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.16);
       outline: none;
     }
     .chat-steer.on {
@@ -7131,7 +7163,7 @@
     }
     .chat-listen:focus-visible {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(65, 118, 230, 0.16);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.16);
       outline: none;
     }
     .chat-listen:disabled {
@@ -7186,7 +7218,7 @@
       gap: 5px;
       margin-top: 8px;
       padding: 3px 9px;
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       background: var(--row-error);
       color: var(--red);
       font-size: 11px;
@@ -7196,7 +7228,7 @@
       display: inline-block;
       margin-top: 6px;
       padding: 2px 8px;
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       background: var(--surface-2);
       color: var(--muted);
       font-size: 10px;
@@ -7209,7 +7241,7 @@
       margin: 7px auto 0;
       padding: 0 8px;
       font-size: 10.5px;
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
       color: var(--muted);
       display: flex;
       flex-direction: column;
@@ -7239,7 +7271,7 @@
       gap: 5px;
       background: var(--pill-bg);
       border: 1px solid var(--border);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       padding: 2px 9px;
       font-size: 10.5px;
       line-height: 1.55;
@@ -7323,7 +7355,7 @@
     .cf-bar {
       display: inline-block;
       height: 5px;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       background: var(--pill-bg);
       border: 1px solid var(--border);
       overflow: hidden;
@@ -7341,7 +7373,7 @@
     .cf-fill {
       display: block;
       height: 100%;
-      border-radius: 3px;
+      border-radius: var(--r-sharp);
       transition: width 0.35s ease;
     }
     .cf-fill.cf-success {
@@ -7475,12 +7507,12 @@
       gap: 5px;
     }
     .chat-kbd kbd {
-      font-family: var(--mono, monospace), var(--emoji);
+      font-family: var(--mono), var(--emoji);
       font-size: 10px;
       background: var(--pill-bg);
       border: 1px solid var(--border);
       border-bottom-width: 2px;
-      border-radius: 5px;
+      border-radius: var(--r-control);
       padding: 1px 6px;
       color: var(--text);
     }
@@ -7499,7 +7531,7 @@
       padding: 11px 10px;
       background: var(--surface-2);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: var(--r-card);
       transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
     .at-sec:hover {
@@ -7511,7 +7543,7 @@
       letter-spacing: 0.8px;
       margin: -2px -4px 9px;
       padding: 2px 4px;
-      border-radius: 6px;
+      border-radius: var(--r-control);
     }
     .at-sec-head:hover {
       background: var(--row-hover);
@@ -7524,7 +7556,7 @@
       gap: 9px;
       padding: 8px 9px;
       margin: 2px 0;
-      border-radius: 10px;
+      border-radius: var(--r-card);
       border: 1px solid transparent;
       cursor: pointer;
       transition: background 0.12s ease, border-color 0.12s ease;
@@ -7547,7 +7579,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       font-size: 12.5px;
       font-weight: 600;
       color: var(--accent);
@@ -7612,7 +7644,7 @@
       color: var(--accent);
       background: var(--accent-soft);
       border: 1px solid var(--accent);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       padding: 2px 7px;
     }
 
@@ -7621,7 +7653,7 @@
       flex-shrink: 0;
       width: 30px;
       height: 17px;
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       border: 1px solid var(--border);
       background: var(--pill-bg);
       cursor: pointer;
@@ -7664,7 +7696,7 @@
       font-size: 11px;
       font-weight: 500;
       padding: 3px 9px;
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       border: 1px solid var(--border);
       background: var(--pill-bg);
       color: var(--muted);
@@ -7677,7 +7709,7 @@
     }
     .at-chip:hover {
       border-color: var(--border-strong);
-      color: var(--fg);
+      color: var(--text);
     }
     .at-chip-dot {
       flex-shrink: 0;
@@ -7688,7 +7720,7 @@
       transition: background 0.12s ease;
     }
     .at-chip.on {
-      color: var(--fg);
+      color: var(--text);
       background: var(--accent-soft);
       border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     }
@@ -7720,7 +7752,7 @@
       font-weight: 600;
       color: var(--muted);
       background: var(--pill-bg);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       padding: 1px 6px;
     }
     .at-chip.team.on .at-chip-count {
@@ -7770,7 +7802,7 @@
     }
 
     .at-item {
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       margin: 1px 0;
       padding: 4px 7px;
     }
@@ -7799,7 +7831,7 @@
       align-items: center;
       gap: 9px;
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: var(--r-card);
       background: var(--pill-bg);
       padding: 8px 9px;
       margin-bottom: 7px;
@@ -7811,7 +7843,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 8px;
+      border-radius: var(--r-btn);
       color: var(--accent);
       background: var(--accent-soft);
       border: 1px solid var(--border);
@@ -7856,7 +7888,7 @@
       gap: 7px;
       border: 1px solid var(--border);
       background: var(--pill-bg);
-      border-radius: 999px;
+      border-radius: var(--r-pill);
       margin: 0;
     }
     .at-card.mode:hover {
@@ -7951,10 +7983,10 @@
       max-width: none;
       padding: 10px 15px;
       border: none;
-      border-radius: 16px 16px 5px 16px;
+      border-radius: var(--r-card) var(--r-card) var(--r-sharp) var(--r-card);
       background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
-      color: #fff;
-      box-shadow: 0 2px 10px rgba(65, 118, 230, 0.22);
+      color: var(--on-accent);
+      box-shadow: 0 2px 10px rgba(var(--accent-rgb), 0.22);
       font-size: 13.8px;
     }
     .chat-user .chat-bubble-user .chat-bubble-text {
@@ -7976,7 +8008,7 @@
     }
     .chat-messages::-webkit-scrollbar-thumb {
       background: var(--border);
-      border-radius: 4px;
+      border-radius: var(--r-control);
       border: 2px solid transparent;
       background-clip: content-box;
     }
@@ -8133,7 +8165,7 @@
     }
     .at-row.clickable {
       cursor: pointer;
-      border-radius: 6px;
+      border-radius: var(--r-control);
       padding: 2px 6px;
       margin: -2px -6px;
     }
@@ -8202,7 +8234,7 @@
       font-size: 9px;
       color: var(--muted);
       background: var(--pill-bg);
-      border-radius: 5px;
+      border-radius: var(--r-control);
       padding: 0 4px;
     }
     .at-sep {
@@ -8217,7 +8249,7 @@
     .chat-rail-head .chat-hbtn {
       width: 26px;
       height: 26px;
-      border-radius: 7px;
+      border-radius: var(--r-btn);
       flex-shrink: 0;
       opacity: 0.75;
     }
@@ -8329,7 +8361,7 @@ body.layout-settings #sidebar-resizer {
   text-align: left;
   padding: 8px 12px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   background: transparent;
   color: var(--muted);
   font-size: 13.5px;
@@ -8348,7 +8380,7 @@ body.layout-settings #sidebar-resizer {
   top: 7px;
   bottom: 7px;
   width: 3px;
-  border-radius: 3px;
+  border-radius: var(--r-sharp);
   background: var(--accent);
 }
 
@@ -8377,7 +8409,7 @@ body.layout-settings #sidebar-resizer {
 }
 .settings-error-ico {
   width: 44px; height: 44px;
-  border-radius: 12px;
+  border-radius: var(--r-card);
   display: grid; place-items: center;
   font-size: 22px; font-weight: 800;
   color: var(--red);
@@ -8386,11 +8418,11 @@ body.layout-settings #sidebar-resizer {
 .settings-empty-title { font-size: 16px; font-weight: 700; color: var(--text); }
 .settings-empty-sub { font-size: 13.5px; line-height: 1.55; color: var(--muted); }
 .settings-empty-sub code {
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   font-size: 12px;
   background: var(--pill-bg);
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
 }
 
 .settings-group-kicker {
@@ -8412,8 +8444,8 @@ body.layout-settings #sidebar-resizer {
   display: inline-block;
   margin-left: 8px;
   padding: 2px 8px;
-  border-radius: 999px;
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  border-radius: var(--r-pill);
+  font-family: var(--mono), var(--emoji);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: .6px;
@@ -8444,11 +8476,11 @@ body.layout-settings #sidebar-resizer {
   max-width: 640px;
 }
 .settings-intro code, .settings-group-title + .settings-intro code {
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   font-size: 12px;
   background: var(--pill-bg);
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
 }
 .settings-group-div {
   height: 1px;
@@ -8485,7 +8517,7 @@ body.layout-settings #sidebar-resizer {
   gap: 2px;
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: var(--r-card);
   padding: 12px 14px;
   margin: 4px 0 12px;
 }
@@ -8508,11 +8540,11 @@ body.layout-settings #sidebar-resizer {
   white-space: nowrap;
 }
 .set-update-row-value code {
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   font-size: 12.5px;
   background: var(--pill-bg);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
 }
 .set-update-path { max-width: 100%; display: inline-block; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .set-update-muted { color: var(--muted); }
@@ -8525,7 +8557,7 @@ body.layout-settings #sidebar-resizer {
 .set-update-actions .btn-sm.primary:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 .set-update-actions .btn-sm:disabled { opacity: .5; cursor: default; }
 .set-update-when { font-size: 12px; color: var(--muted); }
@@ -8536,7 +8568,7 @@ body.layout-settings #sidebar-resizer {
   overflow: auto;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   font-size: 11.5px;
   white-space: pre-wrap;
 }
@@ -8549,7 +8581,7 @@ body.layout-settings #sidebar-resizer {
   gap: 10px;
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   padding: 8px 11px;
 }
 .set-auth-cred-name { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; color: var(--text); }
@@ -8570,7 +8602,7 @@ body.layout-settings #sidebar-resizer {
   flex-wrap: wrap;
   padding: 7px 10px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   background: var(--surface-2);
 }
 .set-auth-prov-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -8579,7 +8611,7 @@ body.layout-settings #sidebar-resizer {
 .set-auth-none { font-size: 12px; color: var(--muted); }
 .set-auth-login {
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: var(--r-card);
   background: var(--surface-2);
   padding: 14px;
 }
@@ -8597,10 +8629,10 @@ body.layout-settings #sidebar-resizer {
 .set-auth-ev-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .set-auth-ev-progress { color: var(--muted); }
 .set-auth-code {
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   background: var(--pill-bg);
   padding: 2px 8px;
-  border-radius: 5px;
+  border-radius: var(--r-control);
   letter-spacing: 1px;
 }
 .set-auth-prompt { margin: 6px 0 12px; }
@@ -8616,9 +8648,9 @@ body.layout-settings #sidebar-resizer {
   padding: 8px 11px;
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   color: var(--text);
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   font-size: 13px;
   transition: border-color .15s ease, background .15s ease;
 }
@@ -8654,7 +8686,7 @@ body.layout-settings #sidebar-resizer {
 .set-member-toggle input { position: absolute; opacity: 0; pointer-events: none; }
 .set-toggle-track {
   width: 40px; height: 22px;
-  border-radius: 11px;
+  border-radius: var(--r-card);
   background: var(--pill-bg);
   border: 1px solid var(--border-strong);
   position: relative;
@@ -8692,7 +8724,7 @@ body.layout-settings #sidebar-resizer {
 /* Teams */
 .set-team {
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--r-btn);
   padding: 14px 16px;
   margin-bottom: 14px;
   background: var(--surface);
@@ -8709,7 +8741,7 @@ body.layout-settings #sidebar-resizer {
 .set-team-toggle {
   border: 0; background: transparent; color: var(--muted);
   cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 4px;
-  border-radius: 4px; flex-shrink: 0;
+  border-radius: var(--r-control); flex-shrink: 0;
 }
 .set-team-toggle:hover { color: var(--text); background: var(--surface-2); }
 .set-team.collapsed .set-team-head { margin-bottom: 0; }
@@ -8725,7 +8757,7 @@ body.layout-settings #sidebar-resizer {
 .set-member-x {
   border: 0; background: transparent; color: var(--muted);
   cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px;
-  border-radius: 4px; flex-shrink: 0;
+  border-radius: var(--r-control); flex-shrink: 0;
 }
 .set-member-x:hover { color: var(--red); }
 .set-member-add { display: flex; gap: 8px; margin-top: 2px; }
@@ -8735,7 +8767,7 @@ body.layout-settings #sidebar-resizer {
   text-transform: uppercase; letter-spacing: .6px;
   color: var(--accent);
   background: var(--accent-soft);
-  padding: 2px 8px; border-radius: 10px;
+  padding: 2px 8px; border-radius: var(--r-card);
 }
 .set-team-select { margin-left: auto; }
 .set-members { display: flex; flex-direction: column; gap: 8px; }
@@ -8744,7 +8776,7 @@ body.layout-settings #sidebar-resizer {
   align-items: center;
   gap: 10px;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: var(--r-control);
   background: var(--surface-2);
 }
 .set-member-toggle { flex-shrink: 0; }
@@ -8758,7 +8790,7 @@ body.layout-settings #sidebar-resizer {
   align-items: center;
   gap: 7px;
   padding: 6px 11px;
-  border-radius: 16px;
+  border-radius: var(--r-panel);
   border: 1px solid var(--border-strong);
   background: var(--surface-2);
   color: var(--muted);
@@ -8783,7 +8815,7 @@ body.layout-settings #sidebar-resizer {
   font-size: 13px; font-weight: 700; color: var(--text);
   margin-bottom: 9px;
 }
-.set-skill-count { font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--pill-bg); padding: 1px 8px; border-radius: 10px; white-space: nowrap; }
+.set-skill-count { font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--pill-bg); padding: 1px 8px; border-radius: var(--r-card); white-space: nowrap; }
 
 /* Models */
 .set-model-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 14px; }
@@ -8791,17 +8823,17 @@ body.layout-settings #sidebar-resizer {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   padding: 5px 9px;
   font-size: 12px;
   color: var(--text);
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
 }
 .set-model-chip-name { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .set-model-chip-x {
   border: 0; background: transparent; color: var(--muted);
   cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
 }
 .set-model-chip-x:hover { color: var(--red); }
 
@@ -8812,7 +8844,7 @@ body.layout-settings #sidebar-resizer {
   border: 1px solid var(--border-strong);
   background: transparent;
   color: var(--muted);
-  border-radius: 6px;
+  border-radius: var(--r-control);
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 600;
@@ -8828,16 +8860,16 @@ body.layout-settings #sidebar-resizer {
   font-weight: 600;
   color: var(--muted);
   white-space: nowrap;
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
 }
 
-.set-cost-table { margin-top: 8px; border: 1px solid var(--border); border-radius: 9px; overflow-x: auto; overflow-y: hidden; background: var(--surface-2); position: relative; }
+.set-cost-table { margin-top: 8px; border: 1px solid var(--border); border-radius: var(--r-btn); overflow-x: auto; overflow-y: hidden; background: var(--surface-2); position: relative; }
 .set-cost-row {
   display: grid;
   align-items: center;
   gap: 12px;
   padding: 7px 12px;
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   font-size: 12.5px;
   color: var(--text);
   border-bottom: 1px solid var(--hairline);
@@ -8880,7 +8912,7 @@ body.layout-settings #sidebar-resizer {
   font-weight: 700;
   line-height: 1;
   padding: 4px 6px;
-  border-radius: 5px;
+  border-radius: var(--r-control);
   cursor: pointer;
   text-align: center;
   min-width: 24px;
@@ -8889,7 +8921,7 @@ body.layout-settings #sidebar-resizer {
 .set-cost-en:hover { color: var(--text); background: var(--accent-hover); }
 .set-cost-en.on { color: var(--green); }
 .set-cost-en:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.set-cost-enhint { font-family: 'MesloLGS NFM', monospace, var(--emoji); font-size: 11px; background: var(--pill-bg); padding: 0 4px; border-radius: 4px; }
+.set-cost-enhint { font-family: var(--mono), var(--emoji); font-size: 11px; background: var(--pill-bg); padding: 0 4px; border-radius: var(--r-control); }
 .set-cost-empty { padding: 14px 12px; color: var(--muted); font-size: 12.5px; }
 
 /* Resizable columns */
@@ -8912,7 +8944,7 @@ body.set-cost-resizing * { user-select: none; }
   border: 1px solid var(--border-strong);
   background: transparent;
   color: var(--muted);
-  border-radius: 6px;
+  border-radius: var(--r-control);
   padding: 4px 8px;
   font-size: 11px;
   font-weight: 600;
@@ -8929,13 +8961,13 @@ body.set-cost-resizing * { user-select: none; }
   display: flex; align-items: center; gap: 8px;
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   padding: 8px 11px;
 }
-.set-ws-path { font-size: 13px; font-family: 'MesloLGS NFM', monospace, var(--emoji); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-ws-path { font-size: 13px; font-family: var(--mono), var(--emoji); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .set-ws-x {
   border: 0; background: transparent; color: var(--muted);
-  cursor: pointer; font-size: 16px; line-height: 1; padding: 0 3px; border-radius: 4px;
+  cursor: pointer; font-size: 16px; line-height: 1; padding: 0 3px; border-radius: var(--r-control);
 }
 .set-ws-x:hover { color: var(--red); }
 
@@ -8945,13 +8977,13 @@ body.set-cost-resizing * { user-select: none; }
   display: flex; align-items: center; gap: 16px;
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   padding: 7px 11px;
 }
 .set-extflag-name {
   flex: 1; min-width: 0;
   font-size: 13px;
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
@@ -8962,7 +8994,7 @@ body.set-cost-resizing * { user-select: none; }
 .set-def-name.clickable:hover { color: var(--accent); }
 .set-def-file {
   font-size: 11.5px; color: var(--muted);
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
 }
 /* Collapsed cards show a one-line summary; expanded instead shows the pickers. */
 .set-def-summary { font-size: 11.5px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
@@ -8973,7 +9005,7 @@ body.set-cost-resizing * { user-select: none; }
   display: flex; flex-direction: column; gap: 9px;
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   padding: 9px 11px;
 }
 .set-def-row.collapsed { gap: 0; padding: 8px 11px; }
@@ -8983,7 +9015,7 @@ body.set-cost-resizing * { user-select: none; }
 .set-def-toggle {
   border: 0; background: transparent; color: var(--muted);
   cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 4px;
-  border-radius: 4px; flex-shrink: 0;
+  border-radius: var(--r-control); flex-shrink: 0;
 }
 .set-def-toggle:hover { color: var(--text); background: var(--surface); }
 .set-def-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -9036,7 +9068,7 @@ body.set-cost-resizing * { user-select: none; }
   background: var(--surface-2);
 }
 .def-editor-title {
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   font-size: 13px; font-weight: 700; color: var(--text);
 }
 .def-editor-hint { font-size: 12px; color: var(--muted); }
@@ -9044,7 +9076,7 @@ body.set-cost-resizing * { user-select: none; }
 .def-editor-text {
   flex: 1; width: 100%; border: 0; outline: 0; resize: none;
   background: var(--surface); color: var(--text);
-  font-family: 'MesloLGS NFM', monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   font-size: 13px; line-height: 1.55;
   padding: 16px 20px; tab-size: 2; white-space: pre;
 }
@@ -9057,7 +9089,7 @@ body.set-cost-resizing * { user-select: none; }
   background: var(--surface-3);
   color: var(--text);
   border: 1px solid var(--border-strong);
-  border-radius: 20px;
+  border-radius: var(--r-panel);
   padding: 8px 18px;
   font-size: 13px;
   font-weight: 600;
@@ -9114,7 +9146,7 @@ body.set-cost-resizing * { user-select: none; }
   flex-direction: column;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-btn);
   box-shadow: 0 12px 40px rgba(0, 0, 0, .55);
   overflow: hidden;
 }
@@ -9147,7 +9179,7 @@ body.set-cost-resizing * { user-select: none; }
   line-height: 1;
   cursor: pointer;
   padding: 0 4px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
 }
 
 .plugin-settings-close:hover {
@@ -9182,7 +9214,7 @@ body.set-cost-resizing * { user-select: none; }
 @media (max-width: 860px) {
   header { flex-wrap: wrap; }
   #header-center { order: 3; flex-basis: 100%; justify-content: flex-start; flex-wrap: wrap; }
-  .view-toggle { flex-wrap: wrap; overflow: visible; border-radius: 6px; }
+  .view-toggle { flex-wrap: wrap; overflow: visible; border-radius: var(--r-control); }
 }
 
 /* ── Global sidebar: Workspaces rail (rail.js) ─────────────────────────────
@@ -9230,11 +9262,11 @@ body.sidebar-collapsed .sidebar-rail {
   width: 34px;
   height: 34px;
   margin: 3px auto;
-  border-radius: 7px;
+  border-radius: var(--r-btn);
   background: var(--pill-bg);
   border: 1px solid var(--border);
   color: var(--text);
-  font-family: monospace, var(--emoji);
+  font-family: var(--mono), var(--emoji);
   font-weight: 700;
   font-size: 14px;
   cursor: pointer;
@@ -9286,7 +9318,7 @@ body.sidebar-collapsed .sidebar-rail {
   background: var(--surface-3);
   color: var(--text);
   border: 1px solid var(--border-strong);
-  border-radius: 20px;
+  border-radius: var(--r-panel);
   padding: 8px 18px;
   font-size: 13px;
   font-weight: 600;
@@ -9319,3 +9351,261 @@ body.sidebar-collapsed .sidebar-rail {
   color: var(--red);
 }
 .scope-toast.err::before { background: var(--red); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   superdesign-alpha — "Amber Terminal Noir" design system
+   --------------------------------------------------------------------------
+   Wires the palette + geometry/type/motion tokens (declared at the top of this
+   sheet, per theme) into the shared chrome so every view reads as one system:
+   a flush square console bar, sharp rectangles with hairline borders, one
+   rationed amber accent, a geometric display face for headings/labels and a
+   mono console face for data. Appended last, so equal-specificity rules win.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Base type ──────────────────────────────────────────────────────────── */
+body {
+  font-family: var(--font-body), var(--emoji);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
+code, kbd, pre, samp, .mono { font-family: var(--mono), var(--emoji); }
+
+/* ── Selection, focus, scrollbars ───────────────────────────────────────── */
+::selection { background: var(--accent); color: var(--on-accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+* { scrollbar-color: var(--border-strong) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: var(--r-pill);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); background-clip: padding-box; }
+
+/* ── Header: flush, square, 57px console bar ────────────────────────────── */
+header {
+  min-height: 57px;
+  padding: 0 16px;
+  border-radius: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  box-shadow: none;
+}
+header h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.035em; }
+header h1::first-letter { color: var(--accent); }
+.brand .subtitle {
+  font-family: var(--mono), var(--emoji);
+  font-size: 9.5px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+#header-breadcrumb {
+  font-family: var(--mono), var(--emoji);
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  color: var(--text-subtle);
+}
+#live-indicator {
+  font-family: var(--mono), var(--emoji);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+/* Segmented view nav */
+.view-toggle {
+  border: 1px solid var(--border);
+  border-radius: var(--r-btn);
+  gap: 1px;
+  background: var(--surface-2);
+}
+.view-toggle button {
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  padding: 4px 11px;
+  background: transparent;
+  color: var(--text-subtle);
+  transition: color var(--dur-fast) var(--ease-std), background var(--dur-fast) var(--ease-std);
+}
+.view-toggle button:hover { color: var(--text); background: var(--row-hover); }
+.view-toggle button.active { background: var(--accent); color: var(--on-accent); }
+
+/* Header icon buttons (Settings gear, phone, theme) */
+.header-icon-btn, #btn-theme {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-subtle);
+  transition: color var(--dur-fast) var(--ease-std), border-color var(--dur-fast) var(--ease-std), background var(--dur-fast) var(--ease-std);
+}
+.header-icon-btn:hover, #btn-theme:hover { color: var(--text); border-color: var(--accent); background: var(--accent-hover); }
+.header-icon-btn.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+.btn-sm, .git-modal-btn, .cp-modal-actions button, .sp-actions button {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: 0.005em;
+  border-radius: var(--r-btn);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-subtle);
+  transition: color var(--dur-fast) var(--ease-std), border-color var(--dur-fast) var(--ease-std), background var(--dur-fast) var(--ease-std);
+}
+.btn-sm:hover, .git-modal-btn:hover, .cp-modal-actions button:hover, .sp-actions button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-hover);
+}
+.btn-sm.active {
+  color: var(--on-accent);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+/* ── Inputs ─────────────────────────────────────────────────────────────── */
+input[type=text], input[type=search], input[type=password], input[type=number],
+select, textarea, .cp-modal-select {
+  font-family: var(--mono), var(--emoji);
+  border-radius: var(--r-control);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  transition: border-color var(--dur-fast) var(--ease-std), box-shadow var(--dur-fast) var(--ease-std);
+}
+input[type=text]:focus, input[type=search]:focus, input[type=password]:focus,
+input[type=number]:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* ── Panes, rails, settings nav ─────────────────────────────────────────── */
+.pane-header { border-bottom: 1px solid var(--hairline); font-family: var(--font-display); }
+.pane-header > span:first-child { font-weight: 600; letter-spacing: -0.01em; }
+.chat-rail-head { font-family: var(--mono), var(--emoji); letter-spacing: 0.12em; }
+.settings-nav-item { font-family: var(--font-display); border-radius: var(--r-btn); }
+.fchip { border-radius: var(--r-pill); }
+
+/* ── Cards, panels, modals, toasts ──────────────────────────────────────── */
+.cp-modal-box, .plugin-settings-modal, #sp-box {
+  border-radius: var(--r-panel);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+}
+.settings-toast, .scope-toast {
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  box-shadow: var(--shadow-card);
+}
+
+/* ── Console grid texture (the skill's signature faint blueprint layer) ──── */
+#event-view, .chat-canvas, .settings-content, .files-list, .git-main,
+#trajectory-ledger, #checkpoints-list, .diagram-canvas {
+  background-image: var(--grid);
+  background-size: var(--grid-size);
+}
+
+/* ── Hero: the empty-state console panel — faint grid + one rationed amber
+   glow layered on the same element (the grid must read through the wash). ── */
+.chat-hero {
+  background-image: var(--grid), radial-gradient(60% 42% at 50% 0%, rgba(var(--accent-rgb), 0.07), transparent 70%);
+  background-size: var(--grid-size), var(--grid-size), auto;
+  background-repeat: repeat, repeat, no-repeat;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   superdesign-alpha — component consistency
+   --------------------------------------------------------------------------
+   One radius per role, one primary button, one card/panel chrome. Component
+   rules above own layout; THIS section assigns each element its role so the
+   whole app reads consistently:
+     buttons 8px · controls 6px · cards 12px · panels 16px · chips pill ·
+     circles 50%.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+/* Every <button> defaults to the button radius + the display face (form
+   controls do not inherit fonts, so without this a button silently falls back
+   to the UA sans). Segmented nav and pill/circle buttons keep their own role
+   through their (higher-specificity) class rules. */
+button { border-radius: var(--r-btn); font-family: var(--font-display); }
+.view-toggle button { border-radius: 0; }
+/* The `layout-form` body variant re-declares .btn-sm padding/radius with a
+   higher specificity (0,2,1); pin the button radius so it can never drift. */
+body.layout-form .btn-sm { border-radius: var(--r-btn); }
+/* Tabs are the button family too (only their active state shows the radius). */
+.git-tab, .git-detail-tab { border-radius: var(--r-btn); }
+
+/* Primary button — amber fill, on-accent text, amber glow (the skill's CTA). */
+.btn-sm.primary, .git-modal-btn.primary, #cp-merge-confirm,
+#btn-git-commit, #btn-checkpoints-create {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--glow-accent);
+}
+.btn-sm.primary:hover, .git-modal-btn.primary:hover, #cp-merge-confirm:hover,
+#btn-git-commit:hover, #btn-checkpoints-create:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--on-accent);
+}
+.btn-sm.primary:disabled, #btn-git-commit:disabled, #btn-checkpoints-create:disabled {
+  box-shadow: none;
+  opacity: .5;
+}
+
+/* ── Inputs & fields ─────────────────────────────────────────────────────── */
+input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]),
+select, textarea { border-radius: var(--r-control); }
+/* Named field classes own a higher specificity than the element rule above, so
+   list them explicitly to keep every field on the control radius. */
+.set-input, .set-select, .cp-modal-select, .git-modal-input, .git-new-branch input,
+.git-remote-form input, .git-commitbar textarea, .git-edit-textarea,
+.chat-ws-add-input, .chat-ask-input, .diagram-toolbar input[type="text"],
+#trajectory-search, #search-box, .sidebar-filters input[type=text], .sidebar-filters select {
+  border-radius: var(--r-control);
+}
+
+/* ── Cards — grouped content on a surface ────────────────────────────────── */
+.set-team, .set-ws, .set-extflag, .set-def-row, .set-auth-cred, .set-auth-prov,
+.set-update-card, .set-auth-login, .set-update-log, .set-cost-table,
+.checkpoint-item, .diagram-legend, .at-sec, .at-orch, .chat-thinking,
+.chat-tool-call, .chat-ask, .chat-chip, .chat-asks {
+  border-radius: var(--r-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card);
+}
+
+/* Flat surfaces (code blocks, fields, tiles): card radius, hairline border,
+   no elevation. */
+.llm-pre, .llm-args, .chat-code, .chat-ws-icon, .chat-ask-opt,
+.phone-url, .phone-cmd { border-radius: var(--r-card); border: 1px solid var(--border); }
+
+/* ── Panels & modals ─────────────────────────────────────────────────────── */
+.cp-modal-box, .plugin-settings-modal, #sp-box, .git-modal-box, .chat-composer-box {
+  border-radius: var(--r-panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-panel);
+}
+
+/* ── Chips / pills / badges / tags / status ──────────────────────────────── */
+.pill, .tool-name-pill, .snav-tag, .snav-model-pill, .snav-stat, .exit-chip,
+.gsm-status, .fchip, .set-chip, .set-model-chip, .set-cost-chip, .set-team-pill,
+.set-skill-count, .chat-rail-count, .chat-ws-count, .git-branch-chip, .git-count,
+.git-ref-badge, .traj-agent-tag, .at-chip, .at-card-pill, .at-toggle, .chat-badge,
+.chat-header-model, .chat-msg-model, .cf-chip, .chat-live-run, .phone-chip,
+.chat-ws-add-btn, .chat-stopped-note, .chat-msg-cancelled, .set-toggle-track,
+.dstat, .dprogress {
+  border-radius: var(--r-pill);
+}
