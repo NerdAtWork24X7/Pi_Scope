@@ -4111,8 +4111,11 @@ const pluginKit = {
   buildRepoGraph,
   // Chat run state, for plugins that own a background run (the Office queue):
   // a task's dispatch outlives the page that started it, so the plugin needs to
-  // tell a still-running session from an orphan, and to stop it on Pause.
-  chatRunStatus, stopChat,
+  // tell a still-running session from an orphan, and to stop it on Pause. The
+  // Office plugin also dispatches its own runs server-side (so the queue keeps
+  // going with no page open) — `startChat` plus the workspace library block.
+  chatRunStatus, stopChat, startChat,
+  libraryBlockFor: (cwd: string) => buildLibraryPrompt(readAgentConfig(cwd).library),
 };
 
 // Discover + activate plugins before accepting traffic so a plugin's routes are

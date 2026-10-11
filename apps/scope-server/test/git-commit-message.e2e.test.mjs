@@ -317,4 +317,47 @@ describe("git view", () => {
     await page.waitForFunction(() => document.getElementById("btn-git-gen-msg").disabled === false);
     await page.close();
   });
+
+  test("the commit box can be grown by dragging its handle", async () => {
+    const page = await browser.newPage();
+    await page.addInitScript((cwd) => {
+      try { localStorage.setItem("scope-cwd", cwd); } catch { /* private mode */ }
+    }, repoDir);
+    await page.goto(`${base}/?token=${TOKEN}#view=git`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#git-commit-resizer");
+    await page.waitForFunction((cwd) => window.__SCOPE_STATE?.cwd === cwd, repoDir);
+
+    const barH = () => page.$eval(".git-commitbar", (el) => el.getBoundingClientRect().height);
+    const start = await barH();
+    assert.ok(start > 0, "commit bar is laid out");
+
+    // Drag the handle upward — the bar (and the textarea inside it) grows.
+    const box = await page.locator("#git-commit-resizer").boundingBox();
+    const cx = box.x + box.width / 2;
+    await page.mouse.move(cx, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(cx, box.y + box.height / 2 - 180, { steps: 8 });
+    await page.mouse.up();
+
+    const grown = await barH();
+    assert.ok(grown > start + 100, `bar grew with the drag (${start} → ${grown})`);
+    const taH = await page.$eval("#git-commit-msg", (el) => el.getBoundingClientRect().height);
+    assert.ok(taH > start, `textarea stretched to fill the bar (${taH})`);
+
+    // The chosen height survives a reload.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#git-commit-resizer");
+    await page.waitForFunction(
+      (h) => Math.abs(document.querySelector(".git-commitbar").getBoundingClientRect().height - h) < 4,
+      grown
+    );
+
+    // Double-clicking the handle restores the default height.
+    await page.dblclick("#git-commit-resizer");
+    await page.waitForFunction(
+      (h) => Math.abs(document.querySelector(".git-commitbar").getBoundingClientRect().height - h) < 4,
+      start
+    );
+    await page.close();
+  });
 });

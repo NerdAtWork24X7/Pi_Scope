@@ -587,24 +587,26 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
-  test("teams are added and removed from the orchestrator's Teams manager", async () => {
+  test("teams are added and removed from the orchestrator's settings popup", async () => {
     await boot({ sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })] });
     await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
 
-    // Team management lives with the orchestrator — the header no longer has it.
-    assert.equal(await page.locator("#office-pane #office-newteam").count(), 0, "the header no longer creates teams");
-    await page.click('#office-pane #office-teams-open');
-    await page.waitForSelector("#office-teams-backdrop");
-    // The manager opens listing every team on the roster.
+    // Team management lives inside the orchestrator's settings, opened from the
+    // gear in its room header (the old standalone "teams" button is gone).
+    assert.equal(await page.locator("#office-pane #office-teams-open").count(), 0, "the header no longer carries a teams button");
+    assert.equal(await page.locator("#office-pane #office-orch-settings").count(), 1, "the orchestrator room carries a settings gear");
+    await page.click("#office-pane #office-orch-settings");
+    await page.waitForSelector("#office-settings-backdrop");
+    // The popup opens listing every team on the roster.
     assert.deepEqual(
-      await page.locator("#office-teams-backdrop .office-team-name").allTextContents(),
+      await page.locator("#office-settings-backdrop .office-team-name").allTextContents(),
       ["dev", "review"],
-      "the manager lists the teams",
+      "the Teams section lists the teams",
     );
 
     // Add: the new team lands on the floor, active, with no desks yet.
-    await page.fill("#office-teams-backdrop #office-team-new", "night_shift");
-    await page.click("#office-teams-backdrop .office-lib-add-btn");
+    await page.fill("#office-settings-backdrop #office-set-team-new", "night_shift");
+    await page.click('#office-settings-backdrop .office-set-team-form button[type="submit"]');
     await page.waitForSelector('#office-pane .office-room[data-room="team:night_shift"]');
     assert.ok(mock.state.team.teamsOrder.includes("night_shift"), "the server created the team");
     assert.equal(mock.state.team.activeTeam, "night_shift", "the new team is the active one");
@@ -612,26 +614,26 @@ describe("office view", () => {
     assert.ok(await room.evaluate((el) => el.classList.contains("active")), "the new room is marked active");
     assert.equal(await room.locator(".office-pod").count(), 0, "the new team has no desks yet");
     assert.match(await room.locator(".office-room-meta").textContent(), /0\s*desks?/);
-    assert.equal(await page.inputValue("#office-teams-backdrop #office-team-new"), "", "the field is cleared for the next team");
+    assert.equal(await page.inputValue("#office-settings-backdrop #office-set-team-new"), "", "the field is cleared for the next team");
     assert.equal(
-      await page.locator('#office-teams-backdrop .office-team-row[data-team="night_shift"]').count(),
+      await page.locator('#office-settings-backdrop .office-team-row[data-team="night_shift"]').count(),
       1,
-      "the manager lists the new team",
+      "the popup lists the new team",
     );
 
-    // Remove: the team's room leaves the floor and its row leaves the manager.
-    await page.click('#office-teams-backdrop .office-team-row[data-team="review"] .office-team-del');
+    // Remove: the team's room leaves the floor and its row leaves the popup.
+    await page.click('#office-settings-backdrop .office-team-row[data-team="review"] .office-team-del');
     await page.waitForFunction(() => !document.querySelector('#office-pane .office-room[data-room="team:review"]'));
     assert.equal(mock.state.team.teams.review, undefined, "the server removed the team");
     assert.equal(
-      await page.locator('#office-teams-backdrop .office-team-row[data-team="review"]').count(),
+      await page.locator('#office-settings-backdrop .office-team-row[data-team="review"]').count(),
       0,
-      "and the manager dropped its row",
+      "and the popup dropped its row",
     );
 
-    // Escape closes the manager, as it does the other surfaces.
+    // Escape closes the settings popup, as it does the other surfaces.
     await page.keyboard.press("Escape");
-    await page.waitForSelector("#office-teams-backdrop", { state: "detached" });
+    await page.waitForSelector("#office-settings-backdrop", { state: "detached" });
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
@@ -1602,6 +1604,69 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
+  test("the board closes from its bottom-right corner, Todo tasks edit in place, and Planned tasks drag to resequence", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        tasks: [
+          { id: "t1", title: "draft the plan", status: "todo", createdAt: 1 },
+          { id: "t2", title: "write it up", status: "planned", createdAt: 2, plannedAt: 3 },
+          { id: "t3", title: "ship it", status: "planned", createdAt: 4, plannedAt: 5 },
+        ],
+      },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop");
+
+    // The close button is pinned to the panel's bottom-right corner, in the foot.
+    const panel = await board().locator(".office-lib-panel").boundingBox();
+    const close = await board().locator(".office-lib-close").boundingBox();
+    assert.ok(close.y + close.height <= panel.y + panel.height + 1, "Close sits inside the panel's bottom edge");
+    assert.ok(close.y >= panel.y + panel.height - 60, `Close sits at the panel's foot (${Math.round(close.y + close.height)} of ${Math.round(panel.y + panel.height)})`);
+    assert.ok(close.x + close.width >= panel.x + panel.width - 25, "and hugs its right edge");
+    assert.equal(await page.locator("#office-board-backdrop .office-lib-head .office-lib-close").count(), 0, "it is no longer in the header");
+
+    // A Todo task can be edited in place; its column is unchanged.
+    await kcol("todo").locator(".office-task", { hasText: "draft the plan" }).locator(".office-task-edit").click();
+    await page.waitForSelector("#office-dlg-backdrop");
+    assert.equal(await page.inputValue("#office-task-title"), "draft the plan", "the editor opens on the task's title");
+    await page.fill("#office-task-title", "draft the migration plan");
+    await page.fill("#office-task-note", "cover the schema move");
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await page.waitForSelector("#office-dlg-backdrop", { state: "detached" });
+    await until(() => (mock.officeState().tasks.find((t) => t.id === "t1") || {}).title === "draft the migration plan", "the edit is stored");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").status, "todo", "editing leaves the column alone");
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('#office-board-backdrop .office-kcol.todo .office-task-title')]
+        .some((el) => el.textContent === "draft the migration plan"));
+
+    // Edit is offered only in Todo.
+    assert.equal(await kcol("todo").locator(".office-task-edit").count(), 1, "Todo offers Edit");
+    assert.equal(await kcol("planned").locator(".office-task-edit").count(), 0, "Planned does not");
+
+    // Planned is a sequence: dragging a card above another reorders the queue
+    // the runner reads.
+    assert.deepEqual(await colTitles("planned"), ["write it up", "ship it"], "the queue starts in order");
+    const ship = kcol("planned").locator(".office-task", { hasText: "ship it" });
+    const write = kcol("planned").locator(".office-task", { hasText: "write it up" });
+    // Drop into the TOP half of "write it up" so "ship it" lands before it.
+    await ship.dragTo(write, { targetPosition: { x: 24, y: 2 } });
+    await until(() => {
+      const p = mock.officeState().tasks.filter((t) => t.status === "planned").sort((a, b) => a.plannedAt - b.plannedAt);
+      return p[0] && p[0].id === "t3";
+    }, "the queue resequences");
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('#office-board-backdrop .office-kcol.planned .office-task-title')]
+        .map((el) => el.textContent).join(",") === "ship it,write it up");
+    assert.deepEqual(await colTitles("planned"), ["ship it", "write it up"], "the board draws the new order");
+
+    // Close, from the corner, finally closes the board.
+    await board().locator(".office-lib-close").click();
+    await page.waitForSelector("#office-board-backdrop", { state: "detached" });
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
   test("a task left In Progress by an earlier visit is picked back up", async () => {
     // Nobody is working on it any more — the page that dispatched it is gone —
     // so the queue must not stall behind it forever.
@@ -1734,8 +1799,132 @@ describe("office view", () => {
     await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "planned", "the refused task returns to Planned");
     await sleep(700);
     assert.equal(mock.requestsFor("/chat", "POST").length, 1, "the task is not re-dispatched");
+    assert.ok(mock.officeState().tasks.find((t) => t.id === "t1").failedAt > 0, "the failure is persisted on the task");
     // The injected 500 is exactly the failure under test — it is logged as a page
     // error by the harness, which is expected here.
+  });
+
+  test("a task marked failed is not retried on a later visit, and a move re-arms it", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [{ id: "t1", title: "doomed", status: "planned", createdAt: 1, plannedAt: 2, failedAt: 3 }],
+      },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
+    await sleep(1200);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 0, "a failed task is not silently retried");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").status, "planned", "it still waits in Planned");
+
+    // The board shows WHY nothing runs: the failed task is marked, not silent.
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop");
+    assert.equal(await board().locator('.office-task[data-id="t1"] .office-task-failed').count(), 1, "the failed task is marked on the board");
+    assert.match(await board().locator(".office-board-now").textContent(), /failed/i, "and the board explains the stalled queue");
+
+    // The user re-arms it by moving the card: it runs, and the mark clears.
+    await board().locator('.office-task[data-id="t1"]').dragTo(kcol("in_progress"));
+    const turn = await mock.nextTurn();
+    await sleep(500);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1, "the re-armed task runs");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").status, "in_progress", "and is running");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").failedAt, undefined, "the failure mark is gone");
+    await page.waitForFunction(() => document.querySelectorAll('#office-board-backdrop .office-task[data-id="t1"] .office-task-failed').length === 0);
+    turn.send({ type: "done", sessionId: turn.sessionId });
+    turn.end();
+  });
+
+  test("a dispatch refused by the runner lock backs off without a duplicate", async () => {
+    // Another tab already started a run, so the server's runner lock refuses this
+    // page's dispatch. The page must not start a parallel run, and must not toast
+    // or spin on the refusal.
+    mock.setBeginRunConflict(true);
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [{ id: "t1", title: "contended", status: "planned", createdAt: 1, plannedAt: 2 }],
+      },
+    });
+    await sleep(1600);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 0, "no run was started by the losing page");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").status, "planned", "the task waits its turn");
+    // The injected 409 is the refusal under test (logged as a page error by the
+    // harness, which is expected).
+  });
+
+  test("dragging a task onto a busy In Progress is refused, not run in parallel", async () => {
+    mock.setRunStatus("busy-run", { active: true, outcome: null });
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: true,
+        tasks: [
+          { id: "t1", title: "already running", status: "in_progress", createdAt: 1, startedAt: 2, runSessionId: "busy-run" },
+          { id: "t2", title: "second task", status: "todo", createdAt: 3 },
+        ],
+      },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop");
+
+    await board().locator('.office-task[data-id="t2"]').dragTo(kcol("in_progress"));
+    await page.waitForSelector("#scope-toast", { timeout: 4000 });
+    assert.match(await page.textContent("#scope-toast"), /already running/i, "the refusal is explained to the user");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t2").status, "todo", "the task stays in Todo");
+    assert.equal(mock.requestsFor("/chat", "POST").length, 0, "no parallel run was started");
+    // The 409 refusal is exactly what is under test (the harness logs it as a
+    // page error, which is expected here).
+  });
+
+  test("two tabs on the same board do not both run a task", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: { runnerPaused: false, tasks: [{ id: "t1", title: "shared work", status: "planned", createdAt: 1, plannedAt: 2 }] },
+    });
+    const turn = await mock.nextTurn();
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "in_progress", "the first tab dispatches");
+
+    // A second tab opens on the same board while the run is live: it must adopt
+    // the run, not dispatch the same task again.
+    const page2 = await context.newPage();
+    await page2.goto(`${mock.base}/?token=test-token#view=office`, { waitUntil: "domcontentloaded" });
+    await page2.waitForSelector("#office-pane .office-pod");
+    await sleep(1500);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1, "the second tab adopts the live run");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").status, "in_progress", "the task keeps running");
+
+    turn.send({ type: "done", sessionId: turn.sessionId });
+    turn.end();
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "done", "the run finishes");
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1, "and it is never dispatched a second time");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("in server-runner mode the client defers to the server and reflects it", async () => {
+    // The real server runs the queue itself. The client must NOT dispatch (that
+    // would double-run), only nudge it and show what it does.
+    mock.setServerRunner(true);
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: { runnerPaused: false, tasks: [{ id: "t1", title: "server work", status: "planned", createdAt: 1, plannedAt: 2 }] },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
+    await sleep(1600);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 0, "the client never dispatches when the server owns the queue");
+    assert.ok(mock.requestsFor("/office", "POST").some((r) => r.body && r.body.action === "pump"), "the client nudges the server runner");
+
+    // The server advances the task; the open board reflects it on the next poll.
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop");
+    mock.setOffice({ tasks: [{ id: "t1", title: "server work", status: "done", createdAt: 1, plannedAt: 2, finishedAt: 3 }] });
+    await page.waitForFunction(
+      () => document.querySelectorAll('#office-board-backdrop .office-kcol.done .office-task-title').length === 1,
+      null, { timeout: 6000 },
+    );
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
   test("the board hands planned tasks to the orchestrator one at a time, in order", async () => {
@@ -1770,7 +1959,7 @@ describe("office view", () => {
     // 2. Moving the first one to Planned hands it to the orchestrator: the queue
     // runner puts it In Progress and dispatches it as its own chat turn.
     const rowFor = (title) => board().locator(".office-task", { hasText: title });
-    await rowFor("first task").locator('.office-task-move[data-move="planned"]').click();
+    await rowFor("first task").dragTo(kcol("planned"));
     await page.waitForFunction(() =>
       [...document.querySelectorAll('#office-board-backdrop .office-kcol.in_progress .office-task-title')]
         .some((el) => el.textContent === "first task"),
@@ -1786,7 +1975,7 @@ describe("office view", () => {
 
     // 3-4. A task planned while the orchestrator is busy queues up — it is not
     // started in parallel, however long the current run takes.
-    await rowFor("second task").locator('.office-task-move[data-move="planned"]').click();
+    await rowFor("second task").dragTo(kcol("planned"));
     await page.waitForFunction(() =>
       [...document.querySelectorAll('#office-board-backdrop .office-kcol.planned .office-task-title')]
         .some((el) => el.textContent === "second task"),
@@ -1829,13 +2018,17 @@ describe("office view", () => {
     // A run that cannot settle puts its task back in the queue instead of
     // losing it, and stops pumping (no spinning on a broken turn).
     await newTask("third task");
-    await rowFor("third task").locator('.office-task-move[data-move="planned"]').click();
+    await rowFor("third task").dragTo(kcol("planned"));
     const turn3 = await mock.nextTurn();
     turn3.send({ type: "msg_start" });
     turn3.send({ type: "error", error: "boom" });
     turn3.send({ type: "done", error: "boom", sessionId: turn3.sessionId });
     turn3.end();
     await until(() => mock.officeState().tasks.find((t) => t.title === "third task").status === "planned", "the failed task returns to Planned");
+    // Wait for the board itself, not just the server write (they can lag apart).
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('#office-board-backdrop .office-kcol.planned .office-task-title')]
+        .some((el) => el.textContent === "third task"), null, { timeout: 8000 });
     assert.deepEqual(await colTitles("planned"), ["third task"], "the task is not lost");
     assert.equal(await pageErrors.length, 0, pageErrors.join("\n"));
   });
@@ -1893,10 +2086,49 @@ describe("office view", () => {
     assert.equal(mock.officeState().runnerPaused, true, "the server was told to pause");
     assert.match(await page.textContent("#office-board-now"), /paused/i);
     assert.equal(mock.requestsFor("/chat", "POST").length, 1, "the task ran once and was not redispatched");
+    // Pause must actually STOP the run on the server — otherwise pi keeps working
+    // in the background while the task sits back in Planned.
+    assert.ok(
+      mock.requestsFor("/office", "POST").some((r) => r.body && r.body.action === "stopRun"),
+      "Pause tells the server to stop the run",
+    );
+    assert.ok(!Object.values(mock.state.runStatus).some((r) => r.active), "and the run is no longer active");
 
     // The client dropped the stream; the scripted turn can settle quietly.
     turn.send({ type: "done", sessionId: turn.sessionId });
     turn.end();
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("resuming after a pause runs the task once, not beside the stopped run", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [{ id: "t1", title: "resume me", status: "planned", createdAt: 1, plannedAt: 2 }],
+      },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
+    const turn1 = await mock.nextTurn();
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "in_progress", "the task starts");
+
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop");
+    await page.click("#office-run-toggle"); // Pause
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "planned", "the task returns to Planned");
+
+    // Resume: the task starts a fresh run — exactly one more dispatch, never a
+    // second parallel run beside the stopped one.
+    await page.click("#office-run-toggle"); // Run
+    const turn2 = await mock.nextTurn();
+    await sleep(600);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 2, "one new run, not a duplicate");
+    assert.equal(mock.officeState().tasks.find((t) => t.id === "t1").status, "in_progress", "the task runs again");
+
+    turn2.send({ type: "done", sessionId: turn2.sessionId });
+    turn2.end();
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "done", "the resumed run finishes");
+    assert.equal(mock.requestsFor("/chat", "POST").length, 2, "and it is not dispatched a third time");
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
@@ -1922,7 +2154,7 @@ describe("office view", () => {
     assert.equal(await pod("deployer").count(), 1, "and so do its desks");
   });
 
-  test("a board task moves backwards and can be deleted", async () => {
+  test("a board task drags between columns and can be deleted", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
       office: {
@@ -1936,8 +2168,8 @@ describe("office view", () => {
     await page.click("#office-board-open");
     await page.waitForSelector("#office-board-backdrop");
 
-    // Done -> In Progress via the row's own back control.
-    await board().locator('.office-task[data-id="t1"] .office-task-move[data-move="in_progress"]').click();
+    // Done -> In Progress by dragging the card back a column.
+    await board().locator('.office-task[data-id="t1"]').dragTo(kcol("in_progress"));
     await page.waitForFunction(() =>
       document.querySelector('#office-board-backdrop .office-kcol.in_progress .office-task-title')?.textContent === "keep me");
     const moved = mock.officeState().tasks.find((t) => t.id === "t1");
@@ -1998,12 +2230,12 @@ describe("office view", () => {
   test("an invalid or duplicate team name is refused without a write", async () => {
     await boot({ sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })] });
     await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
-    await page.click("#office-teams-open");
-    await page.waitForSelector("#office-teams-backdrop");
+    await page.click("#office-orch-settings");
+    await page.waitForSelector("#office-settings-backdrop");
 
     for (const name of ["dev", "bad name!"]) {
-      await page.fill("#office-team-new", name);
-      await page.click("#office-teams-backdrop .office-lib-add-btn");
+      await page.fill("#office-set-team-new", name);
+      await page.click('#office-settings-backdrop .office-set-team-form button[type="submit"]');
       await sleep(200);
     }
     assert.equal(
@@ -2097,9 +2329,9 @@ describe("office view", () => {
       team: defaultTeam({ activeTeam: "dev", teamsOrder: ["dev"], teams: { dev: [{ name: "builder" }] } }),
     });
     await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
-    await page.click("#office-teams-open");
-    await page.waitForSelector("#office-teams-backdrop");
-    await page.click('#office-teams-backdrop .office-team-row[data-team="dev"] .office-team-del');
+    await page.click("#office-orch-settings");
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.click('#office-settings-backdrop .office-team-row[data-team="dev"] .office-team-del');
     await until(() => Object.keys(mock.state.team.teams || {}).length === 0, "every team is gone");
     await page.waitForFunction(() => document.querySelectorAll('#office-pane .office-room[data-room^="team:"]').length === 0);
 

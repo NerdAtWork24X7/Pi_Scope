@@ -192,6 +192,7 @@ export async function startMockBackend() {
     // reports it: { present, active, outcome }. A task's `runSessionId` indexes
     // this to tell a still-running dispatch from an orphan.
     runStatus: {},
+    beginRunConflict: false, // force the runner lock to refuse the next dispatch
   };
 
   /** The bucket a workspace's office state lives in (the plugin keys on cwd). */
@@ -210,6 +211,9 @@ export async function startMockBackend() {
       // Paused is the default: anything but an explicit false means paused.
       runnerPaused: s.runnerPaused !== false,
       runStates,
+      // The real server runs the queue itself; a test can opt in so the client
+      // defers to it. Off by default, so the client-runner path is still tested.
+      serverRunner: state.serverRunner === true,
     };
   }
 
@@ -759,31 +763,99 @@ export async function startMockBackend() {
         }
         const task = (bucket.tasks || []).find((t) => t.id === id);
         if (!task) return sendJSON(res, { error: "no such task" }, 404);
+        // One task at a time: a move into a busy In Progress column is refused.
+        if (status === "in_progress" && (bucket.tasks || []).some((t) => t.status === "in_progress" && t.id !== id)) {
+          return sendJSON(res, { error: "another task is already running", code: "conflict" }, 409);
+        }
         const at = Date.now();
         task.status = status;
+        delete task.failedAt; // a move re-arms a failed task
         if (status === "planned") task.plannedAt = task.plannedAt || at;
         if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
         if (status === "in_progress") task.startedAt = task.startedAt || at;
         if (status === "done") task.finishedAt = at;
         // Leaving In Progress ends any recorded run, like the real plugin.
         if (status !== "in_progress") delete task.runSessionId;
+      } else if (action === "updateTask") {
+        const id = String(body.id || "").trim();
+        const title = collapse(body.title);
+        const note = collapse(body.note);
+        if (!id) return sendJSON(res, { error: "missing id" }, 400);
+        if (!title) return sendJSON(res, { error: "missing title" }, 400);
+        if (title.length > 200) return sendJSON(res, { error: "task titles may be up to 200 characters" }, 400);
+        const task = (bucket.tasks || []).find((t) => t.id === id);
+        if (!task) return sendJSON(res, { error: "no such task" }, 404);
+        task.title = title;
+        if (note) task.note = note; else delete task.note;
+      } else if (action === "placeTask") {
+        const id = String(body.id || "").trim();
+        const status = String(body.status || "");
+        const beforeId = body.beforeId == null ? "" : String(body.beforeId).trim();
+        if (!id) return sendJSON(res, { error: "missing id" }, 400);
+        if (!["todo", "planned", "in_progress", "done"].includes(status)) {
+          return sendJSON(res, { error: `invalid status: ${status}` }, 400);
+        }
+        const task = (bucket.tasks || []).find((t) => t.id === id);
+        if (!task) return sendJSON(res, { error: "no such task" }, 404);
+        if (status === "in_progress" && (bucket.tasks || []).some((t) => t.status === "in_progress" && t.id !== id)) {
+          return sendJSON(res, { error: "another task is already running", code: "conflict" }, 409);
+        }
+        const at = Date.now();
+        task.status = status;
+        delete task.failedAt; // a drag re-arms a failed task
+        if (status === "planned") task.plannedAt = task.plannedAt || at;
+        if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
+        if (status === "in_progress") task.startedAt = task.startedAt || at;
+        if (status === "done") task.finishedAt = at;
+        if (status !== "in_progress") delete task.runSessionId;
+        if (status === "planned") {
+          const queue = (bucket.tasks || [])
+            .filter((t) => t.status === "planned" && t.id !== id)
+            .sort((a, b) => (a.plannedAt || a.createdAt || 0) - (b.plannedAt || b.createdAt || 0));
+          let idx = beforeId ? queue.findIndex((t) => t.id === beforeId) : -1;
+          if (idx < 0) idx = queue.length;
+          queue.splice(idx, 0, task);
+          const base = Date.now() - queue.length;
+          queue.forEach((t, i) => { t.plannedAt = base + i; });
+        }
       } else if (action === "beginRun") {
         const id = String(body.id || "").trim();
         const sessionId = String(body.sessionId || "").trim();
         if (!id) return sendJSON(res, { error: "missing id" }, 400);
         if (!sessionId) return sendJSON(res, { error: "missing sessionId" }, 400);
+        // The single-runner lock, mirroring the real plugin: any task already In
+        // Progress refuses a second dispatch (a racing tab / stale board).
+        if (state.beginRunConflict || (bucket.tasks || []).some((t) => t.status === "in_progress")) {
+          return sendJSON(res, { error: "another task is already running", code: "conflict" }, 409);
+        }
         const task = (bucket.tasks || []).find((t) => t.id === id);
         if (!task) return sendJSON(res, { error: "no such task" }, 404);
         task.status = "in_progress";
         task.startedAt = task.startedAt || Date.now();
         delete task.finishedAt;
+        delete task.failedAt; // a fresh dispatch clears the last failure
         task.runSessionId = sessionId;
+        task.runStartedAt = Date.now();
+      } else if (action === "failTask") {
+        const id = String(body.id || "").trim();
+        if (!id) return sendJSON(res, { error: "missing id" }, 400);
+        const task = (bucket.tasks || []).find((t) => t.id === id);
+        if (!task) return sendJSON(res, { error: "no such task" }, 404);
+        const at = Date.now();
+        task.status = "planned";
+        task.plannedAt = task.plannedAt || at;
+        task.failedAt = at;
+        delete task.runSessionId;
+        delete task.runStartedAt;
+        delete task.startedAt;
       } else if (action === "stopRun") {
         const id = String(body.id || "").trim();
         if (!id) return sendJSON(res, { error: "missing id" }, 400);
         const task = (bucket.tasks || []).find((t) => t.id === id);
         if (!task) return sendJSON(res, { error: "no such task" }, 404);
-        if (task.runSessionId) delete state.runStatus[task.runSessionId];
+        // The server aborts the pi run: the session stays present but is no
+        // longer active, with an `aborted` outcome (as chatRunStatus reports it).
+        if (task.runSessionId) state.runStatus[task.runSessionId] = { present: true, active: false, outcome: "aborted" };
         task.status = "planned";
         task.plannedAt = task.plannedAt || Date.now();
         delete task.runSessionId;
@@ -794,6 +866,9 @@ export async function startMockBackend() {
         bucket.tasks = (bucket.tasks || []).filter((t) => t.id !== id);
       } else if (action === "setRunnerPaused") {
         bucket.runnerPaused = body.paused !== false;
+      } else if (action === "pump") {
+        // The real server starts its queue here; the mock models the runner
+        // itself, so this is a no-op that still answers with the snapshot.
       } else {
         return sendJSON(res, { error: `unknown action: ${action}` }, 400);
       }
@@ -850,6 +925,10 @@ export async function startMockBackend() {
     setRunStatus(sessionId, status) {
       state.runStatus[sessionId] = { present: true, active: false, outcome: null, ...status };
     },
+    /** Force the runner lock to refuse the next beginRun with a 409 conflict. */
+    setBeginRunConflict(v) { state.beginRunConflict = v !== false; },
+    /** Advertise that the SERVER owns the queue (the client should defer to it). */
+    setServerRunner(v) { state.serverRunner = v !== false; },
     /** Seed one session's totals, as GET /sessions/stats reports them. */
     setStats(id, s) {
       state.stats[id] = { total_cost: 0, total_tokens: 0, error_count: 0, models: [], ...s };
@@ -873,6 +952,8 @@ export async function startMockBackend() {
       state.agentDefs = [];
       state.office = {};
       state.runStatus = {};
+      state.beginRunConflict = false;
+      state.serverRunner = false;
       requests.length = 0;
       fails.length = 0;
       turns.length = 0;

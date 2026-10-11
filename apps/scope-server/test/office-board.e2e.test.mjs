@@ -11,7 +11,7 @@
 //
 //   node --test apps/scope-server/test/office-board.e2e.test.mjs
 
-import { test, before, after, describe } from "node:test";
+import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -98,6 +98,11 @@ before(async () => {
   await waitForHealth();
 });
 
+// The shared workspace's runner starts PAUSED before every test, so a test that
+// only exercises board writes never accidentally dispatches a real run (the
+// server now owns the queue and would start one).
+beforeEach(async () => { await post({ action: "setRunnerPaused", paused: true }); });
+
 after(async () => {
   if (child) {
     child.kill("SIGKILL");
@@ -114,7 +119,7 @@ describe("the office plugin's own state", () => {
     for (const key of ["officeName", "tasks", "runnerPaused"]) {
       assert.equal(key in team, false, `/agent-team no longer reports ${key}`);
     }
-    assert.deepEqual(await snapshot(), { tasks: [], runnerPaused: true }, "an untouched office starts empty and paused");
+    assert.deepEqual(await snapshot(), { tasks: [], runnerPaused: true, serverRunner: true }, "an untouched office starts empty and paused, and the server runs the queue");
 
     // And the state lands in the plugin's own store, beside the plugins dir.
     await post({ action: "setRunnerPaused", paused: false });
@@ -146,6 +151,8 @@ describe("the office plugin's own state", () => {
   });
 
   test("a disabled plugin refuses its routes", async () => {
+    // A distinctive state to see restored across a disable/enable cycle.
+    await post({ action: "setRunnerPaused", paused: false });
     const off = await api("/plugins", {
       method: "POST",
       body: JSON.stringify({ action: "disable", id: "office" }),
@@ -243,6 +250,72 @@ describe("the Kanban queue", () => {
     assert.ok((await snapshot()).tasks.some((t) => t.title === "persisted"));
   });
 
+  test("a task's title and brief can be edited in place, without moving its column", async () => {
+    await post({ action: "addTask", title: "rough draft", note: "first pass" });
+    const id = (await snapshot()).tasks.find((t) => t.title === "rough draft").id;
+
+    const { res } = await post({ action: "updateTask", id, title: "  refined   draft ", note: "second pass" });
+    assert.ok(res.ok);
+    const t = await task(id);
+    assert.equal(t.title, "refined draft", "the title is collapsed and trimmed");
+    assert.equal(t.note, "second pass", "the brief is rewritten");
+    assert.equal(t.status, "todo", "editing never changes the column");
+
+    // An omitted brief clears the note; the validation mirrors addTask.
+    await post({ action: "updateTask", id, title: "refined draft" });
+    assert.equal((await task(id)).note, undefined, "an omitted brief clears the note");
+    assert.equal((await post({ action: "updateTask", id, title: "   " })).res.status, 400, "an empty title is refused");
+    assert.equal((await post({ action: "updateTask", id, title: "x".repeat(201) })).res.status, 400, "an over-long title is refused");
+    assert.equal((await post({ action: "updateTask", id: "nope", title: "x" })).res.status, 404, "an unknown task is a 404");
+    assert.equal((await task(id)).title, "refined draft", "a refused edit changes nothing");
+    await post({ action: "removeTask", id });
+  });
+
+  test("planned tasks are placed by drag-and-drop, and that order is what the board reads", async () => {
+    for (const t of (await snapshot()).tasks) await post({ action: "removeTask", id: t.id });
+    for (const title of ["one", "two", "three"]) {
+      await post({ action: "addTask", title });
+      const id = (await snapshot()).tasks.find((t) => t.title === title).id;
+      await post({ action: "moveTask", id, status: "planned" });
+      await new Promise((r) => setTimeout(r, 2)); // distinct plannedAt, like a human
+    }
+    const order = async () => (await snapshot()).tasks
+      .filter((t) => t.status === "planned")
+      .sort((a, b) => a.plannedAt - b.plannedAt)
+      .map((t) => t.title);
+    const idOf = async (title) => (await snapshot()).tasks.find((t) => t.title === title).id;
+    assert.deepEqual(await order(), ["one", "two", "three"], "planned tasks queue FIFO");
+
+    // Dropping "two" before "one" resequences the queue.
+    assert.ok((await post({ action: "placeTask", id: await idOf("two"), status: "planned", beforeId: await idOf("one") })).res.ok);
+    assert.deepEqual(await order(), ["two", "one", "three"], "dropping before a task moves it there");
+    // Dropping "two" at the end (empty beforeId) appends.
+    assert.ok((await post({ action: "placeTask", id: await idOf("two"), status: "planned", beforeId: "" })).res.ok);
+    assert.deepEqual(await order(), ["one", "three", "two"], "an empty target appends to the back");
+    // An unknown target also appends rather than losing the task.
+    assert.ok((await post({ action: "placeTask", id: await idOf("two"), status: "planned", beforeId: "nope" })).res.ok);
+    assert.deepEqual(await order(), ["one", "three", "two"], "an unknown target appends");
+
+    // A task planned AFTER a resequence still sorts to the back of the queue.
+    await post({ action: "addTask", title: "four" });
+    await post({ action: "placeTask", id: await idOf("four"), status: "planned", beforeId: "" });
+    assert.deepEqual(await order(), ["one", "three", "two", "four"], "a later task sorts to the back");
+
+    // A drag between columns is the same action: a Todo card dropped into Planned.
+    await post({ action: "addTask", title: "from todo" });
+    const moved = await post({ action: "placeTask", id: await idOf("from todo"), status: "planned", beforeId: await idOf("three") });
+    assert.ok(moved.res.ok);
+    assert.deepEqual(await order(), ["one", "from todo", "three", "two", "four"], "a cross-column drop lands at the position");
+    // And a Planned card dropped into Done leaves the queue.
+    assert.ok((await post({ action: "placeTask", id: await idOf("one"), status: "done" })).res.ok);
+    assert.deepEqual(await order(), ["from todo", "three", "two", "four"], "moving to Done leaves the queue");
+
+    // Validation: an unknown task is a 404, an invalid status a 400, an empty id a 400.
+    assert.equal((await post({ action: "placeTask", id: "nope", status: "planned" })).res.status, 404, "an unknown task is a 404");
+    assert.equal((await post({ action: "placeTask", id: await idOf("two"), status: "sideways" })).res.status, 400, "an invalid status is refused");
+    assert.equal((await post({ action: "placeTask", id: "", status: "planned" })).res.status, 400, "a missing id is refused");
+  });
+
   test("beginRun records the run session, and leaving In Progress clears it", async () => {
     await post({ action: "addTask", title: "dispatched work" });
     const id = (await snapshot()).tasks.find((t) => t.title === "dispatched work").id;
@@ -282,6 +355,84 @@ describe("the Kanban queue", () => {
     assert.equal(t.runSessionId, undefined, "and its run record is cleared");
   });
 
+  test("beginRun is the single-runner lock: a second concurrent run is refused", async () => {
+    // The office works one task at a time. Two dispatches racing (two tabs, a
+    // stale board) must not both start — the loser is refused, not duplicated.
+    const add = async (title) => {
+      await post({ action: "addTask", title });
+      const id = (await snapshot()).tasks.find((t) => t.title === title).id;
+      await post({ action: "moveTask", id, status: "planned" });
+      return id;
+    };
+    const a = await add("running now");
+    assert.ok((await post({ action: "beginRun", id: a, sessionId: "sess-lock-1" })).res.ok);
+
+    const b = await add("wants to run");
+    const second = await post({ action: "beginRun", id: b, sessionId: "sess-lock-2" });
+    assert.equal(second.res.status, 409, "the second dispatch is refused");
+    assert.equal(second.data.code, "conflict", "with a conflict code the client can act on");
+    assert.equal((await task(b)).status, "planned", "the losing task stays in Planned");
+    assert.equal((await task(b)).runSessionId, undefined, "and never gets a run session");
+
+    // Once the first run leaves In Progress, the lock frees and the next starts.
+    await post({ action: "moveTask", id: a, status: "done" });
+    assert.ok((await post({ action: "beginRun", id: b, sessionId: "sess-lock-3" })).res.ok, "the lock frees up");
+    assert.equal((await task(b)).status, "in_progress");
+  });
+
+  test("a second task cannot be moved or dragged into a busy In Progress", async () => {
+    // Clear whatever the lock test left In Progress so this one starts clean.
+    for (const t of (await snapshot()).tasks) if (t.status === "in_progress") await post({ action: "moveTask", id: t.id, status: "done" });
+
+    const add = async (title) => {
+      await post({ action: "addTask", title });
+      const id = (await snapshot()).tasks.find((t) => t.title === title).id;
+      await post({ action: "moveTask", id, status: "planned" });
+      return id;
+    };
+    const a = await add("busy task");
+    assert.ok((await post({ action: "beginRun", id: a, sessionId: "sess-busy" })).res.ok);
+    const b = await add("second task");
+
+    const moved = await post({ action: "moveTask", id: b, status: "in_progress" });
+    assert.equal(moved.res.status, 409, "moveTask into a busy In Progress is refused");
+    assert.equal(moved.data.code, "conflict");
+    assert.equal((await task(b)).status, "planned", "the task is untouched");
+
+    const placed = await post({ action: "placeTask", id: b, status: "in_progress", beforeId: "" });
+    assert.equal(placed.res.status, 409, "placeTask (drag) is refused too");
+
+    // Moving the busy task out frees the column for the next one.
+    await post({ action: "moveTask", id: a, status: "done" });
+    assert.ok((await post({ action: "moveTask", id: b, status: "in_progress" })).res.ok, "the column frees up");
+  });
+
+  test("failTask persists the failure, and a move or fresh run re-arms it", async () => {
+    // Clear whatever the previous test left In Progress so the lock is free.
+    for (const t of (await snapshot()).tasks) if (t.status === "in_progress") await post({ action: "moveTask", id: t.id, status: "done" });
+    await post({ action: "addTask", title: "doomed" });
+    const id = (await snapshot()).tasks.find((t) => t.title === "doomed").id;
+    await post({ action: "moveTask", id, status: "planned" });
+    await post({ action: "beginRun", id, sessionId: "sess-fail" });
+
+    const failed = await post({ action: "failTask", id });
+    assert.ok(failed.res.ok);
+    const t = await task(id);
+    assert.equal(t.status, "planned", "a failed task waits in Planned");
+    assert.ok(t.failedAt > 0, "and is marked failed (persisted)");
+    assert.equal(t.runSessionId, undefined, "its run record is cleared");
+
+    // A fresh dispatch clears the failure.
+    assert.ok((await post({ action: "beginRun", id, sessionId: "sess-retry" })).res.ok);
+    assert.equal((await task(id)).failedAt, undefined, "a fresh run clears the failure");
+
+    // So does the user moving the card.
+    await post({ action: "failTask", id });
+    assert.ok((await task(id)).failedAt > 0);
+    await post({ action: "moveTask", id, status: "planned" });
+    assert.equal((await task(id)).failedAt, undefined, "moving the task re-arms it");
+  });
+
   test("an unknown action is refused, not silently accepted", async () => {
     assert.equal((await post({ action: "notAnAction" })).res.status, 400);
   });
@@ -307,5 +458,66 @@ describe("the queue runner switch", () => {
     delete all.workspaces[key].runnerPaused;
     fs.writeFileSync(storePath(), JSON.stringify(all, null, 2));
     assert.equal((await snapshot(blank)).runnerPaused, true, "an absent field reads as paused");
+  });
+});
+
+describe("read-time self-heal", () => {
+  test("a stale In Progress board heals on the first read after a restart", async () => {
+    // A board left In Progress whose run is gone (the server restarted, no page
+    // open) must not stall the runner forever. The first read returns the stale
+    // task to Planned — but a run that is only just starting is left alone.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-office-heal-"));
+    const cwd = fs.realpathSync(dir);
+    const agentDir2 = path.join(dir, "agent");
+    const pluginsDir2 = path.join(dir, "plugins");
+    fs.mkdirSync(agentDir2, { recursive: true });
+    fs.mkdirSync(path.join(pluginsDir2, ".data"), { recursive: true });
+    const past = Date.now() - 60_000;
+    fs.writeFileSync(path.join(pluginsDir2, ".data", "office.json"), JSON.stringify({
+      workspaces: {
+        [cwd]: {
+          runnerPaused: false,
+          tasks: [
+            { id: "gone", title: "run that died with the server", status: "in_progress", startedAt: past, runSessionId: "dead-session", runStartedAt: past },
+            { id: "manual", title: "old manual In Progress", status: "in_progress", startedAt: past },
+            { id: "fresh", title: "a run just starting", status: "in_progress", startedAt: Date.now(), runSessionId: "starting-session", runStartedAt: Date.now() },
+          ],
+        },
+      },
+    }, null, 2));
+
+    const port = await freePort();
+    const base2 = `http://127.0.0.1:${port}`;
+    const proc = spawn(process.execPath, [SERVER], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        SCOPE_PORT: String(port), SCOPE_HOST: "127.0.0.1",
+        SCOPE_DB_PATH: path.join(dir, "scope.db"), SCOPE_AUTH_TOKEN: "heal-token",
+        SCOPE_PLUGINS_DIR: pluginsDir2, SCOPE_FILE_ROOT: dir,
+        SCOPE_AGENT_DIR: agentDir2, SCOPE_PI_BIN: "/bin/true",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const start = Date.now();
+      for (;;) {
+        try { if ((await fetch(`${base2}/health`)).ok) break; } catch { /* not up */ }
+        if (Date.now() - start > 20_000) throw new Error("server did not start");
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      const res = await fetch(`${base2}/office?cwd=${encodeURIComponent(cwd)}`, { headers: { authorization: "Bearer heal-token" } });
+      const data = await res.json();
+      const by = (id) => data.tasks.find((t) => t.id === id);
+      assert.equal(by("gone").status, "planned", "a run whose session is gone is returned to Planned");
+      assert.equal(by("gone").runSessionId, undefined, "and its run record is cleared");
+      assert.equal(by("manual").status, "planned", "an old manual In Progress entry heals too");
+      assert.equal(by("fresh").status, "in_progress", "a run only just starting is left alone");
+      assert.equal(by("fresh").runSessionId, "starting-session", "with its session intact");
+    } finally {
+      proc.kill("SIGKILL");
+      await new Promise((r) => proc.once("exit", r));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

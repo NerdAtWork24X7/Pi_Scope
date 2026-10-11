@@ -141,6 +141,9 @@ export interface PluginApi {
   route: (method: string, routePath: string, handler: RouteHandler) => void;
   /** Observe every event ingested through POST /events. */
   onEvent: (handler: (event: any) => void) => void;
+  /** Run a cleanup when the plugin is disabled or reloaded (e.g. stop a
+   *  background run it started). Called once, on deactivate. */
+  onDispose: (fn: () => void) => void;
   /** Namespaced JSON storage, persisted to `<USER_DIR>/.data/<id>.json`. */
   store: {
     get: <T = any>(key: string, fallback?: T) => T | undefined;
@@ -156,6 +159,7 @@ const routes: PluginRoute[] = [];
 const eventHooks: { pluginId: string; handler: (event: any) => void }[] = [];
 const loaded = new Set<string>();
 const activations = new Map<string, PluginApi>();
+const disposers = new Map<string, (() => void)[]>();
 
 let config: { disabled: string[] } = { disabled: [] };
 
@@ -403,6 +407,11 @@ function makeApi(record: PluginRecord, host: PluginHost): PluginApi {
     onEvent: (handler) => {
       eventHooks.push({ pluginId: record.id, handler });
     },
+    onDispose: (fn) => {
+      const list = disposers.get(record.id) ?? [];
+      list.push(fn);
+      disposers.set(record.id, list);
+    },
     store: storeFor(record.id),
   };
 }
@@ -448,6 +457,12 @@ export async function activate(host: PluginHost = {}): Promise<void> {
 
 /** Drop a plugin's routes, hooks and activation so it can be re-imported. */
 function deactivate(id: string): void {
+  // Let the plugin tear down what it started (a background run, a timer) before
+  // its routes and activation go away.
+  for (const fn of disposers.get(id) ?? []) {
+    try { fn(); } catch (err) { console.error(`[plugins] dispose ${id} failed:`, err); }
+  }
+  disposers.delete(id);
   for (let i = routes.length - 1; i >= 0; i--) if (routes[i].pluginId === id) routes.splice(i, 1);
   for (let i = eventHooks.length - 1; i >= 0; i--) if (eventHooks[i].pluginId === id) eventHooks.splice(i, 1);
   loaded.delete(id);

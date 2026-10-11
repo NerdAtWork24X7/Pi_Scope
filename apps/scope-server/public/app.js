@@ -1167,9 +1167,12 @@ function setLive(on) { liveDot.className = on ? "green" : "red"; liveLabel.textC
 function patchSessionFromSSE(evt) {
   if (!evt?.session_id) return;
   let session = STATE.sessions.find(s => s.session_id === evt.session_id);
-  // New session (session_start from an agent we haven't polled yet) —
-  // create a minimal placeholder so the sidebar doesn't miss it entirely.
-  if (!session && evt.type === "session_start") {
+  // A session we have not polled yet. The extension emits NO `session_start`
+  // observability event, so the FIRST event of any kind is what tells us a
+  // session exists — create the minimal placeholder from it so the sidebar (and
+  // the Office floor's desks) react to a fresh run in the same tick instead of
+  // waiting up to 10s for the /sessions poll.
+  if (!session) {
     session = {
       session_id: evt.session_id,
       cwd: evt.cwd || "",
@@ -1179,13 +1182,12 @@ function patchSessionFromSSE(evt) {
       first_ts: evt.ts || new Date().toISOString(),
       has_shutdown: false,
       event_count: 1,
-      tags: [],
+      tags: Array.isArray(evt.tags) ? evt.tags : [],
     };
     STATE.sessions.unshift(session);
     STATE.sessionsSig = ""; // force sidebar rebuild
     debounce(renderSessions, 200)();
   }
-  if (!session) return;
   // Lifecycle events update has_shutdown.
   if (evt.type === "session_start") session.has_shutdown = false;
   if (evt.type === "session_shutdown") session.has_shutdown = true;

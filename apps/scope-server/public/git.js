@@ -1497,6 +1497,82 @@
     });
   })();
 
+  // ─── Resizable commit box (drag the handle above it) ────────────────────
+  (function initGitCommitResizer() {
+    const bar = document.querySelector(".git-commitbar");
+    const resizer = document.getElementById("git-commit-resizer");
+    if (!bar || !resizer) return;
+
+    const MIN = 72, KEY = "scope-git-commit-height";
+    let desired = null; // preferred bar height in px (kept unclamped)
+
+    const maxHeight = () => Math.max(MIN, Math.round(window.innerHeight * 0.75));
+
+    function render() {
+      if (desired == null) {
+        bar.style.height = "";
+        resizer.removeAttribute("aria-valuenow");
+        return;
+      }
+      const shown = Math.min(maxHeight(), Math.max(MIN, desired));
+      bar.style.height = shown + "px";
+      resizer.setAttribute("aria-valuemin", String(MIN));
+      resizer.setAttribute("aria-valuemax", String(maxHeight()));
+      resizer.setAttribute("aria-valuenow", String(shown));
+    }
+
+    function set(h, persist) {
+      desired = Math.max(MIN, Math.round(h));
+      render();
+      if (persist) { try { localStorage.setItem(KEY, desired); } catch {} }
+    }
+
+    function reset() {
+      desired = null;
+      render();
+      try { localStorage.removeItem(KEY); } catch {}
+    }
+
+    try {
+      const saved = parseInt(localStorage.getItem(KEY), 10);
+      if (saved >= MIN) { desired = saved; render(); }
+    } catch {}
+
+    resizer.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = desired ?? bar.getBoundingClientRect().height;
+      resizer.classList.add("dragging");
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "row-resize";
+
+      const onMove = (ev) => set(startH + (startY - ev.clientY), false);
+      const onUp = () => {
+        resizer.classList.remove("dragging");
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        if (desired != null) { try { localStorage.setItem(KEY, Math.round(bar.getBoundingClientRect().height)); } catch {} }
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+
+    resizer.addEventListener("dblclick", reset);
+
+    resizer.addEventListener("keydown", (e) => {
+      const cur = desired ?? bar.getBoundingClientRect().height;
+      const step = e.shiftKey ? 40 : 12;
+      if (e.key === "ArrowUp") { e.preventDefault(); set(cur + step, true); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); set(cur - step, true); }
+      else if (e.key === "Home" || e.key === "Delete") { e.preventDefault(); reset(); }
+    });
+
+    // Keep the box visible when the viewport shrinks (intent preserved).
+    window.addEventListener("resize", () => { if (desired != null) render(); });
+  })();
+
   window.__gitOnView = function () { refreshCwd(); loadStatus(); };
   window.__gitOnSessions = function () {
     refreshCwd();

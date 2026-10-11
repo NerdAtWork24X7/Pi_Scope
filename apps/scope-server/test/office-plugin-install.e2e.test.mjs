@@ -153,7 +153,7 @@ describe("office installed as a user plugin", () => {
     assert.match(js, /__officeUserCopy/, "and it is the *installed* copy that is served");
 
     // Its own routes answer for a workspace the plugin has never touched.
-    assert.deepEqual(await api(`/office?cwd=${encodeURIComponent(ws)}`).then((r) => r.data), { tasks: [], runnerPaused: true });
+    assert.deepEqual(await api(`/office?cwd=${encodeURIComponent(ws)}`).then((r) => r.data), { tasks: [], runnerPaused: true, serverRunner: true });
     await api("/office", { method: "POST", body: JSON.stringify({ action: "setOfficeName", name: "User Copy HQ", cwd: ws }) });
     assert.equal((await snapshot()).officeName, "User Copy HQ");
 

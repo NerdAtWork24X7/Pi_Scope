@@ -700,10 +700,19 @@
           `<span class="office-room-name">Orchestrator</span>` +
           `<span class="office-room-meta">runs the floor</span>` +
           `<span class="office-room-spacer"></span>` +
-          // Team management lives with the orchestrator: it runs the floor, so
-          // adding and removing teams is its own control here.
-          `<button class="office-teams-btn" id="office-teams-open" type="button" ` +
-            `title="Add or remove teams on this floor">teams</button>` +
+          // The orchestrator runs the floor, so its own settings — model, skills,
+          // tools, extensions, hire, and the teams on the floor — open from here,
+          // exactly like a subagent's desk.
+          `<button class="office-act office-settings office-orch-settings" id="office-orch-settings" type="button" ` +
+            `data-act="settings" data-agent="orchestrator" ` +
+            `aria-label="Open the orchestrator's settings" ` +
+            `title="Orchestrator settings — model, skills, tools, extensions, teams, hire">` +
+            `<svg class="office-settings-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" ` +
+              `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+              `<circle cx="12" cy="12" r="3.1"/>` +
+              `<path d="${SETTINGS_GEAR}"/>` +
+            `</svg>` +
+          `</button>` +
         `</div>` +
         `<div class="office-room-floor">${podHtml(agent)}</div>` +
       `</section>`
@@ -900,20 +909,31 @@
     );
   }
 
-  /** One task row on the full-screen board: its text, and what can happen next. */
+  /** One task row on the full-screen board: its text and what can happen next.
+   *  The card is draggable — dragging it to another column moves it, and
+   *  dropping it into Planned at a position resequences the queue — so the board
+   *  carries no move/sequence arrows any more. Keyboard users reorder with the
+   *  arrow keys (see onCardKey). */
   function kanbanRowHtml(task, status) {
-    const idx = TASK_COLUMNS.findIndex((c) => c.id === status);
-    const back = idx > 0 ? TASK_COLUMNS[idx - 1] : null;
-    const fwd = idx < TASK_COLUMNS.length - 1 ? TASK_COLUMNS[idx + 1] : null;
+    // A Todo task is still being written, so it can be edited (title + brief)
+    // until it moves on to Planned.
+    const edit = status === "todo"
+      ? `<button class="office-task-edit" type="button" data-edit="${escAttr(task.id)}" title="Edit this task">✎</button>`
+      : "";
+    // A task whose run failed waits in Planned (the runner skips it) — say so, so
+    // it does not look like a task merely queued behind another.
+    const failed = task.failedAt
+      ? `<span class="office-task-failed" title="This run could not complete — move the card to retry it">⚠ failed</span>`
+      : "";
     return (
-      `<div class="office-task" data-id="${escAttr(task.id)}">` +
+      `<div class="office-task${task.failedAt ? " failed" : ""}" data-id="${escAttr(task.id)}" data-status="${escAttr(status)}" ` +
+        `draggable="true" tabindex="0" role="listitem" ` +
+        `title="Drag to another column — or focus it and use ← → to move, ↑ ↓ to resequence">` +
         `<span class="office-task-title" title="${escAttr(task.title)}">${esc(task.title)}</span>` +
+        failed +
         (task.note ? `<span class="office-task-note" title="${escAttr(task.note)}">${esc(task.note)}</span>` : "") +
         `<span class="office-task-acts">` +
-          (back ? `<button class="office-task-move" type="button" data-move="${escAttr(back.id)}" data-id="${escAttr(task.id)}" ` +
-            `title="Move back to ${escAttr(back.label)}">‹</button>` : "") +
-          (fwd ? `<button class="office-task-move" type="button" data-move="${escAttr(fwd.id)}" data-id="${escAttr(task.id)}" ` +
-            `title="Move to ${escAttr(fwd.label)}">›</button>` : "") +
+          edit +
           `<button class="office-task-del" type="button" data-del="${escAttr(task.id)}" title="Delete this task">×</button>` +
         `</span>` +
       `</div>`
@@ -926,7 +946,7 @@
     return TASK_COLUMNS.map((c) => {
       const list = tasksIn(c.id);
       return (
-        `<div class="office-kcol ${c.id}">` +
+        `<div class="office-kcol ${c.id}" data-status="${c.id}">` +
           `<div class="office-kcol-head"><span>${esc(c.label)}</span><b>${list.length}</b></div>` +
           `<div class="office-kcol-body">` +
             (list.length ? list.map((t) => kanbanRowHtml(t, c.id)).join("") : `<div class="office-kcol-empty">—</div>`) +
@@ -943,23 +963,29 @@
   }
 
   /**
-   * The New-task popup: a roomy editor for the task's title and the brief the
-   * orchestrator works from. The board's tiny inline form was replaced by this,
-   * so a task is written where there is room to write it.
+   * The task popup: a roomy editor for the task's title and the brief the
+   * orchestrator works from. With a `task` it edits that task in place (the
+   * board offers this while the task is still in Todo); without one it writes a
+   * new task into Todo. The board's tiny inline form was replaced by this, so a
+   * task is written where there is room to write it.
    */
-  function openTaskDialog() {
+  function openTaskDialog(task) {
+    const editing = !!task;
     openDialog({
-      title: "New task",
-      hint: "lands in Todo — move it to Planned when it is ready to run",
+      title: editing ? "Edit task" : "New task",
+      hint: editing
+        ? "rewrite the task while it is still in Todo · its status is unchanged"
+        : "lands in Todo — move it to Planned when it is ready to run",
       wide: true,
       body:
         dialogField("Task", "what should be done",
           `<input class="office-input" id="office-task-title" type="text" maxlength="200" spellcheck="false" ` +
-          `autocomplete="off" placeholder="e.g. Draft the migration plan">`) +
+          `autocomplete="off" placeholder="e.g. Draft the migration plan" ` +
+          `value="${escAttr(editing ? task.title : "")}">`) +
         dialogField("Brief", "the details the orchestrator works from (optional)",
           `<textarea class="office-textarea office-task-brief" id="office-task-note" spellcheck="false" ` +
-          `placeholder="Context, constraints, acceptance criteria…"></textarea>`),
-      submitLabel: "Add task",
+          `placeholder="Context, constraints, acceptance criteria…">${esc(editing ? task.note || "" : "")}</textarea>`),
+      submitLabel: editing ? "Save" : "Add task",
       onSubmit: async (root) => {
         const titleEl = root.querySelector("#office-task-title");
         const title = String((titleEl && titleEl.value) || "").trim();
@@ -970,10 +996,11 @@
           return false;
         }
         try {
-          await officePost({ action: "addTask", title, note }, `Task added: ${title}`);
+          if (editing) await officePost({ action: "updateTask", id: task.id, title, note }, `Task updated: ${title}`);
+          else await officePost({ action: "addTask", title, note }, `Task added: ${title}`);
           return true;
         } catch (err) {
-          if (S.toast) S.toast(`Could not add the task: ${errMsg(err)}`, "err");
+          if (S.toast) S.toast(`Could not ${editing ? "save" : "add"} the task: ${errMsg(err)}`, "err");
           return false;
         }
       },
@@ -1222,7 +1249,7 @@
       if (S.toast) S.toast(`Could not activate ${name}: ${err && err.message ? err.message : err}`, "err");
     } finally {
       activating = null;
-      if (ok) render(); // the active flag changed, so the plan rebuilds
+      if (ok) { render(); renderAgentSettings(); } // the active flag changed, so the plan and the Teams section rebuild
       else if (btn) { btn.disabled = false; btn.textContent = "activate"; }
     }
   }
@@ -1685,7 +1712,6 @@
     render();
     renderKanbanOverlay();
     renderLibraryOverlay();
-    renderTeamsOverlay();
     renderAgentSettings();
   }
 
@@ -1695,7 +1721,13 @@
     if (!force && office && cwd === officeCwd && Date.now() - officeAt < 15_000) return;
     try {
       const { res, data } = await S.api("/office", cwd ? { cwd } : {});
-      if (res.ok && data) { office = data; officeCwd = cwd; officeAt = Date.now(); render(); }
+      if (res.ok && data) {
+        office = data; officeCwd = cwd; officeAt = Date.now();
+        render();
+        // The board overlay is not part of render(); repaint it here so a
+        // server-run queue (or another tab) shows up on the next poll.
+        renderKanbanOverlay();
+      }
     } catch { /* keep the last snapshot — the board still draws from it */ }
   }
 
@@ -1703,7 +1735,14 @@
    *  full-screen surface (library, board) in step with whatever was stored. */
   async function officePost(body, okMsg) {
     const { res, data } = await S.api("/office", {}, { ...body, cwd: state().cwd || "" });
-    if (!res.ok || !data) throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
+    if (!res.ok || !data) {
+      // Carry the status/code so a caller can tell a REFUSED write (the runner
+      // lock) from a real failure without string-matching the message.
+      const err = new Error(data && data.error ? data.error : `HTTP ${res.status}`);
+      err.status = res.status;
+      err.code = data && data.code;
+      throw err;
+    }
     office = data; officeCwd = state().cwd || ""; officeAt = Date.now();
     renderOfficeState();
     if (okMsg && S.toast) S.toast(okMsg);
@@ -1719,7 +1758,6 @@
     render();                // the floor, the shelf, the board
     renderLibraryOverlay();  // and whichever manager is open
     renderKanbanOverlay();
-    renderTeamsOverlay();
     renderAgentSettings();
     if (okMsg && S.toast) S.toast(okMsg);
   }
@@ -1894,6 +1932,7 @@
   let pumping = false;   // the queue runner is mid-dispatch
   let runAbort = null;   // AbortController for the run in flight (Pause aborts it)
   let pauseAbort = false; // the in-flight abort came from Pause, not from a page unload
+  let activeRunTaskId = null; // the task this page dispatched and is streaming right now
   const inFlight = new Set(); // task ids this page dispatched (or adopted) and has not settled
   const parked = new Set();   // ids whose run failed — never retried on their own
   const adopted = new Set();  // ids whose run this page found recorded on the server (started by an earlier page)
@@ -1930,23 +1969,28 @@
     const now = overlay.querySelector("#office-board-now");
     if (now) {
       const running = currentTask();
+      const planned = tasksIn("planned");
+      const runnable = planned.filter((t) => !t.failedAt).length;
       now.textContent = paused
-        ? (tasksIn("planned").length || running
+        ? (planned.length || running
           ? "Paused — press ▶ Run to work the queue."
           : "The queue is empty — add a task, then move it to Planned.")
         : running
           ? `The orchestrator is on “${running.title}” — the next planned task starts when it finishes.`
-          : tasksIn("planned").length
+          : runnable
             ? "A planned task is waiting; it starts as soon as the orchestrator is free."
-            : "The queue is empty — add a task, then move it to Planned.";
+            : planned.length
+              ? "Every planned task failed — move one to retry it."
+              : "The queue is empty — add a task, then move it to Planned.";
     }
   }
 
   /**
    * Open the task board full-screen: four columns (Todo, Planned, In Progress,
-   * Done), the add form under Todo, and one move control per task. Moving a task
-   * to Planned hands it to the queue; the runner below hands the queue to the
-   * orchestrator one task at a time.
+   * Done) and the add form under Todo. Cards are dragged between columns and,
+   * within Planned, dropped at a position to resequence the queue the runner
+   * reads; the runner below hands the queue to the orchestrator one task at a
+   * time.
    */
   function openKanban() {
     closeKanban();
@@ -1957,36 +2001,176 @@
       `<div class="office-lib-panel office-board-panel" role="dialog" aria-modal="true" aria-label="Task board">` +
         `<div class="office-lib-head">` +
           `<span class="office-lib-hd-title">Task board</span>` +
-          `<span class="office-lib-hd-sub">Todo → Planned → In Progress → Done. Planned tasks are handed to the orchestrator one at a time when the runner is running, and land in Done when the run finishes.</span>` +
+          `<span class="office-lib-hd-sub">Todo → Planned → In Progress → Done. Drag a card to another column (or focus it and use ← →); drop it into Planned at a position to resequence the queue. Planned tasks run one at a time when the runner is running.</span>` +
           `<span class="office-lib-hd-spacer"></span>` +
           // The runner starts paused; this is where the queue is started or held.
           `<button class="btn-sm office-run-toggle" id="office-run-toggle" type="button"></button>` +
-          `<button class="btn-sm office-lib-close" type="button">Close</button>` +
         `</div>` +
         `<div class="office-board-cols" id="office-board-cols"></div>` +
-        `<div class="office-board-now" id="office-board-now"></div>` +
+        // The board's foot: what the queue is doing, and Close pinned to the
+        // right-bottom corner of the panel.
+        `<div class="office-board-foot">` +
+          `<span class="office-board-now" id="office-board-now"></span>` +
+          `<button class="btn-sm office-lib-close" type="button">Close</button>` +
+        `</div>` +
       `</div>`;
     document.body.appendChild(overlay);
     renderKanbanOverlay();
 
+    const cols = overlay.querySelector("#office-board-cols");
     overlay.querySelector(".office-lib-close").addEventListener("click", closeKanban);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) closeKanban(); });
     overlay.querySelector("#office-run-toggle").addEventListener("click", () => void setRunnerPaused(!runnerPaused()));
-    overlay.querySelector("#office-board-cols").addEventListener("click", (e) => {
+    cols.addEventListener("click", (e) => {
       const add = e.target.closest && e.target.closest(".office-task-new");
       if (add) { openTaskDialog(); return; }
-      const move = e.target.closest && e.target.closest(".office-task-move");
-      if (move) {
-        // A move the user makes themselves unpark the task: they are asking for
-        // another run, even if the last one failed.
-        parked.delete(move.dataset.id);
-        void moveTask(move.dataset.id, move.dataset.move);
+      const edit = e.target.closest && e.target.closest(".office-task-edit");
+      if (edit) {
+        const t = tasksOf().find((x) => x.id === edit.dataset.edit);
+        if (t) openTaskDialog(t);
         return;
       }
       const del = e.target.closest && e.target.closest(".office-task-del");
       if (del) void deleteTask(del.dataset.del);
     });
+    // Drag and drop: the card under the pointer is the drag source, the column
+    // it is released over is the drop target, and the card it is released above
+    // decides the queue position.
+    cols.addEventListener("dragstart", onDragStart);
+    cols.addEventListener("dragover", onDragOver);
+    cols.addEventListener("dragleave", onDragLeave);
+    cols.addEventListener("drop", onDrop);
+    cols.addEventListener("dragend", onDragEnd);
+    // Keyboard parity: a focused card moves with ← →, and resequences with ↑ ↓.
+    cols.addEventListener("keydown", onCardKey);
     document.addEventListener("keydown", kanbanKeys);
+  }
+
+  /** The card a drag/keyboard event belongs to, when it is inside the board. */
+  function boardCardOf(e) {
+    const card = e.target.closest && e.target.closest(".office-task");
+    return card && card.closest("#office-board-cols") ? card : null;
+  }
+
+  /** Clear every drop affordance the board is currently showing. */
+  function clearDropMarks(root) {
+    if (!root) return;
+    root.querySelectorAll(".office-task.drop-before, .office-task.drop-after")
+      .forEach((el) => el.classList.remove("drop-before", "drop-after"));
+    root.querySelectorAll(".office-kcol.drag-over").forEach((el) => el.classList.remove("drag-over"));
+  }
+
+  /**
+   * Where a drop at (`clientX`, `clientY`) would land: the column under the
+   * pointer, and the id of the card it should sit BEFORE ("" appends). Also
+   * returns the card to mark, so the user sees the exact insertion point.
+   */
+  function dropTargetAt(clientX, clientY, colsRoot) {
+    // The four columns sit SIDE BY SIDE, so the column is chosen by X (all of
+    // them share a vertical range). Pick the one whose box contains the pointer,
+    // falling back to the horizontally nearest column when the pointer is in a
+    // gap between them.
+    let target = null;
+    let nearest = null;
+    let nearestD = Infinity;
+    for (const c of colsRoot.querySelectorAll(".office-kcol")) {
+      const r = c.getBoundingClientRect();
+      if (clientY < r.top || clientY > r.bottom) continue;
+      if (clientX >= r.left && clientX <= r.right) { target = c; break; }
+      const d = Math.abs(clientX - (r.left + r.right) / 2);
+      if (d < nearestD) { nearestD = d; nearest = c; }
+    }
+    target = target || nearest;
+    if (!target) return null;
+    const body = target.querySelector(".office-kcol-body");
+    const cards = [...body.querySelectorAll(".office-task")].filter((c) => c.dataset.id !== dragId);
+    let beforeId = "";
+    let mark = null;
+    for (const c of cards) {
+      const r = c.getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) { beforeId = c.dataset.id; mark = { el: c, cls: "drop-before" }; break; }
+      mark = { el: c, cls: "drop-after" };
+    }
+    return { col: target, status: target.dataset.status || "", beforeId, mark };
+  }
+
+  let dragId = null;
+
+  function onDragStart(e) {
+    const card = boardCardOf(e);
+    if (!card) return;
+    dragId = card.dataset.id;
+    card.classList.add("dragging");
+    try { e.dataTransfer.setData("text/plain", dragId); e.dataTransfer.effectAllowed = "move"; } catch { /* older engines */ }
+  }
+
+  function onDragOver(e) {
+    if (!dragId) return;
+    const info = dropTargetAt(e.clientX, e.clientY, e.currentTarget);
+    if (!info) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = "move"; } catch { /* ignore */ }
+    clearDropMarks(e.currentTarget);
+    info.col.classList.add("drag-over");
+    if (info.mark) info.mark.el.classList.add(info.mark.cls);
+  }
+
+  function onDragLeave(e) {
+    // Only clear when the pointer really left the board (not moving between its
+    // own children).
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    clearDropMarks(e.currentTarget);
+  }
+
+  function onDrop(e) {
+    const id = dragId;
+    const info = dragId ? dropTargetAt(e.clientX, e.clientY, e.currentTarget) : null;
+    clearDropMarks(e.currentTarget);
+    dragId = null;
+    if (!id || !info) return;
+    e.preventDefault();
+    parked.delete(id);          // a move the user makes themselves re-arms the task
+    void placeTask(id, info.status, info.beforeId);
+  }
+
+  function onDragEnd(e) {
+    dragId = null;
+    const card = boardCardOf(e);
+    if (card) card.classList.remove("dragging");
+    clearDropMarks(document.getElementById("office-board-cols"));
+  }
+
+  /** Arrow keys on a focused card: ← → move it between columns, ↑ ↓ resequence
+   *  it within Planned. Keyboard parity for the drag-and-drop board. */
+  function onCardKey(e) {
+    const card = boardCardOf(e);
+    if (!card) return;
+    const ids = TASK_COLUMNS.map((c) => c.id);
+    const status = card.dataset.status || "";
+    const i = ids.indexOf(status);
+    if (e.key === "ArrowRight" && i >= 0 && i < ids.length - 1) {
+      e.preventDefault();
+      parked.delete(card.dataset.id);
+      void placeTask(card.dataset.id, ids[i + 1], "");
+      return;
+    }
+    if (e.key === "ArrowLeft" && i > 0) {
+      e.preventDefault();
+      parked.delete(card.dataset.id);
+      void placeTask(card.dataset.id, ids[i - 1], "");
+      return;
+    }
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && status === "planned") {
+      const body = card.closest(".office-kcol-body");
+      const cards = [...body.querySelectorAll(".office-task")];
+      const at = cards.indexOf(card);
+      const to = e.key === "ArrowUp" ? at - 1 : at + 1;
+      if (to < 0 || to >= cards.length) return;
+      e.preventDefault();
+      // Dropping "before" the next card (or appending when moving down the tail).
+      const beforeId = e.key === "ArrowUp" ? cards[to].dataset.id : (cards[to + 1] ? cards[to + 1].dataset.id : "");
+      void placeTask(card.dataset.id, "planned", beforeId);
+    }
   }
 
   function closeKanban() {
@@ -2007,16 +2191,24 @@
   async function setRunnerPaused(paused) {
     if (runnerPaused() === paused) return;
     runnerPausedLocal = paused; // hold the UI steady until the write settles
-    if (paused) {
-      abortRun();
-      // A run this page ADOPTED belongs to a session the browser that started it
-      // abandoned: abort it on the server and hand its task back to Planned.
-      const ids = [...adopted];
+    // In server-runner mode the server stops the run itself when it is told to
+    // pause, so this page only sends the switch.
+    if (paused && !(office && office.serverRunner)) {
+      // Pause must actually STOP the run, not just stop the browser reading its
+      // stream — otherwise pi keeps working in the background. Both the run this
+      // page dispatched and any adopted run are recorded on their task, so the
+      // server can abort the pi session and return the task to Planned. The local
+      // stream is dropped only after the server has been told to stop, so the
+      // abort is classified as a Pause (not a page unload).
+      pauseAbort = true;
+      const ids = new Set(adopted);
+      if (activeRunTaskId) ids.add(activeRunTaskId);
       adopted.clear();
       for (const id of ids) inFlight.delete(id);
       for (const id of ids) {
         try { await officePost({ action: "stopRun", id }); } catch { /* best effort */ }
       }
+      abortRun();
     }
     try {
       await officePost({ action: "setRunnerPaused", paused }, paused ? "Runner paused" : "Runner running");
@@ -2048,7 +2240,34 @@
       if (status === "planned") void pumpTasks();
       return true;
     } catch (err) {
-      if (S.toast) S.toast(`Could not move that task: ${errMsg(err)}`, "err");
+      if (S.toast) S.toast(moveRefusal(err), err && err.status === 409 ? "warn" : "err");
+      return false;
+    } finally {
+      pendingTask = false;
+    }
+  }
+
+  /** The message for a refused move: the one-at-a-time rule has a friendlier
+   *  wording than a generic failure. */
+  function moveRefusal(err) {
+    if (err && (err.status === 409 || err.code === "conflict")) return "Another task is already running — wait for it to finish";
+    return `Could not move that task: ${errMsg(err)}`;
+  }
+
+  /** Move a task and/or drop it at a position: the drag-and-drop write. On the
+   *  server it sets the column and, for Planned, splices the task immediately
+   *  before `beforeId` (an empty/unknown id appends), so the order the board
+   *  shows is exactly the order the runner dispatches. */
+  async function placeTask(id, status, beforeId) {
+    if (!id || !status || pendingTask) return false;
+    pendingTask = true;
+    try {
+      await officePost({ action: "placeTask", id, status, beforeId: beforeId || "" });
+      // Landing in Planned is the handover: the runner picks it up.
+      if (status === "planned") void pumpTasks();
+      return true;
+    } catch (err) {
+      if (S.toast) S.toast(moveRefusal(err), err && err.status === 409 ? "warn" : "err");
       return false;
     } finally {
       pendingTask = false;
@@ -2109,6 +2328,7 @@
     const decoder = new TextDecoder();
     let buf = "";
     let settled = false;
+    let aborted = false;
     try {
       for (;;) {
         const { value, done } = await reader.read();
@@ -2121,29 +2341,48 @@
           if (!line) continue;
           let evt = null;
           try { evt = JSON.parse(line); } catch { continue; }
-          if (evt && evt.type === "done") settled = !evt.error;
+          // A `done` carrying `aborted` is pi acknowledging a stop (the Pause
+          // asked the server to abort the run) — never a successful finish.
+          if (evt && evt.type === "done") { if (evt.aborted) aborted = true; else settled = !evt.error; }
         }
       }
     } catch {
       return ctrl.signal.aborted ? abortedOutcome() : "detached";
     }
+    if (pauseAbort || aborted) return "aborted";
     if (settled) return "done";
     // The stream ended without a clear `done`: the page may be unloading while pi
     // keeps working, or the run already errored. The client cannot judge from
     // here — hand the task to the recorded run state, which the adopt poll reads
     // (and which tells a live run from a finished one).
-    return ctrl.signal.aborted && pauseAbort ? "aborted" : "detached";
+    return "detached";
+  }
+
+  /** Persist a failed dispatch: the server marks the task failed and returns it
+   *  to Planned, so the runner skips it — and a reload never silently retries
+   *  it. The user re-arms it by moving the card (or a fresh run clears it). */
+  async function failTask(id) {
+    try {
+      await officePost({ action: "failTask", id });
+      return true;
+    } catch (err) {
+      if (S.toast) S.toast(`Could not record the failure: ${errMsg(err)}`, "err");
+      return false;
+    }
   }
 
   /** Move a task into In Progress and record its run's chat session in ONE write,
-   *  before the run is dispatched, so a reload can recognise the live run. */
+   *  before the run is dispatched, so a reload can recognise the live run.
+   *  Returns "ok", "conflict" (the runner lock refused: a task is already
+   *  running — another tab won), or "error". */
   async function beginRun(id, sessionId) {
     try {
       await officePost({ action: "beginRun", id, sessionId });
-      return true;
+      return "ok";
     } catch (err) {
+      if (err && (err.status === 409 || err.code === "conflict")) return "conflict";
       if (S.toast) S.toast(`Could not start that task: ${errMsg(err)}`, "err");
-      return false;
+      return "error";
     }
   }
 
@@ -2159,7 +2398,7 @@
       let ok;
       if (outcome === "done") ok = await moveTask(task.id, "done", true);
       else if (outcome === "aborted") ok = await moveTask(task.id, "planned", true);
-      else { parked.add(task.id); ok = await moveTask(task.id, "planned", true); }
+      else { parked.add(task.id); ok = await failTask(task.id); }
       if (!ok) return;                 // a write is already in flight — the poll retries
       adopted.delete(task.id);
       inFlight.delete(task.id);
@@ -2228,6 +2467,11 @@
   async function pumpTasks() {
     if (pumping) return;
     if (runnerPaused()) return;         // the runner waits for the user to press Run
+    // The server owns the queue (it dispatches and settles the runs itself), so
+    // this page only reflects it — dispatching here would double-run tasks. Until
+    // the first snapshot is in, the mode is unknown, so wait for it rather than
+    // risk a duplicate dispatch against the server's own run.
+    if (!office || office.serverRunner) return;
     const running = currentTask();
     if (running) {
       // This page already owns (or adopted) the run: leave it be.
@@ -2261,15 +2505,19 @@
     // Skip anything whose run already failed (it waits for the user to move it
     // again), and anything already in flight (being relocated or dispatched), so
     // a broken run — or a write in progress — can never spin.
-    const next = tasksIn("planned").find((t) => !parked.has(t.id) && !inFlight.has(t.id));
+    const next = tasksIn("planned").find((t) => !t.failedAt && !parked.has(t.id) && !inFlight.has(t.id));
     if (!next) return;
     pumping = true;
     inFlight.add(next.id);
+    activeRunTaskId = next.id;
     pauseAbort = false;
     let advanced = false;               // the run finished — look for the next
     try {
       const sid = newRunId();
-      if (!(await beginRun(next.id, sid))) return;
+      // The server's runner lock refuses a second concurrent dispatch (a racing
+      // tab, a stale board); a losing page just backs off — the next pump adopts
+      // the winner's live run instead of starting a duplicate.
+      if ((await beginRun(next.id, sid)) !== "ok") return;
       if (S.toast) S.toast(`Handing “${next.title}” to the orchestrator`);
       const outcome = await runTask(next, sid);
       if (outcome === "done") {
@@ -2282,10 +2530,10 @@
         await moveTask(next.id, "planned", true);
         if (S.toast) S.toast(`Paused — “${next.title}” is back in Planned`);
       } else if (outcome === "failed") {
-        // The dispatch never ran (the server refused it). Put the task back and
-        // park it so the runner never spins on a doomed dispatch.
+        // The dispatch never ran (the server refused it). Record the failure and
+        // park it so the runner never spins — across reloads too.
         parked.add(next.id);
-        await moveTask(next.id, "planned", true);
+        await failTask(next.id);
         if (S.toast) S.toast(`“${next.title}” could not run — it is back in Planned`, "err");
       }
       // Any "detached" ending (page torn down, stream cut) leaves the task In
@@ -2295,6 +2543,7 @@
     } finally {
       pumping = false;
       inFlight.delete(next.id);
+      activeRunTaskId = null;
       runAbort = null;
     }
     // Step 6: with a task finished, take the next one from the queue.
@@ -2346,7 +2595,11 @@
     }
   }
 
-  // ─── The Teams manager (orchestrator → teams) ─────────────────────────────
+  // ─── Teams (inside the orchestrator's settings popup) ─────────────────────
+  // Teams used to live in their own manager opened from the orchestrator's room
+  // header. They now sit inside the orchestrator's settings popup, beside the
+  // rest of its configuration: the header gear opens one surface for the whole
+  // orchestrator — model, skills, tools, extensions, teams, hire.
 
   /** Every team in roster order, with its members, for the manager. */
   function teamsOf() {
@@ -2369,87 +2622,32 @@
     return out;
   }
 
-  /** The manager's rows: one team each, with its desk count and a ✕. */
-  function teamRowsHtml() {
+  /** The Teams section of the orchestrator's settings popup: one row per team
+   *  (activate / remove) and the form that adds the next one. */
+  function settingsTeamsHtml() {
     const rows = teamsOf();
-    if (!rows.length) {
-      return `<div class="office-lib-none">No teams yet. Add one below, then hire subagents onto it.</div>`;
-    }
-    return rows.map(({ name, members }) => {
-      const active = team && team.activeTeam === name;
-      return (
-        `<div class="office-team-row" data-team="${escAttr(name)}">` +
-          `<span class="office-team-name">${esc(name)}</span>` +
-          (active ? `<span class="office-room-active">✓ active</span>` : "") +
-          `<span class="office-team-count">${members.length} desk${members.length === 1 ? "" : "s"}</span>` +
-          `<span class="office-task-acts">` +
+    const active = (team && team.activeTeam) || "";
+    const list = rows.length
+      ? rows.map(({ name, members }) =>
+          `<div class="office-team-row" data-team="${escAttr(name)}">` +
+            `<span class="office-team-name">${esc(name)}</span>` +
+            (name === active
+              ? `<span class="office-room-active">✓ active</span>`
+              : `<button class="btn-sm office-team-pick" type="button" data-team="${escAttr(name)}" ` +
+                `title="Make ${escAttr(name)} the active team">activate</button>`) +
+            `<span class="office-team-count">${members.length} desk${members.length === 1 ? "" : "s"}</span>` +
             `<button class="office-task-del office-team-del" type="button" data-team="${escAttr(name)}" ` +
-              `title="Remove ${escAttr(name)} from the floor">×</button>` +
-          `</span>` +
-        `</div>`
-      );
-    }).join("");
+              `title="Remove ${escAttr(name)} from the floor" aria-label="Remove ${escAttr(name)}">×</button>` +
+          `</div>`).join("")
+      : `<div class="office-set-none">No teams yet — add one below, then hire subagents onto it.</div>`;
+    return settingsSection("Teams", "the teams on this floor",
+      `<div class="office-set-teams" id="office-set-teams">${list}</div>` +
+      `<form class="office-set-row office-set-team-form" id="office-set-team-form">` +
+        `<input class="office-input" id="office-set-team-new" type="text" maxlength="64" spellcheck="false" ` +
+          `autocomplete="off" placeholder="new team name" aria-label="New team name">` +
+        `<button class="btn-sm" type="submit">add team</button>` +
+      `</form>`);
   }
-
-  /** Repaint the manager's rows from the roster snapshot. */
-  function renderTeamsOverlay() {
-    const overlay = document.getElementById("office-teams-backdrop");
-    if (!overlay) return;
-    const list = overlay.querySelector("#office-teams-list");
-    if (list) list.innerHTML = teamRowsHtml();
-  }
-
-  /**
-   * The Teams manager, opened from the orchestrator's office: every team on the
-   * floor with its desk count, a remove control per team, and the form that
-   * adds the next one (which becomes the active team).
-   */
-  function openTeamsManager() {
-    closeTeamsManager();
-    const overlay = document.createElement("div");
-    overlay.className = "office-lib-backdrop";
-    overlay.id = "office-teams-backdrop";
-    overlay.innerHTML =
-      `<div class="office-lib-panel office-teams-panel" role="dialog" aria-modal="true" aria-label="Teams">` +
-        `<div class="office-lib-head">` +
-          `<span class="office-lib-hd-title">Teams</span>` +
-          `<span class="office-lib-hd-sub">Every team on this workspace's floor. Add one, hire subagents onto it, or remove a team you no longer need.</span>` +
-          `<span class="office-lib-hd-spacer"></span>` +
-          `<button class="btn-sm office-lib-close" type="button">Close</button>` +
-        `</div>` +
-        `<div class="office-teams-list" id="office-teams-list"></div>` +
-        `<form class="office-lib-add" id="office-teams-form">` +
-          `<input class="office-input" id="office-team-new" type="text" maxlength="64" spellcheck="false" ` +
-            `autocomplete="off" placeholder="new team name" aria-label="New team name">` +
-          `<button class="btn-sm office-lib-add-btn" type="submit">add team</button>` +
-        `</form>` +
-      `</div>`;
-    document.body.appendChild(overlay);
-    renderTeamsOverlay();
-
-    overlay.querySelector(".office-lib-close").addEventListener("click", closeTeamsManager);
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeTeamsManager(); });
-    overlay.querySelector("#office-teams-form").addEventListener("submit", (e) => {
-      e.preventDefault();
-      const input = e.target.querySelector("#office-team-new");
-      void addTeam(input && input.value).then((ok) => { if (ok && input) input.value = ""; });
-    });
-    overlay.querySelector("#office-teams-list").addEventListener("click", (e) => {
-      const del = e.target.closest && e.target.closest(".office-team-del");
-      if (del) void removeTeam(del.dataset.team);
-    });
-    document.addEventListener("keydown", teamsKeys);
-    const first = overlay.querySelector("#office-team-new");
-    if (first) first.focus();
-  }
-
-  function closeTeamsManager() {
-    const overlay = document.getElementById("office-teams-backdrop");
-    if (overlay) overlay.remove();
-    document.removeEventListener("keydown", teamsKeys);
-  }
-
-  function teamsKeys(e) { if (e.key === "Escape") closeTeamsManager(); }
 
   // ─── A desk's settings popup ──────────────────────────────────────────────
   // Every configurable desk (the orchestrator's office and every team member)
@@ -2648,6 +2846,7 @@
         `<button class="btn-sm office-set-fire" type="button">fire ${esc(shown)}</button>`));
     }
     if (isOrch) {
+      secs.push(settingsTeamsHtml());
       const rows = teamsOf();
       const active = (team && team.activeTeam) || "";
       const opts = rows.map((t) =>
@@ -2658,7 +2857,7 @@
               `<select class="office-input office-set-hire-team" aria-label="Team to hire into">${opts}</select>` +
               `<button class="btn-sm office-set-hire" type="button">hire…</button>` +
             `</div>`
-          : `<div class="office-set-none">No teams yet — add one from the Teams manager.</div>`));
+          : `<div class="office-set-none">No teams yet — add one above.</div>`));
     }
     return secs.join("");
   }
@@ -2690,6 +2889,15 @@
     overlay.addEventListener("click", (e) => { if (e.target === overlay) closeAgentSettings(); });
     overlay.addEventListener("click", onSettingsClick);
     overlay.addEventListener("change", onSettingsChange);
+    // The Teams section (orchestrator only) carries the add-team form; the body
+    // is repainted on every roster change, so the handler is delegated.
+    overlay.addEventListener("submit", (e) => {
+      const form = e.target.closest && e.target.closest(".office-set-team-form");
+      if (!form) return;
+      e.preventDefault();
+      const input = form.querySelector("#office-set-team-new");
+      void addTeam(input && input.value).then((ok) => { if (ok && input) input.value = ""; });
+    });
     document.addEventListener("keydown", settingsKeys);
     renderAgentSettings();
     // A subagent's popup also shows its agents/<name>.md allowlists, which ride
@@ -2781,6 +2989,12 @@
       void hireMember(sel && sel.value);
       return;
     }
+    // The Teams section: activate or remove a team (the roster write repaints
+    // the popup through teamPost).
+    const teamPick = hit(".office-team-pick");
+    if (teamPick) { void activateTeam(teamPick.dataset.team, teamPick); return; }
+    const teamDel = hit(".office-team-del");
+    if (teamDel) { void removeTeam(teamDel.dataset.team); return; }
     const skill = hit("[data-set-skill]");
     if (skill) { void settingsPost({ action: "toggleSkill", dir: skill.dataset.setSkill }); return; }
     const tool = hit("[data-set-tool]");
@@ -3064,10 +3278,9 @@
       if (pick && !pick.disabled) { void activateTeam(pick.dataset.team, pick); return; }
       const lib = t.closest && t.closest("#office-library-open");
       if (lib) { openLibrary(); return; }
-      const teamsBtn = t.closest && t.closest("#office-teams-open");
-      if (teamsBtn) { openTeamsManager(); return; }
       // The desk's own controls: off duty (a quick toggle) and settings (the
-      // agent's whole configuration, in a popup).
+      // agent's whole configuration, in a popup). The orchestrator's room-header
+      // gear carries the same data-act, so it opens the same popup.
       const act = t.closest && t.closest(".office-act");
       if (!act || act.disabled) return;
       if (act.dataset.act === "duty") toggleDuty(act.dataset.agent, act.dataset.team || "", act);
@@ -3095,6 +3308,9 @@
   function startTicker() {
     if (ticker) return;
     ticker = setInterval(() => {
+      // In server-runner mode the queue advances on the server; poll the board so
+      // the floor and the board reflect it without waiting for a manual refresh.
+      if (office && office.serverRunner && !runnerPaused()) void refreshOffice(true);
       // Time-based statuses (the 10s activity window) and expiring labels.
       render();
       if (lastActivitySeen && Date.now() - lastActivitySeen > ACTIVITY_TTL_MS) lastActivitySeen = 0;
@@ -3138,7 +3354,11 @@
         if (!el) return;
         if (!pane || pane !== el) build(el);
         void refreshTeam(false);
-        void refreshOffice(false);
+        // Nudge the server runner once the board is known: a queue left running
+        // (e.g. across a server restart) resumes when a page comes back.
+        void refreshOffice(false).then(() => {
+          if (office && office.serverRunner && !runnerPaused()) void officePost({ action: "pump" }).catch(() => {});
+        });
         void refreshDefs(false);
         render();
         startTicker();
@@ -3149,7 +3369,6 @@
         // The full-screen surfaces are chrome; leaving the view takes them with it.
         closeLibrary();
         closeKanban();
-        closeTeamsManager();
         closeAgentSettings();
       },
       onSessions: () => { render(); },

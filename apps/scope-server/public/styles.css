@@ -4340,6 +4340,24 @@
       font-size: 11.5px;
     }
 
+    .git-commit-resizer {
+      height: 6px;
+      flex-shrink: 0;
+      margin-bottom: -2px;
+      cursor: row-resize;
+      background: transparent;
+      z-index: 20;
+      position: relative;
+    }
+
+    .git-commit-resizer:hover,
+    .git-commit-resizer.dragging,
+    .git-commit-resizer:focus-visible {
+      background: var(--accent);
+      opacity: 0.5;
+      outline: none;
+    }
+
     .git-commitbar {
       display: flex;
       align-items: center;
@@ -4352,6 +4370,7 @@
 
     .git-commitbar textarea {
       flex: 1;
+      align-self: stretch;
       resize: none;
       padding: 7px 9px;
       background: var(--bg);
