@@ -9,6 +9,8 @@ __pycache__/
 # Agent / working state
 .pi/
 .pi_memory/
+# Per-project plugin state (project-scoped plugin stores live here)
+.pi-scope/
 tmp/
 .env
 

@@ -33,8 +33,12 @@ import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, s
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
 import { checkPiUpdate, updatePi } from "./pi-update.ts";
-import { listAuthProviders, startLogin, getLogin, answerLogin, cancelLogin, logoutProvider, resetAuthRuntime } from "./pi-auth.ts";
+import {
+  MODELS_STORE_PATH, modelCatalogStatus, refreshModelCatalog, startModelCatalogScheduler, modelCatalogAutoEnabled,
+} from "./model-catalog.ts";
+import { listAuthProviders, startLogin, getLogin, answerLogin, cancelLogin, logoutProvider, resetAuthRuntime, listAvailableModelsMeta } from "./pi-auth.ts";
 import { keyEntries, maskSecret, setStoredKey, clearStoredKey, isValidKeyName, MAX_KEY_LENGTH, KNOWN_KEYS } from "./api-keys.ts";
+import { seedProviderEnvFromShell } from "./provider-env.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -583,6 +587,9 @@ function loadSettingsSnapshot(proj?: string | null): Record<string, any> {
     // Shared vocabulary for form controls
     thinkingLevels: THINKING_LEVELS,
     modelsMeta: buildModelMeta(),
+    // How current pi's two model catalogs are, so Settings → Models can offer the
+    // refresh next to the cost table the store feeds (see model-catalog.ts).
+    modelCatalog: modelCatalogStatus(),
     // The raw teams.yaml teams/members (deduped over loadAgentTeam for editing).
     teams: team.teams ?? {},
     teamsOrder: team.teamsOrder ?? Object.keys(team.teams ?? {}),
@@ -1143,21 +1150,34 @@ function updateSettingsJson(mutate: (cfg: any) => void): void {
 // provider pricing, and opencode-go rolling $ usage. The go-usage values come
 // from the same live endpoint the pi footer uses, refreshed at most once a
 // minute, with local DB $ sums as fallback until the fetch lands.
-const MODELS_STORE = process.env.SCOPE_MODELS_STORE ?? path.join(AGENT_DIR, "models-store.json");
+// Owned by model-catalog.ts, which also refreshes it while the app is open.
+const MODELS_STORE = MODELS_STORE_PATH;
 const AUTH_JSON = process.env.SCOPE_AUTH_JSON ?? path.join(AGENT_DIR, "auth.json");
 const GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
 const GO_USAGE_TTL = 60_000;
 const GO_LIMITS: Record<"h5" | "wk" | "mo", number> = { h5: 12, wk: 30, mo: 60 };
-// The `kilo` provider (kilo.ai) keeps its own on-disk model cache, separate from
-// models-store.json. Its models are ingested here so the Settings cost catalog
-// surfaces `kilo` as an independent provider (never conflated with a model of the
-// same id under another provider such as openrouter). The path mirrors the
-// agent-team extension's model-cache.ts CACHE_DIR (~/.pi-scope/kilo_Cache), which is
-// the only writer of these files.
-const KILO_CACHE_DIR = process.env.SCOPE_KILO_CACHE_DIR ?? path.join(os.homedir(), ".pi-scope", "kilo_Cache");
+// The dynamic providers (`kilo` — kilo.ai — and `tokenharbor` — tokenharbor.ai)
+// register their model lists from a pi extension at load, so they never land in
+// models-store.json (which pi's own models.dev updater owns). Their provider
+// extension shares one on-disk cache, the agent-team extension's model-cache.ts
+// CACHE_FILE: <home>/.pi/Provider_Cache/model_provider.json, holding one
+// { cachedAt, data } envelope per provider cache key ("kilo-models",
+// "kilo-free-models", "tokenharbor-models-v2"). Ingesting it here lets the
+// Settings cost catalog surface each as an independent provider — never
+// conflated with an identically-named model another provider (e.g. openrouter)
+// happens to expose.
+//
+// The cache lives beside pi's data root — the agent dir's parent. That is
+// <home>/.pi-scope for Pi Scope's own agent (<agent dir> = ~/.pi-scope/agent,
+// next to the pi shim) and <home>/.pi for a global install. The extensions'
+// model-cache.ts derives the exact same path from the same rule, so the writer
+// and this reader agree with no configuration to keep in step.
+// SCOPE_PROVIDER_CACHE_FILE overrides it (tests, a relocated install).
+const DEFAULT_PROVIDER_CACHE_FILE =
+  path.join(path.dirname(AGENT_DIR), "Provider_Cache", "model_provider.json");
 
 let modelsStoreCache: { mtimeMs: number; data: Record<string, any> } | null = null;
-let kiloCache: { models: any[] } | null = null;
+let providerCache: { file: string; mtimeMs: number; providers: Record<string, any[]> } | null = null;
 
 /** Read the pi model store (~/.pi-scope/agent/models-store.json), cached by mtime. */
 function loadModelsStore(): Record<string, any> {
@@ -1172,21 +1192,53 @@ function loadModelsStore(): Record<string, any> {
   }
 }
 
-/** Read the kilo provider's model cache (~/.pi-scope/kilo_Cache/kilo-models.json and
- *  kilo-free-models.json). Each is a { cachedAt, data: [...] } envelope; merge
- *  the arrays. Cached in-process; a fresh read happens once per process since
- *  the caches change only when the kilo extension refreshes them at boot. */
-function loadKiloModels(): any[] {
-  if (kiloCache) return kiloCache.models;
-  const models: any[] = [];
-  for (const file of ["kilo-models.json", "kilo-free-models.json"]) {
-    try {
-      const env = JSON.parse(fs.readFileSync(path.join(KILO_CACHE_DIR, file), "utf8"));
-      if (Array.isArray(env?.data)) models.push(...env.data);
-    } catch { /* cache absent / corrupt — skip */ }
+/** The pi provider a shared-cache section key belongs to. Keys are
+ *  `<provider>-models` / `<provider>-free-models`, optionally versioned with a
+ *  `-v<n>` suffix: kilo-models → kilo, kilo-free-models → kilo,
+ *  tokenharbor-models-v2 → tokenharbor. Anything else is skipped. */
+function providerForCacheKey(key: string): string | null {
+  const base = key.replace(/-v\d+$/, "");
+  const name = base.replace(/-free-models$|-models$/, "");
+  return name && name !== base ? name : null;
+}
+
+/** Expand a leading `~` / `~/` to the user's home dir, so a hand-typed path in
+ *  Settings works the way a shell path would. */
+function expandHome(file: string): string {
+  if (file === "~") return os.homedir();
+  return file.startsWith("~/") ? path.join(os.homedir(), file.slice(2)) : file;
+}
+
+/** Where the dynamic providers' shared model cache is read from: the path
+ *  derived from pi's own agent dir (see above), or `SCOPE_PROVIDER_CACHE_FILE`
+ *  when an operator/tests set it. */
+function providerCacheFile(): string {
+  const override = (process.env.SCOPE_PROVIDER_CACHE_FILE || "").trim();
+  return override ? expandHome(override) : DEFAULT_PROVIDER_CACHE_FILE;
+}
+
+/** Read the shared provider-model cache from the resolved providerCacheFile(),
+ *  cached by path + mtime. Each section's model array is merged under the
+ *  provider its key names (kilo's paid + free sections both land under `kilo`). */
+function loadProviderCacheModels(): Record<string, any[]> {
+  const file = providerCacheFile();
+  try {
+    const st = fs.statSync(file);
+    if (providerCache && providerCache.file === file && providerCache.mtimeMs === st.mtimeMs) {
+      return providerCache.providers;
+    }
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const providers: Record<string, any[]> = {};
+    for (const [key, section] of Object.entries(parsed ?? {}) as [string, any][]) {
+      const provider = providerForCacheKey(key);
+      if (!provider || !Array.isArray(section?.data)) continue;
+      providers[provider] = [...(providers[provider] ?? []), ...section.data];
+    }
+    providerCache = { file, mtimeMs: st.mtimeMs, providers };
+    return providers;
+  } catch {
+    return {}; /* cache absent / corrupt — the store still serves its providers */
   }
-  kiloCache = { models };
-  return models;
 }
 
 /** Thinking levels a model supports, from its thinkingLevelMap (array form, or
@@ -1217,21 +1269,78 @@ function buildModelMeta(): Record<string, any> {
       };
     }
   }
-  // `kilo` is an independent provider whose models live in its own cache, not
-  // models-store.json. Register them under the `kilo/` key so they show up in
-  // the cost catalog as a provider of their own — distinct from any same-id
-  // model that another provider (e.g. openrouter) happens to expose.
-  for (const m of loadKiloModels()) {
-    if (!m?.id) continue;
-    out[`kilo/${m.id}`] = {
-      provider: "kilo",
-      contextWindow: m.contextWindow ?? 0,
-      maxTokens: m.maxTokens ?? 0,
-      cost: m.cost ?? {},
-      thinkingLevels: thinkingLevelsFor(m),
-    };
+  // Dynamic providers (kilo, tokenharbor) live in their extensions' shared
+  // cache, not models-store.json. Register each under its own `<provider>/` key
+  // so the cost catalog lists it as a provider of its own — distinct from any
+  // same-id model another provider (e.g. openrouter) happens to expose.
+  for (const [provider, models] of Object.entries(loadProviderCacheModels())) {
+    for (const m of models) {
+      if (!m?.id) continue;
+      out[`${provider}/${m.id}`] = {
+        provider,
+        contextWindow: m.contextWindow ?? 0,
+        maxTokens: m.maxTokens ?? 0,
+        cost: m.cost ?? {},
+        thinkingLevels: thinkingLevelsFor(m),
+      };
+    }
+  }
+  // Providers pi can reach but the store never names: pi-ai's built-in static
+  // catalogues (cerebras, google, groq, mistral, zai, …), read from the bundled
+  // runtime (see runtimeModelsMeta below). Only keys neither source above
+  // defines are added, so their richer metadata is preserved.
+  if (runtimeModelsMeta) {
+    for (const [key, m] of Object.entries(runtimeModelsMeta) as [string, any][]) {
+      if (!out[key]) out[key] = m;
+    }
   }
   return out;
+}
+
+// ─── Runtime "available models" (mirrors pi's `/modelcost`) ─────────────────
+// pi's model registry offers every provider with configured auth — including
+// pi-ai's built-in catalogues, whose static models the models.dev refresh never
+// persists to models-store.json (they declare no `refreshModels`). The store
+// alone therefore lists fewer providers than `/modelcost`. Read the same
+// runtime the Authentication tab uses (pi-auth.ts), cache it, and merge it into
+// buildModelMeta() so the Settings cost table agrees with the selector. The
+// read runs once at boot and again when a credential changes. SCOPE_MODEL_CATALOG
+// =off (the catalog refresher's own switch) skips it, which keeps the e2e suite
+// deterministic.
+const RUNTIME_MODELS_TTL_MS = 4 * 60 * 60 * 1000;
+let runtimeModelsMeta: Record<string, any> | null = null;
+let runtimeModelsAttemptedAt = 0;
+let runtimeModelsInFlight: Promise<void> | null = null;
+
+/** Read the runtime's available models unless disabled or already fresh. */
+function loadRuntimeModels(force = false): Promise<void> {
+  if (!modelCatalogAutoEnabled()) return Promise.resolve();
+  if (runtimeModelsInFlight) return runtimeModelsInFlight;
+  if (!force && runtimeModelsMeta && Date.now() - runtimeModelsAttemptedAt < RUNTIME_MODELS_TTL_MS) {
+    return Promise.resolve();
+  }
+  runtimeModelsInFlight = (async () => {
+    try {
+      runtimeModelsMeta = await listAvailableModelsMeta();
+    } catch (err: any) {
+      // No bundle, a corrupt one, or a failing auth check: keep whatever the
+      // store + caches already provide rather than losing the whole list.
+      console.error(`  Available models: runtime read failed — ${err?.message ?? err}`);
+    } finally {
+      runtimeModelsAttemptedAt = Date.now();
+      runtimeModelsInFlight = null;
+    }
+  })();
+  return runtimeModelsInFlight;
+}
+
+/** Await the runtime models before a Settings snapshot (the first call only;
+ *  later calls see the cache and return immediately). */
+function ensureRuntimeModels(): Promise<void> {
+  if (!modelCatalogAutoEnabled()) return Promise.resolve();
+  if (runtimeModelsInFlight) return runtimeModelsInFlight;
+  if (runtimeModelsMeta) return Promise.resolve();
+  return loadRuntimeModels();
 }
 
 /** opencode-go $ usage in the 5h/7d/30d rolling windows from the DB (fallback). */
@@ -2865,26 +2974,38 @@ async function handle(req: Request): Promise<Response> {
   // ── GET /pi-update (is a newer bundled Pi coding agent available?) ──────
   // Reports the installed version next to the npm `latest` dist-tag. Read-only
   // and safe to call repeatedly; the Settings → Update tab drives it.
+  // The payload also carries the two pi model catalogs' state: the app refreshes
+  // them itself while it is open (Pi Scope runs pi offline, so nothing else
+  // does), and the Update tab shows when that last happened.
   if (pathname === "/pi-update" && method === "GET") {
-    return jsonResponse(await checkPiUpdate());
+    return jsonResponse({ ...(await checkPiUpdate()), modelCatalog: modelCatalogStatus() });
   }
 
   // ── POST /pi-update (install the newest bundled Pi coding agent) ────────
-  // { action: "check"|"update" }. The install runs `npm install …@latest` in
-  // the bundle and can take a while; the handler waits for it and returns the
-  // resulting status. No server restart is needed — the next spawned pi picks
-  // up the new agent through the shim.
+  // { action: "check"|"update"|"refresh-models" }. The install runs
+  // `npm install …@latest` in the bundle and can take a while; the handler waits
+  // for it and returns the resulting status. No server restart is needed — the
+  // next spawned pi picks up the new agent through the shim. `refresh-models`
+  // refreshes pi's model store + the release cache on demand (the app also does
+  // this on its own while it is open; see model-catalog.ts).
   if (pathname === "/pi-update" && method === "POST") {
     let body: any;
     try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
     const action = String(body?.action ?? "check");
     try {
       if (action === "check") return jsonResponse(await checkPiUpdate());
+      if (action === "refresh-models") {
+        return jsonResponse({ modelCatalog: await refreshModelCatalog({ force: true }) });
+      }
       if (action === "update") {
         const result = await updatePi();
         // A newer agent may add or change providers; drop the cached auth
         // runtime so the Authentication tab reads the fresh bundle.
         resetAuthRuntime();
+        // New agent, new provider catalogs: bring the model store up to date too.
+        void refreshModelCatalog({ force: true }).catch(() => { /* reported by status */ });
+        // And re-read the runtime's available models from the fresh bundle.
+        void loadRuntimeModels(true);
         return jsonResponse(result);
       }
       return jsonResponse({ error: `unknown action: ${action}` }, 400);
@@ -2911,6 +3032,10 @@ async function handle(req: Request): Promise<Response> {
   if (pathname === "/auth/login" && method === "GET") {
     const session = getLogin(url.searchParams.get("id") || "");
     if (!session) return jsonResponse({ error: "no such login session" }, 404);
+    // A finished login adds a credential, so re-read the runtime's available
+    // models (fire-and-forget): the newly signed-in provider appears in the
+    // cost table on the next Settings snapshot.
+    if (session.status === "ok") void loadRuntimeModels(true);
     return jsonResponse(session);
   }
   if (pathname === "/auth/login" && method === "POST") {
@@ -2939,6 +3064,8 @@ async function handle(req: Request): Promise<Response> {
     try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
     try {
       await logoutProvider(String(body?.providerId || ""));
+      // Dropping a credential can remove a provider from the available list.
+      void loadRuntimeModels(true);
       return jsonResponse(await listAuthProviders());
     } catch (err: any) {
       return jsonResponse({ error: String(err?.message || err) }, 400);
@@ -2950,6 +3077,10 @@ async function handle(req: Request): Promise<Response> {
   // absent → last-used project, then the server's launch directory.
   if (pathname === "/settings" && method === "GET") {
     const proj = resolveProjectDir(url.searchParams.get("cwd"));
+    // The cost table lists the models pi can run (the store + dynamic caches +
+    // the runtime's built-in providers). Wait for the first runtime read so the
+    // first paint is complete; later calls find it cached.
+    await ensureRuntimeModels();
     return jsonResponse(loadSettingsSnapshot(proj));
   }
 
@@ -3222,6 +3353,7 @@ async function handle(req: Request): Promise<Response> {
       console.error("POST /settings failed:", err);
       return jsonResponse({ error: "internal server error" }, 500);
     }
+    await ensureRuntimeModels();
     return jsonResponse(loadSettingsSnapshot(proj));
   }
 
@@ -4116,14 +4248,32 @@ const pluginKit = {
   // going with no page open) — `startChat` plus the workspace library block.
   chatRunStatus, stopChat, startChat,
   libraryBlockFor: (cwd: string) => buildLibraryPrompt(readAgentConfig(cwd).library),
+  // The agent dir the user's skills/ and extensions/ live in. A plugin that lets
+  // a node pick skills or extensions needs it to resolve those names to real
+  // paths — and it must be the host's value (SCOPE_AGENT_DIR-aware), never a
+  // second guess at the default.
+  agentDir: AGENT_DIR,
 };
 
 // Discover + activate plugins before accepting traffic so a plugin's routes are
 // live from the first request (these routes used to be synchronous inline
 // handlers, so a request that beat activation would have 404'd). A plugin that
 // throws is reported on its record, never fatal.
+//
+// First expose the provider API keys that live only in the user's shell rc, so
+// every pi process this app spawns (and the model reads below) sees the same
+// credentials a terminal pi would — see provider-env.ts.
+seedProviderEnvFromShell();
 discoverPlugins();
 await activatePlugins({ kit: pluginKit });
+// Keep pi's model store + release cache current for as long as the app is up.
+// Pi Scope runs pi with PI_OFFLINE=1, so pi itself no longer refreshes them
+// while the app is in use (see model-catalog.ts).
+startModelCatalogScheduler();
+// Read the runtime's available models once at boot (the same list `/modelcost`
+// offers) so the first Settings → Models view already lists every provider pi
+// can run, including the built-in ones models-store.json never names.
+void loadRuntimeModels();
 {
   const active = pluginSnapshot().plugins as any[];
   if (process.env.SCOPE_VERBOSE) {

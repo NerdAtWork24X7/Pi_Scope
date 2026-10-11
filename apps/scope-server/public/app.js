@@ -529,9 +529,37 @@ setInterval(() => {
   if (document.hidden || !STATE.sessions.length) return;
   const byId = sessionIndex();
   const rank = { green: 3, orange: 2, red: 1, gray: 0 };
+  // Descendant-aware status, matching rail.renderSessionTree: a session keeps
+  // "running" while any subagent it spawned is live (a stopped session stays
+  // red). Without this, the tick overwrote the tree's "working" dot with the
+  // parent's own recency — flipping a busy orchestrator to "waiting" the moment
+  // its own last_ts went stale while a subagent was still working.
+  const subsByParent = new Map();
+  for (const s of STATE.sessions) {
+    const p = s.parent_session_id;
+    if (p && p !== s.session_id && byId.has(p)) {
+      if (!subsByParent.has(p)) subsByParent.set(p, []);
+      subsByParent.get(p).push(s);
+    }
+  }
+  const liveUnderMemo = new Map();
+  const liveUnder = (sid) => {
+    if (liveUnderMemo.has(sid)) return liveUnderMemo.get(sid);
+    liveUnderMemo.set(sid, false); // cycle guard
+    let live = false;
+    for (const k of subsByParent.get(sid) || []) {
+      if (window.SCOPE.subagentStatus(k) === "green" || liveUnder(k.session_id)) { live = true; break; }
+    }
+    liveUnderMemo.set(sid, live);
+    return live;
+  };
+  const statusOf = (s) => {
+    const own = window.SCOPE.subagentStatus(s);
+    return own !== "red" && liveUnder(s.session_id) ? "green" : own;
+  };
   const wsDot = new Map(); // cwd → aggregate dot class
   for (const s of STATE.sessions) {
-    const st = window.SCOPE.subagentStatus(s);
+    const st = statusOf(s);
     const cwd = s.cwd || "(unknown)";
     const cur = wsDot.get(cwd);
     if (!cur || rank[st] > rank[cur]) wsDot.set(cwd, st);
@@ -539,7 +567,7 @@ setInterval(() => {
   document.querySelectorAll(".ws-sess .status-dot").forEach(el => {
     const s = byId.get(el.closest(".ws-sess")?.dataset.sid);
     if (!s) return;
-    const cls = "status-dot " + window.SCOPE.subagentStatus(s);
+    const cls = "status-dot " + statusOf(s);
     if (el.className !== cls) el.className = cls;
   });
   document.querySelectorAll(".chat-ws").forEach(el => {

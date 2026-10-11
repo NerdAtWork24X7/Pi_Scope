@@ -1,0 +1,20 @@
+{
+  "id": "subagent-workflow",
+  "name": "Subagent Workflow",
+  "description": "Wire coding-agent harnesses into a fan-out workflow on a canvas: Claude Code, Codex CLI, Gemini CLI, opencode, Aider, Cursor Agent, the built-in Pi runner, or a custom command. Bookend it with start and end nodes, configure each node's harness, model, prompt, working dir and fan-out, then run the whole graph server-side and watch every node stream its output.",
+  "version": "1.0.0",
+  "author": "Pi Scope",
+  "server": "server.ts",
+  "client": "client.js",
+  "serverRoutes": [
+    "/subagent-workflow"
+  ],
+  "nav": {
+    "label": "Workflow",
+    "order": 70,
+    "group": "timeline"
+  },
+  "ui": {
+    "icon": "🕸"
+  }
+}

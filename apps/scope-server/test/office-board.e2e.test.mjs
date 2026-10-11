@@ -63,11 +63,12 @@ async function api(pathname, init = {}) {
 
 const post = (body, cwd = ws) => api("/office", { method: "POST", body: JSON.stringify({ ...body, cwd }) });
 const snapshot = async (cwd = ws) => (await api(`/office?cwd=${encodeURIComponent(cwd)}`)).data;
-/** The plugin's own store, as the host persists it (api.store → .data/<id>.json). */
-const storePath = () => path.join(pluginsDir, ".data", "office.json");
-const readStore = () => JSON.parse(fs.readFileSync(storePath(), "utf8"));
+/** The plugin's project-scoped store (api.projectStore →
+ *  `<cwd>/.pi-scope/plugins/.data/office.json`). */
+const storePath = (cwd = ws) => path.join(fs.realpathSync(cwd), ".pi-scope", "plugins", ".data", "office.json");
+const readStore = (cwd = ws) => JSON.parse(fs.readFileSync(storePath(cwd), "utf8"));
 /** The state the plugin kept for one workspace. */
-const stored = (cwd = ws) => readStore().workspaces[fs.realpathSync(cwd)];
+const stored = (cwd = ws) => readStore(cwd).workspaces[fs.realpathSync(cwd)];
 const task = async (id, cwd = ws) => (await snapshot(cwd)).tasks.find((t) => t.id === id);
 /** The old, pre-plugin home of this state (used only to prove the migration). */
 const legacyConfigPath = (cwd) => path.join(cwd, ".pi", "settings", "agent-team-config.json");
@@ -453,10 +454,10 @@ describe("the queue runner switch", () => {
     assert.equal(stored(blank).runnerPaused, true);
 
     // A hand-edited store with the field missing still reads as paused.
-    const all = readStore();
+    const all = readStore(blank);
     const key = fs.realpathSync(blank);
     delete all.workspaces[key].runnerPaused;
-    fs.writeFileSync(storePath(), JSON.stringify(all, null, 2));
+    fs.writeFileSync(storePath(blank), JSON.stringify(all, null, 2));
     assert.equal((await snapshot(blank)).runnerPaused, true, "an absent field reads as paused");
   });
 });
@@ -471,9 +472,11 @@ describe("read-time self-heal", () => {
     const agentDir2 = path.join(dir, "agent");
     const pluginsDir2 = path.join(dir, "plugins");
     fs.mkdirSync(agentDir2, { recursive: true });
-    fs.mkdirSync(path.join(pluginsDir2, ".data"), { recursive: true });
+    fs.mkdirSync(pluginsDir2, { recursive: true });
     const past = Date.now() - 60_000;
-    fs.writeFileSync(path.join(pluginsDir2, ".data", "office.json"), JSON.stringify({
+    // The board now lives in the project's own store, not the plugins dir.
+    fs.mkdirSync(path.join(cwd, ".pi-scope", "plugins", ".data"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".pi-scope", "plugins", ".data", "office.json"), JSON.stringify({
       workspaces: {
         [cwd]: {
           runnerPaused: false,

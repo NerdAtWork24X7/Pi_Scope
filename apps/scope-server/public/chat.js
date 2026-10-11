@@ -1917,7 +1917,7 @@
         const wrap = document.createElement("div");
         wrap.innerHTML = toolsHtml;
         const toolsEl = wrap.firstElementChild;
-        const ref = body.querySelector(".chat-text, .chat-usage");
+        const ref = body.querySelector(".chat-text, .chat-usage, .chat-live-run");
         if (ref) body.insertBefore(toolsEl, ref);
         else body.appendChild(toolsEl);
       }
@@ -2108,7 +2108,7 @@
       thinking +
       tools +
       text +
-      `<div class="chat-typing"><span></span><span></span><span></span></div>` +
+      liveRunHtml(m) +
       `</div></div>`
     );
   }
@@ -2146,22 +2146,53 @@
     });
   }
 
-  function clearLiveTyping(body) {
+  // ─── Persistent "agent is running" indicator ─────────────────────────────
+  // One animated pill lives at the bottom of the in-flight assistant bubble for
+  // the WHOLE turn (the old typing dots were removed the moment any delta
+  // arrived, so a long tool call or a long reply showed no motion at all). Every
+  // streaming helper inserts its node BEFORE this element (see
+  // livePrependTextNode), so the pill always stays pinned last and its label
+  // tracks the current phase — "thinking…", "running bash…", "responding…".
+  function liveRunLabelFor(m) {
+    const tool = (m?.tools || []).find((t) => t.state === "live");
+    if (tool && tool.name) return `running ${tool.name}…`;
+    if (m?.text) return "responding…";
+    if (m?.thinking) return "thinking…";
+    return "working…";
+  }
+  function liveRunHtml(m) {
+    return (
+      `<div class="chat-live-run" aria-hidden="true">` +
+      `<span class="chat-live-run-dots"><i></i><i></i><i></i></span>` +
+      `<span class="chat-live-run-label">${esc(liveRunLabelFor(m))}</span></div>`
+    );
+  }
+  function setLiveRunLabel(body, label) {
     if (!body) return;
-    const t = body.querySelector(".chat-typing");
-    if (t) t.remove();
+    const l = body.querySelector(".chat-live-run-label");
+    if (l && l.textContent !== label) l.textContent = label;
+  }
+  function removeLiveRun(body) {
+    if (!body) return;
+    body.querySelector(".chat-live-run")?.remove();
   }
 
   function livePrependTextNode(body, node, beforeSelector) {
     const ref = beforeSelector ? body.querySelector(beforeSelector) : null;
     if (ref) body.insertBefore(node, ref);
-    else body.appendChild(node);
+    else {
+      // Keep the run indicator pinned last: content that has no explicit anchor
+      // goes above it, never below.
+      const run = body.querySelector(".chat-live-run");
+      if (run) body.insertBefore(node, run);
+      else body.appendChild(node);
+    }
   }
 
   function streamThinking(body, m, delta) {
     m.thinking = (m.thinking || "") + delta;
     if (!body) return; // background thread — model only
-    clearLiveTyping(body);
+    setLiveRunLabel(body, "thinking…");
     let det = body.querySelector("details.chat-thinking");
     if (!det) {
       det = document.createElement("details");
@@ -2177,7 +2208,7 @@
   function streamText(body, m, delta) {
     m.text = (m.text || "") + delta;
     if (!body) return; // background thread — model only
-    clearLiveTyping(body);
+    setLiveRunLabel(body, "responding…");
     let t = body.querySelector(".chat-text.chat-stream-text");
     if (!t) {
       t = document.createElement("div");
@@ -2205,7 +2236,7 @@
     // resolves the first match).
     m.tools.push({ name, args, state: "live" });
     if (!body) return; // background thread — model only
-    clearLiveTyping(body);
+    setLiveRunLabel(body, `running ${name}…`);
     let toolsEl = body.querySelector(".chat-tools");
     if (!toolsEl) {
       toolsEl = document.createElement("div");
@@ -2245,6 +2276,9 @@
     const t = m.tools?.find((x) => x.name === name && x.state === "live");
     if (t) t.state = "ok";
     if (!body) return; // background thread — model only
+    // Derive the phase from the model so a still-running parallel tool keeps
+    // its own label instead of being masked by "thinking…".
+    setLiveRunLabel(body, liveRunLabelFor(m));
     const chip = toolChip(body, name);
     if (chip) { chip.classList.remove("live"); chip.classList.add("ok"); }
     const det = body.querySelector(`.chat-tool-call[data-name="${CSS.escape(name)}"]`);
@@ -2264,7 +2298,7 @@
     n.className = "chat-error-note";
     n.textContent = "⚠ " + msg;
     body.appendChild(n);
-    clearLiveTyping(body);
+    removeLiveRun(body);
   }
 
   // ─── Interactive host dialogs (ask_user_question & friends) ───────────────
@@ -2400,7 +2434,13 @@
       `<input class="chat-ask-input" type="text" placeholder="Type your own answer…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />` +
       `<button type="button" class="chat-ask-send">Send</button></div>` +
       `<div class="chat-ask-note">pi is waiting for your answer</div>`;
-    body.appendChild(card);
+    // The question card belongs above the run pill, and the pill (which stays
+    // pinned last) now reports the honest phase — the agent is blocked on the
+    // user, not working.
+    const runPill = body.querySelector(".chat-live-run");
+    if (runPill) body.insertBefore(card, runPill);
+    else body.appendChild(card);
+    setLiveRunLabel(body, "waiting for your answer…");
 
     card.querySelector(".chat-ask-x").addEventListener("click", (e) => {
       e.preventDefault();
@@ -2498,7 +2538,10 @@
       `<textarea class="chat-ask-input" rows="2" placeholder="${esc(dlg.placeholder || "Type your answer…")}" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>` +
       `<button type="button" class="chat-ask-send">Send</button></div>` +
       `<div class="chat-ask-note">pi is waiting for your answer</div>`;
-    body.appendChild(card);
+    const runPill = body.querySelector(".chat-live-run");
+    if (runPill) body.insertBefore(card, runPill);
+    else body.appendChild(card);
+    setLiveRunLabel(body, "waiting for your answer…");
 
     const submit = () => submitInput(dlg, card, card.querySelector(".chat-ask-input").value);
     card.querySelector(".chat-ask-x").addEventListener("click", (e) => {
@@ -2555,6 +2598,10 @@
         // text streamed so far — mirroring how session transcripts render.
         if (t.live.isFirst) { t.live.isFirst = false; break; }
         t.live.m.streaming = false;
+        // The completed bubble is done — drop its run pill so only the new
+        // in-flight bubble shows one (otherwise a tool loop leaves a stale
+        // "responding…" pill on every finished message until the final render).
+        removeLiveRun(body);
         const m2 = {
           role: "assistant", text: "", thinking: "", tools: [], usage: null,
           model: m.model || CH.chatModel, ts: Date.now(), streaming: true,

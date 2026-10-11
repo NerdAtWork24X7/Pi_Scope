@@ -208,7 +208,7 @@ describe("the server-side queue runner", () => {
 
     // The aborted run returns its task to Planned — read the store directly, the
     // route is gated while disabled.
-    const storePath = path.join(pluginsDir, ".data", "office.json");
+    const storePath = path.join(ws, ".pi-scope", "plugins", ".data", "office.json");
     const storedStatus = () => {
       try {
         const all = JSON.parse(fs.readFileSync(storePath, "utf8"));
@@ -235,12 +235,17 @@ describe("the server-side queue runner", () => {
     const agentDir2 = path.join(dir, "agent");
     const pluginsDir2 = path.join(dir, "plugins");
     fs.mkdirSync(agentDir2, { recursive: true });
-    fs.mkdirSync(path.join(pluginsDir2, ".data"), { recursive: true });
-    fs.writeFileSync(path.join(pluginsDir2, ".data", "office.json"), JSON.stringify({
+    fs.mkdirSync(pluginsDir2, { recursive: true });
+    // The board lives in the project's own store; the plugins dir keeps only the
+    // index of known projects, which is what the boot resume pass reads.
+    fs.mkdirSync(path.join(cwd, ".pi-scope", "plugins", ".data"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".pi-scope", "plugins", ".data", "office.json"), JSON.stringify({
       workspaces: { [cwd]: { runnerPaused: false, tasks: [
         { id: "r1", title: "resume me", status: "planned", createdAt: 1, plannedAt: 2 },
       ] } },
     }, null, 2));
+    fs.mkdirSync(path.join(pluginsDir2, ".data"), { recursive: true });
+    fs.writeFileSync(path.join(pluginsDir2, ".data", "office.json"), JSON.stringify({ projects: [cwd] }, null, 2));
 
     const port = await freePort();
     const base2 = `http://127.0.0.1:${port}`;

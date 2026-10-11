@@ -26,6 +26,7 @@ SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
 | `SCOPE_AGENT_DIR` | `~/.pi-scope/agent` | Pi Scope's **own** pi agent dir. The bundled `pi` is pinned here via `PI_CODING_AGENT_DIR`, so it never reads or writes the global pi agent dir. |
 | `SCOPE_SETTINGS_JSON` | `<agentDir>/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
+| `SCOPE_PROVIDER_CACHE_FILE` | `<agentDir>/../Provider_Cache/model_provider.json` | Override where the kilo / tokenharbor extension model cache is read from. The default is derived from the agent dir's parent, which is where the extension's `model-cache.ts` writes it (`~/.pi-scope/Provider_Cache` for Pi Scope, `~/.pi/Provider_Cache` for a global pi) |
 | `SCOPE_SKILLS_DIR` | `<agentDir>/skills` | Override the skills directory scanned for the agent-team sidebar |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
 | `SCOPE_KEYS_JSON` | `<agentDir>/api-keys.json` | API keys entered in Settings → API Keys (owner-only file, mode 0600) |
@@ -159,8 +160,8 @@ address the token is required anyway (see the LAN notes in the root README).
 | POST | `/git/stash` | Push/pop/drop a stash |
 | GET | `/git/submodules` | List submodules |
 | POST | `/git/submodule` | Add/remove/update/init/deinit/sync a submodule |
-| GET | `/pi-update` | Compare the bundled Pi coding agent against the npm latest |
-| POST | `/pi-update` | `{ action: "check"|"update" }` — check, or install the newest bundled agent |
+| GET | `/pi-update` | Compare the bundled Pi coding agent against the npm latest, plus `modelCatalog` (pi's model store + release cache; `cacheModels`/`cacheProviders` describe models.dev's whole release catalogue, not the providers the cost table lists) |
+| POST | `/pi-update` | `{ action: "check"|"update"|"refresh-models" }` — check, install the newest bundled agent, or fetch the model catalogs (`refresh-models` is what Settings → Models → Model update calls) |
 | GET | `/auth/providers` | Provider catalogue (methods + status) and stored credentials, read live from the bundled agent |
 | POST | `/auth/login` | `{ providerId, type }` to start, `{ id, promptId, value }` to answer a prompt, `{ id, cancel: true }` to abort |
 | GET | `/auth/login?id=` | Current login session state (pending prompt + event log) |

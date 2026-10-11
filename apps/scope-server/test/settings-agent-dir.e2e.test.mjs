@@ -27,6 +27,7 @@ let child;
 let base;
 let tmpDir;
 let agentDir;
+let providerCacheFile;
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -94,6 +95,39 @@ before(async () => {
   fs.writeFileSync(path.join(agentDir, "AGENTS.md"), "Be careful.\n");
   fs.writeFileSync(path.join(agentDir, "skills", "foo", "SKILL.md"), "---\nname: Foo\n---\nbody\n");
 
+  // pi's model store: the providers pi's own models.dev updater owns.
+  fs.writeFileSync(path.join(agentDir, "models-store.json"), JSON.stringify({
+    "opencode-go": {
+      models: [{ id: "deepseek-v4.1-flash", contextWindow: 128000, maxTokens: 8192, cost: { input: 1, output: 2 } }],
+    },
+  }, null, 2));
+  // The dynamic providers' (kilo, tokenharbor) shared extension cache, which the
+  // server has to read separately: one section per provider cache key, plus a
+  // key that names no provider (which must be ignored).
+  providerCacheFile = path.join(tmpDir, "provider-cache", "model_provider.json");
+  fs.mkdirSync(path.dirname(providerCacheFile), { recursive: true });
+  fs.writeFileSync(providerCacheFile, JSON.stringify({
+    "kilo-models": {
+      cachedAt: 1,
+      data: [{ id: "kilo-auto/efficient", contextWindow: 1_000_000, maxTokens: 65536, cost: { input: -1000000, output: -1000000 } }],
+    },
+    "kilo-free-models": {
+      cachedAt: 1,
+      data: [{ id: "stepfun/step-3.7-flash:free", contextWindow: 256000, maxTokens: 32768, cost: { input: 0, output: 0 } }],
+    },
+    "tokenharbor-models-v2": {
+      cachedAt: 1,
+      data: [{ id: "claude-sonnet-4.6", contextWindow: 200000, maxTokens: 65536, cost: { input: 3, output: 15 }, thinkingLevelMap: ["off", "low", "high"] }],
+    },
+    "unrelated-key": { cachedAt: 1, data: [{ id: "nope" }] },
+  }, null, 2));
+  // A decoy at the DERIVED default (<agentDir>/../Provider_Cache, the path the
+  // extension computes). It must be ignored while the env override is set.
+  const derivedDir = path.join(tmpDir, "Provider_Cache");
+  fs.mkdirSync(derivedDir, { recursive: true });
+  fs.writeFileSync(path.join(derivedDir, "model_provider.json"),
+    JSON.stringify({ "decoy-models": { cachedAt: 1, data: [{ id: "model" }] } }, null, 2));
+
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, [SERVER], {
@@ -108,6 +142,8 @@ before(async () => {
       // Isolate the agent dir so the test never reads or writes the real one.
       SCOPE_AGENT_DIR: agentDir,
       SCOPE_PI_BIN: "/bin/true",
+      // Keep the dynamic-provider cache out of the real ~/.pi too.
+      SCOPE_PROVIDER_CACHE_FILE: providerCacheFile,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -169,6 +205,30 @@ describe("agent-dir settings", () => {
     // The skills list carries the settings.json load state independently of the
     // orchestrator/subagent membership.
     assert.equal(data.skills[0].settingsEnabled, false);
+  });
+
+  test("the model registry ingests the shared provider cache (kilo + tokenharbor)", async () => {
+    const { res, data } = await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`);
+    assert.ok(res.ok);
+    const meta = data.modelsMeta;
+
+    // Providers pi's own models-store.json owns are still read from there.
+    assert.equal(meta["opencode-go/deepseek-v4.1-flash"].provider, "opencode-go");
+
+    // The dynamic providers' cache sections are ingested under their own names,
+    // even though models-store.json has never heard of either.
+    assert.equal(meta["kilo/kilo-auto/efficient"].provider, "kilo");
+    assert.equal(meta["kilo/kilo-auto/efficient"].contextWindow, 1_000_000);
+    assert.equal(meta["kilo/stepfun/step-3.7-flash:free"].provider, "kilo", "the -free section merges under the same provider");
+    assert.equal(meta["kilo/stepfun/step-3.7-flash:free"].cost.input, 0);
+    assert.equal(meta["tokenharbor/claude-sonnet-4.6"].provider, "tokenharbor");
+    assert.equal(meta["tokenharbor/claude-sonnet-4.6"].contextWindow, 200_000);
+    assert.deepEqual(meta["tokenharbor/claude-sonnet-4.6"].thinkingLevels, ["off", "low", "high"]);
+
+    // A section key that names no provider contributes nothing, and the decoy
+    // at the derived default is not read while the env override is in force.
+    assert.ok(!Object.keys(meta).some((k) => k.includes("nope")));
+    assert.equal(meta["decoy/model"], undefined, "the env override wins over the derived default");
   });
 
   test("packages can be added and removed", async () => {
@@ -533,5 +593,83 @@ describe("per-subagent tools", () => {
     assert.equal(readBeta(), before, "a rejected request never writes");
     assert.equal((await postSettings("setAgentDefTools", { file: "nope.md", tools: [] })).res.status, 404);
     fs.rmSync(betaPath());
+  });
+});
+
+// Where the dynamic providers' shared model cache is read from is DERIVED, not
+// configured: the agent dir's parent. The extension's model-cache.ts applies the
+// same rule (dirname(getAgentDir())), so the writer and the reader agree with no
+// setting to keep in step. This server runs WITHOUT the env override, so the
+// derived path is the one in play.
+describe("provider cache path (derived from pi's agent dir)", () => {
+  let pChild;
+  let pBase;
+  let pTmp;
+  let pAgent;
+  const derivedCache = () => path.join(pTmp, "Provider_Cache", "model_provider.json");
+
+  const pApi = async (pathname, init = {}) => {
+    const res = await fetch(`${pBase}${pathname}`, {
+      ...init,
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...(init.headers || {}) },
+    });
+    let data = null;
+    try { data = await res.json(); } catch { /* non-JSON */ }
+    return { res, data };
+  };
+  const snapshot = async () => (await pApi(`/settings?cwd=${encodeURIComponent(pTmp)}`)).data;
+
+  before(async () => {
+    pTmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "scope-provider-cache-")));
+    pAgent = path.join(pTmp, "agent");
+    fs.mkdirSync(pAgent, { recursive: true });
+    // Exactly where the extension writes it: <agent dir>/../Provider_Cache.
+    fs.mkdirSync(path.dirname(derivedCache()), { recursive: true });
+    fs.writeFileSync(derivedCache(), JSON.stringify({
+      "kilo-models": { cachedAt: 1, data: [{ id: "derived/model", contextWindow: 1000, maxTokens: 10, cost: { input: 1, output: 1 } }] },
+      "tokenharbor-models-v2": { cachedAt: 1, data: [{ id: "th/model", contextWindow: 2000, maxTokens: 20, cost: { input: 2, output: 2 } }] },
+    }, null, 2));
+    // A store, so modelsMeta is never empty for unrelated reasons.
+    fs.writeFileSync(path.join(pAgent, "models-store.json"), JSON.stringify({ solo: { models: [{ id: "one" }] } }, null, 2));
+
+    const port = await freePort();
+    pBase = `http://127.0.0.1:${port}`;
+    pChild = spawn(process.execPath, [SERVER], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        SCOPE_PORT: String(port),
+        SCOPE_HOST: "127.0.0.1",
+        SCOPE_DB_PATH: path.join(pTmp, "scope.db"),
+        SCOPE_AUTH_TOKEN: TOKEN,
+        SCOPE_PLUGINS_DIR: path.join(pTmp, "plugins"),
+        SCOPE_AGENT_DIR: pAgent,
+        SCOPE_PI_BIN: "/bin/true",
+        SCOPE_MODEL_CATALOG: "off",
+        // Deliberately NOT set: SCOPE_PROVIDER_CACHE_FILE — the derived path must win.
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    pChild.stderr.on("data", (d) => process.stderr.write(`[server] ${d}`));
+    const start = Date.now();
+    while (Date.now() - start < 20_000) {
+      try { if ((await fetch(`${pBase}/health`)).ok) break; } catch { /* not up */ }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  });
+
+  after(async () => {
+    if (pChild) {
+      pChild.kill("SIGKILL");
+      await new Promise((r) => pChild.once("exit", r));
+    }
+    if (pTmp) fs.rmSync(pTmp, { recursive: true, force: true });
+  });
+
+  test("the cache beside the agent dir is read with no configuration", async () => {
+    const data = await snapshot();
+    assert.ok(data.modelsMeta["kilo/derived/model"], "kilo is ingested from <agentDir>/../Provider_Cache");
+    assert.ok(data.modelsMeta["tokenharbor/th/model"], "tokenharbor is ingested from the same file");
+    assert.equal(data.modelsMeta["kilo/derived/model"].contextWindow, 1000);
   });
 });

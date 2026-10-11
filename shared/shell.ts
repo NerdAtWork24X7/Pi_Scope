@@ -17,7 +17,7 @@ import * as path from "node:path";
 /** Shell rc files an interactive terminal sources, in the order we check them. */
 export function shellRcFiles(): string[] {
   const home = os.homedir();
-  return [".zshenv", ".zshrc", ".bash_profile", ".bashrc", ".profile"]
+  return [".zshenv", ".zshrc", ".zprofile", ".zlogin", ".bash_profile", ".bashrc", ".profile"]
     .map((f) => path.join(home, f))
     .filter((p) => fs.existsSync(p));
 }
@@ -58,6 +58,57 @@ export function readShellEnvValues(name: string): string[] {
 export function readShellEnvValue(name: string): string {
   const [first] = readShellEnvValues(name);
   return first ? expandShellPath(first) : "";
+}
+
+/**
+ * Every `NAME=value` assignment reachable from the shell rc files, as one map
+ * (first occurrence wins; `$HOME`/`~` expanded). Follows `source`/`.` includes
+ * whose path is a file under the user's home, so a key defined in a sourced env
+ * file (e.g. `~/.free-coding-models.env`) is seen the way a shell would — one
+ * pass, bounded depth and file count.
+ */
+const MAX_SOURCE_DEPTH = 3;
+const MAX_SOURCE_FILES = 25;
+/** `source <path>` / `. <path>` after a line start or a shell separator. */
+const SOURCE_RE = /(?:^|[;&|]\s*)(?:source|\.)\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g;
+
+export function readShellEnvMap(): Record<string, string> {
+  const out: Record<string, string> = {};
+  const home = os.homedir();
+  const seen = new Set<string>();
+  const visit = (file: string, depth: number): void => {
+    let real: string;
+    try { real = fs.realpathSync(file); } catch { return; }
+    if (seen.has(real) || seen.size >= MAX_SOURCE_FILES) return;
+    seen.add(real);
+    let content: string;
+    try { content = fs.readFileSync(real, "utf8"); } catch { return; }
+    for (const rawLine of content.split("\n")) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const assignment = line.startsWith("export ") ? line.slice(7).trim() : line;
+      const eq = assignment.indexOf("=");
+      if (eq > 0) {
+        const name = assignment.slice(0, eq).trim();
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !(name in out)) {
+          const val = assignment.slice(eq + 1).trim().replace(/^(['"])(.*)\1$/, "$2").trim();
+          if (val) out[name] = expandShellPath(val);
+        }
+      }
+      if (depth >= MAX_SOURCE_DEPTH) continue;
+      for (const match of line.matchAll(SOURCE_RE)) {
+        const raw = match[1].replace(/^(['"])(.*)\1$/, "$2").trim();
+        // Only literal paths and $HOME: a variable we can't expand is skipped.
+        if (!raw || raw.replace(/\$\{HOME\}|\$HOME/g, "").includes("$")) continue;
+        const resolved = path.resolve(expandShellPath(raw));
+        // Never follow system paths or anything outside the user's home.
+        if (!resolved.startsWith(home + path.sep)) continue;
+        try { if (fs.statSync(resolved).isFile()) visit(resolved, depth + 1); } catch { /* absent */ }
+      }
+    }
+  };
+  for (const rc of shellRcFiles()) visit(rc, 0);
+  return out;
 }
 
 /** POSIX single-quote escaping for a shell argument (bash/zsh): safe for

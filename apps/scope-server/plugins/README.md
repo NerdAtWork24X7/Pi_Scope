@@ -151,6 +151,8 @@ Done: header button → view → own HTTP route → own persistent counters.
 
 Enable/disable state is persisted to `~/.pi-scope/plugins/plugins.json`. Per
 plugin state written through `api.store` lands in `~/.pi-scope/plugins/.data/`.
+State that belongs to one project (a board, a workflow) should use
+`api.projectStore(dir)` instead and live under `<dir>/.pi-scope/plugins/.data/`.
 
 A user plugin with the same `id` as a built-in **overrides** it — that is how you
 swap out a shipped feature without patching the app.
@@ -164,7 +166,8 @@ re-importing `server.ts`.
 
 The Office is the reference for a **fully standalone built-in**: manifest, server
 module, client bundle and stylesheet all in `plugins/office/`, with its own
-`/office` route prefix and its own `api.store` state — nothing about it lives in
+`/office` route prefix and its own project-scoped state
+(`api.projectStore`) — nothing about it lives in
 `server.ts`, `public/`, or `index.html`. A built-in that ships a `client.js` is
 served at `/plugins/file/<id>/<client>` and loaded by the host exactly like a
 user plugin's bundle, and may fetch its own sibling files (e.g. a stylesheet)
@@ -237,6 +240,7 @@ Reload plugins**.
 | `api.route(method, path, handler)` | register an HTTP route; `handler(ctx)` may return a value (JSON) or a `Response` |
 | `api.onEvent(handler)` | called for every ingested event |
 | `api.store.get(key, fallback)` / `.set(key, value)` / `.all()` | JSON state persisted to `<pluginsDir>/.data/<id>.json` (mode `0600`) |
+| `api.projectStore(dir)` | the same store API, but persisted to `<dir>/.pi-scope/plugins/.data/<id>.json`; use it for state that belongs to one project |
 
 A route handler's `ctx` is
 `{ url, method, params, req, readBody, json, cwd }`:
@@ -285,6 +289,15 @@ cannot break ingestion or other plugins.
 * `get(key, fallback)` returns the fallback only when the key is absent.
 * The file survives server restarts and plugin disable/enable cycles (verified).
 
+#### State — `api.projectStore(dir)`
+
+Use this for state that belongs to a **project** rather than to the plugin
+install: the Office board and the Workflow graph keep their files in the project
+(`<dir>/.pi-scope/plugins/.data/<id>.json`), so two projects never share a board.
+`dir` must be an absolute, existing directory; anything else falls back to the
+global `api.store`, so a caller can never scatter files relative to the server's
+cwd. Add `.pi-scope/` to the project's `.gitignore` (the app's own does).
+
 #### `api.kit` — shared host primitives
 
 Built-in plugins need the same helpers the core server uses: `git`/`gitTry`, the
@@ -312,6 +325,22 @@ The kit exposes `fs`, `path`, `jsonResponse`, `textResponse`, `readBody`,
 `rejectOptionLike`, `parsePorcelainLine`, `porcelainStatus`, `buildRepoGraph`,
 and `legacyOfficeState` (a one-time migration reader the Office plugin uses to
 import a workspace's pre-plugin name/board; nothing else should need it).
+
+For plugins that *run* an agent, two more members matter:
+
+* `startChat({ cwd, model, prompt, sessionId, … })` — the host's chat runner, which
+  streams a Pi session back as NDJSON (see the Office plugin's queue). It also
+  accepts **per-run capability allowlists** — `skills` (paths), `tools` (names)
+  and `extensions` (paths) — which are passed to the Pi subprocess as its own
+  `--skill` / `--tools` / `--extension` flags. They apply at spawn time, so pass
+  your own `sessionId` per run; a session that is already running keeps its argv.
+  Omitting them produces exactly the argv the Chat view uses.
+* `agentDir` — the host's agent directory, i.e. where the user's `skills/` and
+  `extensions/` live. A plugin that lets a user *pick* a skill or extension needs
+  it to turn a name into a real path, and it must be this value:
+  `SCOPE_AGENT_DIR` moves the directory, so a second guess at the default would
+  resolve to the wrong tree. Feature-detect it and say so in the UI when it is
+  absent rather than resolving against somewhere else.
 
 `readSettingsJson()` is pi's `settings.json` — read-only, for the keys pi itself
 owns (`defaultModel`, `theme`, `editorPaddingX`, …). It is **not** where a
@@ -585,8 +614,9 @@ loading it from your plugins dir: the host serves that copy's `client.js` /
 `GET /plugins` shows its `dir`, `version` and `name`. Delete the directory and
 reload to fall back to the shipped copy.
 
-Its state does not move with it: the plugin's store is namespaced by **plugin
-id** (`<plugins dir>/.data/office.json`), so a swapped-in copy picks up the
+Its state does not move with it: the board is kept in the **project**
+(`<workspace>/.pi-scope/plugins/.data/office.json`, keyed by plugin id), so a
+swapped-in copy picks up the
 boards, names and runner state the built-in one had left there.
 
 ---

@@ -17,9 +17,15 @@
  * bundled agent looks for them — logging in here is equivalent to running
  * `/login` in a pi terminal, but reachable from the browser.
  *
- * The pi runtime is imported lazily (only when the Authentication tab is first
- * used) straight out of the bundle, so Pi Scope doesn't pay to load it at boot
- * and can never disagree with the agent it ships about provider auth.
+ * The same bundled runtime also answers `listAvailableModelsMeta()`: the models
+ * pi reports as available (every provider with configured auth, including its
+ * built-in catalogues), which server.ts merges into the Settings cost table so
+ * it agrees with the `/modelcost` selector.
+ *
+ * The pi runtime is imported lazily (when the Authentication tab is first used
+ * or the Settings cost table is first read) straight out of the bundle, so Pi
+ * Scope doesn't pay to load it at boot and can never disagree with the agent it
+ * ships about provider auth.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -108,6 +114,11 @@ const sessions = new Map<string, LoginSession>();
 // ─── Bundled runtime (loaded on demand) ──────────────────────────────────────
 
 let runtimePromise: Promise<any> | null = null;
+// The available-models read gets its own runtime, created with `modelsPath:null`
+// (an in-memory models store) so listing the models pi can run never touches the
+// agent dir's `models-store.json` — that file is pi's own, shared with the
+// Settings cost table and the catalog refresher (see model-catalog.ts).
+let modelsRuntimePromise: Promise<any> | null = null;
 // Bumped by resetAuthRuntime() so the next load imports the fresh bundle files
 // (a query string makes Node treat the same path as a distinct module).
 let runtimeGeneration = 0;
@@ -127,6 +138,7 @@ function bundleEntry(): string | null {
  */
 export function resetAuthRuntime(): void {
   runtimePromise = null;
+  modelsRuntimePromise = null;
   runtimeGeneration += 1;
 }
 
@@ -158,6 +170,25 @@ async function getRuntime(): Promise<any> {
     runtimePromise.catch(() => { runtimePromise = null; });
   }
   return runtimePromise;
+}
+
+/** The runtime used to list available models: same bundle, but with an
+ *  in-memory models store (`modelsPath:null`) so the read never rewrites the
+ *  agent dir's `models-store.json`. */
+async function getModelsRuntime(): Promise<any> {
+  if (!modelsRuntimePromise) {
+    modelsRuntimePromise = (async () => {
+      const entry = bundleEntry();
+      if (!entry) throw new Error("bundled pi coding agent not found");
+      const mod: any = await import(`${pathToFileURL(entry).href}?gen=${runtimeGeneration}`);
+      if (typeof mod?.ModelRuntime?.create !== "function") {
+        throw new Error("bundled pi coding agent does not expose ModelRuntime");
+      }
+      return mod.ModelRuntime.create({ authPath: AUTH_JSON, modelsPath: null });
+    })();
+    modelsRuntimePromise.catch(() => { modelsRuntimePromise = null; });
+  }
+  return modelsRuntimePromise;
 }
 
 /** Stable per-installation id some login flows send as an agent host id. */
@@ -243,6 +274,57 @@ export async function listAuthProviders(): Promise<AuthSnapshot> {
     .sort((a: AuthCredential, b: AuthCredential) => a.name.localeCompare(b.name));
 
   return { ready: true, providers, credentials };
+}
+
+// ─── Available models (mirrors the `/modelcost` selector) ───────────────────
+
+/** One model's metadata, shaped exactly like server.ts's `buildModelMeta()`
+ *  entries, so the cost catalogue can merge it without adapting. */
+export interface AvailableModelMeta {
+  provider: string;
+  contextWindow: number;
+  maxTokens: number;
+  cost: Record<string, any>;
+  thinkingLevels: string[] | null;
+}
+
+/** Thinking levels from a model's optional thinkingLevelMap (array form, or an
+ *  object map whose non-null values are supported). null → pi's default. */
+function levelsOf(m: any): string[] | null {
+  const map = m?.thinkingLevelMap;
+  if (Array.isArray(map)) return map;
+  if (map && typeof map === "object") {
+    const keys = Object.keys(map).filter((k) => map[k] !== null && map[k] !== undefined);
+    return keys.length ? keys : null;
+  }
+  return null;
+}
+
+/**
+ * Every model the bundled runtime reports as available, keyed `<provider>/<id>`
+ * — the same list pi's `/modelcost` selector offers. `getAvailable()` returns
+ * the models whose provider has configured auth (a stored credential or a set
+ * environment key), so a provider with none contributes nothing. This is what
+ * lets the Settings cost table list providers the models.dev refresh never
+ * writes to `models-store.json`: pi-ai's built-in static catalogues (cerebras,
+ * google, groq, mistral, zai, …) declare legacy static models rather than a
+ * `refreshModels` capability, so `ModelRuntime.refresh()` skips persisting them.
+ */
+export async function listAvailableModelsMeta(): Promise<Record<string, AvailableModelMeta>> {
+  const runtime = await getModelsRuntime();
+  const models = await runtime.getAvailable(undefined, { signal: AbortSignal.timeout(30_000) });
+  const out: Record<string, AvailableModelMeta> = {};
+  for (const m of models) {
+    if (!m?.provider || !m?.id) continue;
+    out[`${m.provider}/${m.id}`] = {
+      provider: m.provider,
+      contextWindow: m.contextWindow ?? 0,
+      maxTokens: m.maxTokens ?? 0,
+      cost: m.cost ?? {},
+      thinkingLevels: levelsOf(m),
+    };
+  }
+  return out;
 }
 
 // ─── Login sessions ──────────────────────────────────────────────────────────

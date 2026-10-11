@@ -616,6 +616,16 @@
     "a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06" +
     "a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z";
 
+  /** The X the Office popups' close controls draw (a Feather-style cross), so
+   *  the agent settings, reference library and task board close with an icon
+   *  instead of a word. */
+  const CLOSE_X =
+    `<svg class="office-set-close-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" ` +
+    `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+    `<line x1="18" y1="6" x2="6" y2="18"/>` +
+    `<line x1="6" y1="6" x2="18" y2="18"/>` +
+    `</svg>`;
+
   /** The settings control a configurable desk carries: a round gear button that
    *  opens that agent's whole configuration (model, name, duty, definition,
    *  skills, tools, extensions, hire / fire) in a popup. */
@@ -1846,7 +1856,7 @@
           `<span class="office-lib-hd-title">Reference library</span>` +
           `<span class="office-lib-hd-sub">Files and folders for this workspace — injected at the start of every new conversation, grouped by the agent they are for.</span>` +
           `<span class="office-lib-hd-spacer"></span>` +
-          `<button class="btn-sm office-lib-close" type="button">Close</button>` +
+          `<button class="office-lib-close office-icon-close" type="button" aria-label="Close reference library" title="Close">${CLOSE_X}</button>` +
         `</div>` +
         `<div class="office-lib-rows" id="office-lib-list"></div>` +
         `<form class="office-lib-add" id="office-lib-form">` +
@@ -2013,13 +2023,15 @@
           `<span class="office-lib-hd-spacer"></span>` +
           // The runner starts paused; this is where the queue is started or held.
           `<button class="btn-sm office-run-toggle" id="office-run-toggle" type="button"></button>` +
+          // Close is an icon at the panel's top-right corner.
+          `<button class="office-lib-close office-icon-close" type="button" aria-label="Close task board" title="Close">${CLOSE_X}</button>` +
         `</div>` +
         `<div class="office-board-cols" id="office-board-cols"></div>` +
-        // The board's foot: what the queue is doing, and Close pinned to the
-        // right-bottom corner of the panel.
+        // The board's foot: what the queue is doing, and an OK button pinned to
+        // the right-bottom corner of the panel.
         `<div class="office-board-foot">` +
           `<span class="office-board-now" id="office-board-now"></span>` +
-          `<button class="btn-sm office-lib-close" type="button">Close</button>` +
+          `<button class="btn-sm office-board-ok" type="button" title="Close the board">OK</button>` +
         `</div>` +
       `</div>`;
     document.body.appendChild(overlay);
@@ -2027,6 +2039,7 @@
 
     const cols = overlay.querySelector("#office-board-cols");
     overlay.querySelector(".office-lib-close").addEventListener("click", closeKanban);
+    overlay.querySelector(".office-board-ok").addEventListener("click", closeKanban);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) closeKanban(); });
     overlay.querySelector("#office-run-toggle").addEventListener("click", () => void setRunnerPaused(!runnerPaused()));
     cols.addEventListener("click", (e) => {
@@ -2650,7 +2663,7 @@
       : `<div class="office-set-none">No teams yet — add one below, then hire subagents onto it.</div>`;
     return settingsSection("Teams", "the teams on this floor",
       `<div class="office-set-teams" id="office-set-teams">${list}</div>` +
-      `<form class="office-set-row office-set-team-form" id="office-set-team-form">` +
+      `<form class="office-set-row office-set-actions office-set-team-form" id="office-set-team-form">` +
         `<input class="office-input" id="office-set-team-new" type="text" maxlength="64" spellcheck="false" ` +
           `autocomplete="off" placeholder="new team name" aria-label="New team name">` +
         `<button class="btn-sm" type="submit">add team</button>` +
@@ -2812,7 +2825,7 @@
     }
     if (!isOrch && teamName) {
       secs.push(settingsSection("Name", "what the desk shows",
-        `<div class="office-set-row">` +
+        `<div class="office-set-row office-set-actions">` +
           `<input class="office-input office-set-name" id="office-set-name" maxlength="64" spellcheck="false" ` +
             `autocomplete="off" placeholder="${escAttr(agent.name)}" value="${escAttr((row && row.displayName) || "")}" ` +
             `aria-label="Display name for ${escAttr(agent.name)}">` +
@@ -2820,11 +2833,17 @@
         `</div>`));
     }
     if (!isOrch) {
-      secs.push(settingsSection("Duty", offDuty ? `off duty on ${teamName} — the desk is empty` : `on duty on ${teamName}`,
-        `<button class="btn-sm office-set-duty${offDuty ? " off" : ""}" type="button">` +
-          `${offDuty ? "bring on duty" : "take off duty"}</button>`));
-      secs.push(settingsSection("Definition", `agents/${agent.name}.md`,
-        `<button class="btn-sm office-set-md" type="button">edit markdown</button>`));
+      // Duty and the markdown definition share one compact row, so both read as
+      // small inline controls instead of stretching across the section.
+      secs.push(settingsSection("Duty & definition",
+        offDuty ? `off duty on ${teamName} — the desk is empty · agents/${agent.name}.md` : `on duty on ${teamName} · agents/${agent.name}.md`,
+        `<div class="office-set-row office-set-actions">` +
+          `<button class="btn-sm office-set-duty${offDuty ? " off" : ""}" type="button" ` +
+            `title="${escAttr(offDuty ? `Bring ${shown} on duty` : `Take ${shown} off duty`)}">` +
+            `${offDuty ? "bring on duty" : "take off duty"}</button>` +
+          `<button class="btn-sm office-set-md" type="button" ` +
+            `title="Edit agents/${escAttr(agent.name)}.md — frontmatter + prompt">edit markdown</button>` +
+        `</div>`));
       // The md file's own allowlists — exactly what the agent-team extension
       // reads off agents/<name>.md when it spawns this subagent: `skills:`
       // overrides the subagent set above, `tools:` is the child's `--tools`
@@ -2850,8 +2869,12 @@
     }
     secs.push(settingsSection("Extensions", "loaded by pi", extChips()));
     if (!isOrch && teamName) {
+      // Fire sits in the same compact action row as the other controls, so it
+      // does not stretch across the section.
       secs.push(settingsSection("Fire", `drop ${shown} from ${teamName}`,
-        `<button class="btn-sm office-set-fire" type="button">fire ${esc(shown)}</button>`));
+        `<div class="office-set-row office-set-actions">` +
+          `<button class="btn-sm office-set-fire" type="button">fire ${esc(shown)}</button>` +
+        `</div>`));
     }
     if (isOrch) {
       secs.push(settingsTeamsHtml());
@@ -2861,7 +2884,7 @@
         `<option value="${escAttr(t.name)}"${t.name === active ? " selected" : ""}>${esc(t.name)}</option>`).join("");
       secs.push(settingsSection("Hire", "add a subagent to a team",
         rows.length
-          ? `<div class="office-set-row">` +
+          ? `<div class="office-set-row office-set-actions">` +
               `<select class="office-input office-set-hire-team" aria-label="Team to hire into">${opts}</select>` +
               `<button class="btn-sm office-set-hire" type="button">hire…</button>` +
             `</div>`
@@ -2888,12 +2911,12 @@
           `<span class="office-lib-hd-title">Settings</span>` +
           `<span class="office-lib-hd-sub" id="office-set-sub"></span>` +
           `<span class="office-lib-hd-spacer"></span>` +
-          `<button class="btn-sm office-lib-close" type="button">Close</button>` +
+          `<button class="office-set-close" type="button" aria-label="Close settings" title="Close settings">${CLOSE_X}</button>` +
         `</div>` +
         `<div class="office-set-body" id="office-set-body"></div>` +
       `</div>`;
     document.body.appendChild(overlay);
-    overlay.querySelector(".office-lib-close").addEventListener("click", closeAgentSettings);
+    overlay.querySelector(".office-set-close").addEventListener("click", closeAgentSettings);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) closeAgentSettings(); });
     overlay.addEventListener("click", onSettingsClick);
     overlay.addEventListener("change", onSettingsChange);

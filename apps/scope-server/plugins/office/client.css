@@ -257,8 +257,8 @@ body[data-ds-dark-theme] {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 30px 86px;
-  padding: 26px 22px 30px;
+  gap: 20px 60px;
+  padding: 18px 18px 22px;
   background:
     repeating-linear-gradient(0deg,
       color-mix(in srgb, var(--office-floor-2) 80%, transparent) 0 1px,
@@ -316,14 +316,14 @@ body[data-ds-dark-theme] {
    on the beige floor. */
 .office-room.orch-room .office-room-name { color: color-mix(in srgb, var(--office-ink) 80%, var(--accent)); }
 .office-room-head {
-  display: flex; align-items: center; gap: 7px;
-  padding: 6px 8px 0;
-  font-size: 10px; letter-spacing: .7px; text-transform: uppercase;
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 7px 0;
+  font-size: 9.5px; letter-spacing: .7px; text-transform: uppercase;
   color: color-mix(in srgb, var(--office-ink) 72%, var(--office-frame));
 }
 .office-room-name { font-weight: 600; color: var(--office-ink); }
 .office-room.active .office-room-name { color: color-mix(in srgb, var(--office-ink) 80%, var(--accent)); }
-.office-room-meta { font-size: 9.5px; }
+.office-room-meta { font-size: 9px; }
 /* The header's controls are pushed to the room's top-right corner. */
 .office-room-spacer { flex: 1 1 auto; }
 /* Every team keeps its room; the active one is badged, the others offer a way
@@ -357,9 +357,9 @@ body[data-ds-dark-theme] {
 .office-room-pick:disabled { opacity: .7; cursor: default; }
 .office-room-floor {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
-  gap: 26px 16px;
-  padding: 14px 14px 16px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 16px 12px;
+  padding: 10px 10px 12px;
 }
 /* The meeting room holds three things: the round table, the office's Kanban
    board, and the workspace's reference library (files/folders injected at the
@@ -367,15 +367,15 @@ body[data-ds-dark-theme] {
    column, and wrap when the room is narrow. */
 .office-room.meeting .office-room-floor {
   display: grid;
-  grid-template-columns: minmax(108px, 150px) minmax(0, 1fr);
+  grid-template-columns: minmax(96px, 130px) minmax(0, 1fr);
   align-items: start;
-  gap: 14px;
-  min-height: 148px;
+  gap: 12px;
+  min-height: 120px;
 }
 .office-meeting-set {
   position: relative;
   display: flex; align-items: center; justify-content: center;
-  min-height: 148px;
+  min-height: 120px;
 }
 .office-meeting-plant { position: absolute; left: 2px; bottom: 2px; }
 .office-meeting-tools {
@@ -392,7 +392,7 @@ body[data-ds-dark-theme] {
   align-self: center;
   justify-self: center;
   display: flex; flex-direction: column; align-items: center; gap: 2px;
-  padding: 8px 10px 6px;
+  padding: 6px 8px 5px;
   border-radius: 7px;
   background: color-mix(in srgb, var(--office-floor) 88%, var(--office-wood-top));
   border: 1px solid color-mix(in srgb, var(--office-frame) 70%, transparent);
@@ -408,7 +408,7 @@ body[data-ds-dark-theme] {
   transform: translateY(-1px);
 }
 .office-library:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.office-lib-svg { width: 104px; height: 80px; display: block; }
+.office-lib-svg { width: 86px; height: 66px; display: block; }
 .lib-case { fill: var(--office-wood-dark); }
 .lib-inner { fill: color-mix(in srgb, var(--office-wood) 55%, var(--office-floor)); }
 .lib-board { fill: var(--office-wood-dark); }
@@ -437,10 +437,10 @@ body[data-ds-dark-theme] {
 .office-pod {
   position: relative;
   /* The cubicle's header (name + its own controls) sits inside the top wall. */
-  padding: 10px 10px 8px;
-  border-top: 6px solid var(--office-frame);
-  border-left: 6px solid var(--office-frame);
-  border-right: 6px solid var(--office-frame);
+  padding: 8px 8px 6px;
+  border-top: 5px solid var(--office-frame);
+  border-left: 5px solid var(--office-frame);
+  border-right: 5px solid var(--office-frame);
   border-radius: 3px 3px 0 0;
   background: color-mix(in srgb, var(--office-floor) 55%, transparent);
   transition: border-color .3s ease, box-shadow .3s ease, opacity .3s ease, background .3s ease;
@@ -466,8 +466,8 @@ body[data-ds-dark-theme] {
 .office-pod.leave .office-code i { opacity: .12; }
 
 .office-bubble {
-  margin-top: 3px;
-  font-size: 10.5px; line-height: 1.3;
+  margin-top: 2px;
+  font-size: 10px; line-height: 1.3;
   color: color-mix(in srgb, var(--office-ink) 70%, var(--office-frame));
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   pointer-events: none;
@@ -479,7 +479,7 @@ body[data-ds-dark-theme] {
    worker, beneath the model picker. Tabular figures keep the columns from
    twitching as the numbers move. */
 .office-stats {
-  font-size: 9.5px; line-height: 1.3;
+  font-size: 9px; line-height: 1.3;
   font-variant-numeric: tabular-nums;
   color: color-mix(in srgb, var(--office-ink) 78%, var(--office-frame));
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -491,16 +491,16 @@ body[data-ds-dark-theme] {
    what it has spent. This is the part of the floor the eye reads when asking
    "who is doing what, on which model, at what cost?". */
 .office-pod-foot {
-  display: flex; flex-direction: column; gap: 3px;
-  margin-top: 7px;
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: 5px;
 }
 
 /* The cubicle plot: everything below is positioned from above. */
-.office-station { position: relative; height: 116px; }
+.office-station { position: relative; height: 92px; }
 
 .office-desk {
   position: absolute;
-  left: 16px; right: 16px; top: 12px;  height: 48px;
+  left: 12px; right: 12px; top: 10px;  height: 40px;
   border-radius: 5px;
   background: linear-gradient(180deg, var(--office-wood-top), var(--office-wood));
   border: 1px solid var(--office-wood-dark);
@@ -512,7 +512,7 @@ body[data-ds-dark-theme] {
 .office-monitor {
   position: absolute;
   top: 4px; left: 50%; transform: translateX(-50%);
-  width: 66px; height: 10px; border-radius: 2px;
+  width: 56px; height: 9px; border-radius: 2px;
   overflow: hidden;
   background: color-mix(in srgb, var(--office-ink) 88%, var(--office-frame));
   border: 1px solid var(--office-ink);
@@ -546,15 +546,15 @@ body[data-ds-dark-theme] {
 }
 .office-keyboard {
   position: absolute;
-  bottom: 7px; left: 50%; transform: translateX(-50%);
-  width: 40px; height: 11px; border-radius: 2px;
+  bottom: 5px; left: 50%; transform: translateX(-50%);
+  width: 34px; height: 9px; border-radius: 2px;
   background: color-mix(in srgb, var(--office-ink) 55%, var(--office-wood));
   border: 1px solid color-mix(in srgb, var(--office-ink) 70%, transparent);
 }
 .office-mug {
   position: absolute;
-  right: 9px; bottom: 8px;
-  width: 10px; height: 10px; border-radius: 50%;
+  right: 7px; bottom: 6px;
+  width: 9px; height: 9px; border-radius: 50%;
   background: color-mix(in srgb, var(--office-armchair) 75%, var(--office-wood-top));
   border: 1px solid color-mix(in srgb, var(--office-ink) 55%, transparent);
 }
@@ -562,8 +562,8 @@ body[data-ds-dark-theme] {
 /* The agent, seen from above: shoulders + head + two arms on the keyboard. */
 .office-person {
   position: absolute;
-  left: 50%; top: 58px;
-  width: 34px; height: 30px; z-index: 3;
+  left: 50%; top: 46px;
+  width: 30px; height: 26px; z-index: 3;
   transform: translateX(-50%);
 }
 .office-shoulders {
@@ -574,13 +574,13 @@ body[data-ds-dark-theme] {
 }
 .office-head {
   position: absolute; top: 0; left: 50%; transform: translateX(-50%);
-  width: 21px; height: 21px; border-radius: 50%;
+  width: 19px; height: 19px; border-radius: 50%;
   background: color-mix(in srgb, var(--muted) 86%, var(--text));
   border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
 }
 .office-arm {
-  position: absolute; top: -13px;
-  width: 7px; height: 20px; border-radius: 4px;
+  position: absolute; top: -11px;
+  width: 6px; height: 18px; border-radius: 4px;
   background: hsl(var(--office-hue, 210) 52% 42%);
   border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
 }
@@ -594,8 +594,8 @@ body[data-ds-dark-theme] {
 /* Top-down office chair, tucked under the desk. */
 .office-chair {
   position: absolute;
-  left: 50%; top: 82px; transform: translateX(-50%);
-  width: 36px; height: 24px; border-radius: 12px 12px 8px 8px;
+  left: 50%; top: 66px; transform: translateX(-50%);
+  width: 32px; height: 21px; border-radius: 12px 12px 8px 8px;
   background: linear-gradient(180deg, var(--office-chair-top), var(--office-chair));
   border: 1px solid color-mix(in srgb, var(--office-chair) 60%, var(--office-ink));
   box-shadow: 0 4px 8px -5px var(--office-shadow);
@@ -605,7 +605,7 @@ body[data-ds-dark-theme] {
 
 /* The cubicle's header: its name plate at the top-left, the desk's controls
    directly beneath it. */
-.office-pod-head { display: flex; flex-direction: column; gap: 4px; }
+.office-pod-head { display: flex; flex-direction: column; gap: 3px; }
 
 /* Every desk's model picker, in its foot. The orchestrator writes the app's
    default model; a team member writes its own teams.yaml row. Dressed like the
@@ -633,13 +633,13 @@ body[data-ds-dark-theme] {
 }
 .office-model-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .office-plate {
-  display: flex; align-items: center; gap: 6px;
-  padding: 3px 7px;
+  display: flex; align-items: center; gap: 5px;
+  padding: 2px 6px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--office-floor) 82%, var(--office-wood-top));
   border: 1px solid color-mix(in srgb, var(--office-frame) 60%, transparent);
 }
-.office-name { font-size: 12px; color: var(--office-ink); max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.office-name { font-size: 11.5px; color: var(--office-ink); max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* "file_reader is Bob": the desk leads with the display name and keeps the real
    one beside it, so the roster id is never lost. */
 .office-realname { font-size: 9.5px; color: color-mix(in srgb, var(--office-ink) 55%, var(--office-frame)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -817,6 +817,10 @@ body[data-ds-dark-theme] {
 }
 .office-lib-hd-title { font-size: 16px; font-weight: 600; }
 .office-lib-hd-sub { font-size: 12.5px; color: var(--muted); }
+/* A long header blurb wraps to a sane width instead of shrinking into a tall
+   column, and the icon close keeps to the header's top-right corner. */
+.office-lib-head .office-lib-hd-sub { max-width: 70ch; }
+.office-lib-head .office-icon-close { align-self: flex-start; }
 .office-lib-hd-spacer { flex: 1 1 auto; }
 .office-lib-rows {
   flex: 1 1 auto; min-height: 0;
@@ -967,8 +971,8 @@ body[data-ds-dark-theme] {
 .office-run-toggle { min-width: 92px; }
 .office-run-toggle.running { color: var(--green); border-color: color-mix(in srgb, var(--green) 55%, var(--border)); }
 
-/* The board's foot: what the queue is doing on the left, Close pinned to the
-   panel's bottom-right corner. */
+/* The board's foot: what the queue is doing on the left, an OK button pinned to
+   the panel's bottom-right corner (the close icon lives up in the header). */
 .office-board-foot {
   display: flex; align-items: center; gap: 12px;
   padding: 10px 16px;
@@ -979,6 +983,7 @@ body[data-ds-dark-theme] {
   flex: 1 1 auto; min-width: 0;
   font-size: 12.5px; color: var(--muted);
 }
+.office-board-ok { padding: 5px 22px; font-size: 13px; min-width: 76px; }
 
 /* The office's small modal forms (hire / rename). They borrow the full-screen
    editor's backdrop and the UI's own tokens — they float above the room, so
@@ -1070,7 +1075,10 @@ body[data-ds-dark-theme] {
   scrollbar-gutter: stable;
   background: var(--surface);
 }
-.office-set-sec { padding: 14px 2px; border-bottom: 1px solid var(--border); min-width: 0; }
+/* `flex-shrink: 0` keeps each section at its full content height: without it a
+   long configuration (many skills / tools / extensions) lets the sections
+   shrink and overlap, instead of the body scrolling. */
+.office-set-sec { padding: 14px 2px; border-bottom: 1px solid var(--border); min-width: 0; flex: 0 0 auto; }
 .office-set-sec:last-child { border-bottom: 0; }
 .office-set-sec-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 9px; flex-wrap: wrap; min-width: 0; }
 .office-set-sec-title {
@@ -1081,6 +1089,30 @@ body[data-ds-dark-theme] {
 .office-set-sec-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .office-set-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; min-width: 0; }
 .office-set-row .office-input { width: auto; flex: 1 1 200px; min-width: 0; }
+/* Duty + edit markdown share a row: keep both at their intrinsic size so they
+   sit side by side instead of stretching across the section. */
+.office-set-actions .btn-sm { flex: 0 0 auto; }
+
+/* The Office popups' close control: an icon, not a word — a small square that
+   takes the surface's ink. Shared by the agent settings, reference library and
+   task board surfaces (the board keeps its `.office-lib-close` hook so its
+   corner position is unchanged). */
+.office-set-close,
+.office-icon-close {
+  align-self: center;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.office-set-close:hover,
+.office-icon-close:hover { color: var(--text); background: var(--surface-3); border-color: var(--border-strong); }
+.office-set-close:focus-visible,
+.office-icon-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.office-set-close-icon { width: 14px; height: 14px; display: block; }
 .office-set-none { font-size: 12.5px; color: var(--muted); }
 .office-set-chips { display: flex; flex-wrap: wrap; gap: 7px; }
 .office-set-chip {

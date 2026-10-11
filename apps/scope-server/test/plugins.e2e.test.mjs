@@ -239,6 +239,43 @@ describe("plugin host (client)", () => {
     await page.close();
   });
 
+  test("the view tabs reorder by drag and drop, and the order persists", async () => {
+    const { page, errors } = await openApp();
+    const tabIds = () => page.$$eval("#view-toggle .view-btn[data-plugin]", (els) => els.map((e) => e.dataset.plugin));
+    const before = await tabIds();
+    assert.ok(before.length >= 3, `there are tabs to reorder (${before.length})`);
+    const [first, second] = before;
+
+    // Drag the first tab onto the right edge of the second: it should land just
+    // after it, not back where it started.
+    const target = page.locator(`#view-toggle #btn-${second}`);
+    const box = await target.boundingBox();
+    await page.locator(`#view-toggle #btn-${first}`).dragTo(target, {
+      targetPosition: { x: box.width - 1, y: box.height / 2 },
+    });
+    await page.waitForFunction((f) => {
+      const first = document.querySelector("#view-toggle .view-btn[data-plugin]");
+      return first && first.dataset.plugin !== f;
+    }, first);
+
+    const after = await tabIds();
+    assert.equal(after[0], second, "the target took the first slot");
+    assert.equal(after[1], first, "the dragged tab landed just after it");
+    assert.equal(after.length, before.length, "no tab was lost in the move");
+    assert.deepEqual([...after].sort(), [...before].sort(), "the same tabs, reordered");
+
+    // The choice is written to localStorage, and a reload keeps it.
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("scope-nav-order") || "null"));
+    assert.deepEqual(saved, after, "the drawn order is the saved order");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => window.SCOPE?.Plugins?.isSynced?.() === true);
+    const reloaded = await tabIds();
+    assert.equal(reloaded[0], second, "the custom order survives a reload");
+    assert.equal(reloaded[1], first);
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
   test("setView switches the plugin's pane without knowing any view by name", async () => {
     const { page } = await openApp();
     assert.notEqual(await page.locator("#single-pane").evaluate((e) => e.style.display), "none");
@@ -299,12 +336,13 @@ describe("plugin host (client)", () => {
     const { res, data } = await api(`/office?cwd=${encodeURIComponent(ROOT)}`);
     assert.ok(res.ok);
     assert.equal(data.officeName, "Night Shift HQ");
-    // …and its own store, which is namespaced per plugin. The view's cwd is the
-    // server's launch dir, so the bucket is found rather than assumed.
-    const store = JSON.parse(fs.readFileSync(path.join(pluginsDir, ".data", "office.json"), "utf8"));
+    // …and the project's own store. The view's cwd is the server's launch dir,
+    // so the board is written under <launch dir>/.pi-scope/plugins/.data/.
+    const storeFile = path.join(fs.realpathSync(ROOT), ".pi-scope", "plugins", ".data", "office.json");
+    const store = JSON.parse(fs.readFileSync(storeFile, "utf8"));
     assert.ok(
       Object.values(store.workspaces).some((w) => w.officeName === "Night Shift HQ"),
-      "the office name is in the plugin's own store",
+      "the office name is in the project's own store",
     );
 
     // Disabling the plugin takes the view away with it (routes and bundle).

@@ -234,6 +234,13 @@
       flex-shrink: 0;
     }
 
+    /* View tabs are reorderable by drag and drop (plugins.js). */
+    .view-toggle .view-btn { cursor: grab; user-select: none; }
+    .view-toggle .view-btn:active { cursor: grabbing; }
+    .view-toggle .view-btn.nav-dragging { opacity: .4; }
+    .view-toggle .view-btn.nav-drop-before { box-shadow: inset 3px 0 0 var(--accent); }
+    .view-toggle .view-btn.nav-drop-after { box-shadow: inset -3px 0 0 var(--accent); }
+
     #live-indicator {
       font-size: 16.5px;
       display: flex;
@@ -5702,6 +5709,23 @@
     .chat-header-state.busy {
       color: var(--orange);
       background: var(--tint-orange);
+      animation: chat-state-breathe 1.8s ease-in-out infinite;
+    }
+    .chat-header-state.busy::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: chat-state-dot 1.1s ease-in-out infinite;
+    }
+    @keyframes chat-state-dot {
+      0%, 100% { opacity: 0.35; transform: scale(0.7); }
+      50% { opacity: 1; transform: scale(1); }
+    }
+    @keyframes chat-state-breathe {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+      50% { box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.14); }
     }
     .chat-header-state.off {
       color: var(--muted);
@@ -6577,6 +6601,76 @@
     .chat-asks-i.declined .chat-asks-a {
       color: var(--muted);
       font-style: italic;
+    }
+
+    /* Running indicator — a persistent animated pill pinned to the bottom of
+       the in-flight assistant bubble for the whole turn. Unlike the old typing
+       dots it is not removed when the first token arrives, so a long tool call
+       or a long reply still shows motion and the current phase. */
+    .chat-live-run {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      align-self: flex-start;
+      max-width: 100%;
+      margin: 10px 0 2px;
+      padding: 3px 11px 3px 9px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      border: 1px solid var(--border);
+    }
+    .chat-live-run-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+    .chat-live-run-dots i {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+      opacity: 0.45;
+      animation: chat-typing-bounce 1.2s ease-in-out infinite;
+    }
+    .chat-live-run-dots i:nth-child(2) { animation-delay: 0.15s; }
+    .chat-live-run-dots i:nth-child(3) { animation-delay: 0.3s; }
+    .chat-live-run-label {
+      font-size: 11.5px;
+      font-weight: 500;
+      letter-spacing: 0.1px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      /* A soft left→right shimmer sweeps the label so the row reads as live at
+         a glance. Falls back to the solid muted colour if text clipping is
+         unsupported. */
+      background: linear-gradient(90deg, var(--muted) 0%, var(--text) 50%, var(--muted) 100%);
+      background-size: 220% 100%;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: chat-live-shimmer 2.2s linear infinite;
+    }
+    @keyframes chat-live-shimmer {
+      0% { background-position: 130% 0; }
+      100% { background-position: -100% 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .chat-live-run-dots i,
+      .chat-live-run-label,
+      .chat-header-state.busy,
+      .chat-header-state.busy::before {
+        animation: none;
+      }
+      .chat-live-run-label {
+        background: none;
+        -webkit-background-clip: initial;
+        background-clip: initial;
+        -webkit-text-fill-color: initial;
+        color: var(--muted);
+      }
     }
 
     /* Typing indicator */

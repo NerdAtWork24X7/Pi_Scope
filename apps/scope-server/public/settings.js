@@ -52,6 +52,7 @@
   // snapshot (seeded by GET /pi-update) while an install is in flight.
   let piUpdateChecking = false;
   let piUpdating = false;
+  let piModelsRefreshing = false;
 
   // Authentication tab state (GUI mirror of pi's /login). `authData` is the
   // provider catalogue; `authSession` is the running login (polled); `authSig`
@@ -969,6 +970,12 @@
   }
 
   // ─── Models section ───────────────────────────────────────────────────────
+  /** One label/value row inside a `.set-update-card` (Update + Models tabs). */
+  function statusRow(label, value) {
+    return `<div class="set-update-row"><span class="set-update-row-label">${esc(label)}</span>` +
+      `<span class="set-update-row-value">${value}</span></div>`;
+  }
+
   function renderModels() {
     const sr = SET.settingsRaw || {};
     const enabled = strList(SET.enabledModels);
@@ -1021,6 +1028,7 @@
       `<div class="settings-group-kicker">Memory</div>` +
       field("Memory model", "powers the memory summarizer; (default) falls back to the settings default model when memory is enabled",
         modelSelect(memoryKey, 'data-act="setMemoryModel"', "(default)")) +
+      modelCatalogCard() +
       renderModelCost() +
       `</div>`
     );
@@ -1069,6 +1077,64 @@
       `<button type="button" class="set-cost-reset" id="set-cost-reset" title="Reset column widths">↺ columns</button>` +
       `</div>` +
       `<div class="set-cost-table${hasCache ? " has-cache" : ""}" style="--cost-cols: ${costGridTemplate(hasCache)}">${header}<div id="set-cost-rows">${costRowsHtml()}</div><div class="set-cost-resizers" aria-hidden="true"></div></div>`
+    );
+  }
+
+  // ─── Model update (the two pi model catalogs) ─────────────────────────────
+  /**
+   * Fetches every provider's model list on demand. Two files back the cost table
+   * below, and they count different things: pi's own `models-store.json` (its
+   * provider/model store — ids, context windows, pricing) holds the providers pi
+   * is configured for in this agent dir, while the `model-update-cache.json` the
+   * pi-updater extension writes from models.dev holds that site's whole release
+   * catalogue (hundreds of providers, most of which pi has no credentials for).
+   * The card therefore reports the catalogue the table below lists as its own
+   * row — otherwise "7571 models" above a six-provider table reads as though the
+   * table were missing most of them. Pi Scope runs pi with `PI_OFFLINE=1`, so
+   * neither file is refreshed in-app by anything else; this re-checks pi's
+   * providers and fetches models.dev again, then the list below is re-read. The
+   * app also does this by itself once a file is past the TTL.
+   */
+  function modelCatalogCard() {
+    const m = SET && SET.modelCatalog;
+    if (!m) return "";
+    const when = (ms) => ms ? esc(fmtWhen(new Date(ms).toISOString())) : `<span class="set-update-muted">absent</span>`;
+    const state = (exists, stale) => !exists
+      ? `<span class="set-update-muted">missing — will be fetched</span>`
+      : stale
+        ? `<span class="set-update-verdict avail">stale</span>`
+        : `<span class="set-update-verdict ok">fresh</span>`;
+    const storeExists = m.storeUpdatedAt !== null;
+    const cacheExists = m.cacheCheckedAt !== null;
+    // What the table below actually lists: the same registry the cost rows are
+    // built from (pi's store, plus the extension provider caches).
+    const meta = (SET && SET.modelsMeta) || {};
+    const listKeys = Object.keys(meta);
+    const listProviders = new Set(listKeys.map((k) => (meta[k] && meta[k].provider) || k.split("/")[0])).size;
+    const count = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+    return (
+      `<div class="settings-group-div"></div>` +
+      `<div class="settings-group-kicker">Model update</div>` +
+      `<h2 class="settings-group-title">providers ${scopeBadge("global")}</h2>` +
+      `<div class="settings-intro">Fetch the current model list from every provider. ` +
+      `pi re-checks the providers configured in this agent dir and rewrites <code>models-store.json</code> — a source the cost table below is built from — and its models.dev release cache is fetched again. ` +
+      `The two hold different things: the table lists the providers you can run here (the store, pi's built-in catalogues and the dynamic provider caches), while the models.dev cache lists releases from that site's whole catalogue, most of which pi has no credentials for. ` +
+      `Pi Scope launches pi with <code>PI_OFFLINE=1</code>, so nothing else refreshes them while the app is open; ` +
+      `the app also refreshes whichever file has gone past ${Math.round(m.ttlMs / 3_600_000)}h by itself.</div>` +
+      `<div class="set-update-card">` +
+        statusRow("Cost table below", `${count(listProviders, "provider")} · ${count(listKeys.length, "model")}`) +
+        statusRow("Model store", `${when(m.storeUpdatedAt)} · ${state(storeExists, m.storeStale)}`) +
+        statusRow("models.dev releases", `${when(m.cacheCheckedAt)} · ${count(m.cacheModels, "release")} across ${count(m.cacheProviders || 0, "provider")} · ${state(cacheExists, m.cacheStale)}`) +
+        statusRow("Automatic refresh", m.scheduled
+          ? `<span class="set-update-verdict ok">on</span>`
+          : `<span class="set-update-muted">off (SCOPE_MODEL_CATALOG=off)</span>`) +
+        (m.lastError ? statusRow("Last error", `<span class="set-update-verdict err">${esc(m.lastError)}</span>`) : "") +
+      `</div>` +
+      `<div class="set-update-actions">` +
+        `<button type="button" class="btn-sm primary" id="set-models-refresh"${piModelsRefreshing ? " disabled" : ""}>` +
+          `${piModelsRefreshing ? "Fetching models…" : "Refresh models from all providers"}</button>` +
+        (m.lastCheckedAt ? `<span class="set-update-when">checked ${esc(fmtWhen(new Date(m.lastCheckedAt).toISOString()))}</span>` : "") +
+      `</div>`
     );
   }
 
@@ -1390,10 +1456,6 @@
       verdict = `<span class="set-update-verdict">Installed version reported.</span>`;
     }
 
-    const row = (label, value) =>
-      `<div class="set-update-row"><span class="set-update-row-label">${esc(label)}</span>` +
-      `<span class="set-update-row-value">${value}</span></div>`;
-
     const canUpdate = !!u && u.updateAvailable && u.updatable && !piUpdating;
     const busy = piUpdating || piUpdateChecking;
 
@@ -1405,14 +1467,14 @@
       `Check npm for a newer release and install it here — the next Chat prompt picks it up, ` +
       `no server restart required.</div>` +
       `<div class="set-update-card${u && u.updateAvailable ? " avail" : ""}">` +
-        row("Installed", ver(u && u.installed)) +
-        row("Latest on npm", u && u.latest ? ver(u.latest)
+        statusRow("Installed", ver(u && u.installed)) +
+        statusRow("Latest on npm", u && u.latest ? ver(u.latest)
           : (u ? `<span class="set-update-muted">not available</span>` : `<span class="set-update-muted">…</span>`)) +
-        row("Source", `<span class="set-scope set-scope-none">${esc(u ? u.source : "…")}</span>`) +
+        statusRow("Source", `<span class="set-scope set-scope-none">${esc(u ? u.source : "…")}</span>`) +
         (u && u.bundleDir
-          ? row("Location", `<code class="set-update-path" title="${esc(u.bundleDir)}">${esc(u.bundleDir)}</code>`)
+          ? statusRow("Location", `<code class="set-update-path" title="${esc(u.bundleDir)}">${esc(u.bundleDir)}</code>`)
           : "") +
-        row("Status", verdict) +
+        statusRow("Status", verdict) +
       `</div>` +
       (u && u.reason ? `<div class="set-field-hint">${esc(u.reason)}</div>` : "") +
       `<div class="set-update-actions">` +
@@ -1425,6 +1487,33 @@
       (u && u.error && u.output ? `<pre class="set-update-log">${esc(u.output)}</pre>` : "") +
       `</div>`
     );
+  }
+
+  // Force both catalogs current now (the app also does this by itself while open).
+  async function runModelCatalogRefresh() {
+    if (piModelsRefreshing) return;
+    piModelsRefreshing = true;
+    setSection(activeSec, true); // show the busy button straight away
+    const piUpdate = SET.piUpdate; // /settings has no pi-update payload; keep the tab's copy
+    try {
+      const { res, data } = await S.api("/pi-update", {}, { action: "refresh-models" });
+      if (!res.ok || !data?.modelCatalog) {
+        toast(data?.error || "Could not refresh the models", true);
+        return;
+      }
+      // Re-read the snapshot: the server re-reads models-store.json by mtime, so
+      // the cost table now lists the providers that were just fetched.
+      await load();
+      if (SET) SET.piUpdate = piUpdate;
+      toast(data.modelCatalog.lastError
+        ? `Models: ${data.modelCatalog.lastError}`
+        : "Fetched models from all providers");
+    } catch (e) {
+      toast(String(e?.message || e), true);
+    } finally {
+      piModelsRefreshing = false;
+      setSection(activeSec, true);
+    }
   }
 
   // Check npm for the latest version and refresh the section from the response.
@@ -2201,6 +2290,11 @@
         updateCostView();
       });
     }
+
+    // Fetch every provider's models (Settings → Models → Model update). Sits
+    // directly above the cost table, so the click refreshes the list below it.
+    const modelsRefresh = $("#set-models-refresh");
+    if (modelsRefresh) modelsRefresh.addEventListener("click", () => void runModelCatalogRefresh());
 
     // Model-cost interactions, DELEGATED on the rows container. Filtering
     // (provider chip / search) re-renders the rows in place via updateCostView;

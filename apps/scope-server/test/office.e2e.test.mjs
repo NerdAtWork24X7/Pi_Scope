@@ -687,6 +687,15 @@ describe("office view", () => {
     assert.match(await page.locator("#office-lib-backdrop .office-lib-hd-title").textContent(), /Reference library/);
     assert.match(await page.locator("#office-lib-backdrop .office-lib-hd-sub").textContent(), /injected at the start of every new conversation/);
     assert.ok(await page.locator("#office-lib-backdrop").evaluate((el) => getComputedStyle(el).position === "fixed"), "it is an overlay");
+    // It closes with an icon, like the agent settings popup.
+    const libClose = page.locator("#office-lib-backdrop .office-lib-close");
+    assert.equal(await libClose.count(), 1, "the header carries a close control");
+    assert.equal((await libClose.textContent()).trim(), "", "which is an icon, not the word Close");
+    assert.equal(await libClose.locator("svg").count(), 1, "and draws an X");
+    await libClose.click();
+    await page.waitForSelector("#office-lib-backdrop", { state: "detached" });
+    await shelf.click();
+    await page.waitForSelector("#office-lib-backdrop");
     assert.deepEqual(
       await page.locator("#office-lib-backdrop .office-lib-row .office-lib-path").allTextContents(),
       ["alpha/docs/", "alpha/docs/arch.md"],
@@ -1482,6 +1491,113 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
+  test("the settings popup closes with an icon, keeps duty + markdown on one row, and scrolls when long", async () => {
+    const manyNames = (n, p) => Array.from({ length: n }, (_, i) => `${p}_${i}`);
+    const skillCatalogue = manyNames(40, "skill").map((dir) => ({
+      name: dir, dir, description: `does ${dir}`, orchestrator: false, subagent: true,
+    }));
+    const toolCatalogue = manyNames(40, "tool");
+    const extCatalogue = manyNames(30, "ext").map((name) => ({
+      name, path: `/home/u/.pi/extensions/${name}.ts`, available: true, enabled: true,
+    }));
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({ tools: toolCatalogue, skills: skillCatalogue, extensions: extCatalogue }),
+      defs: [{ file: "builder.md", name: "builder", skills: [], tools: [], toolsAll: false, content: "---\nname: builder\n---\n\nBuild.\n" }],
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    const popup = () => page.locator("#office-settings-backdrop");
+
+    await pod("builder").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+
+    // The header closes with an icon, not the word "Close": the agent settings
+    // popup replaces that button with a small X.
+    const close = popup().locator(".office-set-close");
+    assert.equal(await close.count(), 1, "the close control is there");
+    assert.equal((await close.textContent()).trim(), "", "and carries no text");
+    assert.equal(await close.locator("svg").count(), 1, "it draws an icon");
+    assert.equal(await popup().locator(".office-lib-close").count(), 0, "the old word button is gone");
+    await close.click();
+    await page.waitForSelector("#office-settings-backdrop", { state: "detached" });
+
+    await pod("builder").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.waitForSelector('#office-settings-backdrop [data-desk-tool="tool_0"]');
+
+    // Duty and edit markdown sit on one row, at their intrinsic size — neither
+    // stretches across the section.
+    const duty = await popup().locator(".office-set-duty").boundingBox();
+    const md = await popup().locator(".office-set-md").boundingBox();
+    assert.ok(Math.abs(duty.y - md.y) < 4, `duty and markdown share a row (${duty.y} vs ${md.y})`);
+    assert.ok(md.x > duty.x + duty.width - 4, "markdown sits beside duty, not below it");
+    assert.ok(duty.width < 140 && md.width < 160, `both read small (${duty.width}, ${md.width})`);
+    // Every action button (duty, markdown, save name, fire) stays at its
+    // intrinsic size — none stretches across its section.
+    const stretched = await popup().locator(".office-set-actions .btn-sm").evaluateAll((els) =>
+      els.filter((el) => el.getBoundingClientRect().width >= 220).map((el) => el.textContent.trim()));
+    assert.deepEqual(stretched, [], "no settings action button stretches across its section");
+
+    // A long configuration scrolls inside the popup body, and the sections keep
+    // their own height instead of shrinking into each other.
+    const scroll = await popup().locator(".office-set-body").evaluate((el) => ({ sh: el.scrollHeight, ch: el.clientHeight }));
+    assert.ok(scroll.sh > scroll.ch + 4, `the body scrolls (${scroll.sh} > ${scroll.ch})`);
+    const overlaps = await popup().locator(".office-set-sec").evaluateAll((els) => {
+      const boxes = els.map((el) => el.getBoundingClientRect());
+      for (let i = 1; i < boxes.length; i++) if (boxes[i].top < boxes[i - 1].bottom - 1) return true;
+      return false;
+    });
+    assert.equal(overlaps, false, "the sections stack without overlapping");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("the settings popup fits and stays usable on a narrow (mobile) viewport", async () => {
+    const manyNames = (n, p) => Array.from({ length: n }, (_, i) => `${p}_${i}`);
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
+      team: defaultTeam({
+        tools: manyNames(30, "tool"),
+        skills: manyNames(30, "skill").map((dir) => ({ name: dir, dir, description: `does ${dir}`, subagent: true })),
+        extensions: manyNames(20, "ext").map((name) => ({ name, path: `/home/u/.pi/extensions/${name}.ts`, available: true, enabled: true })),
+      }),
+      defs: [{ file: "builder.md", name: "builder", skills: [], tools: [], toolsAll: false, content: "---\nname: builder\n---\n\nBuild.\n" }],
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+
+    // Open the popup on the roomy viewport, then shrink to a phone size: the
+    // fixed overlay has to fit inside the narrower viewport, not spill off-screen.
+    await pod("builder").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.waitForSelector('#office-settings-backdrop [data-desk-tool="tool_0"]');
+    await page.setViewportSize({ width: 360, height: 640 });
+    const popup = () => page.locator("#office-settings-backdrop");
+    const view = page.viewportSize();
+    const panel = await popup().locator(".office-settings-panel").boundingBox();
+    assert.ok(panel.x >= -1 && panel.y >= -1, `the panel starts on-screen (${panel.x},${panel.y})`);
+    assert.ok(panel.width <= view.width + 1, `the panel fits the width (${panel.width} <= ${view.width})`);
+    assert.ok(panel.height <= view.height + 1, `and the height (${panel.height} <= ${view.height})`);
+
+    // The body scrolls vertically and never overflows sideways.
+    const body = await popup().locator(".office-set-body").evaluate((el) => ({
+      sw: el.scrollWidth, cw: el.clientWidth, sh: el.scrollHeight, ch: el.clientHeight,
+    }));
+    assert.ok(body.sw <= body.cw + 1, `no horizontal overflow (${body.sw} <= ${body.cw})`);
+    assert.ok(body.sh > body.ch, `the configuration scrolls (${body.sh} > ${body.ch})`);
+
+    // The sections still stack cleanly, and the close icon is reachable.
+    const overlaps = await popup().locator(".office-set-sec").evaluateAll((els) => {
+      const boxes = els.map((el) => el.getBoundingClientRect());
+      for (let i = 1; i < boxes.length; i++) if (boxes[i].top < boxes[i - 1].bottom - 1) return true;
+      return false;
+    });
+    assert.equal(overlaps, false, "the sections stay stacked on a narrow viewport");
+    const close = await popup().locator(".office-set-close").boundingBox();
+    assert.ok(close.x >= 0 && close.y >= 0 && close.x + close.width <= view.width + 1 && close.y + close.height <= view.height + 1, `the close icon is on-screen (${close.x}+${close.width}, ${close.y}+${close.height})`);
+    await popup().locator(".office-set-close").click();
+    await page.waitForSelector("#office-settings-backdrop", { state: "detached" });
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
   test("each desk shows the tokens it spent and what they cost", async () => {
     mock.setStats(SID, { total_tokens: 12_345, total_cost: 0.042, error_count: 0, models: ["google/gemini-2.5-flash-lite"] });
     await boot({
@@ -1604,7 +1720,7 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
-  test("the board closes from its bottom-right corner, Todo tasks edit in place, and Planned tasks drag to resequence", async () => {
+  test("the board's close icon sits top-right and its OK button closes from the foot, and Planned tasks drag to resequence", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
       office: {
@@ -1619,13 +1735,20 @@ describe("office view", () => {
     await page.click("#office-board-open");
     await page.waitForSelector("#office-board-backdrop");
 
-    // The close button is pinned to the panel's bottom-right corner, in the foot.
+    // The close icon sits at the panel's top-right corner, in the header; the
+    // foot carries an OK button at its bottom-right corner.
     const panel = await board().locator(".office-lib-panel").boundingBox();
-    const close = await board().locator(".office-lib-close").boundingBox();
-    assert.ok(close.y + close.height <= panel.y + panel.height + 1, "Close sits inside the panel's bottom edge");
-    assert.ok(close.y >= panel.y + panel.height - 60, `Close sits at the panel's foot (${Math.round(close.y + close.height)} of ${Math.round(panel.y + panel.height)})`);
-    assert.ok(close.x + close.width >= panel.x + panel.width - 25, "and hugs its right edge");
-    assert.equal(await page.locator("#office-board-backdrop .office-lib-head .office-lib-close").count(), 0, "it is no longer in the header");
+    const close = await board().locator(".office-lib-head .office-lib-close").boundingBox();
+    assert.ok(close.y >= panel.y - 1 && close.y + close.height <= panel.y + 90, "Close sits in the panel's header");
+    assert.ok(close.x + close.width >= panel.x + panel.width - 30, "and hugs its top-right corner");
+    // It is an icon, not the word Close.
+    assert.equal((await board().locator(".office-lib-close").textContent()).trim(), "", "the board closes with an icon, not a word");
+    assert.equal(await board().locator(".office-lib-close svg").count(), 1, "which draws an X");
+    // The foot's OK button is pinned to the bottom-right corner.
+    const ok = await board().locator(".office-board-ok").boundingBox();
+    assert.ok(ok.y + ok.height <= panel.y + panel.height + 1, "OK sits inside the panel's bottom edge");
+    assert.ok(ok.y >= panel.y + panel.height - 60, `OK sits at the panel's foot (${Math.round(ok.y + ok.height)} of ${Math.round(panel.y + panel.height)})`);
+    assert.ok(ok.x + ok.width >= panel.x + panel.width - 25, "and hugs its right edge");
 
     // A Todo task can be edited in place; its column is unchanged.
     await kcol("todo").locator(".office-task", { hasText: "draft the plan" }).locator(".office-task-edit").click();
@@ -1661,8 +1784,8 @@ describe("office view", () => {
         .map((el) => el.textContent).join(",") === "ship it,write it up");
     assert.deepEqual(await colTitles("planned"), ["ship it", "write it up"], "the board draws the new order");
 
-    // Close, from the corner, finally closes the board.
-    await board().locator(".office-lib-close").click();
+    // OK, from the foot's corner, closes the board.
+    await board().locator(".office-board-ok").click();
     await page.waitForSelector("#office-board-backdrop", { state: "detached" });
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });

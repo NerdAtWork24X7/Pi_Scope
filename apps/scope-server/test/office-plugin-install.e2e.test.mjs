@@ -77,7 +77,8 @@ async function api(pathname, init = {}) {
 const officeRecord = async () => (await api("/plugins")).data.plugins.find((p) => p.id === "office");
 /** The workspace's office state, through the plugin's own route. */
 const snapshot = async (cwd = ws) => (await api(`/office?cwd=${encodeURIComponent(cwd)}`)).data;
-const storePath = () => path.join(pluginsDir, ".data", "office.json");
+/** The plugin's project store: `<cwd>/.pi-scope/plugins/.data/office.json`. */
+const storePath = (cwd = ws) => path.join(fs.realpathSync(cwd), ".pi-scope", "plugins", ".data", "office.json");
 
 before(async () => {
   tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "scope-office-install-")));
@@ -157,9 +158,9 @@ describe("office installed as a user plugin", () => {
     await api("/office", { method: "POST", body: JSON.stringify({ action: "setOfficeName", name: "User Copy HQ", cwd: ws }) });
     assert.equal((await snapshot()).officeName, "User Copy HQ");
 
-    // Its state is the user plugins' store, keyed by workspace.
-    assert.ok(fs.existsSync(storePath()), "the store lives beside the user plugins");
-    assert.equal(JSON.parse(fs.readFileSync(storePath(), "utf8")).workspaces[ws].officeName, "User Copy HQ");
+    // Its state is the project's own store, keyed by workspace.
+    assert.ok(fs.existsSync(storePath()), "the store lives in the project");
+    assert.equal(JSON.parse(fs.readFileSync(storePath(), "utf8")).workspaces[fs.realpathSync(ws)].officeName, "User Copy HQ");
   });
 
   test("the browser loads that copy: it runs its bundle and draws the floor with its stylesheet", async () => {

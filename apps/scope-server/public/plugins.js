@@ -19,6 +19,9 @@
   const SPECS = new Map();
   const ORDER = [];
 
+  /** Where the user's own nav order lives (a list of plugin ids). */
+  const NAV_ORDER_KEY = "scope-nav-order";
+
   function escHtml(s) {
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -98,10 +101,31 @@
   const currentViewId = () => window.__SCOPE_STATE?.view ?? null;
   const activeView = () => get(currentViewId());
 
+  /** The user's saved nav order (a list of plugin ids), or [] when they have
+   *  never rearranged the tabs. */
+  function savedNavOrder() {
+    try {
+      const v = JSON.parse(localStorage.getItem(NAV_ORDER_KEY) || "null");
+      return Array.isArray(v) ? v : [];
+    } catch { return []; }
+  }
+
+  /** Persist the user's nav order (the drawn tab ids, left to right). */
+  function saveNavOrder(ids) {
+    try { localStorage.setItem(NAV_ORDER_KEY, JSON.stringify(ids)); } catch { /* private mode */ }
+  }
+
   function visibleNav() {
-    return all()
-      .filter((p) => p.nav && p.enabled !== false)
-      .sort((a, b) => (a.nav.order ?? 1000) - (b.nav.order ?? 1000));
+    const items = all().filter((p) => p.nav && p.enabled !== false);
+    const saved = savedNavOrder();
+    // No custom order yet: the declared `nav.order` is the whole story.
+    if (!saved.length) return items.sort((a, b) => (a.nav.order ?? 1000) - (b.nav.order ?? 1000));
+    // The user's order wins; ids it does not know (a plugin added since) keep
+    // their declared order and land at the end.
+    const rank = new Map(saved.map((id, i) => [id, i]));
+    const known = items.filter((p) => rank.has(p.id)).sort((a, b) => rank.get(a.id) - rank.get(b.id));
+    const rest = items.filter((p) => !rank.has(p.id)).sort((a, b) => (a.nav.order ?? 1000) - (b.nav.order ?? 1000));
+    return known.concat(rest);
   }
 
   // ─── Nav rendering ────────────────────────────────────────────────────────
@@ -131,7 +155,7 @@
       const cls = "view-btn" + (p.id === cur ? " active" : "");
       const title = p.nav.title || p.description || p.name || p.id;
       html += `<button id="btn-${escAttr(p.id)}" class="${cls}" data-plugin="${escAttr(p.id)}" ` +
-        `type="button" title="${escAttr(title)}">${escHtml(p.nav.label || p.name || p.id)}</button>`;
+        `type="button" draggable="true" title="${escAttr(title)}">${escHtml(p.nav.label || p.name || p.id)}</button>`;
     }
     host.innerHTML = html;
 
@@ -158,6 +182,73 @@
         else if (typeof window.setView === "function") window.setView(p.id);
       });
     }
+
+    enableNavReorder(host);
+  }
+
+  /**
+   * Make the centre view tabs reorderable by drag and drop. A drop writes the
+   * new order to localStorage (see saveNavOrder) and repaints; visibleNav()
+   * then serves that order to every caller. Bound once per host element, since
+   * renderNav() rebuilds the buttons but not the container.
+   */
+  function enableNavReorder(host) {
+    if (host.dataset.reorder === "1") return;
+    host.dataset.reorder = "1";
+    let dragId = null;
+
+    const buttons = () => [...host.querySelectorAll(".view-btn[data-plugin]")];
+    const clearMarks = () => {
+      for (const b of buttons()) b.classList.remove("nav-dragging", "nav-drop-before", "nav-drop-after");
+    };
+    // The button a drop at (x, y) would land before, or null to append at the
+    // end. Reading order, so it holds whether the tabs sit in one row or wrap.
+    const dropBefore = (x, y) => {
+      for (const b of buttons()) {
+        if (b.dataset.plugin === dragId) continue;
+        const r = b.getBoundingClientRect();
+        if (y < r.top) return b;
+        if (y <= r.bottom && x < r.left + r.width / 2) return b;
+      }
+      return null;
+    };
+
+    host.addEventListener("dragstart", (e) => {
+      const btn = e.target.closest && e.target.closest(".view-btn[data-plugin]");
+      if (!btn || btn.dataset.plugin == null) return;
+      dragId = btn.dataset.plugin;
+      btn.classList.add("nav-dragging");
+      try { e.dataTransfer.setData("text/plain", dragId); e.dataTransfer.effectAllowed = "move"; }
+      catch { /* older engines */ }
+    });
+
+    host.addEventListener("dragover", (e) => {
+      if (!dragId) return;
+      e.preventDefault();
+      const target = dropBefore(e.clientX, e.clientY);
+      const movable = buttons().filter((b) => b.dataset.plugin !== dragId);
+      const last = movable[movable.length - 1] || null;
+      for (const b of buttons()) {
+        b.classList.toggle("nav-drop-before", b === target);
+        b.classList.toggle("nav-drop-after", !target && b === last);
+      }
+      try { e.dataTransfer.dropEffect = "move"; } catch { /* ignore */ }
+    });
+
+    host.addEventListener("drop", (e) => {
+      if (!dragId) return;
+      e.preventDefault();
+      const target = dropBefore(e.clientX, e.clientY);
+      const ids = buttons().map((b) => b.dataset.plugin).filter((id) => id && id !== dragId);
+      const at = target ? ids.indexOf(target.dataset.plugin) : ids.length;
+      ids.splice(at < 0 ? ids.length : at, 0, dragId);
+      dragId = null;
+      clearMarks();
+      saveNavOrder(ids);
+      renderNav();
+    });
+
+    host.addEventListener("dragend", () => { dragId = null; clearMarks(); });
   }
 
   /** Re-tint the nav buttons for the current view without rebuilding the DOM. */

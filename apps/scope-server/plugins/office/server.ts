@@ -4,8 +4,14 @@
  * The Office view's own state, moved out of the core server so the feature owns
  * it end to end (see plugins/README.md). It used to ride on `POST /agent-team`
  * and live in each workspace's `.pi/settings/agent-team-config.json`; it now has
- * its own `/office` route prefix and its own JSON store, namespaced per plugin
- * (`api.store` → `<plugins dir>/.data/office.json`), keyed by workspace.
+ * its own `/office` route prefix and — because a board belongs to a project, not
+ * to the plugin install — its own **project-scoped** JSON store,
+ * `<workspace>/.pi-scope/plugins/.data/office.json` (`api.projectStore`).
+ *
+ * The plugin's global `api.store` is now only a migration source and an index:
+ * it keeps `projects` (the workspace dirs it has seen) so a queue left running
+ * can be resumed at boot, and any pre-move `workspaces` bucket is migrated into
+ * the project's own file on first read and removed from the global file.
  *
  *   GET  /office?cwd=<workspace>  → { officeName, tasks, runnerPaused }
  *   POST /office { action, cwd, … } → the same snapshot, after the write
@@ -28,6 +34,8 @@
  * without a new build (see plugins/README.md).
  */
 
+import * as path from "node:path";
+
 /** Columns, in board order: a planned task is worked FIFO by `plannedAt`. */
 const TASK_STATUSES = ["todo", "planned", "in_progress", "done"];
 const TASK_MAX = 200;
@@ -36,6 +44,8 @@ const NAME_MAX = 60;
 const TITLE_MAX = 200;
 /** The store key holding `{ [workspace]: { officeName, tasks, runnerPaused } }`. */
 const KEY = "workspaces";
+/** The global store's index of project dirs (see `rememberProject`). */
+const INDEX_KEY = "projects";
 
 const collapse = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
 
@@ -95,24 +105,59 @@ export function activate(api: any): void {
   /** The workspace this request's office state belongs to. */
   const workspaceOf = (cwd: unknown) => String(resolveProjectDir(cwd ? String(cwd) : null) ?? "default");
 
-  const readAll = (): Record<string, any> => {
-    const all = api.store.get(KEY, {});
+  // ── Storage ───────────────────────────────────────────────────────────────
+  // The board is project state, so it lives in the project: `api.projectStore`
+  // → `<workspace>/.pi-scope/plugins/.data/office.json`. A host that predates
+  // the helper (or a workspace that is not a real directory) falls back to the
+  // plugin's global store, so this stays installable everywhere.
+  const hasProjectStore = typeof api.projectStore === "function";
+  const storeFor = (workspace: string) => (hasProjectStore ? api.projectStore(workspace) : api.store);
+  const readStoreAll = (workspace: string): Record<string, any> => {
+    const all = storeFor(workspace).get(KEY, {});
     return all && typeof all === "object" ? all : {};
   };
 
-  /** The state for `workspace`, seeding it once from the pre-plugin location so
-   *  an existing name and board survive the move into plugin-owned storage. */
-  function readState(workspace: string): { officeName?: string; tasks: Record<string, any>[]; runnerPaused: boolean } {
-    const all = readAll();
-    if (workspace in all) return normaliseState(all[workspace]);
-    const legacy = api.kit.legacyOfficeState?.(workspace);
-    if (legacy) {
-      const seeded = normaliseState(legacy);
-      all[workspace] = seeded;
-      api.store.set(KEY, all);
-      return seeded;
+  /** The workspaces this plugin has seen, so a queue left running can be resumed
+   *  at boot (project files cannot be enumerated from the plugin). */
+  const knownProjects = (): string[] => {
+    const list = api.store.get(INDEX_KEY, []);
+    return Array.isArray(list) ? list.filter((x) => typeof x === "string") : [];
+  };
+  function rememberProject(workspace: string): void {
+    if (!hasProjectStore || !path.isAbsolute(workspace)) return;
+    const list = knownProjects();
+    if (!list.includes(workspace)) {
+      list.push(workspace);
+      api.store.set(INDEX_KEY, list);
     }
-    return normaliseState(null);
+  }
+
+  /** A workspace's bucket in the old global store, if it has not migrated yet. */
+  function globalBucket(workspace: string): any {
+    const all = api.store.get(KEY, {});
+    return all && typeof all === "object" ? all[workspace] : undefined;
+  }
+  function dropGlobalBucket(workspace: string): void {
+    const all = api.store.get(KEY, {});
+    if (all && typeof all === "object" && workspace in all) {
+      delete all[workspace];
+      api.store.set(KEY, all);
+    }
+  }
+
+  /** The state for `workspace`, seeding it once from the pre-plugin location or
+   *  the old global store so an existing name and board survive the move. */
+  function readState(workspace: string): { officeName?: string; tasks: Record<string, any>[]; runnerPaused: boolean } {
+    const store = storeFor(workspace);
+    rememberProject(workspace);
+    const all = readStoreAll(workspace);
+    if (workspace in all) return normaliseState(all[workspace]);
+    const legacy = globalBucket(workspace) ?? api.kit.legacyOfficeState?.(workspace);
+    const seeded = normaliseState(legacy);
+    all[workspace] = seeded;
+    store.set(KEY, all);
+    if (globalBucket(workspace) !== undefined) dropGlobalBucket(workspace);
+    return seeded;
   }
 
   /** Live run status (from the chat manager) for every task that dispatched one.
@@ -141,10 +186,11 @@ export function activate(api: any): void {
   }
 
   function commit(workspace: string, mutate: (state: any) => any): any {
-    const all = readAll();
+    const store = storeFor(workspace);
     const next = mutate(readState(workspace));
+    const all = readStoreAll(workspace);
     all[workspace] = next;
-    api.store.set(KEY, all);
+    store.set(KEY, all);
     return withRuns(normaliseState(next));
   }
 
@@ -201,9 +247,10 @@ export function activate(api: any): void {
       }
     }
     if (changed) {
-      const all = readAll();
+      const store = storeFor(workspace);
+      const all = readStoreAll(workspace);
       all[workspace] = state;
-      api.store.set(KEY, all);
+      store.set(KEY, all);
     }
   }
 
@@ -600,7 +647,11 @@ export function activate(api: any): void {
   // first so a run orphaned by the restart is returned to Planned before the
   // queue starts. A workspace left PAUSED (the default) resumes nothing.
   if (serverRunnerEnabled()) {
-    for (const workspace of Object.keys(readAll())) {
+    // Both the index (project files) and any pre-move global buckets: reading a
+    // legacy bucket migrates it into its project file here.
+    const legacy = api.store.get(KEY, {});
+    const known = new Set<string>([...knownProjects(), ...Object.keys(legacy && typeof legacy === "object" ? legacy : {})]);
+    for (const workspace of known) {
       if (readState(workspace).runnerPaused !== false) continue;
       reconcile(workspace);
       void pump(workspace);

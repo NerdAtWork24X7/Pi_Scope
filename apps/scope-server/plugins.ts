@@ -50,6 +50,14 @@ export const USER_DIR =
 const CONFIG_PATH = path.join(USER_DIR, "plugins.json");
 /** Namespaced JSON storage handed to plugins via `api.store`. */
 const STORE_DIR = path.join(USER_DIR, ".data");
+/**
+ * Where a plugin's *project-scoped* store lives, relative to the project:
+ * `<projectDir>/.pi-scope/plugins/.data/<id>.json`. A plugin whose state belongs
+ * to one workspace (the Office board, the Workflow graph) keeps it inside the
+ * project instead of mixing every project into one global file — see
+ * `api.projectStore`.
+ */
+export const PROJECT_DATA_REL = path.join(".pi-scope", "plugins", ".data");
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -150,6 +158,16 @@ export interface PluginApi {
     set: (key: string, value: unknown) => void;
     all: () => Record<string, unknown>;
   };
+  /**
+   * Project-scoped JSON storage, persisted to
+   * `<projectDir>/.pi-scope/plugins/.data/<id>.json`.
+   *
+   * Use it for state that belongs to one workspace (a board, a workflow) rather
+   * than the plugin's global `store`. `projectDir` must be an absolute,
+   * existing directory; anything else falls back to the global `store` so a
+   * caller can never scatter files relative to the server's cwd.
+   */
+  projectStore: (projectDir: string) => PluginApi["store"];
 }
 
 // ─── State ──────────────────────────────────────────────────────────────────
@@ -339,12 +357,51 @@ export function storeFor(id: string): PluginApi["store"] {
   return store;
 }
 
+/**
+ * Project-scoped stores, keyed by `<plugin id>\u0000<projectDir>`. Memoised for
+ * the same reason as `stores`: two handles over one file would shadow each
+ * other's writes.
+ */
+const projectStores = new Map<string, PluginApi["store"]>();
+
+/** The project store file for a plugin: `<projectDir>/.pi-scope/plugins/.data/<id>.json`. */
+export function projectStoreFile(id: string, projectDir: string): string {
+  return path.join(projectDir, PROJECT_DATA_REL, `${id}.json`);
+}
+
+/**
+ * The store for `id` scoped to `projectDir`. Falls back to the global store
+ * when `projectDir` is not an absolute, existing directory (e.g. the Office's
+ * `"default"` sentinel), so a caller always gets a usable store.
+ */
+export function projectStoreFor(id: string, projectDir: string): PluginApi["store"] {
+  if (!projectDir || !path.isAbsolute(projectDir)) return storeFor(id);
+  try {
+    if (!fs.statSync(projectDir).isDirectory()) return storeFor(id);
+  } catch {
+    return storeFor(id);
+  }
+  const key = `${id}\u0000${projectDir}`;
+  let store = projectStores.get(key);
+  if (!store) {
+    store = makeStoreAt(projectStoreFile(id, projectDir));
+    projectStores.set(key, store);
+  }
+  return store;
+}
+
 function makeStore(id: string): PluginApi["store"] {
+  return makeStoreAt(storeFile(id));
+}
+
+/** A JSON store over one file, read lazily and cached in memory per instance. */
+function makeStoreAt(file: string): PluginApi["store"] {
+  const dir = path.dirname(file);
   let cache: Record<string, unknown> | null = null;
   const read = (): Record<string, unknown> => {
     if (cache) return cache;
     try {
-      cache = JSON.parse(fs.readFileSync(storeFile(id), "utf8"));
+      cache = JSON.parse(fs.readFileSync(file, "utf8"));
     } catch {
       cache = {};
     }
@@ -352,10 +409,10 @@ function makeStore(id: string): PluginApi["store"] {
   };
   const flush = () => {
     try {
-      fs.mkdirSync(STORE_DIR, { recursive: true });
-      fs.writeFileSync(storeFile(id), JSON.stringify(cache ?? {}, null, 2) + "\n", { mode: 0o600 });
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(cache ?? {}, null, 2) + "\n", { mode: 0o600 });
     } catch (err) {
-      console.error(`[plugins:${id}] failed to persist store:`, err);
+      console.error(`[plugins:${path.basename(file, ".json")}] failed to persist store:`, err);
     }
   };
   return {
@@ -413,6 +470,7 @@ function makeApi(record: PluginRecord, host: PluginHost): PluginApi {
       disposers.set(record.id, list);
     },
     store: storeFor(record.id),
+    projectStore: (projectDir) => projectStoreFor(record.id, projectDir),
   };
 }
 

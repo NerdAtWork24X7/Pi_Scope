@@ -447,8 +447,36 @@ function chatPathPrefix(cwd: string): string {
   return prefix.join(path.delimiter);
 }
 
-function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatSession {
+/**
+ * Per-run capability allowlists a caller may hand to a chat subprocess. They map
+ * onto pi's own flags (`--skill <path>`, `--tools a,b`, `--extension <path>`) and
+ * are only meaningful at spawn time, which is why every caller that needs them
+ * uses a session id of its own (a fresh subprocess). All optional: omitting them
+ * produces exactly the argv this module has always used.
+ */
+export interface ChatSpawnExtras {
+  /** Skill files or directories to load (`--skill`, repeated). */
+  skills?: string[];
+  /** Comma-joined tool allowlist (`--tools`). */
+  tools?: string[];
+  /** Extension files or `builtin:<name>` entries (`--extension`, repeated). */
+  extensions?: string[];
+}
+
+/**
+ * The argv for a chat subprocess. Exported so the flag shape is testable without
+ * spawning the bundled agent.
+ */
+export function chatSpawnArgs(model: string, extras: ChatSpawnExtras = {}): string[] {
   const args = ["--mode", "rpc", "--model", model];
+  for (const skill of extras.skills ?? []) args.push("--skill", skill);
+  if (extras.tools?.length) args.push("--tools", extras.tools.join(","));
+  for (const ext of extras.extensions ?? []) args.push("--extension", ext);
+  return args;
+}
+
+function spawnChat(id: string, cwd: string, model: string, fresh = false, extras: ChatSpawnExtras = {}): ChatSession {
+  const args = chatSpawnArgs(model, extras);
   // PI_OFFLINE=1 tells pi (and its pi-updater extension) to skip startup network
   // operations. Without it, pi-updater fires async version checks on
   // session_start; when the user resumes a recorded session and the scope server
@@ -541,7 +569,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false): ChatS
  *  after the agent settles) and a JSON `{ queued: true }` response is returned
  *  instead of a stream — the in-flight stream keeps delivering events to the
  *  client. */
-export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string; libraryBlock?: string }): Response {
+export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string; libraryBlock?: string } & ChatSpawnExtras): Response {
   const { cwd, prompt } = opts;
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   if (!prompt || !prompt.trim()) {
@@ -562,7 +590,14 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
     // serves a recorded session is keyed by that session's id; the
     // pre-spawned "new conversation" subprocess (fresh) is keyed by its own
     // random id (spawned via startChatSession with fresh=true).
-    sess = spawnChat(sid, cwd, model, false);
+    // Skills/tools/extensions are spawn-time flags, so they only apply to the
+    // subprocess started here: they are ignored for an already-running session
+    // (whose argv is fixed) rather than silently appearing to work.
+    sess = spawnChat(sid, cwd, model, false, {
+      skills: opts.skills,
+      tools: opts.tools,
+      extensions: opts.extensions,
+    });
     sessions.set(sid, sess);
   }
   sess.lastUsed = Date.now();

@@ -508,6 +508,10 @@ Running from source instead of the launcher? `SCOPE_HOST=0.0.0.0 npm start` in
 | `SCOPE_PI_BUNDLE_DIR` | auto-detected | Where the bundled `pi` lives (`apps/scope-desktop/pi-bundle` in dev, `resources/pi` packaged). Set by the packaged launcher; only override for an out-of-tree bundle. |
 | `SCOPE_PI_REGISTRY` | `https://registry.npmjs.org` | npm registry used by Settings → Update to look for a newer bundled `pi` (point at a mirror for air-gapped installs) |
 | `SCOPE_NPM_BIN` | `npm` | `npm` executable Settings → Update runs to install a newer bundled `pi` |
+| `SCOPE_MODEL_CATALOG` | `on` | Set to `off` to stop the app refreshing pi's model catalogs (`models-store.json` + `model-update-cache.json`) while it is open. Pi Scope runs `pi` with `PI_OFFLINE=1`, so pi no longer refreshes them by itself in-app — Settings → Models → Model update still refreshes them on demand |
+| `SCOPE_MODELS_STORE` | `<agentDir>/models-store.json` | Override pi's model store path (read for pricing/context windows) |
+| `SCOPE_MODEL_UPDATE_CACHE` | `<agentDir>/model-update-cache.json` | Override the pi-updater release cache path |
+| `SCOPE_MODELS_DEV_URL` | `https://models.dev/api.json` | Catalog the release cache is refreshed from (point at a mirror for air-gapped installs) |
 
 Chat-spawned `pi` subprocesses also get the workspace venv bin dirs prepended to
 `PATH`, and `PLAYWRIGHT_BROWSERS_PATH` restored from the user's shell rc files

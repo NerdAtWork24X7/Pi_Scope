@@ -807,6 +807,69 @@ describe("chat streaming", () => {
     await page.waitForSelector(".chat-ai:not(.chat-ai-live)");
     assert.deepEqual(env.pageErrors, [], "no uncaught page errors");
   });
+
+  test("a persistent 'running' pill tracks the phase and stays pinned last in the live bubble", async () => {
+    await selectA();
+    const turn = await send(page, mock, "do the thing");
+    await page.waitForSelector(".chat-live-run", { state: "visible" });
+    const label = () => page.textContent(".chat-live-run-label");
+    assert.equal(await label(), "working…", "shows a running pill as soon as the turn starts");
+
+    turn.send({ type: "session", sessionId: "live-run" });
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "thinking", delta: "let me look" });
+    await page.waitForFunction(() => document.querySelector(".chat-live-run-label")?.textContent === "thinking…");
+
+    turn.send({ type: "tool_start", name: "bash", args: { command: "ls" } });
+    await page.waitForFunction(() => document.querySelector(".chat-live-run-label")?.textContent === "running bash…");
+
+    turn.send({ type: "tool_end", name: "bash" });
+    turn.send({ type: "text", delta: "Here is the answer so far" });
+    await page.waitForFunction(() => document.querySelector(".chat-live-run-label")?.textContent === "responding…");
+    // The pill must survive the first text delta (the old typing dots were
+    // removed the moment any content streamed, so a long reply showed nothing).
+    assert.equal(await page.locator(".chat-live-run").count(), 1);
+    // And it must remain the LAST child of the message body so streamed content
+    // is always inserted above it, never below.
+    assert.equal(
+      await page.evaluate(() => document.querySelector(".chat-ai-live .chat-msg-body").lastElementChild.classList.contains("chat-live-run")),
+      true,
+      "run pill is pinned last in the live bubble",
+    );
+    // The header advertises the same state.
+    assert.equal(await page.textContent("#chat-header-state"), "working");
+
+    turn.send({ type: "done", sessionId: "live-run" });
+    turn.end();
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live) .chat-text");
+    assert.equal(await page.locator(".chat-live-run").count(), 0, "pill is gone once the turn ends");
+  });
+
+  test("REGRESSION: a tool loop keeps exactly one run pill, on the newest bubble", async () => {
+    await selectA();
+    const turn = await send(page, mock, "multi-step");
+    turn.send({ type: "session", sessionId: "live-loop" });
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "text", delta: "step one" });
+    await page.waitForFunction(() => !!document.querySelector(".chat-text.chat-stream-text"));
+    assert.equal(await page.locator(".chat-live-run").count(), 1, "one pill on the first bubble");
+
+    // A second assistant message (next LLM call in the tool loop) becomes its
+    // own bubble: the finished bubble must drop its pill.
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "tool_start", name: "grep", args: { pattern: "foo" } });
+    await page.waitForFunction(() => document.querySelector(".chat-live-run-label")?.textContent === "running grep…");
+    assert.equal(await page.locator(".chat-live-run").count(), 1, "only the newest bubble carries a pill");
+    const rows = await page.evaluate(() =>
+      [...document.querySelectorAll(".chat-ai-live")].map((r) => !!r.querySelector(".chat-live-run")));
+    assert.equal(rows[0], false, "the completed bubble has no pill");
+    assert.equal(rows[rows.length - 1], true, "the in-flight bubble has the pill");
+
+    turn.send({ type: "done", sessionId: "live-loop" });
+    turn.end();
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live)");
+    assert.equal(await page.locator(".chat-live-run").count(), 0);
+  });
 });
 
 // ─── Resuming recorded sessions ────────────────────────────────────────────
