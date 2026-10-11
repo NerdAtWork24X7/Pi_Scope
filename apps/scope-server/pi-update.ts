@@ -90,7 +90,7 @@ function registryBase(): string {
 /** Fetch the `latest` dist-tag from the npm registry. Throws on any failure so
  *  callers can surface a clear message instead of a false "up to date". */
 async function fetchLatest(): Promise<string> {
-  const url = `${registryBase()}/${PI_PACKAGE.replace("/", "%2F")}/latest`;
+  const url = `${registryBase()}/${encodeURIComponent(PI_PACKAGE)}/latest`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), CHECK_TIMEOUT_MS);
   try {
