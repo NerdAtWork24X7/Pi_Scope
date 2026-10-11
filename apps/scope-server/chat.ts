@@ -27,7 +27,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readStoredKeys } from "./api-keys.ts";
-import { expandShellPath, readShellEnvValues, shellQuote } from "../../shared/shell.ts";
+import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable } from "../../shared/shell.ts";
 // Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
 // PATH (force-loading the Pi Scope extension). Must be imported before PI_BIN is
 // used so chat subprocesses launch the bundled agent, not a global install.
@@ -410,14 +410,8 @@ function resolveInteractiveShell(): string | null {
   for (const candidate of candidates) {
     const base = path.basename(candidate);
     if (base !== "bash" && base !== "zsh") continue;
-    if (candidate.includes("/")) {
-      try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch { continue; }
-    }
-    const dirs = [...(process.env.PATH || "").split(":").filter(Boolean), "/bin", "/usr/bin"];
-    for (const dir of dirs) {
-      const p = path.join(dir, candidate);
-      try { fs.accessSync(p, fs.constants.X_OK); return p; } catch { /* next dir */ }
-    }
+    const resolved = resolveExecutable(candidate);
+    if (resolved) return resolved;
   }
   return null;
 }
@@ -540,7 +534,14 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
     const ctrl = sess.active?.controller;
     if (ctrl) enqueue(ctrl, { type: "stderr", text: d.toString() });
   });
-  proc.on("error", () => { sess.dead = true; });
+  proc.on("error", () => {
+    sess.dead = true;
+    // A failed spawn (e.g. ENOENT) can emit "error" without ever emitting
+    // "close", leaving the entry in the sessions Map until the 10-min idle
+    // reaper. Drop an idle entry now; an in-flight run still gets its "close"
+    // teardown (and its recorded outcome) below.
+    if (!sess.active) sessions.delete(id);
+  });
   proc.on("close", () => {
     sess.dead = true;
     // A process that dies mid-run is a failed run, recorded even if the browser

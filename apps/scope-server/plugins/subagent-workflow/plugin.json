@@ -11,7 +11,7 @@
   ],
   "nav": {
     "label": "Workflow",
-    "order": 70,
+    "order": 75,
     "group": "timeline"
   },
   "ui": {

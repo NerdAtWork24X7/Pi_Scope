@@ -12,9 +12,9 @@ export function activate(api: any): void {
     fs,
     path,
     jsonResponse,
-    readBody,
+    requireCwd,
+    jsonBody,
     intParam,
-    validateCwd,
     readSettingsJson,
     DEFAULT_COMMIT_TEMPLATE,
     git,
@@ -29,10 +29,8 @@ export function activate(api: any): void {
 
   api.route("GET", "/git/status", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     const isRepo = gitTry(absCwd, ["rev-parse", "--is-inside-work-tree"]);
     if (!isRepo.ok) return jsonResponse({ git: false, error: "not a git repository" });
     const branch = gitTry(absCwd, ["branch", "--show-current"]);
@@ -122,8 +120,8 @@ export function activate(api: any): void {
     const file = url.searchParams.get("file") ?? "";
     const cached = url.searchParams.get("cached") === "1";
     if (!cwd || !file) return jsonResponse({ error: "missing cwd or file" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(cwd);
+    if (absCwd instanceof Response) return absCwd;
     if (!resolveWithinCwd(absCwd, file)) return jsonResponse({ error: "invalid file path" }, 400);
     if (cached) {
       const d = gitTry(absCwd, ["diff", "--cached", "--no-color", "--unified=3", "--", file]);
@@ -142,10 +140,8 @@ export function activate(api: any): void {
 
   api.route("GET", "/git/log", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     const all = url.searchParams.get("all") === "1";
     const limit = intParam(url, "limit", 200, 500);
     // `%P` yields space-separated parent SHAs (first parent first) so the UI
@@ -175,8 +171,8 @@ export function activate(api: any): void {
     if (!cwd || !sha) return jsonResponse({ error: "missing cwd or sha" }, 400);
     // `sha` becomes a git argument — a leading dash would be read as an option.
     if (rejectOptionLike(sha)) return jsonResponse({ error: "invalid sha" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(cwd);
+    if (absCwd instanceof Response) return absCwd;
     const meta = gitTry(absCwd, ["show", "-s", "--date=iso-strict", "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b%x1f%cn%x1f%ce%x1f%cd%x1f%P", sha]);
     const diff = gitTry(absCwd, ["show", "--no-color", "--unified=3", "--format=", sha]);
     const names = gitTry(absCwd, ["show", "--name-only", "--format=", sha]);
@@ -199,8 +195,8 @@ export function activate(api: any): void {
     let sha2 = url.searchParams.get("sha2") ?? "";
     if (!cwd || !sha1) return jsonResponse({ error: "missing cwd or sha1" }, 400);
     if (sha1.startsWith("-") || sha2.startsWith("-")) return jsonResponse({ error: "invalid sha" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(cwd);
+    if (absCwd instanceof Response) return absCwd;
     const args = ["diff", "--no-color", "--unified=3", sha1];
     if (sha2) args.push(sha2);
     const diff = gitTry(absCwd, args);
@@ -222,8 +218,8 @@ export function activate(api: any): void {
     const fp = url.searchParams.get("path") ?? "";
     if (!cwd || !sha || !fp) return jsonResponse({ error: "missing cwd, sha, or path" }, 400);
     if (sha.startsWith("-") || fp.startsWith("-")) return jsonResponse({ error: "invalid sha or path" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(cwd);
+    if (absCwd instanceof Response) return absCwd;
     const r = gitTry(absCwd, ["show", `${sha}:${fp}`]);
     if (!r.ok) return jsonResponse({ ok: false, error: r.out || "file not found or binary" }, 404);
     // Refuse binary content (null bytes in first 8KB)
@@ -407,10 +403,8 @@ export function activate(api: any): void {
 
   api.route("GET", "/git/branches", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     const cur = gitTry(absCwd, ["branch", "--show-current"]);
     // for-each-ref expands %00 (NUL) but not %x1f, so use NUL separators.
     const r = gitTry(absCwd, ["for-each-ref", "--format=%(refname:lstrip=2)%00%(objectname:short)%00%(upstream:lstrip=2)%00%(creatordate:relative)", "--sort=-committerdate", "refs/heads"]);
@@ -441,10 +435,8 @@ export function activate(api: any): void {
 
   api.route("GET", "/git/remotes", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     const r = gitTry(absCwd, ["remote", "-v"]);
     const map = new Map<string, { name: string; fetch: string; push: string }>();
     for (const line of r.out.split("\n")) {
@@ -522,10 +514,8 @@ export function activate(api: any): void {
 
   api.route("GET", "/git/stash", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     // No --date here: it turns %gd's selector into a date-based form instead
     // of the stable stash@{0} handle used by pop/drop. %ad stays human-readable.
     const r = gitTry(absCwd, ["stash", "list", "--format=%gd%x1f%H%x1f%ad%x1f%s"]);
@@ -560,10 +550,8 @@ export function activate(api: any): void {
 
   api.route("GET", "/git/submodules", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     const r = gitTry(absCwd, ["submodule", "status", "--recursive"]);
     // Not a failure if there are no submodules or no .gitmodules
     const items: any[] = [];
@@ -648,14 +636,10 @@ export function activate(api: any): void {
   });
 
   async function gitPost(req: Request): Promise<{ cwd: string; parsed: any } | Response> {
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const { value: parsed, error } = await jsonBody(req);
+    if (error) return error;
+    const absCwd = requireCwd(parsed?.cwd);
+    if (absCwd instanceof Response) return absCwd;
     return { cwd: absCwd, parsed };
   }
 }

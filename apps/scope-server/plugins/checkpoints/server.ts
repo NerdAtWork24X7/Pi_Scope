@@ -16,23 +16,18 @@ const CHECKPOINT_REF_RE = /^refs\/checkpoints\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/;
 export function activate(api: any): void {
   const {
     jsonResponse,
-    readBody,
-    validateCwd,
+    requireCwd,
+    jsonBody,
     git,
     ensureGitRepo,
     rejectOptionLike,
   } = api.kit;
 
   api.route("POST", "/checkpoints/create", async (ctx) => {
-    const req = ctx.req;
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const cwd = parsed.cwd ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const { value: parsed, error } = await jsonBody(ctx.req);
+    if (error) return error;
+    const absCwd = requireCwd(parsed?.cwd);
+    if (absCwd instanceof Response) return absCwd;
     const label = typeof parsed.label === "string" && parsed.label.trim() ? parsed.label.trim().slice(0, 120) : "";
     try {
       const { initialized } = ensureGitRepo(absCwd);
@@ -75,10 +70,8 @@ export function activate(api: any): void {
 
   api.route("GET", "/checkpoints/list", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     const ns = cwdNs(absCwd);
     const glob = `refs/checkpoints/${ns}/*`;
     try {
@@ -103,19 +96,14 @@ export function activate(api: any): void {
   });
 
   api.route("POST", "/checkpoints/restore", async (ctx) => {
-    const req = ctx.req;
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const ref = parsed.ref ?? "";
+    const { value: parsed, error } = await jsonBody(ctx.req);
+    if (error) return error;
+    const ref = parsed?.ref ?? "";
     if (!CHECKPOINT_REF_RE.test(ref)) {
       return jsonResponse({ error: "ref must be a checkpoint ref (refs/checkpoints/...)" }, 400);
     }
-    const cwd = parsed.cwd ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(parsed?.cwd);
+    if (absCwd instanceof Response) return absCwd;
     try {
       git(absCwd, ["rev-parse", "--verify", ref]);
       git(absCwd, ["reset", "--hard", ref]);
@@ -129,10 +117,8 @@ export function activate(api: any): void {
 
   api.route("GET", "/checkpoints/branches", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     try {
       git(absCwd, ["rev-parse", "--is-inside-work-tree"]);
       const current = git(absCwd, ["branch", "--show-current"]).trim();
@@ -150,12 +136,9 @@ export function activate(api: any): void {
   });
 
   api.route("POST", "/checkpoints/merge", async (ctx) => {
-    const req = ctx.req;
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const ref = parsed.ref ?? "";
+    const { value: parsed, error } = await jsonBody(ctx.req);
+    if (error) return error;
+    const ref = parsed?.ref ?? "";
     if (!CHECKPOINT_REF_RE.test(ref)) {
       return jsonResponse({ error: "ref must be a checkpoint ref (refs/checkpoints/...)" }, 400);
     }
@@ -165,10 +148,8 @@ export function activate(api: any): void {
     // (`refs/heads/<target>`); a leading dash or whitespace would be an option
     // or a malformed ref.
     if (rejectOptionLike(target) || /\s/.test(target)) return jsonResponse({ error: "invalid target branch" }, 400);
-    const cwd = parsed.cwd ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(parsed?.cwd);
+    if (absCwd instanceof Response) return absCwd;
     try {
       const parts = ref.split("/");
       const id = parts.pop() ?? "";
@@ -202,19 +183,14 @@ export function activate(api: any): void {
   });
 
   api.route("POST", "/checkpoints/delete", async (ctx) => {
-    const req = ctx.req;
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const ref = parsed.ref ?? "";
+    const { value: parsed, error } = await jsonBody(ctx.req);
+    if (error) return error;
+    const ref = parsed?.ref ?? "";
     if (!CHECKPOINT_REF_RE.test(ref)) {
       return jsonResponse({ error: "ref must be a checkpoint ref (refs/checkpoints/...)" }, 400);
     }
-    const cwd = parsed.cwd ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(parsed?.cwd);
+    if (absCwd instanceof Response) return absCwd;
     try {
       const parts = ref.split("/");
       const id = parts[parts.length - 1];

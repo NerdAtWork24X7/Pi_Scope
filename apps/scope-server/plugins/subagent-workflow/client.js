@@ -930,7 +930,7 @@
     name: "Subagent Workflow",
     description:
       "Wire coding-agent harnesses (Claude Code, Codex CLI, Gemini CLI, opencode, Aider, Cursor, Pi, or a custom command) into a fan-out workflow and run it server-side, watching each node stream its output.",
-    nav: { label: "Workflow", order: 70, group: "timeline", title: "Design and run a multi-harness workflow" },
+    nav: { label: "Workflow", order: 75, group: "timeline", title: "Design and run a multi-harness workflow" },
     view: {
       pane: "#subagent-workflow-pane",
       display: "flex",

@@ -52,6 +52,7 @@
       display: "flex",
       session: "chat",
       onShow: () => window.__chatOnView?.(),
+      onHide: () => window.__chatOnHide?.(),
       onSessions: () => window.__chatOnSessions?.(),
     },
   });
@@ -160,6 +161,8 @@
       pane: "#single-pane",
       display: "",
       session: "select",
+      // Renders the per-session agent subnav (the strip under the header).
+      sessionSubnav: true,
       sseSession: true,
       onShow: () => window.__singleOnShow?.(),
       onEvent: (evt) => window.__singleOnEvent?.(evt),

@@ -24,7 +24,7 @@ import { readFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { storedKey } from "./api-keys.ts";
-import { readShellEnvValue } from "../../shared/shell.ts";
+import { readShellEnvValue, hasExecutable } from "../../shared/shell.ts";
 import { AGENT_DIR } from "./agent-dir.ts";
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
 const DEFAULT_MODEL = "whisper-large-v3-turbo";
@@ -181,17 +181,7 @@ export function loadSttConfig(cwd: string): SttConfig {
 
 /** Is `bin` resolvable on PATH (plus the common system dirs)? */
 export function which(bin: string): boolean {
-  const dirs = [
-    ...(process.env.PATH || "").split(path.delimiter),
-    "/usr/local/bin",
-    "/usr/bin",
-    path.join(os.homedir(), ".local", "bin"),
-  ].filter(Boolean);
-  const exts = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
-  return dirs.some((dir) => exts.some((ext) => {
-    try { fs.accessSync(path.join(dir, bin + ext), fs.constants.X_OK); return true; }
-    catch { return false; }
-  }));
+  return hasExecutable(bin);
 }
 
 function binFor(kind: RecorderKind): string {

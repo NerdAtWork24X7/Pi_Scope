@@ -40,6 +40,7 @@ import { listAuthProviders, startLogin, getLogin, answerLogin, cancelLogin, logo
 import { keyEntries, maskSecret, setStoredKey, clearStoredKey, isValidKeyName, MAX_KEY_LENGTH, KNOWN_KEYS } from "./api-keys.ts";
 import { seedProviderEnvFromShell } from "./provider-env.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
+import { resolveExecutable } from "../../shared/shell.ts";
 import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import { WebSocket } from "ws";
@@ -1482,8 +1483,15 @@ function addSubscriber(
   return id;
 }
 
-function removeSubscriber(id: number) {
+function removeSubscriber(id: number, controller?: ReadableStreamDefaultController<Uint8Array>) {
   subscribers.delete(id);
+  // When we evict a subscriber because it stopped draining, close its stream so
+  // the browser's EventSource sees the end and reconnects — deleting the map
+  // entry alone left the ReadableStream open and the client hanging until TCP
+  // timed out. `cancel()` (a normal client disconnect) passes no controller.
+  if (controller) {
+    try { controller.close(); } catch { /* already closed/cancelled */ }
+  }
 }
 
 // One encoder for the process — this used to allocate a TextEncoder on every
@@ -1503,13 +1511,13 @@ function pushSSE(sub: SSESubscriber, data: string): boolean {
   try {
     const size = sub.controller.desiredSize;
     if (size !== null && size < -SSE_MAX_BACKLOG) {
-      removeSubscriber(sub.id);
+      removeSubscriber(sub.id, sub.controller);
       return false;
     }
     sub.controller.enqueue(sseEncoder.encode(data));
     return true;
   } catch {
-    removeSubscriber(sub.id);
+    removeSubscriber(sub.id, sub.controller);
     return false;
   }
 }
@@ -1717,6 +1725,9 @@ const MIME: Record<string, string> = {
   ".png": "image/png",
   ".ico": "image/x-icon",
   ".ttf": "font/ttf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".map": "application/json",
 };
 
 /**
@@ -1919,7 +1930,37 @@ function validateCwd(cwd: string): string | null {
   }
   if (!ok) return null;
   return abs;
-}/** Default instructions for Git → “✨ generate”, substituted into the prompt
+}
+
+/** Resolve a caller-supplied cwd, or the canonical 400 Response. Every feature
+ *  plugin route used to inline this four-line idiom; one helper keeps the error
+ *  text and the validation identical everywhere. */
+function requireCwd(raw: unknown): string | Response {
+  const cwd = String(raw ?? "").trim();
+  if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
+  const absCwd = validateCwd(cwd);
+  if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+  return absCwd;
+}
+
+/** Read and parse a JSON request body. Returns `{ value }`, or `{ error }` with
+ *  a 413 (oversized) / 400 (invalid JSON) Response — the two-step catch the
+ *  plugins used to repeat per route. */
+async function jsonBody(req: Request): Promise<{ value: any; error?: Response }> {
+  let text: string;
+  try {
+    text = await readBody(req);
+  } catch (err: any) {
+    return { value: null, error: jsonResponse({ error: err?.message ?? "payload too large" }, 413) };
+  }
+  try {
+    return { value: JSON.parse(text) };
+  } catch {
+    return { value: null, error: jsonResponse({ error: "invalid JSON" }, 400) };
+  }
+}
+
+/** Default instructions for Git → “✨ generate”, substituted into the prompt
  *  sent to the model. Settings → Models can override this with a custom
  *  template; the following placeholders are replaced server-side:
  *    {{branch}}  current branch (or "(detached)")
@@ -2537,14 +2578,12 @@ async function handle(req: Request): Promise<Response> {
     if (!file) return textResponse("not found", 404, "text/plain");
     try {
       const body = fs.readFileSync(file);
-      const ext = path.extname(file).toLowerCase();
-      const type = ext === ".json" ? "application/json"
-        : ext === ".css" ? "text/css"
-        : ext === ".html" ? "text/html"
-        : "text/javascript";
+      // Same MIME table as the public assets (unknown → octet-stream) so a
+      // plugin's .css/.json/.svg is served as itself rather than as JavaScript.
+      const type = MIME[path.extname(file).toLowerCase()] ?? "application/octet-stream";
       return new Response(body, {
         status: 200,
-        headers: { "content-type": `${type}; charset=utf-8`, "cache-control": "no-store", "access-control-allow-origin": "*" },
+        headers: { "content-type": type, "cache-control": "no-store", "access-control-allow-origin": "*" },
       });
     } catch {
       return textResponse("not found", 404, "text/plain");
@@ -3779,146 +3818,6 @@ async function handle(req: Request): Promise<Response> {
     return jsonResponse(loadAgentTeam(proj));
   }
 
-  // ── POST /chat/start (pre-spawn the pi session for a workspace) ────────
-  // Called when the user selects a workspace in the Chat view so `pi --mode
-  // rpc` is already running before the first prompt is typed.
-  if (pathname === "/chat/start" && method === "POST") {
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
-    const r = startChatSession({ cwd: absCwd, model: typeof parsed.model === "string" ? parsed.model : "" });
-    return jsonResponse({ ...r, cwd: absCwd, model: (parsed.model || "").trim() || "google/gemini-2.5-flash-lite" });
-  }
-
-  // ── POST /chat (real-time prompt to the pi coding agent) ───────────────
-  if (pathname === "/chat" && method === "POST") {
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
-    return startChat({
-      cwd: absCwd,
-      // The workspace's reference library rides along as a block the chat
-      // module injects at the start of a fresh conversation (and never again
-      // in that session).
-      libraryBlock: buildLibraryPrompt(readAgentConfig(absCwd).library),
-      model: typeof parsed.model === "string" ? parsed.model : "",
-      // The composer's thinking-level choice; pushed to the subprocess via RPC
-      // set_thinking_level so it applies without a respawn (pi otherwise caches
-      // settings.json's defaultThinkingLevel at boot).
-      thinkingLevel: typeof parsed.thinkingLevel === "string" ? parsed.thinkingLevel : "",
-      prompt: typeof parsed.prompt === "string" ? parsed.prompt : "",
-      sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
-      sessionFile: typeof parsed.sessionFile === "string" ? parsed.sessionFile : "",
-      streamingBehavior: typeof parsed.streamingBehavior === "string" ? parsed.streamingBehavior : "",
-    });
-  }
-
-  // ── POST /chat/stop (abort the agent's current run, keep the session) ────
-  // Unlike /chat/kill, this sends `clear_queue` + `abort` to the live pi
-  // subprocess so the current run stops but the conversation context survives —
-  // the user can keep chatting in the same session.
-  if (pathname === "/chat/stop" && method === "POST") {
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
-    const ok = sessionId ? stopChat(sessionId) : false;
-    return jsonResponse({ ok, sessionId });
-  }
-
-  // ── POST /chat/kill (stop a chat subprocess by session id) ─────────────
-  // Called when the user starts a brand-new conversation: the old pi subprocess
-  // holds the previous conversation's context, so it is killed and its entry
-  // removed rather than left idle to be picked up again.
-  if (pathname === "/chat/kill" && method === "POST") {
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
-    if (sessionId) killChatSession(sessionId);
-    return jsonResponse({ ok: true });
-  }
-
-  // ── POST /chat/prefs (push model/thinking into a running chat subprocess) ─
-  // Applies updated default model / thinking level to an already-running (or
-  // pre-spawned) pi session in place, so Settings changes take effect on the
-  // live agent without killing it and losing the conversation context.
-  if (pathname === "/chat/prefs" && method === "POST") {
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
-    if (!sessionId) return jsonResponse({ error: "missing sessionId" }, 400);
-    return jsonResponse(pushChatPrefs(sessionId, {
-      model: typeof parsed.model === "string" ? parsed.model : "",
-      thinkingLevel: typeof parsed.thinkingLevel === "string" ? parsed.thinkingLevel : "",
-    }));
-  }
-
-  // ── POST /chat/ui (answer an extension_ui dialog, e.g. ask_user_question) ──
-  // pi blocks while an extension waits on the host for a select/input dialog
-  // (the ask_user_question questionnaire). The chat view renders the dialog
-  // as an answerable card; answering POSTs here, which writes the matching
-  // `extension_ui_response` back to the pi subprocess's stdin so the tool
-  // resolves and the agent can continue.
-  if (pathname === "/chat/ui" && method === "POST") {
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
-    const uiId = typeof parsed.id === "string" ? parsed.id.trim() : "";
-    if (!sessionId || !uiId) return jsonResponse({ error: "missing sessionId or dialog id" }, 400);
-    const ok = answerChatUi(sessionId, uiId, {
-      value: typeof parsed.value === "string" ? parsed.value : "",
-      cancelled: parsed.cancelled === true,
-    });
-    return jsonResponse({ ok, sessionId });
-  }
-
-  // ── GET /chat/stt/status (dictation availability for the composer mic) ──
-  // Reports whether a host recorder and a Groq key are available, plus whether
-  // a recording is live. The Chat view uses this to explain a greyed-out mic.
-  if (pathname === "/chat/stt/status" && method === "GET") {
-    const cwd = url.searchParams.get("cwd") ?? "";
-    const absCwd = (cwd && validateCwd(cwd)) || TERMINAL_CWD;
-    return jsonResponse(sttStatus(absCwd));
-  }
-
-  // ── POST /chat/stt/start (record the host microphone) ──────────────────
-  // Mirrors the pi `speech-to-text` extension: capture on the host with
-  // sox/arecord/ffmpeg, then transcribe with Groq Whisper on stop.
-  if (pathname === "/chat/stt/start" && method === "POST") {
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
-    return jsonResponse(startStt(absCwd));
-  }
-
-  // ── POST /chat/stt/stop (stop recording + transcribe via Groq) ─────────
-  // Returns { ok, text } — the transcript to splice into the composer.
-  if (pathname === "/chat/stt/stop" && method === "POST") {
-    return jsonResponse(await stopStt());
-  }
-
   // ── GET /sessions ──────────────────────────────────────────────────────
   if (pathname === "/sessions" && method === "GET") {
     const pool = url.searchParams.get("pool") ?? "";
@@ -4235,18 +4134,25 @@ wssRef = attachTerminal(server, {
 const pluginKit = {
   fs, path,
   jsonResponse, textResponse, readBody, intParam, intOrNull,
-  validateCwd, resolveProjectDir, legacyOfficeState,
+  validateCwd, resolveProjectDir, legacyOfficeState, requireCwd, jsonBody,
   readSettingsJson, DEFAULT_COMMIT_TEMPLATE, generateCommitMessage,
   git, gitTry, gitConfigArgs, ensureGitRepo,
   resolveWithinCwd, cleanPaths, rejectOptionLike,
   parsePorcelainLine, porcelainStatus,
   buildRepoGraph,
+  // Executable resolution (PATH + platform bin dirs + SCOPE_SYSTEM_BIN_DIRS) for
+  // a plugin that shells out to an external harness (the Workflow nodes).
+  resolveExecutable,
   // Chat run state, for plugins that own a background run (the Office queue):
   // a task's dispatch outlives the page that started it, so the plugin needs to
-  // tell a still-running session from an orphan, and to stop it on Pause. The
-  // Office plugin also dispatches its own runs server-side (so the queue keeps
-  // going with no page open) — `startChat` plus the workspace library block.
+  // tell a still-running session from an orphan, and to stop it on Pause.
   chatRunStatus, stopChat, startChat,
+  // The Chat feature plugin owns the /chat routes; it needs the full subprocess
+  // lifecycle + the STT machinery + the reference-library preamble.
+  startChatSession, killChatSession, pushChatPrefs, answerChatUi,
+  sttStatus, startStt, stopStt,
+  // The live shared cwd (mutable; the STT status fallback needs its current value).
+  terminalCwd: () => TERMINAL_CWD,
   libraryBlockFor: (cwd: string) => buildLibraryPrompt(readAgentConfig(cwd).library),
   // The agent dir the user's skills/ and extensions/ live in. A plugin that lets
   // a node pick skills or extensions needs it to resolve those names to real

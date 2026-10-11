@@ -117,14 +117,18 @@
 
   function visibleNav() {
     const items = all().filter((p) => p.nav && p.enabled !== false);
+    // `order` alone is not unique (a plugin may collide with a built-in); the id
+    // breaks ties so the drawn order is deterministic and matches the server's
+    // comparePlugins() instead of depending on registration order.
+    const byOrder = (a, b) => ((a.nav.order ?? 1000) - (b.nav.order ?? 1000)) || a.id.localeCompare(b.id);
     const saved = savedNavOrder();
     // No custom order yet: the declared `nav.order` is the whole story.
-    if (!saved.length) return items.sort((a, b) => (a.nav.order ?? 1000) - (b.nav.order ?? 1000));
+    if (!saved.length) return items.sort(byOrder);
     // The user's order wins; ids it does not know (a plugin added since) keep
     // their declared order and land at the end.
     const rank = new Map(saved.map((id, i) => [id, i]));
     const known = items.filter((p) => rank.has(p.id)).sort((a, b) => rank.get(a.id) - rank.get(b.id));
-    const rest = items.filter((p) => !rank.has(p.id)).sort((a, b) => (a.nav.order ?? 1000) - (b.nav.order ?? 1000));
+    const rest = items.filter((p) => !rank.has(p.id)).sort(byOrder);
     return known.concat(rest);
   }
 
@@ -283,19 +287,38 @@
     if (next && typeof window.setView === "function") window.setView(next);
   }
 
+  // Bundles we have already tried to load (successfully or not), so a re-sync
+  // never re-injects a <script> for a plugin whose register() did not run (a
+  // bundle that threw mid-execution would otherwise be fetched on every sync).
+  const bundleAttempts = new Set();
+  /** A hung <script> would stall sync()'s sequential load loop forever. */
+  const BUNDLE_TIMEOUT_MS = 10000;
+
   function loadClientBundle(plugin) {
     return new Promise((resolve) => {
       if (!plugin.clientUrl) return resolve(false);
+      bundleAttempts.add(plugin.id);
       const url = new URL(plugin.clientUrl, location.origin);
       const token = window.__SCOPE_STATE?.token;
       if (token) url.searchParams.set("token", token);
       const script = document.createElement("script");
+      let settled = false;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => {
+        console.warn(`[plugins] client bundle for ${plugin.id} timed out after ${BUNDLE_TIMEOUT_MS}ms`);
+        done(false);
+      }, BUNDLE_TIMEOUT_MS);
       script.src = url.toString();
       script.dataset.plugin = plugin.id;
-      script.onload = () => resolve(true);
+      script.onload = () => done(true);
       script.onerror = () => {
-        console.warn(`[plugins] failed to load client bundle for ${plugin.id}`);
-        resolve(false);
+        console.warn(`[plugins] failed to load client bundle for ${plugin.id} (check ?token= auth)`);
+        done(false);
       };
       document.head.appendChild(script);
     });
@@ -315,10 +338,13 @@
 
   async function sync() {
     let snap = null;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), BUNDLE_TIMEOUT_MS);
     try {
-      const res = await fetch(window.apiUrl("/plugins", {}), { headers: authHeaders() });
+      const res = await fetch(window.apiUrl("/plugins", {}), { headers: authHeaders(), signal: ctrl.signal });
       if (res.ok) snap = await res.json();
     } catch { /* server unreachable or no plugin host — keep built-in defaults */ }
+    finally { clearTimeout(t); }
     if (!snap || !Array.isArray(snap.plugins)) return;
 
     const byId = new Map(snap.plugins.map((p) => [p.id, p]));
@@ -335,7 +361,7 @@
       }
     }
 
-    const pending = snap.plugins.filter((p) => p.clientUrl && p.enabled && !get(p.id));
+    const pending = snap.plugins.filter((p) => p.clientUrl && p.enabled && !get(p.id) && !bundleAttempts.has(p.id));
     for (const p of pending) await loadClientBundle(p);
 
     const firstSync = !synced;

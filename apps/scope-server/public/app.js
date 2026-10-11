@@ -46,7 +46,11 @@ function loadURLState() {
 function saveURLState() {
   const p = new URLSearchParams();
   p.set("view", STATE.view);
-  if ((STATE.view === "single" || STATE.view === "trajectory" || STATE.view === "chat") && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
+  // Views that carry a selected session in the hash opt in via the plugin spec
+  // (`view.session`); app.js names no view. "chat" (a conversation) and "select"
+  // (Single/Trajectory) keep `sid`; the workspace views deliberately do not.
+  const sess = window.SCOPE.Plugins?.get(STATE.view)?.view?.session;
+  if ((sess === "chat" || sess === "select") && STATE.selectedSessionId) p.set("sid", STATE.selectedSessionId);
   const newHash = "#" + p.toString();
   if (location.hash !== newHash) history.replaceState(null, "", newHash);
 }
@@ -229,9 +233,13 @@ function debounce(fn, wait = 200) {
 // wait period instead of on every appended event / stats response.
 const scheduleAgentSubnav = debounce(renderAgentSubnav, 200);
 
+// Views that render the per-session agent subnav (Single today). Declared on
+// the plugin spec (`view.sessionSubnav`) so app.js no longer names a view id.
+const viewUsesSessionSubnav = (id) => window.SCOPE.Plugins?.get(id)?.view?.sessionSubnav === true;
+
 function renderAgentSubnav() {
   if (!sessionSubnav) return;
-  if (!STATE.selectedSessionId || STATE.view !== "single") {
+  if (!STATE.selectedSessionId || !viewUsesSessionSubnav(STATE.view)) {
     sessionSubnav.style.display = "none";
     return;
   }
@@ -339,19 +347,19 @@ window.setView = function(mode) {
   }
   const prev = P?.get(STATE.view);
   STATE.view = mode;
-  localStorage.setItem("scope-view", mode);
   document.body.classList.toggle("layout-chat", spec?.layout === "chat");
   document.body.classList.toggle("layout-settings", spec?.layout === "settings");
 
   for (const p of (P?.all?.() ?? [])) {
     const pane = p.view?.pane ? document.querySelector(p.view.pane) : null;
     if (pane) pane.style.display = p.id === mode ? (p.view.display || "") : "none";
-    const btn = document.getElementById("btn-" + p.id);
-    if (btn) btn.classList.toggle("active", p.id === mode);
   }
+  // Tint the nav via the host's own helper (the one place that knows the active
+  // button), instead of re-implementing the class toggle here.
+  P?.markActive?.();
 
   if (prev && prev.id !== mode) prev.view?.onHide?.();
-  if (sessionSubnav) sessionSubnav.style.display = (mode === "single" && STATE.selectedSessionId) ? "flex" : "none";
+  if (sessionSubnav) sessionSubnav.style.display = (viewUsesSessionSubnav(mode) && STATE.selectedSessionId) ? "flex" : "none";
   renderSessions();
   spec?.view?.onShow?.();
   saveURLState();
@@ -505,7 +513,7 @@ function clearSelectedSession() {
 function renderSessions() {
   // A selected session that has left the store must not linger on the Single
   // pane (it was deleted or cleared elsewhere). clearSelectedSession re-enters.
-  if (STATE.sessionsLoaded && STATE.view === "single" && STATE.selectedSessionId &&
+  if (STATE.sessionsLoaded && viewUsesSessionSubnav(STATE.view) && STATE.selectedSessionId &&
       !STATE.sessions.some(s => s.session_id === STATE.selectedSessionId)) {
     clearSelectedSession();
     return;

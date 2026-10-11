@@ -309,22 +309,27 @@ the plugin destructures what it needs:
 
 ```js
 export function activate(api) {
-  const { gitTry, jsonResponse, validateCwd } = api.kit;
+  const { gitTry, jsonResponse, requireCwd } = api.kit;
   api.route("GET", "/my-plugin/status", (ctx) => {
-    const cwd = validateCwd(ctx.url.searchParams.get("cwd") ?? "");
-    if (!cwd) return jsonResponse({ error: "invalid cwd" }, 400);
+    const cwd = requireCwd(ctx.url.searchParams.get("cwd"));
+    if (cwd instanceof Response) return cwd;   // the canonical 400
     return jsonResponse({ ok: gitTry(cwd, ["status", "--short"]).out });
   });
 }
 ```
 
 The kit exposes `fs`, `path`, `jsonResponse`, `textResponse`, `readBody`,
-`intParam`, `intOrNull`, `validateCwd`, `resolveProjectDir`, `readSettingsJson`,
+`intParam`, `intOrNull`, `validateCwd`, `requireCwd`, `jsonBody`,
+`resolveProjectDir`, `readSettingsJson`,
 `DEFAULT_COMMIT_TEMPLATE`, `generateCommitMessage`, `git`,
 `gitTry`, `gitConfigArgs`, `ensureGitRepo`, `resolveWithinCwd`, `cleanPaths`,
 `rejectOptionLike`, `parsePorcelainLine`, `porcelainStatus`, `buildRepoGraph`,
 and `legacyOfficeState` (a one-time migration reader the Office plugin uses to
 import a workspace's pre-plugin name/board; nothing else should need it).
+`requireCwd(raw)` is `validateCwd` plus the standard `400` bodies (it returns the
+absolute cwd or a `Response`), and `jsonBody(req)` reads + parses a JSON body,
+returning `{ value }` or `{ error }` (a `413`/`400` `Response`) — use them so
+every route reports the same errors as the built-ins.
 
 For plugins that *run* an agent, two more members matter:
 

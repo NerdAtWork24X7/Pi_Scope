@@ -436,7 +436,9 @@
   }
 
   function workspaces() {
-    const map = {};
+    // Null-prototype map: a cwd literally named "__proto__" must be a normal key,
+    // not a prototype write (rail.js already uses Object.create(null)).
+    const map = Object.create(null);
     for (const s of CH.sessions) {
       const cwd = s.cwd || "(unknown)";
       (map[cwd] = map[cwd] || []).push(s);
@@ -461,6 +463,8 @@
   // is skipped entirely (an innerHTML swap re-creates every node for nothing).
   let wsRailHtml = null;
   let agentsRailHtml = null;
+  // The 30s footer tick interval, owned by the view lifecycle (startFooterTicker).
+  let footerTimer = null;
   function chatRailSig() {
     const ss = CH.sessions;
     let h = ss.length;
@@ -507,9 +511,26 @@
     renderChat();
     attemptRestore();
     refreshOpenSession();
+    startFooterTicker();
     // Returning to the Chat view should land ready to type: the view switch is
     // an explicit user action, and the composer is the primary surface here.
     if (CH.workspace) focusComposer();
+  }
+
+  // Elapsed / branch / go-usage keep ticking while Chat is on screen: a full
+  // footer re-render + refresh every 30s, skipping a hidden tab. Bound to the
+  // view lifecycle (started on show, cleared on hide) so the timer never fires
+  // network requests while the user is on another view.
+  function startFooterTicker() {
+    if (footerTimer) return;
+    footerTimer = setInterval(() => {
+      if (document.hidden) return;
+      renderChatFooter();
+      fetchChatFooter();
+    }, 30000);
+  }
+  function stopFooterTicker() {
+    if (footerTimer) { clearInterval(footerTimer); footerTimer = null; }
   }
 
   // ─── Workspace rail (left) ────────────────────────────────────────────────
@@ -1461,7 +1482,11 @@
     if (!s) return;
     const count = s.event_count ?? 0;
     if (t.lastOpenCount != null && count <= t.lastOpenCount) return;
-    t.lastOpenCount = count;
+    // Do NOT advance lastOpenCount here: loadSessionChat records it only after a
+    // successful render (and re-clicking already refetches). Advancing it up
+    // front meant a transient fetch failure permanently skipped the refresh —
+    // the count was already "seen", so the next poll saw nothing new to load —
+    // leaving a stale transcript until the session gained another event.
     void loadSessionChat(t.openSid, true);
   }
 
@@ -4174,18 +4199,15 @@
     updateSteerToggle();
     attemptRestore();
     fetchChatFooter(true);
-    // Elapsed / branch / go-usage keep ticking: re-render + refresh every 30s.
-    // Skip both while the tab is hidden — nothing is visible to update.
-    setInterval(() => {
-      if (document.hidden) return;
-      renderChatFooter();
-      fetchChatFooter();
-    }, 30000);
+    startFooterTicker();
   }
 
   // Expose hooks for app.js
   window.__chatOnView = onView;
   window.__chatOnSessions = onSessions;
+  // Chat hides: stop the footer ticker so it does not keep polling from another
+  // view (onView restarts it when the user comes back).
+  window.__chatOnHide = stopFooterTicker;
   // The app deletes sessions from outside Chat (Single view's Clear-all button
   // and per-row ✕); these let it hand the change to Chat for thread/subprocess
   // cleanup instead of leaving stale, streaming threads behind.

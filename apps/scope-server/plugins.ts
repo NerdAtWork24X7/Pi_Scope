@@ -671,5 +671,16 @@ export function resolvePluginFile(id: string, rel: string): string | null {
   const base = record.dir;
   const full = path.resolve(base, rel);
   if (full !== base && !full.startsWith(base + path.sep)) return null;
-  return full;
+  // The lexical check above stops `..`, but a symlink *inside* the plugin dir
+  // could still point outside it (e.g. `client.js -> /etc/passwd`). Resolve the
+  // real path and re-check containment; require a regular file too.
+  try {
+    const realBase = fs.realpathSync(base);
+    const real = fs.realpathSync(full);
+    if (real !== realBase && !real.startsWith(realBase + path.sep)) return null;
+    if (!fs.statSync(real).isFile()) return null;
+    return real;
+  } catch {
+    return null;
+  }
 }

@@ -12,8 +12,8 @@ export function activate(api: any): void {
     fs,
     path,
     jsonResponse,
-    readBody,
-    validateCwd,
+    requireCwd,
+    jsonBody,
     git,
     parsePorcelainLine,
     porcelainStatus,
@@ -23,11 +23,9 @@ export function activate(api: any): void {
 
   api.route("GET", "/files/modified", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
     const includeIgnored = url.searchParams.get("ignored") === "1";
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     try {
       const out = git(absCwd, ["status", "--porcelain", "-uall", ...(includeIgnored ? ["--ignored"] : [])]);
       const files: any[] = [];
@@ -48,8 +46,8 @@ export function activate(api: any): void {
     const cwd = url.searchParams.get("cwd") ?? "";
     const file = url.searchParams.get("file") ?? "";
     if (!cwd || !file) return jsonResponse({ error: "missing cwd or file" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(cwd);
+    if (absCwd instanceof Response) return absCwd;
     const absFile = resolveWithinCwd(absCwd, file);
     if (!absFile) return jsonResponse({ error: "invalid file path" }, 400);
     try {
@@ -68,10 +66,8 @@ export function activate(api: any): void {
 
   api.route("GET", "/files/graph", async (ctx) => {
     const url = ctx.url;
-    const cwd = url.searchParams.get("cwd") ?? "";
-    if (!cwd) return jsonResponse({ error: "missing cwd" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
     try {
       return jsonResponse(buildRepoGraph(absCwd));
     } catch (err: any) {
@@ -84,17 +80,14 @@ export function activate(api: any): void {
   });
 
   api.route("POST", "/files/save", async (ctx) => {
-    const req = ctx.req;
-    let bodyText: string;
-    try { bodyText = await readBody(req); } catch (err: any) { return jsonResponse({ error: err.message }, 413); }
-    let parsed: any;
-    try { parsed = JSON.parse(bodyText); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
-    const cwd = parsed.cwd ?? "";
-    const file = parsed.file ?? "";
-    const content = typeof parsed.content === "string" ? parsed.content : "";
+    const { value: parsed, error } = await jsonBody(ctx.req);
+    if (error) return error;
+    const cwd = parsed?.cwd ?? "";
+    const file = parsed?.file ?? "";
+    const content = typeof parsed?.content === "string" ? parsed.content : "";
     if (!cwd || !file) return jsonResponse({ error: "missing cwd or file" }, 400);
-    const absCwd = validateCwd(cwd);
-    if (!absCwd) return jsonResponse({ error: "invalid or disallowed cwd" }, 400);
+    const absCwd = requireCwd(cwd);
+    if (absCwd instanceof Response) return absCwd;
     const absFile = resolveWithinCwd(absCwd, file);
     if (!absFile) return jsonResponse({ error: "invalid file path" }, 400);
     try {

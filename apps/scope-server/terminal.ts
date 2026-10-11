@@ -14,7 +14,7 @@ import net from "node:net";
 import { execFileSync } from "node:child_process";
 import pty from "node-pty";
 import { WebSocketServer, WebSocket } from "ws";
-import { shellQuote } from "../../shared/shell.ts";
+import { shellQuote, resolveExecutable } from "../../shared/shell.ts";
 
 interface TerminalConfig {
   port: number;
@@ -164,6 +164,23 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
     term.onData((data: string) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
     term.onExit(() => { try { ws.close(); } catch {} });
 
+    // Backpressure: a slow or frozen client (a tab throttled to ~0 fps, a stalled
+    // socket) makes `ws.send` queue without bound. Without a guard a chatty
+    // command can balloon the server's memory. Pause the PTY at a high-water
+    // mark so the child stops producing, and resume once the socket has drained.
+    const WS_HIGH_WATER = 1 << 20; // 1 MiB queued → pause
+    const WS_LOW_WATER = 1 << 18; //  256 KiB queued → resume
+    let ptyPaused = false;
+    const drainTimer = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (ptyPaused) {
+        if (ws.bufferedAmount <= WS_LOW_WATER) { ptyPaused = false; try { term.resume(); } catch { /* exiting */ } }
+      } else if (ws.bufferedAmount > WS_HIGH_WATER) {
+        ptyPaused = true; try { term.pause(); } catch { /* exiting */ }
+      }
+    }, 100);
+    drainTimer.unref?.();
+
     // Keep the shared session directory in sync with the live shell cwd.
     // The CWD source depends on which shell the user selected:
     //   - Bash (or any non-Herdr shell): use the in-browser PTY's cwd via /proc/<pid>/cwd.
@@ -208,6 +225,8 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
     };
     pushCwd();
     const cwdTimer = setInterval(pushCwd, 2000);
+    // Don't let the poll hold the event loop open (e.g. during server shutdown).
+    cwdTimer.unref?.();
 
     ws.on("message", async (msg: Buffer | ArrayBuffer | Buffer[]) => {
       const raw = typeof msg === "string" ? msg : Buffer.from(msg as Uint8Array).toString();
@@ -243,8 +262,8 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
       }
       term.write(raw);
     });
-    ws.on("close", () => { try { clearInterval(cwdTimer); } catch {} try { term.kill(); } catch {} cfg.onClose?.(ws); });
-    ws.on("error", () => { try { clearInterval(cwdTimer); } catch {} try { term.kill(); } catch {} cfg.onClose?.(ws); });
+    ws.on("close", () => { try { clearInterval(cwdTimer); } catch {} try { clearInterval(drainTimer); } catch {} try { term.kill(); } catch {} cfg.onClose?.(ws); });
+    ws.on("error", () => { try { clearInterval(cwdTimer); } catch {} try { clearInterval(drainTimer); } catch {} try { term.kill(); } catch {} cfg.onClose?.(ws); });
   });
 
   return wss;
@@ -252,34 +271,10 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
 
 // Resolve an executable name to a full path so node-pty doesn't fail with
 // "execvp(3) failed.: No such file or directory" when the server process has
-// a limited PATH (e.g. launched from a desktop session).
+// a limited PATH (e.g. launched from a desktop session). Falls back to the bare
+// name, letting node-pty report the failure.
 function resolveShellPath(name: string): string {
-  if (path.isAbsolute(name)) return name;
-  const dirs = new Set<string>([
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-    "/opt/homebrew/bin",
-    path.join(os.homedir(), ".local", "bin"),
-  ]);
-  if (process.env.PATH) {
-    for (const dir of process.env.PATH.split(path.delimiter)) {
-      if (dir) dirs.add(dir);
-    }
-  }
-  for (const dir of dirs) {
-    const full = path.join(dir, name);
-    try {
-      if (fs.existsSync(full) && fs.statSync(full).isFile()) {
-        try { fs.accessSync(full, fs.constants.X_OK); return full; } catch {}
-      }
-    } catch {}
-  }
-  try {
-    const out = execFileSync("which", [name], { encoding: "utf8" }).trim();
-    if (out) return out;
-  } catch {}
-  return name;
+  return resolveExecutable(name) ?? name;
 }
 
 // Resolve the PTY shell's current working directory so the UI can keep the

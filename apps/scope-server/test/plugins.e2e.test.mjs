@@ -163,6 +163,53 @@ describe("plugin host (server)", () => {
     assert.equal(gated.status, 401);
   });
 
+  test("plugin bundle resolution cannot escape the plugin directory", async (t) => {
+    const dir = path.join(pluginsDir, "hello-insights");
+    // Lexical traversal: `..` segments are refused (400/404, never 200).
+    const dotdot = await fetch(`${base}/plugins/file/hello-insights/..%2f..%2fetc%2fhosts?token=${TOKEN}`);
+    assert.notEqual(dotdot.status, 200, "`..` must not read outside the plugin dir");
+
+    // Symlink traversal: a link *inside* the dir pointing outside must be
+    // refused too (the lexical check alone would follow it).
+    const link = path.join(dir, "escaped.js");
+    try {
+      fs.symlinkSync("/etc/hosts", link);
+    } catch {
+      t.skip("symlinks unavailable on this platform");
+      return;
+    }
+    try {
+      const res = await fetch(`${base}/plugins/file/hello-insights/escaped.js?token=${TOKEN}`);
+      assert.equal(res.status, 404, "a symlink out of the plugin dir must 404");
+    } finally {
+      fs.rmSync(link, { force: true });
+    }
+  });
+
+  test("the Chat feature plugin owns its /chat routes (gated by enablement)", async () => {
+    assert.equal((await api("/plugins")).data.plugins.find((p) => p.id === "chat").hasServer, true);
+
+    const on = await api("/chat/stt/status");
+    assert.equal(on.res.status, 200, "chat route served while the plugin is enabled");
+
+    const off = await api("/plugins", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "disable", id: "chat" }),
+    });
+    assert.ok(off.res.ok);
+    const gated = await api("/chat/stt/status");
+    assert.equal(gated.res.status, 403, "disabling chat refuses its own prefix");
+    assert.equal(gated.data.plugin, "chat");
+
+    const again = await api("/plugins", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "enable", id: "chat" }),
+    });
+    assert.ok(again.res.ok);
+    const back = await api("/chat/stt/status");
+    assert.equal(back.res.status, 200, "re-enabling restores the routes");
+  });
+
   test("disabling a feature refuses its server routes but leaves core routes alone", async () => {
     const off = await api("/plugins", {
       method: "POST", headers: { "content-type": "application/json" },

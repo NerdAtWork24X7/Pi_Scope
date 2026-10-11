@@ -153,17 +153,9 @@ const HARNESSES: Record<string, any> = {
   custom: { label: "Custom command", bin: null, models: [], capabilities: { tools: null, skills: null, extensions: null } },
 };
 
-/** Is `bin` executable somewhere on PATH? */
-function which(bin: string): string | null {
-  if (!bin) return null;
-  const dirs = String(process.env.PATH || "").split(path.delimiter).filter(Boolean);
-  for (const dir of dirs) {
-    const full = path.join(dir, bin);
-    try {
-      if (fs.statSync(full).isFile()) { fs.accessSync(full, fs.constants.X_OK); return full; }
-    } catch { /* keep looking */ }
-  }
-  return null;
+/** Is `bin` executable somewhere on PATH? Returns its absolute path or null. */
+function which(bin: string, resolve: (name: string) => string | null): string | null {
+  return resolve(bin);
 }
 
 /** Split a user-typed argument string on whitespace, honouring quotes. */
@@ -380,6 +372,14 @@ export function activate(api: any): void {
   // Absent when the host predates the helper — handled per node, never assumed.
   const agentDir: string = typeof api.kit.agentDir === "string" ? api.kit.agentDir : "";
 
+  // Resolve a harness binary through the HOST's resolver (PATH + the platform's
+  // extra bin dirs + SCOPE_SYSTEM_BIN_DIRS) — a plugin must not import the
+  // server's modules directly (the packaged build copies plugins outside the
+  // bundle, so a shared import would not resolve). An older host without the
+  // helper simply resolves nothing, so no harness reports as available.
+  const resolveBin: (name: string) => string | null =
+    typeof api.kit.resolveExecutable === "function" ? api.kit.resolveExecutable : () => null;
+
   const hasProjectStore = typeof api.projectStore === "function";
   const storeFor = (workspace: string) => (hasProjectStore ? api.projectStore(workspace) : api.store);
   const readStoreAll = (workspace: string): Record<string, any> => {
@@ -433,7 +433,7 @@ export function activate(api: any): void {
       id,
       label: h.label,
       bin: h.bin,
-      available: h.bin ? !!which(h.bin) : id === "custom" ? true : typeof api.kit.startChat === "function",
+      available: h.bin ? !!which(h.bin, resolveBin) : id === "custom" ? true : typeof api.kit.startChat === "function",
       modelFlag: h.modelFlag || null,
       // Suggested models for this harness. `pi` is filled in by the client from
       // the app's own catalogue (`GET /models`), which the host owns.

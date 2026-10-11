@@ -134,8 +134,15 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
       // launched from a desktop session that may not inherit shell env vars.
       HOME: process.env.HOME || os.homedir(),
       USER: process.env.USER || (() => { try { return os.userInfo().username; } catch { return ""; } })(),
-      SHELL: process.env.SHELL || "/bin/bash",
-      PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
+      // Prefer the user's real login shell; never hardcode /bin/bash (absent on
+      // some systems). The server itself falls back to bash/zsh when SHELL is
+      // empty, so an unresolved shell is safe to pass through as "".
+      SHELL: process.env.SHELL || (() => { try { return os.userInfo().shell || ""; } catch { return ""; } })(),
+      // Only synthesise a PATH when the launcher truly has none (Windows resolves
+      // against its own PATH variable, so the POSIX defaults don't apply there).
+      PATH: process.env.PATH || (process.platform === "win32"
+        ? String(process.env.Path || "")
+        : "/usr/local/bin:/usr/bin:/bin"),
     };
     const launch = serverLaunch();
     const proc = spawn(launch.bin, launch.args, { cwd: launch.cwd, env, detached: true, stdio: "inherit" });

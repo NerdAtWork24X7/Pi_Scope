@@ -116,3 +116,66 @@ export function readShellEnvMap(): Record<string, string> {
 export function shellQuote(value: string): string {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
+
+/**
+ * System binary directories to search *in addition to* $PATH.
+ *
+ * The server is routinely launched from a GUI/desktop session whose PATH lacks
+ * the dirs a login shell would add, so looked-up executables (`bash`, `rec`,
+ * `claude`, …) resolve only if these are searched too. Override with
+ * SCOPE_SYSTEM_BIN_DIRS (a path-delimiter-separated list) — e.g. to point at a
+ * Homebrew or Nix prefix. Empty on Windows, where PATHEXT handles the rest.
+ */
+export function systemBinDirs(): string[] {
+  const override = process.env.SCOPE_SYSTEM_BIN_DIRS;
+  if (override) return override.split(path.delimiter).map((d) => d.trim()).filter(Boolean);
+  if (process.platform === "win32") return [];
+  return [
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/opt/homebrew/bin",
+    path.join(os.homedir(), ".local", "bin"),
+  ];
+}
+
+/** $PATH entries first, then the platform system dirs (de-duplicated). */
+export function executableSearchDirs(): string[] {
+  const dirs = String(process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  for (const dir of systemBinDirs()) if (!dirs.includes(dir)) dirs.push(dir);
+  return dirs;
+}
+
+/**
+ * Resolve an executable name to an absolute path, or null.
+ *
+ * An absolute/relative path is validated and returned as-is; a bare name is
+ * searched across `executableSearchDirs()` with the platform's extension
+ * suffixes. One implementation replaces the four near-identical `which`
+ * deep-probes that chat.ts, terminal.ts, stt.ts and the subagent-workflow
+ * plugin each carried (and honour SCOPE_SYSTEM_BIN_DIRS uniformly).
+ */
+export function resolveExecutable(name: string): string | null {
+  const bin = String(name || "").trim();
+  if (!bin) return null;
+  if (bin.includes("/") || bin.includes("\\")) {
+    try { fs.accessSync(bin, fs.constants.X_OK); return bin; } catch { return null; }
+  }
+  const exts = process.platform === "win32"
+    ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+    : [""];
+  for (const dir of executableSearchDirs()) {
+    for (const ext of exts) {
+      const full = path.join(dir, bin + ext);
+      try {
+        if (fs.statSync(full).isFile()) { fs.accessSync(full, fs.constants.X_OK); return full; }
+      } catch { /* keep looking */ }
+    }
+  }
+  return null;
+}
+
+/** Whether `name` resolves to an executable (see resolveExecutable). */
+export function hasExecutable(name: string): boolean {
+  return resolveExecutable(name) !== null;
+}
