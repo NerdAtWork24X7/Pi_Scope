@@ -1942,7 +1942,15 @@
   /** A fresh id for a dispatch's own chat session, so the run can be recognised
    *  again if this page reloads while it is still going. */
   function newRunId() {
-    try { return crypto.randomUUID(); } catch { return `run_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`; }
+    try { return crypto.randomUUID(); } catch {}
+    try {
+      const bytes = new Uint8Array(8);
+      crypto.getRandomValues(bytes);
+      const rand = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      return `run_${Date.now()}_${rand}`;
+    } catch {
+      return `run_${Date.now()}_${Date.now().toString(36)}`;
+    }
   }
 
   /** The live run status the server reports for a task, or null. */
