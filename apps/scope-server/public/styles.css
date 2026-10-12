@@ -5865,6 +5865,9 @@
       flex-direction: column;
     }
     .chat-messages {
+      /* The avatar column every row reserves (message rows and the terminal-run
+         row below). One value, so the two can never disagree. */
+      --chat-av: 30px;
       flex: 1;
       overflow-y: auto;
       padding: 26px 34px 40px;
@@ -5926,8 +5929,8 @@
       justify-content: flex-end;
     }
     .chat-msg-avatar {
-      width: 30px;
-      height: 30px;
+      width: var(--chat-av);
+      height: var(--chat-av);
       border-radius: var(--r-btn);
       flex-shrink: 0;
       background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 70%);
@@ -7239,15 +7242,43 @@
     .chat-ext-run svg {
       opacity: 0.85;
     }
-    /* The same motion the in-app run pill gives, pinned under a transcript whose
-       agent is working elsewhere (there is no in-flight bubble to carry it). */
+    /* The same motion the in-app run pill gives, for a transcript whose agent is
+       working elsewhere. It is laid out as a message ROW — the avatar column
+       plus a body column, with the very same box model as .chat-msg — instead of
+       a bare strip with a hand-computed offset, so the pill lines up with the
+       message column at every pane width. */
     .chat-ext-live {
       display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin: 0 auto 2px;
+      max-width: 940px;
+      width: 100%;
+      padding: 12px 8px;
+      animation: chat-msg-in 0.22s ease both;
+    }
+    /* The avatar column, filled with a glyph instead of a person: the exact box
+       the message rows reserve (same width, same 2px top offset, content
+       centered), so the row reads as a peer of the messages and its glyph sits
+       where every avatar's does. */
+    .chat-ext-live-av {
+      width: var(--chat-av);
+      height: var(--chat-av);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 2px;
+      color: var(--muted);
+      opacity: 0.75;
+    }
+    .chat-ext-live-pill {
+      display: inline-flex;
       align-items: center;
       gap: 8px;
       align-self: flex-start;
       max-width: 100%;
-      margin: 6px 0 2px 38px;
+      min-width: 0;
       padding: 3px 11px 3px 9px;
       border-radius: var(--r-pill);
       background: var(--accent-soft);
@@ -7258,6 +7289,9 @@
       font-weight: 500;
       letter-spacing: 0.1px;
       color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .chat-stopped-note {

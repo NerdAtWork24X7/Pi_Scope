@@ -1303,13 +1303,14 @@
 
   // ─── Boot ─────────────────────────────────────────────────────────────────
   // app.js runs setView() and the first /sessions fetch before this script
-  // loads, so neither hook fires for the initial URL-hash view. Adopt the
-  // workspace's newest session as soon as the session list is available —
-  // otherwise the pane sits empty until the next 10s sessions poll.
+  // loads, so for the initial URL-hash view neither hook fires. This view also
+  // needs the session list (it adopts the workspace's newest session), so the
+  // missed first show is requested via the host once the list is in — otherwise
+  // the pane sits empty until the next 10s sessions poll.
   if (STATE.view === "trajectory") {
     let tries = 0;
     const boot = () => {
-      if (STATE.sessionsLoaded || tries++ > 100) { window.__trajectoryOnView(); return; }
+      if (STATE.sessionsLoaded || tries++ > 100) { window.SCOPE.Plugins?.ready?.("trajectory"); return; }
       setTimeout(boot, 100);
     };
     boot();

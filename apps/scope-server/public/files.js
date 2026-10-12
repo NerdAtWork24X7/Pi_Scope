@@ -1395,4 +1395,8 @@
       if (viewMode === "diagram") ensureGraph(true);
     }
   };
+
+  // Hooks bound — this script is parsed after app.js, so the boot setView() could
+  // not deliver the first show (see plugins.js `ready`).
+  window.SCOPE.Plugins?.ready?.("files");
 })();

@@ -358,4 +358,9 @@
     if (herdrBtn) herdrBtn.addEventListener("click", () => setShell("herdr"));
     updateShellButtons();
   })();
+
+  // Hooks bound — this script is parsed after app.js, so the boot setView() could
+  // not deliver the first show: a deep link to the Terminal used to sit on the
+  // shell chooser instead of reconnecting the shell the user last used.
+  window.SCOPE.Plugins?.ready?.("terminal");
 })();

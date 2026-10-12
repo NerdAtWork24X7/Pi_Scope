@@ -287,6 +287,40 @@
     if (next && typeof window.setView === "function") window.setView(next);
   }
 
+  /**
+   * Deliver the `onShow` a view missed at boot.
+   *
+   * Every view script in `public/` (files.js, git.js, checkpoints.js, chat.js,
+   * terminal.js, settings.js, trajectory.js) is parsed AFTER app.js, and app.js
+   * opens the initial view with `setView()` while it executes. The spec's
+   * `onShow` therefore ran before the hook it calls existed — a document that
+   * lands straight on such a view (a deep link, a reload on the Chat nav) sat
+   * stale or empty until some unrelated hook (the 10 s sessions poll, a cwd
+   * change) happened to fire. Three views had grown their own workarounds.
+   *
+   * A view script now announces itself here once its `window.__<view>…` hooks
+   * are bound; if that view is the one on screen, the show is delivered now.
+   * Idempotent per view, and a no-op for a view that is not on screen (its next
+   * `setView()` delivers the hook itself, so nothing is ever shown twice).
+   */
+  const readyViews = new Set();
+  function viewReady(id) {
+    const key = String(id ?? "");
+    if (!key || readyViews.has(key)) return;
+    const spec = get(key);
+    // An unknown id (its manifest is not in the registry yet) keeps the
+    // announcement open — consuming it here would silently drop the show.
+    if (!spec) return;
+    readyViews.add(key);
+    if (spec.enabled === false || currentViewId() !== key) return;
+    try {
+      spec.view?.onShow?.();
+    } catch (err) {
+      // A view that throws while presenting itself must not take the boot down.
+      console.error(`[plugins] ${key} onShow failed:`, err);
+    }
+  }
+
   // Bundles we have already tried to load (successfully or not), so a re-sync
   // never re-injects a <script> for a plugin whose register() did not run (a
   // bundle that threw mid-execution would otherwise be fetched on every sync).
@@ -315,7 +349,9 @@
       }, BUNDLE_TIMEOUT_MS);
       script.src = url.toString();
       script.dataset.plugin = plugin.id;
-      script.onload = () => done(true);
+      // A bundle that loaded has bound its hooks — if its view is the one on
+      // screen, deliver the show it missed while the bundle was in flight.
+      script.onload = () => { viewReady(plugin.id); done(true); };
       script.onerror = () => {
         console.warn(`[plugins] failed to load client bundle for ${plugin.id} (check ?token= auth)`);
         done(false);
@@ -402,7 +438,7 @@
   window.SCOPE = window.SCOPE || {};
   window.SCOPE.Plugins = {
     register, get, all, views, currentViewId, activeView,
-    renderNav, markActive, sync, snapshot,
+    renderNav, markActive, sync, snapshot, ready: viewReady,
     isEnabled: (id) => get(id)?.enabled !== false,
     isSynced: () => synced,
   };

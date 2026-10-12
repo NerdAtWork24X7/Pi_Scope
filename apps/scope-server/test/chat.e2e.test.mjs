@@ -105,6 +105,46 @@ describe("chat workspaces", () => {
     assert.equal(await page.inputValue("#chat-input"), "typed without clicking", "keyboard reaches the composer");
   });
 
+  test("REGRESSION: the Chat view's boot show waits for the session list", async () => {
+    // The Chat view is the default, so a boot usually lands here. Its first
+    // `onShow` used to be missed entirely (this script is parsed after app.js
+    // boots); it is delivered now (plugins.js `ready`), but only once the first
+    // /sessions response is in — presenting the rail from an empty list painted
+    // "No workspaces yet" on every reload. The mock delays that response so the
+    // ordering is deterministic instead of a race.
+    await boot({ sessions: [makeSession(SESS_A)] });
+    await page.addInitScript(() => {
+      window.__chatShows = [];
+      let fn;
+      Object.defineProperty(window, "__chatOnView", {
+        configurable: true,
+        get: () => fn,
+        set: (value) => {
+          fn = typeof value === "function"
+            ? function (...args) {
+                const out = value.apply(this, args);
+                // Sampled AFTER the show painted the rail.
+                window.__chatShows.push({
+                  loaded: !!window.__SCOPE_STATE?.sessionsLoaded,
+                  emptyRail: !!document.querySelector(".chat-rail-empty"),
+                });
+                return out;
+              }
+            : value;
+        },
+      });
+    });
+    mock.setSessionsDelay(900);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => (window.__chatShows || []).length > 0, undefined, { timeout: 10_000 });
+    await page.waitForSelector(`.chat-ws[data-cwd="${WS_A}"]`);
+    assert.deepEqual(
+      await page.evaluate(() => window.__chatShows),
+      [{ loaded: true, emptyRail: false }],
+      "shown once, with the session list already in hand"
+    );
+  });
+
   test("REGRESSION: the Chat button hard-reloads with a cache-bust marker", async () => {
     // Clicking Chat must not run a renderer-cached copy of the chat JS/CSS: it
     // navigates to the chat view with ?_=<ts> so the server tags the page's
@@ -1563,6 +1603,42 @@ describe("a session running in the terminal", () => {
     }, new Date().toISOString());
     await page.waitForFunction(() => document.getElementById("chat-header-state").textContent === "working");
     await page.waitForSelector(".chat-ext-live", { state: "visible" });
+  });
+
+  test("REGRESSION: the terminal indicator lines up with the message column at any width", async () => {
+    // Reported: the "working in your terminal…" strip was offset with a
+    // hand-computed margin, so it drifted away from the centered message column
+    // as the window grew (glaring once the app was maximized). It is laid out as
+    // a message ROW now, so it must share the rows' geometry at every width.
+    await boot({
+      sessions: [EXT({ last_turn_event: "turn_start" })],
+      events: { "ext-1": [
+        { type: "user_message", ts: now, payload: { text: "terminal work" } },
+        { type: "assistant_message", ts: now, payload: { text: "watching" } },
+        { type: "turn_start", ts: now, payload: {} },
+      ] },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "ext-1").click();
+    await page.waitForSelector(".chat-ext-live-pill", { state: "visible" });
+
+    for (const width of [1440, 2560, 3840]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await sleep(200);
+      const geo = await page.evaluate(() => {
+        const box = (sel) => { const e = document.querySelector(sel); const b = e.getBoundingClientRect(); return { x: Math.round(b.x), w: Math.round(b.width) }; };
+        const aiBody = [...document.querySelectorAll(".chat-msg.chat-ai .chat-msg-body")].pop().getBoundingClientRect();
+        return {
+          row: box(".chat-msg"), stripRow: box(".chat-ext-live"), pill: box(".chat-ext-live-pill"),
+          aiBodyX: Math.round(aiBody.x),
+          overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
+      });
+      assert.equal(geo.stripRow.x, geo.row.x, `row box aligns at ${width}px`);
+      assert.equal(geo.stripRow.w, geo.row.w, `row width matches at ${width}px`);
+      assert.equal(geo.pill.x, geo.aiBodyX, `pill sits on the message column at ${width}px`);
+      assert.equal(geo.overflowX, 0, `no horizontal overflow at ${width}px`);
+    }
   });
 
   test("a recorded provider error and error events reach the transcript", async () => {

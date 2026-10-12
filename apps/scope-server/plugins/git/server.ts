@@ -19,6 +19,7 @@ export function activate(api: any): void {
     DEFAULT_COMMIT_TEMPLATE,
     git,
     gitTry,
+    gitTryAsync,
     resolveWithinCwd,
     cleanPaths,
     rejectOptionLike,
@@ -298,16 +299,67 @@ export function activate(api: any): void {
     if (!uemail.ok || !uemail.out.trim()) cfg["user.email"] = "scope@localhost";
     const r = gitTry(absCwd, ["commit", ...(amend ? ["--amend"] : []), "-m", message], cfg);
     if (!r.ok) return jsonResponse({ ok: false, error: r.out }, 409);
+    // The commit consumed the repo's drafted message: drop the job so a page
+    // that comes back later never adopts a draft the box has moved past.
+    dropCommitJob(absCwd);
     const sha = gitTry(absCwd, ["rev-parse", "--short", "HEAD"]);
     return jsonResponse({ ok: true, sha: sha.out.trim(), amend });
   });
 
-  api.route("POST", "/git/commit-message", async (ctx) => {
-    const req = ctx.req;
-    const body = await gitPost(req);
-    if (body instanceof Response) return body;
-    const { cwd: absCwd } = body;
+  // ─── AI commit-message draft: a job per repo, outliving the request ──────
+  // Drafting is slow (a model round-trip) and the page is not: the Chat nav
+  // reloads the document, and any reload used to lose the answer forever — the
+  // response had nowhere to go while `pi` kept working. So the draft runs as a
+  // server-side job keyed by repo, and the Git view re-reads it (GET below)
+  // whenever it is shown, adopting a running or finished job. That also makes
+  // the button idempotent: a second click while one draft is in flight reuses
+  // the running `pi` instead of spawning another.
+  const JOB_TTL_MS = 30 * 60_000; // how long a finished draft stays adoptable
+  const JOB_MAX = 32; // repos remembered at once (one job each)
+  type CommitJob = {
+    id: string;
+    cwd: string;
+    model: string;
+    source: string;
+    status: "running" | "done" | "error";
+    message: string;
+    error: string;
+    startedAt: number;
+    finishedAt: number;
+    /** Settles (never rejects) when the draft reaches a terminal state. */
+    done: Promise<void>;
+  };
+  const commitJobs = new Map<string, CommitJob>();
+  let commitJobSeq = 0;
 
+  /** Forget a repo's draft job (its commit consumed it). */
+  function dropCommitJob(absCwd: string): void {
+    commitJobs.delete(absCwd);
+  }
+
+  /** Drop finished drafts past their TTL, and never grow past JOB_MAX repos. */
+  function pruneCommitJobs(): void {
+    const now = Date.now();
+    for (const [key, job] of commitJobs) {
+      if (now - (job.finishedAt || job.startedAt) > JOB_TTL_MS) commitJobs.delete(key);
+    }
+    while (commitJobs.size > JOB_MAX) {
+      let oldestKey = "";
+      let oldest = Infinity;
+      for (const [key, job] of commitJobs) {
+        const t = job.finishedAt || job.startedAt;
+        if (t < oldest) { oldest = t; oldestKey = key; }
+      }
+      commitJobs.delete(oldestKey);
+    }
+  }
+
+  /**
+   * Render the draft prompt for a repo, or return the Response to fail with.
+   * Kept separate from the job so the request still answers 400/409 (nothing to
+   * describe, diff failure) before anything is spawned.
+   */
+  function buildCommitPrompt(absCwd: string): { prompt: string; model: string; source: string } | Response {
     // Prefer the index (what a commit would actually contain); fall back to the
     // worktree so the button still helps before anything is staged.
     let diff = gitTry(absCwd, ["diff", "--cached", "--no-color", "--unified=3"]);
@@ -357,13 +409,91 @@ export function activate(api: any): void {
       ? rendered
       : `${rendered}\n\nBranch: ${branch || "(detached)"}\nChanges (${source}):\n${clipped}`;
 
-    try {
-      const message = await generateCommitMessage({ cwd: absCwd, model, prompt });
-      if (!message) return jsonResponse({ error: "the model returned an empty message" }, 502);
-      return jsonResponse({ ok: true, message, model, source });
-    } catch (err: any) {
-      return jsonResponse({ error: `could not generate a commit message: ${String(err?.message ?? err)}` }, 502);
+    return { prompt, model, source };
+  }
+
+  /** Start the repo's draft — or hand back the run already in flight. */
+  function startCommitJob(
+    absCwd: string,
+    built: { prompt: string; model: string; source: string },
+  ): CommitJob {
+    const running = commitJobs.get(absCwd);
+    if (running && running.status === "running") return running;
+
+    const job: CommitJob = {
+      id: `j${++commitJobSeq}-${Date.now().toString(36)}`,
+      cwd: absCwd,
+      model: built.model,
+      source: built.source,
+      status: "running",
+      message: "",
+      error: "",
+      startedAt: Date.now(),
+      finishedAt: 0,
+      done: Promise.resolve(),
+    };
+    commitJobs.set(absCwd, job);
+    pruneCommitJobs();
+
+    // The job owns the outcome, the request only waits for it: `done` resolves
+    // on success AND on failure (the reason lands in `job.error`), so a waiter
+    // never needs its own try/catch and can never reject into the HTTP layer.
+    job.done = (async () => {
+      try {
+        const message = await generateCommitMessage({ cwd: absCwd, model: job.model, prompt: built.prompt });
+        if (message) job.message = message;
+        else { job.status = "error"; job.error = "the model returned an empty message"; }
+      } catch (err: any) {
+        job.status = "error";
+        job.error = `could not generate a commit message: ${String(err?.message ?? err)}`;
+      } finally {
+        if (job.status === "running") job.status = "done";
+        job.finishedAt = Date.now();
+      }
+    })();
+    return job;
+  }
+
+  api.route("POST", "/git/commit-message", async (ctx) => {
+    const body = await gitPost(ctx.req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd } = body;
+
+    const built = buildCommitPrompt(absCwd);
+    if (built instanceof Response) return built;
+
+    const job = startCommitJob(absCwd, built);
+    await job.done;
+    // The registry is the source of truth: a job that is gone was consumed (a
+    // commit landed while this draft was still running), so its message no
+    // longer describes the box the user is looking at.
+    if (commitJobs.get(absCwd) !== job) {
+      return jsonResponse({ ok: false, error: "the commit changed while the message was being drafted — generate again" }, 409);
     }
+    if (job.status === "error") return jsonResponse({ error: job.error }, 502);
+    return jsonResponse({ ok: true, message: job.message, model: job.model, source: job.source, job: job.id });
+  });
+
+  // What is this repo's draft doing? The Git view asks on every show — that is
+  // how a generation started before a page reload is recovered instead of lost.
+  api.route("GET", "/git/commit-message", async (ctx) => {
+    const absCwd = requireCwd(ctx.url.searchParams.get("cwd"));
+    if (absCwd instanceof Response) return absCwd;
+    pruneCommitJobs();
+    const job = commitJobs.get(absCwd);
+    if (!job) return jsonResponse({ ok: true, status: "idle" });
+    return jsonResponse({
+      ok: true,
+      status: job.status,
+      job: job.id,
+      cwd: job.cwd,
+      model: job.model,
+      source: job.source,
+      message: job.message,
+      error: job.error,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+    });
   });
 
   api.route("POST", "/git/branch", async (ctx) => {
@@ -484,6 +614,11 @@ export function activate(api: any): void {
       const cur = gitTry(absCwd, ["branch", "--show-current"]);
       if (cur.ok && cur.out.trim()) branch = cur.out.trim();
     }
+    // These three hit the network: a push/pull/fetch against a remote can take
+    // seconds (auth, a large fetch) and used to freeze the whole server — SSE,
+    // the terminal socket, every other request — because gitTry is synchronous.
+    // The local plumbing above (branch/rev-parse/remote) stays sync, and a
+    // credential prompt is still disabled so nothing can hang on stdin.
     let r;
     if (pathname === "/git/push") {
       // When no remote/branch are specified and the branch lacks an upstream,
@@ -494,17 +629,17 @@ export function activate(api: any): void {
           // No upstream configured — find the default remote and push with --set-upstream.
           const remotes = gitTry(absCwd, ["remote"]);
           const defaultRemote = remotes.ok ? remotes.out.split("\n")[0]?.trim() || "origin" : "origin";
-          r = gitTry(absCwd, ["push", "--set-upstream", defaultRemote, branch]);
+          r = await gitTryAsync(absCwd, ["push", "--set-upstream", defaultRemote, branch]);
         } else {
-          r = gitTry(absCwd, ["push"]);
+          r = await gitTryAsync(absCwd, ["push"]);
         }
       } else {
-        r = gitTry(absCwd, ["push", ...(remote ? [remote, branch || "HEAD"] : [])]);
+        r = await gitTryAsync(absCwd, ["push", ...(remote ? [remote, branch || "HEAD"] : [])]);
       }
     } else if (pathname === "/git/pull") {
-      r = gitTry(absCwd, ["pull", ...(remote ? [remote, branch] : [])]);
+      r = await gitTryAsync(absCwd, ["pull", ...(remote ? [remote, branch] : [])]);
     } else {
-      r = gitTry(absCwd, ["fetch", ...(remote ? [remote] : ["--all"])]);
+      r = await gitTryAsync(absCwd, ["fetch", ...(remote ? [remote] : ["--all"])]);
     }
     return r.ok ? jsonResponse({ ok: true, out: r.out.trim() }) : jsonResponse({ ok: false, error: r.out }, 409);
   };
@@ -605,7 +740,8 @@ export function activate(api: any): void {
     switch (action) {
       case "add":
         if (!url || !subPath) return jsonResponse({ error: "missing url or path" }, 400);
-        r = gitTry(absCwd, ["submodule", "add", url, subPath]);
+        // Clones the submodule — network, so it must not block the event loop.
+        r = await gitTryAsync(absCwd, ["submodule", "add", url, subPath]);
         break;
       case "remove":
         if (!subPath) return jsonResponse({ error: "missing path" }, 400);
@@ -617,7 +753,8 @@ export function activate(api: any): void {
         }
         break;
       case "update":
-        r = gitTry(absCwd, ["submodule", "update", "--init", "--recursive", ...(subPath ? ["--", subPath] : [])]);
+        // Fetches every missing submodule — network (see `add`).
+        r = await gitTryAsync(absCwd, ["submodule", "update", "--init", "--recursive", ...(subPath ? ["--", subPath] : [])]);
         break;
       case "init":
         r = gitTry(absCwd, ["submodule", "init", ...(subPath ? [subPath] : [])]);

@@ -249,7 +249,9 @@ commit-lane graph, **Branches**, **Stashes**, **Remotes**, and **Submodules**. C
 commit to see its detail and diff. Cherry-pick, revert, rebase, or reset from the graph's
 context menu. Stuck on a message? **✨ generate** drafts one from the pending diff (staged, or
 the working tree when nothing is staged) — pick the model and edit the instruction template in
-**Settings → Models**; both default to the agent's model and a Conventional Commits prompt.
+**Settings → Models**; both default to the agent's model and a Conventional Commits prompt. The
+draft runs server-side, so switching views or reloading the page (the Chat tab always reloads)
+does not lose it: come back to Git and the message is there.
 
 <p align="center">
   <img src="docs/shots/git-dark.png" alt="Git history" width="880" />

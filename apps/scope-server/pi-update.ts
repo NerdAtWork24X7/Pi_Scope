@@ -210,9 +210,35 @@ function run(bin: string, args: string[], cwd: string): Promise<string> {
 /** Deduplicate concurrent update requests — `npm install` must not run twice. */
 let inFlight: Promise<PiUpdateStatus> | null = null;
 
+/** When the running install started (null when none is running). */
+let updateStartedAt: string | null = null;
+/** How the last install ended. Kept after the request that started it is gone,
+ *  so a page that reloaded mid-install can still learn the outcome. */
+let updateLast: PiUpdateOutcome | null = null;
+
+export interface PiUpdateOutcome {
+  /** When the install reached its terminal state. */
+  at: string;
+  ok: boolean;
+  /** Installed version on success. */
+  installed: string;
+  /** Failure reason on error. */
+  error: string;
+}
+
 /** Whether an install is currently running. */
 export function isUpdating(): boolean {
   return inFlight !== null;
+}
+
+/**
+ * The install state a client can read at any time: is one running, and how did
+ * the last one end? `npm install` takes minutes and outlives the request that
+ * started it, so the Settings → Update card recovers from a reload with this
+ * instead of showing a stale "update available".
+ */
+export function updateState(): { running: boolean; startedAt: string | null; last: PiUpdateOutcome | null } {
+  return { running: inFlight !== null, startedAt: updateStartedAt, last: updateLast };
 }
 
 /** Install the newest Pi coding agent into the bundled npm project and return
@@ -220,7 +246,19 @@ export function isUpdating(): boolean {
  *  isn't one Pi Scope can update or npm fails. */
 export function updatePi(): Promise<PiUpdateStatus> {
   if (inFlight) return inFlight;
-  inFlight = runUpdate().finally(() => { inFlight = null; });
+  updateStartedAt = new Date().toISOString();
+  inFlight = runUpdate()
+    .then((status) => {
+      updateLast = { at: new Date().toISOString(), ok: true, installed: status.installed ?? "", error: "" };
+      return status;
+    })
+    .catch((err: any) => {
+      // Recorded before the rejection reaches the HTTP layer, so a reloaded
+      // page sees the failure instead of "nothing happened".
+      updateLast = { at: new Date().toISOString(), ok: false, installed: "", error: String(err?.message ?? err) };
+      throw err;
+    })
+    .finally(() => { inFlight = null; updateStartedAt = null; });
   return inFlight;
 }
 

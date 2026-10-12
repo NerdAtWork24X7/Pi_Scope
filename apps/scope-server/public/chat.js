@@ -510,6 +510,10 @@
     refreshOpenSession();
   }
 
+  // True only for the boot-time delivery of this view's missed `onShow`
+  // (plugins.js `ready`): that is not a user switching views.
+  let bootShow = false;
+
   function onView() {
     CH.sessions = (state.sessions || []).filter(isChatSession);
     adoptFreeThreads();
@@ -526,7 +530,9 @@
     startFooterTicker();
     // Returning to the Chat view should land ready to type: the view switch is
     // an explicit user action, and the composer is the primary surface here.
-    if (CH.workspace) focusComposer();
+    // Not for the boot delivery though — a reload must not yank focus away
+    // (the caret-repaint cycle blurs the document first).
+    if (CH.workspace && !bootShow) focusComposer();
   }
 
   // Elapsed / branch / go-usage keep ticking while Chat is on screen: a full
@@ -2358,9 +2364,11 @@
     if (!showLive && externalRunLive()) {
       html +=
         `<div class="chat-ext-live">` +
+
+        `<span class="chat-ext-live-pill">` +
         `<span class="chat-live-run-dots"><i></i><i></i><i></i></span>` +
         `<span class="chat-ext-live-label">working in your terminal…</span>` +
-        `</div>`;
+        `</span></div>`;
     }
     el.msg.innerHTML = html;
     if (stickBottom) scrollToBottom(true);
@@ -4617,6 +4625,21 @@
   // after the write, so an idle pre-spawn is killed and re-pre-spawned).
   window.__chatConfigChanged = rearmChatAfterConfigChange;
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
-  else init();
+  // The Chat view is the default, so a boot usually lands here — and its first
+  // show was missed for the same reason as the other views (plugins.js `ready`).
+  // Deliver it once init() cached the DOM, and only after the first session list
+  // has arrived: `onView` presents the rail from `state.sessions`, so running it
+  // against an empty list painted a false "No workspaces yet" on every reload.
+  const boot = () => {
+    init();
+    let tries = 0;
+    const announce = () => {
+      if (!state.sessionsLoaded && tries++ <= 100) { setTimeout(announce, 100); return; }
+      bootShow = true;
+      try { window.SCOPE.Plugins?.ready?.("chat"); } finally { bootShow = false; }
+    };
+    announce();
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
 })();

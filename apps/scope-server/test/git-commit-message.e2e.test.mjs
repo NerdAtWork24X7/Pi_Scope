@@ -33,7 +33,10 @@ let base;
 let tmpDir;
 let repoDir;
 let cleanRepoDir;
+let adoptRepoDir;
 let argvLog;
+let runsLog;
+let sleepFile;
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -89,16 +92,27 @@ before(async () => {
   tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "scope-git-msg-")));
   repoDir = path.join(tmpDir, "repo");
   cleanRepoDir = path.join(tmpDir, "clean-repo");
+  adoptRepoDir = path.join(tmpDir, "adopt-repo");
   fs.mkdirSync(path.join(tmpDir, "plugins"), { recursive: true });
   makeRepo(repoDir, { dirty: true });
   makeRepo(cleanRepoDir, { dirty: false });
+  // Its own repo for the adoption tests: draft jobs are keyed by repo, so a
+  // shared fixture would leave the earlier tests' job in the registry.
+  makeRepo(adoptRepoDir, { dirty: true });
 
   // Stub pi: prints a fixed commit message, and records the argv it was given.
+  // STUB_SLEEP_FILE makes it slow (for the "draft outlives the page" tests) and
+  // STUB_RUNS_LOG counts invocations (one line per run).
   argvLog = path.join(tmpDir, "argv.log");
+  runsLog = path.join(tmpDir, "runs.log");
+  sleepFile = path.join(tmpDir, "slow");
   const stub = path.join(tmpDir, "fake-pi");
   fs.writeFileSync(
     stub,
-    `#!/bin/sh\nif [ -n "$STUB_ARGV_LOG" ]; then printf '%s\\n' "$@" > "$STUB_ARGV_LOG"; fi\n` +
+    `#!/bin/sh\n` +
+      `if [ -n "$STUB_RUNS_LOG" ]; then printf 'run\\n' >> "$STUB_RUNS_LOG"; fi\n` +
+      `if [ -n "$STUB_SLEEP_FILE" ] && [ -f "$STUB_SLEEP_FILE" ]; then sleep 4; fi\n` +
+      `if [ -n "$STUB_ARGV_LOG" ]; then printf '%s\\n' "$@" > "$STUB_ARGV_LOG"; fi\n` +
       `printf '%s\\n' '${STUB_MESSAGE}'\n`,
   );
   fs.chmodSync(stub, 0o755);
@@ -119,9 +133,11 @@ before(async () => {
       // setGitCommitModel write would leak into their config.
       SCOPE_AGENT_DIR: path.join(tmpDir, "agent"),
       SCOPE_SETTINGS_JSON: path.join(tmpDir, "agent", "settings.json"),
-      SCOPE_FILE_ROOT: `${repoDir},${cleanRepoDir}`,
+      SCOPE_FILE_ROOT: `${repoDir},${cleanRepoDir},${adoptRepoDir}`,
       SCOPE_PI_BIN: stub,
       STUB_ARGV_LOG: argvLog,
+      STUB_RUNS_LOG: runsLog,
+      STUB_SLEEP_FILE: sleepFile,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -359,5 +375,162 @@ describe("git view", () => {
       start
     );
     await page.close();
+  });
+});
+
+// The draft is produced by a server-side job, so leaving the Git view — or
+// reloading the document, which the Chat nav does — no longer throws the answer
+// away while `pi` keeps working. These tests pin that contract end to end.
+describe("git commit message job (the draft outlives the page)", () => {
+  const jobUrl = (cwd) => `/git/commit-message?cwd=${encodeURIComponent(cwd)}`;
+
+  const runs = () => (fs.existsSync(runsLog) ? fs.readFileSync(runsLog, "utf8").trim().split("\n").filter(Boolean).length : 0);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const startJob = (cwd) => api("/git/commit-message", { method: "POST", body: JSON.stringify({ cwd }) });
+
+  async function waitForStatus(cwd, status, timeoutMs = 15_000) {
+    const t0 = Date.now();
+    let last = null;
+    while (Date.now() - t0 < timeoutMs) {
+      last = (await api(jobUrl(cwd))).data;
+      if (last?.status === status) return last;
+      await sleep(150);
+    }
+    throw new Error(`job for ${cwd} never reached "${status}" (last: ${JSON.stringify(last)})`);
+  }
+
+  test("a repo with no draft reports idle, and a finished draft is readable", async () => {
+    const idle = await api(jobUrl(adoptRepoDir));
+    assert.ok(idle.res.ok);
+    assert.deepEqual({ ok: idle.data.ok, status: idle.data.status }, { ok: true, status: "idle" });
+
+    const before = runs();
+    const started = await startJob(adoptRepoDir);
+    assert.ok(started.res.ok, `start failed: ${JSON.stringify(started.data)}`);
+    assert.equal(started.data.message, STUB_MESSAGE);
+    assert.equal(runs(), before + 1);
+
+    // The snapshot the view adopts on its next show: same job, terminal state,
+    // message plus the model/source the draft was made with.
+    const done = (await api(jobUrl(adoptRepoDir))).data;
+    assert.equal(done.status, "done");
+    assert.equal(done.job, started.data.job, "GET reports the job the POST ran");
+    assert.equal(done.message, STUB_MESSAGE);
+    assert.equal(done.model, started.data.model);
+    assert.equal(done.source, "staged");
+    assert.ok(done.finishedAt >= done.startedAt);
+  });
+
+  test("a second request joins the run in flight instead of spawning another pi", async () => {
+    fs.writeFileSync(sleepFile, "1");
+    try {
+      const before = runs();
+      const first = startJob(adoptRepoDir);
+      const running = await waitForStatus(adoptRepoDir, "running");
+      assert.equal(running.message, "", "a running job has no message yet");
+      assert.equal(runs(), before + 1, "exactly one pi is running");
+
+      const second = startJob(adoptRepoDir);
+      const [a, b] = await Promise.all([first, second]);
+      assert.ok(a.res.ok && b.res.ok, `joins failed: ${JSON.stringify([a.data, b.data])}`);
+      assert.equal(a.data.message, STUB_MESSAGE);
+      assert.equal(b.data.message, STUB_MESSAGE, "the joined request is answered, not rejected");
+      assert.equal(a.data.job, b.data.job, "both requests report the same job");
+      assert.equal(runs(), before + 1, "the second request did not spawn a second pi");
+      assert.equal((await api(jobUrl(adoptRepoDir))).data.status, "done");
+    } finally {
+      fs.rmSync(sleepFile, { force: true });
+    }
+  });
+
+  test("committing consumes the draft, so it is never adopted afterwards", async () => {
+    const started = await startJob(adoptRepoDir);
+    assert.ok(started.res.ok, `start failed: ${JSON.stringify(started.data)}`);
+    assert.equal((await api(jobUrl(adoptRepoDir))).data.status, "done");
+
+    const committed = await api("/git/commit", {
+      method: "POST", body: JSON.stringify({ cwd: adoptRepoDir, message: "chore: adopt fixture" }),
+    });
+    assert.ok(committed.res.ok, `commit failed: ${JSON.stringify(committed.data)}`);
+    assert.equal((await api(jobUrl(adoptRepoDir))).data.status, "idle");
+
+    // …and the repo is clean, so a new draft has nothing to describe.
+    const again = await startJob(adoptRepoDir);
+    assert.equal(again.res.status, 400);
+  });
+
+  test("the view restores a running draft after a document reload (the reported bug)", async () => {
+    // Fresh changes to describe (the previous test committed the fixture).
+    fs.writeFileSync(path.join(adoptRepoDir, "reload.js"), "export const reload = true;\n");
+    git(adoptRepoDir, ["add", "reload.js"]);
+
+    fs.writeFileSync(sleepFile, "1");
+    const page = await browser.newPage();
+    try {
+      await page.addInitScript((cwd) => {
+        try { localStorage.setItem("scope-cwd", cwd); } catch { /* private mode */ }
+      }, adoptRepoDir);
+      await page.goto(`${base}/?token=${TOKEN}#view=git`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction((cwd) => window.__SCOPE_STATE?.cwd === cwd, adoptRepoDir);
+
+      const before = runs();
+      await page.click("#btn-git-gen-msg");
+      await page.waitForFunction(() => document.getElementById("btn-git-gen-msg").disabled === true);
+
+      // Leave the page mid-generation. The request dies with the document.
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector("#btn-git-gen-msg");
+      await page.waitForFunction((cwd) => window.__SCOPE_STATE?.cwd === cwd, adoptRepoDir);
+
+      // The new document finds the job still running (busy button restored)…
+      await page.waitForFunction(() => document.getElementById("btn-git-gen-msg").disabled === true, null, { timeout: 5000 });
+      // …and adopts the message once it lands, releasing the button.
+      await page.waitForFunction(
+        (msg) => document.getElementById("git-commit-msg").value.includes(msg),
+        "stub commit message",
+        { timeout: 20_000 }
+      );
+      await page.waitForFunction(() => document.getElementById("btn-git-gen-msg").disabled === false);
+      assert.equal(runs(), before + 1, "the reload did not re-run pi");
+      assert.equal((await api(jobUrl(adoptRepoDir))).data.status, "done");
+    } finally {
+      fs.rmSync(sleepFile, { force: true });
+      await page.close();
+    }
+  });
+
+  test("the view adopts a draft finished while it was hidden", async () => {
+    fs.writeFileSync(path.join(adoptRepoDir, "hidden.js"), "export const hidden = true;\n");
+    git(adoptRepoDir, ["add", "hidden.js"]);
+
+    fs.writeFileSync(sleepFile, "1");
+    const page = await browser.newPage();
+    try {
+      await page.addInitScript((cwd) => {
+        try { localStorage.setItem("scope-cwd", cwd); } catch { /* private mode */ }
+      }, adoptRepoDir);
+      await page.goto(`${base}?token=${TOKEN}#view=git`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction((cwd) => window.__SCOPE_STATE?.cwd === cwd, adoptRepoDir);
+
+      await page.click("#btn-git-gen-msg");
+      await page.waitForFunction(() => document.getElementById("btn-git-gen-msg").disabled === true);
+      // Switch views while the model works: the poll stops with the view, and
+      // the draft is adopted when the view comes back.
+      await page.evaluate(() => window.setView("files"));
+      await page.waitForFunction(
+        () => (document.querySelector("#git-pane")?.style.display || "") === "none"
+      );
+      await sleep(4500); // the draft finishes off-screen
+      await page.evaluate(() => window.setView("git"));
+      await page.waitForFunction(
+        (msg) => document.getElementById("git-commit-msg").value.includes(msg),
+        "stub commit message",
+        { timeout: 10_000 }
+      );
+      await page.waitForFunction(() => document.getElementById("btn-git-gen-msg").disabled === false);
+    } finally {
+      fs.rmSync(sleepFile, { force: true });
+      await page.close();
+    }
   });
 });

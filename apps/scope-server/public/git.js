@@ -387,24 +387,147 @@
     await loadStatus();
     if (activeTab === "history") loadHistory();
   }
+  // ─── AI commit-message draft (a server job, so it survives this page) ────
+  // The draft outlives the request (see plugins/git/server.ts): leaving the view
+  // — or reloading the document via the Chat nav — used to throw the answer
+  // away while `pi` kept working. Every entry to this view re-reads the job and
+  // adopts it: still running → the busy button plus a poll, finished → the
+  // message. A job this page already applied is never applied twice, so a
+  // commit (which empties the box) or an edit is not overwritten.
+  let genPoll = null; // poll handle while a draft is in flight
+  let genFails = 0; // consecutive unreadable snapshots (server unreachable)
+  let genApplied = null; // job id whose outcome this page has already applied
+  let genBaseline = ""; // box content when the draft was requested
+
+  function setGenBusy(on) {
+    if (!btnGenMsg) return;
+    btnGenMsg.disabled = on;
+    btnGenMsg.textContent = on ? "⟳ generating…" : "✨ generate";
+  }
+  function stopGenPoll() {
+    if (genPoll) { clearInterval(genPoll); genPoll = null; }
+  }
+
+  /** Fold a job snapshot into the box. true once it reached a terminal state. */
+  function applyCommitJob(job) {
+    // No job, or no box to fill (the markup is gone): nothing to apply, and
+    // nothing left to wait for.
+    if (!job || !commitMsg) return true;
+    if (job.status === "running") return false;
+    setGenBusy(false); // terminal: this repo has no draft in flight any more
+    if (job.id && job.id === genApplied) return true;
+    if (job.id) genApplied = job.id;
+    if (job.status === "error") {
+      setStatus(job.error || "could not generate a message", true);
+      return true;
+    }
+    // Only fill a box the user has not touched: empty, or — on the page that
+    // requested the draft — exactly as it was when they clicked ✨ generate. An
+    // inherited job (a reload, a re-shown view) only fills an empty box, so an
+    // edit made after the click is never overwritten.
+    if (!commitMsg.value.trim() || commitMsg.value === genBaseline) {
+      commitMsg.value = job.message || "";
+      commitMsg.focus();
+      setStatus(`drafted with ${job.model} (from ${job.source})`);
+    } else {
+      setStatus(`drafted with ${job.model} — your message was kept`);
+    }
+    return true;
+  }
+
+  function startGenPoll(cwd) {
+    stopGenPoll();
+    genFails = 0;
+    genPoll = setInterval(async () => {
+      let snap;
+      try {
+        const { res, data } = await api("/git/commit-message", { cwd });
+        // The workspace can change while a request is in flight; a draft belongs
+        // to the repo it was started for, never to the box now on screen.
+        if (cwd !== selectedCwd()) { stopGenPoll(); setGenBusy(false); return; }
+        if (!res.ok || !data.ok) throw new Error("snapshot failed");
+        snap = data;
+      } catch {
+        // Give up after a few drops rather than polling a dead server forever.
+        if (++genFails >= 5) {
+          stopGenPoll();
+          setGenBusy(false);
+          setStatus("lost track of the drafted message — the server is unreachable", true);
+        }
+        return;
+      }
+      genFails = 0;
+      if (snap.status === "idle") {
+        // The repo has no draft any more (a commit consumed it, or the server
+        // restarted): stop watching rather than polling a job that is gone.
+        stopGenPoll();
+        setGenBusy(false);
+        setStatus("");
+        return;
+      }
+      if (applyCommitJob(snap)) stopGenPoll();
+    }, 1200);
+  }
+
+  /** Read the repo's draft job snapshot; null when it cannot be read. */
+  async function fetchCommitJob(cwd) {
+    try {
+      const { res, data } = await api("/git/commit-message", { cwd });
+      return res.ok && data.ok ? data : null;
+    } catch {
+      return null;
+    }
+  }
+
   // Draft a commit message from the pending diff with the model configured in
   // Settings → Models (server-side; falls back to the agent's default model).
   async function generateMessage() {
     const cwd = selectedCwd(); if (!cwd) return;
-    if (btnGenMsg) { btnGenMsg.disabled = true; btnGenMsg.textContent = "⟳ generating…"; }
+    genBaseline = commitMsg.value;
+    setGenBusy(true);
     setStatus("generating a commit message…");
+    // Watch the job as well as await it: should this document go away (a
+    // reload), the draft still lands once this view is shown again.
+    startGenPoll(cwd);
     try {
       const { res, data } = await api("/git/commit-message", {}, { cwd });
-      if (!res.ok || !data.ok) { setStatus(data.error || "could not generate a message", true); return; }
-      commitMsg.value = data.message;
-      commitMsg.focus();
-      setStatus(`drafted with ${data.model} (from ${data.source})`);
+      if (!res.ok || !data.ok) {
+        // The draft never started (nothing to describe) or failed: the server
+        // has nothing to adopt, so stop watching and say why.
+        stopGenPoll();
+        setGenBusy(false);
+        setStatus(data.error || "could not generate a message", true);
+        return;
+      }
+      applyCommitJob({ id: data.job, status: "done", message: data.message, model: data.model, source: data.source });
+      stopGenPoll();
     } catch (err) {
-      setStatus("could not generate a message: " + String(err?.message || err), true);
-    } finally {
-      if (btnGenMsg) { btnGenMsg.disabled = false; btnGenMsg.textContent = "✨ generate"; }
+      // The request was dropped (this page is going away, or the network
+      // hiccupped). The job keeps running server-side — if a poll is still
+      // armed it reports the outcome; otherwise hand the button back, since the
+      // next visit to this view adopts whatever the server holds.
+      if (!genPoll) setGenBusy(false);
+      setStatus("waiting for the drafted message…");
     }
   }
+
+  // Adopt a draft started before this document loaded — or while the view was
+  // hidden. Called on every show of the Git view.
+  async function adoptCommitJob() {
+    const cwd = selectedCwd(); if (!cwd) return;
+    const job = await fetchCommitJob(cwd);
+    // A draft belongs to the repo it was started for: if the workspace moved on
+    // while this snapshot was in flight, it says nothing about the box on screen.
+    if (cwd !== selectedCwd()) return;
+    // The busy button means exactly "a draft is running for this repo" — that
+    // invariant is what heals the button after a reload (or any lost request).
+    if (!job || job.status === "idle") { setGenBusy(false); return; }
+    if (applyCommitJob(job)) return;
+    setGenBusy(true);
+    setStatus("generating a commit message…");
+    startGenPoll(cwd);
+  }
+
   async function remoteOp(kind) {
     const cwd = selectedCwd(); if (!cwd) return;
     if (kind === "push") {
@@ -1573,10 +1696,22 @@
     window.addEventListener("resize", () => { if (desired != null) render(); });
   })();
 
-  window.__gitOnView = function () { refreshCwd(); loadStatus(); };
+  window.__gitOnView = async function () {
+    refreshCwd();
+    // The host calls this hook without awaiting it, so neither half may reject.
+    try { await loadStatus(); } catch { /* keep going: adoption still matters */ }
+    try { await adoptCommitJob(); } catch { /* the view stays usable regardless */ }
+  };
+  window.__gitOnHide = function () { stopGenPoll(); };
   window.__gitOnSessions = function () {
     refreshCwd();
     const cwd = selectedCwd();
     if (cwd && cwd !== lastCwd) { lastCwd = cwd; loadStatus(); }
   };
+
+  // Hooks bound — this script is parsed after app.js, so the boot setView() could
+  // not deliver the first show (a deep link, or the Chat nav's full reload would
+  // otherwise never adopt a draft started before the reload). See plugins.js
+  // `ready`.
+  window.SCOPE.Plugins?.ready?.("git");
 })();

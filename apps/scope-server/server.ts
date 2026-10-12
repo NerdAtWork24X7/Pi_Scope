@@ -32,7 +32,7 @@ import {
 import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatLiveRuns, attachChatRun } from "./chat.ts";
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
-import { checkPiUpdate, updatePi } from "./pi-update.ts";
+import { checkPiUpdate, updatePi, updateState } from "./pi-update.ts";
 import {
   MODELS_STORE_PATH, modelCatalogStatus, refreshModelCatalog, startModelCatalogScheduler, modelCatalogAutoEnabled,
 } from "./model-catalog.ts";
@@ -41,7 +41,7 @@ import { keyEntries, maskSecret, setStoredKey, clearStoredKey, isValidKeyName, M
 import { seedProviderEnvFromShell } from "./provider-env.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
 import { resolveExecutable } from "../../shared/shell.ts";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as crypto from "node:crypto";
 import { WebSocket } from "ws";
 
@@ -546,6 +546,14 @@ function loadSettingsSnapshot(proj?: string | null): Record<string, any> {
     // default is also returned so the Settings textarea can show it as a hint.
     gitCommitTemplate: typeof git.gitCommitTemplate === "string" ? git.gitCommitTemplate : "",
     gitCommitTemplateDefault: DEFAULT_COMMIT_TEMPLATE,
+    // Bundled pi agent install state (Settings → Update). In-memory only and
+    // free of the npm round trip, so the unified snapshot can carry it: a page
+    // that reloaded while an install was running restores the busy card instead
+    // of showing a stale "update available" (see pi-update.ts updateState).
+    // Deliberately NOT called `piUpdate`: the Settings client keeps its own
+    // `SET.piUpdate` (the npm-check STATUS), and a same-named snapshot field
+    // would be assigned straight over it.
+    piInstall: updateState(),
     // settings.json
     settingsRaw: {
       defaultModel: settings.defaultModel,
@@ -1975,6 +1983,9 @@ const DEFAULT_COMMIT_TEMPLATE =
   "Branch: {{branch}}\n" +
   "Changes ({{source}}):\n{{diff}}";
 
+/** How much git output the async runner keeps (tail, for diagnostics). */
+const MAX_GIT_OUTPUT = 32 * 1024 * 1024;
+
 /** Build inline `-c key=value` config args so git commands never touch the
  *  user's global or local git config. */
 function gitConfigArgs(config: Record<string, string>): string[] {
@@ -2004,6 +2015,60 @@ function gitTry(cwd: string, args: string[], config: Record<string, string> = {}
     const msg = [stdout, stderr].filter(Boolean).join("\n").trim();
     return { ok: false, out: msg || String(err?.message ?? err).split("\n")[0] };
   }
+}
+
+/**
+ * Async `gitTry` for work that can block for a long time.
+ *
+ * Network operations (push/pull/fetch, a submodule clone) take seconds and are
+ * run with `execFileSync` — which parks the event loop for the whole call, so
+ * the SSE feed the UI lives on, the terminal socket and every other request
+ * wait behind it. Same contract as `gitTry` ({ ok, out }) and the same
+ * GIT_TERMINAL_PROMPT=0, but the server keeps serving while git runs.
+ *
+ * Local plumbing (status, diff, log, rev-parse …) stays synchronous on purpose:
+ * those return in milliseconds and the async bookkeeping would only add noise.
+ */
+function gitTryAsync(
+  cwd: string,
+  args: string[],
+  config: Record<string, string> = {},
+  timeoutMs = 30_000,
+): Promise<{ ok: boolean; out: string }> {
+  const configArgs = gitConfigArgs(config);
+  return new Promise((resolve) => {
+    let out = "";
+    let err = "";
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (result: { ok: boolean; out: string }) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    let proc;
+    try {
+      proc = spawn("git", ["-C", cwd, ...configArgs, ...args], {
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      });
+    } catch (e: any) {
+      resolve({ ok: false, out: String(e?.message ?? e).split("\n")[0] });
+      return;
+    }
+    const keep = (chunk: Buffer, acc: string) => (acc + chunk.toString()).slice(-MAX_GIT_OUTPUT);
+    proc.stdout?.on("data", (c: Buffer) => { out = keep(c, out); });
+    proc.stderr?.on("data", (c: Buffer) => { err = keep(c, err); });
+    timer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+      finish({ ok: false, out: `git ${args[0] ?? ""} timed out after ${Math.round(timeoutMs / 1000)}s` });
+    }, timeoutMs);
+    proc.on("error", (e: any) => finish({ ok: false, out: String(e?.message ?? e).split("\n")[0] }));
+    proc.on("close", (code: number | null) => {
+      if (code === 0) finish({ ok: true, out });
+      else finish({ ok: false, out: [out, err].filter(Boolean).join("\n").trim() || `git ${args[0] ?? ""} exited with code ${code}` });
+    });
+  });
 }
 
 /** Run a git command and return stdout; throws on failure. For call sites that
@@ -3017,7 +3082,9 @@ async function handle(req: Request): Promise<Response> {
   // them itself while it is open (Pi Scope runs pi offline, so nothing else
   // does), and the Update tab shows when that last happened.
   if (pathname === "/pi-update" && method === "GET") {
-    return jsonResponse({ ...(await checkPiUpdate()), modelCatalog: modelCatalogStatus() });
+    // `update` is the install state, so a page that reloaded while an install
+    // was running restores the busy card and adopts the outcome (see pi-update.ts).
+    return jsonResponse({ ...(await checkPiUpdate()), modelCatalog: modelCatalogStatus(), update: updateState() });
   }
 
   // ── POST /pi-update (install the newest bundled Pi coding agent) ────────
@@ -3045,7 +3112,7 @@ async function handle(req: Request): Promise<Response> {
         void refreshModelCatalog({ force: true }).catch(() => { /* reported by status */ });
         // And re-read the runtime's available models from the fresh bundle.
         void loadRuntimeModels(true);
-        return jsonResponse(result);
+        return jsonResponse({ ...result, update: updateState() });
       }
       return jsonResponse({ error: `unknown action: ${action}` }, 400);
     } catch (err: any) {
@@ -4136,7 +4203,7 @@ const pluginKit = {
   jsonResponse, textResponse, readBody, intParam, intOrNull,
   validateCwd, resolveProjectDir, legacyOfficeState, requireCwd, jsonBody,
   readSettingsJson, DEFAULT_COMMIT_TEMPLATE, generateCommitMessage,
-  git, gitTry, gitConfigArgs, ensureGitRepo,
+  git, gitTry, gitTryAsync, gitConfigArgs, ensureGitRepo,
   resolveWithinCwd, cleanPaths, rejectOptionLike,
   parsePorcelainLine, porcelainStatus,
   buildRepoGraph,

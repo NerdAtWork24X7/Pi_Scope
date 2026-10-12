@@ -53,6 +53,9 @@
   let piUpdateChecking = false;
   let piUpdating = false;
   let piModelsRefreshing = false;
+  let piAppliedAt = "";   // install outcome already surfaced by this page
+  let piAdoptTimer = null; // poll handle while adopting an install we did not start
+  let piAdoptFails = 0;   // consecutive unreadable install states
 
   // Authentication tab state (GUI mirror of pi's /login). `authData` is the
   // provider catalogue; `authSession` is the running login (polled); `authSig`
@@ -270,6 +273,12 @@
       if (res.ok && data) {
         SET = data;
         setSection(activeSec, true);
+        // The snapshot carries the bundled-pi install state (`piInstall` — NOT
+        // `piUpdate`, which is this client's own npm-check status): adopt an
+        // install that was already running when this page loaded (see
+        // adoptPiUpdateState) — including its re-arm, which the page that
+        // started it can no longer perform.
+        adoptPiUpdateState(data.piInstall);
       } else {
         renderError(data?.error || `HTTP ${res.status}`);
       }
@@ -1517,6 +1526,86 @@
   }
 
   // Check npm for the latest version and refresh the section from the response.
+  // ── Adopting an install this page did not start ────────────────────────────
+  // `npm install` runs server-side for minutes and outlives the page that asked
+  // for it, so the request's promise is not a reliable place to learn how it
+  // ended: a reload during the install used to leave a stale "Update available"
+  // card (and skipped the re-arm the finished install needs). GET /pi-update
+  // carries the install state, so the tab restores the busy card and adopts the
+  // outcome — including the re-arm — whenever it notices one it has not shown.
+  const PI_OUTCOME_FRESH_MS = 10 * 60_000;
+
+  function stopPiAdopt() {
+    if (piAdoptTimer) { clearInterval(piAdoptTimer); piAdoptTimer = null; }
+  }
+
+  /** Fold the server's install state into the card. Idempotent per outcome. */
+  function adoptPiUpdateState(up) {
+    if (!up) return;
+    if (up.running) {
+      if (!piUpdating) {
+        piUpdating = true;
+        if (activeSec === "update") setSection("update", true);
+      }
+      if (!piAdoptTimer) {
+        piAdoptFails = 0;
+        piAdoptTimer = setInterval(() => { void pollPiUpdateState(); }, 2000);
+        // Read the status now as well, so the card shows the versions rather
+        // than "Not checked yet" for the first two seconds.
+        void pollPiUpdateState();
+      }
+      return;
+    }
+    stopPiAdopt();
+    // Did THIS page watch the install? Only a watcher announces it — a page
+    // opened after the fact would otherwise re-toast the same outcome.
+    const watched = piUpdating;
+    if (piUpdating) {
+      piUpdating = false;
+      if (activeSec === "update") setSection("update", true);
+    }
+    const last = up.last;
+    if (!last || !last.at || last.at === piAppliedAt) return;
+    piAppliedAt = last.at;
+    // Nothing to do for an outcome from an earlier session.
+    if (Date.now() - Date.parse(last.at) > PI_OUTCOME_FRESH_MS) return;
+    if (last.ok) {
+      if (watched) toast("Pi coding agent updated");
+      // A live pi session keeps the binary it started with; re-arm it so the
+      // very next prompt runs the freshly installed agent. Cheap and idempotent,
+      // so a page that merely noticed the install also does it.
+      rearmChat();
+    } else {
+      SET.piUpdate = { ...(SET.piUpdate || {}), error: last.error || "Update failed" };
+      if (watched) toast(last.error || "Update failed", true);
+    }
+  }
+
+  /** Read the install state without disturbing the card's own check state. */
+  async function pollPiUpdateState() {
+    let data;
+    try {
+      const { res, data: body } = await S.api("/pi-update");
+      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+      if (!body) throw new Error("empty response");
+      data = body;
+    } catch (e) {
+      // A dropped request is normal (the install outlives it) — but a server
+      // that cannot be read must not leave the card "Installing…" forever.
+      if (++piAdoptFails < 5) return;
+      stopPiAdopt();
+      piUpdating = false;
+      piAdoptFails = 0;
+      SET.piUpdate = { ...(SET.piUpdate || {}), error: `Could not read the update state — ${String(e?.message || e)}` };
+      if (activeSec === "update") setSection("update", true);
+      return;
+    }
+    piAdoptFails = 0;
+    SET.piUpdate = data;
+    adoptPiUpdateState(data.update);
+    if (activeSec === "update") setSection("update", true);
+  }
+
   async function refreshPiUpdate() {
     if (piUpdateChecking || piUpdating) return;
     piUpdateChecking = true;
@@ -1526,6 +1615,7 @@
       SET.piUpdate = res.ok && data
         ? data
         : { ...(SET.piUpdate || {}), error: data?.error || `HTTP ${res.status}` };
+      if (res.ok) adoptPiUpdateState(data.update);
     } catch (e) {
       SET.piUpdate = { ...(SET.piUpdate || {}), error: String(e?.message || e) };
     } finally {
@@ -1540,9 +1630,14 @@
   async function runPiUpdate() {
     if (piUpdating || piUpdateChecking) return;
     piUpdating = true;
+    stopPiAdopt(); // this page owns the outcome now
     if (activeSec === "update") setSection("update", true);
     try {
       const { res, data } = await S.api("/pi-update", {}, { action: "update" });
+      // This page started the install, so its own result is the one to show —
+      // mark the outcome as applied so the adopter (which polls the same state)
+      // does not announce it a second time.
+      piAppliedAt = data?.update?.last?.at || "";
       if (res.ok && data) {
         SET.piUpdate = data;
         toast(data.updateAvailable ? "Installed, but a newer version is still reported" : "Pi coding agent updated");
@@ -2654,12 +2749,11 @@
   window.__settingsRetry = function () { loaded = false; onView(); };
   window.__settingsAuthRetry = function () { authError = null; authData = null; void loadAuth(); };
 
-  // app.js restores the initial view with setView(STATE.view) while it executes,
-  // which is BEFORE this file is parsed — so its __settingsOnView call was a
-  // no-op and a boot that lands directly on Settings sat on "Loading settings…"
-  // forever. Re-issue that notification now that the hook exists (this matters
-  // for the automatic reload after removing a workspace from Settings).
-  if (state?.view === "settings") onView();
+  // Hooks bound — this script is parsed after app.js, so the boot setView() could
+  // not deliver the first show; without it a boot that lands directly on
+  // Settings (e.g. the automatic reload after removing a workspace) sat on
+  // "Loading settings…" forever. See plugins.js `ready`.
+  window.SCOPE.Plugins?.ready?.("settings");
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

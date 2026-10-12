@@ -469,7 +469,12 @@ export async function startMockBackend() {
 
     // ── Sessions ───────────────────────────────────────────────────────────
     if (pathname === "/sessions" && method === "GET") {
-      return sendJSON(res, { sessions: state.sessions });
+      // A test can make the first session list slow (setSessionsDelay) to pin
+      // what a view does before it arrives — the real DB fetch is not instant.
+      const delay = state.sessionsDelayMs | 0;
+      if (delay > 0) setTimeout(() => sendJSON(res, { sessions: state.sessions }), delay).unref?.();
+      else sendJSON(res, { sessions: state.sessions });
+      return;
     }
     if (pathname === "/sessions" && method === "DELETE") {
       const deleted = { sessions: state.sessions.length, events: Object.values(state.eventsBySid).reduce((n, e) => n + e.length, 0) };
@@ -972,6 +977,8 @@ export async function startMockBackend() {
     snapshotTeam,
     /** Seed the session list the next /sessions fetch will return. */
     setSessions(list) { state.sessions = list.map(makeSession); },
+    /** Delay GET /sessions by `ms` (a slow first fetch, e.g. a big DB). */
+    setSessionsDelay(ms) { state.sessionsDelayMs = Math.max(0, ms | 0); },
     setTeam(team) {
       state.team = team;
       // chatWorkspaces live in their own slot on the snapshot; mirror the
@@ -1037,6 +1044,9 @@ export async function startMockBackend() {
       liveTurns.clear();
       state.beginRunConflict = false;
       state.serverRunner = false;
+      // A test that slowed /sessions (setSessionsDelay) must not slow every
+      // later test in the file.
+      state.sessionsDelayMs = 0;
       requests.length = 0;
       fails.length = 0;
       turns.length = 0;

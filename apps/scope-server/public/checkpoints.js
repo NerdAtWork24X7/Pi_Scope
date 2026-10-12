@@ -230,4 +230,8 @@
     const cwd = selectedCwd();
     if (cwd && cwd !== lastCwd) { lastCwd = cwd; loadCheckpoints(); }
   };
+
+  // Hooks bound — this script is parsed after app.js, so the boot setView() could
+  // not deliver the first show (see plugins.js `ready`).
+  window.SCOPE.Plugins?.ready?.("checkpoints");
 })();

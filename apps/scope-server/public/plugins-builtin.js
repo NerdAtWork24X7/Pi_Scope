@@ -113,6 +113,7 @@
       display: "flex",
       session: "workspace",
       onShow: () => window.__gitOnView?.(),
+      onHide: () => window.__gitOnHide?.(),
       onSessions: () => window.__gitOnSessions?.(),
       onCwd: () => window.__gitOnView?.(),
     },
