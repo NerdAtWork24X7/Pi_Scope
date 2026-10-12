@@ -54,6 +54,10 @@
       onShow: () => window.__chatOnView?.(),
       onHide: () => window.__chatOnHide?.(),
       onSessions: () => window.__chatOnSessions?.(),
+      // Live events matter here even though Chat streams its own turns: a pi
+      // running in the user's TERMINAL is only observable, and its turn
+      // lifecycle (turn_start/turn_end) is what tells the header it is working.
+      onEvent: (evt) => window.__chatOnEvent?.(evt),
     },
   });
 

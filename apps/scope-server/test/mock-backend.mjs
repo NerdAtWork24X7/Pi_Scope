@@ -192,6 +192,11 @@ export async function startMockBackend() {
     // reports it: { present, active, outcome }. A task's `runSessionId` indexes
     // this to tell a still-running dispatch from an orphan.
     runStatus: {},
+    // Every chat run this mock has seen, as GET /chat/status reports it: the
+    // run info (cwd/model/prompt/fresh) plus the live `active` flag from
+    // runStatus. A run whose response was abandoned (a page reload) stays here,
+    // exactly like the real server's in-memory sessions.
+    liveRuns: new Map(),
     beginRunConflict: false, // force the runner lock to refuse the next dispatch
   };
 
@@ -235,20 +240,36 @@ export async function startMockBackend() {
   const turns = []; // completed-but-not-yet-awaited turns
   const waiters = []; // nextTurn() promises awaiting a request
   let activeTurn = null;
+  const liveTurns = new Map(); // sessionId → the Turn currently streaming for it
   let sessionSeq = 0;
 
   function makeTurn(req) {
     const res = req.__res;
     const sessionId = req.__sessionId;
+    const body = req.__body || {};
     res.writeHead(200, {
       "content-type": "application/x-ndjson; charset=utf-8",
       "cache-control": "no-cache",
       "x-accel-buffering": "no",
     });
+    const subs = new Set(); // readers that attached mid-run (GET /chat/attach)
+    const writeTo = (r, ev) => { try { r.write(JSON.stringify(ev) + "\n"); } catch { /* gone */ } };
     const turn = {
       sessionId,
       ended: false,
+      detached: false, // the original reader went away — the RUN keeps going
       events: [],
+      // Everything known about the run, as GET /chat/status reports it.
+      run: {
+        sessionId,
+        cwd: body.cwd || state.cwd,
+        model: body.model || "",
+        fresh: /^pre-\d+$/.test(sessionId),
+        prompted: true,
+        resumedFile: body.sessionFile || null,
+        startedAt: Date.now(),
+        prompt: String(body.prompt || ""),
+      },
       send(ev) {
         // Mirror the real server's chatRunStatus: a live run is `active` until
         // its `done` lands, then the outcome is recorded. This is recorded even
@@ -257,10 +278,25 @@ export async function startMockBackend() {
         // the ended guard.
         if (ev && ev.type === "done") {
           state.runStatus[sessionId] = { present: true, active: false, outcome: ev.error ? "error" : ev.aborted ? "aborted" : "done" };
+          turn.run.prompt = "";
+          turn.run.startedAt = null;
         }
         if (turn.ended) return;
         turn.events.push(ev);
-        res.write(JSON.stringify(ev) + "\n");
+        writeTo(res, ev);
+        for (const s of subs) writeTo(s, ev);
+        if (ev && ev.type === "done") {
+          for (const s of subs) { try { s.end(); } catch { /* gone */ } }
+          subs.clear();
+          liveTurns.delete(sessionId);
+        }
+      },
+      /** Replay the run so far into a late reader, then keep it live — the
+       *  mock's GET /chat/attach (see chat.ts attachChatRun). */
+      attachStream(r) {
+        for (const ev of turn.events) writeTo(r, ev);
+        subs.add(r);
+        r.on("close", () => subs.delete(r));
       },
       text(delta) { turn.send({ type: "text", delta }); },
       thinking(delta) { turn.send({ type: "thinking", delta }); },
@@ -268,15 +304,23 @@ export async function startMockBackend() {
         if (turn.ended) return;
         turn.ended = true;
         try { res.end(); } catch { /* already gone */ }
+        for (const s of subs) { try { s.end(); } catch { /* gone */ } }
+        subs.clear();
+        liveTurns.delete(sessionId);
         if (activeTurn === turn) activeTurn = null;
       },
     };
     activeTurn = turn;
+    liveTurns.set(sessionId, turn);
+    state.liveRuns.set(sessionId, turn.run);
     state.runStatus[sessionId] = { present: true, active: true, outcome: null };
     const w = waiters.shift();
     if (w) w(turn);
     else turns.push(turn);
-    req.__res.on("close", () => { if (!turn.ended) { turn.ended = true; if (activeTurn === turn) activeTurn = null; } });
+    // The browser went away (a reload abandons the response) — the run itself
+    // does NOT end, exactly like the real server: pi keeps working and its
+    // events keep accumulating for a page that attaches later.
+    req.__res.on("close", () => { turn.detached = true; });
     return turn;
   }
 
@@ -631,6 +675,33 @@ export async function startMockBackend() {
     if (pathname === "/chat/prefs") return sendJSON(res, { ok: true, sent: 2 });
     if (pathname === "/chat/ui") return sendJSON(res, { ok: true, sessionId: body.sessionId });
 
+    // Which chat runs are live right now — the Chat view's recovery source
+    // after a reload (see chat.js "Recovering a LIVE run").
+    if (pathname === "/chat/status" && method === "GET") {
+      const runs = [];
+      for (const [sid, run] of state.liveRuns) {
+        runs.push({ ...run, active: state.runStatus[sid]?.active === true });
+      }
+      return sendJSON(res, { runs });
+    }
+
+    // Stream a run that is already in flight to a NEW reader: everything so far,
+    // then live until it settles. 409 when there is nothing to attach to.
+    if (pathname === "/chat/attach" && method === "GET") {
+      const sid = parsed.searchParams.get("sessionId") || "";
+      const turn = liveTurns.get(sid);
+      if (!sid || !turn || turn.ended || state.runStatus[sid]?.active !== true) {
+        return sendJSON(res, { error: "no live run for this session", active: false }, 409);
+      }
+      res.writeHead(200, {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "cache-control": "no-cache",
+        "x-accel-buffering": "no",
+      });
+      turn.attachStream(res);
+      return;
+    }
+
     if (pathname === "/chat/footer" && method === "GET") {
       return sendJSON(res, {
         branch: "main",
@@ -656,6 +727,7 @@ export async function startMockBackend() {
         return sendJSON(res, { ok: true, queued: true, streamingBehavior: body.streamingBehavior });
       }
       req.__res = res;
+      req.__body = body;
       req.__sessionId = body.sessionId || `live-${++sessionSeq}`;
       makeTurn(req);
       return;
@@ -921,6 +993,15 @@ export async function startMockBackend() {
     },
     /** The Office state the plugin route is currently holding for a workspace. */
     officeState: (cwd) => officeSnapshot(cwd),
+    /** Seed a chat run as /chat/status reports it, WITHOUT a live Turn: used to
+     *  model a run the status still lists while its stream is already gone (the
+     *  race the client's 409 fallback covers). */
+    setLiveRun(sessionId, run = {}) {
+      state.liveRuns.set(sessionId, {
+        sessionId, cwd: state.cwd, model: "", fresh: false, prompted: true,
+        resumedFile: null, startedAt: Date.now(), prompt: "", ...run,
+      });
+    },
     /** Seed a chat run's live status (as the real chatRunStatus would report it). */
     setRunStatus(sessionId, status) {
       state.runStatus[sessionId] = { present: true, active: false, outcome: null, ...status };
@@ -952,6 +1033,8 @@ export async function startMockBackend() {
       state.agentDefs = [];
       state.office = {};
       state.runStatus = {};
+      state.liveRuns = new Map();
+      liveTurns.clear();
       state.beginRunConflict = false;
       state.serverRunner = false;
       requests.length = 0;

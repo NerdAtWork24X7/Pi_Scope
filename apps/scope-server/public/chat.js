@@ -141,6 +141,9 @@
     customWs: loadCustomWs(), // union of chat workspaces seen across projects (sidebar display cache)
     threads: new Map(),   // thread id → thread (one per chat conversation, keyed by session id or "free:<cwd>")
     curId: null,          // id of the thread currently shown in the canvas
+    liveRuns: new Map(),  // sessionId → /chat/status run (live runs on the server)
+    liveRunsAt: 0,        // when that snapshot was taken
+    liveAdopting: new Set(), // session ids whose attach is in flight (no double adopt)
   };
 
   // ─── Per-session threads ──────────────────────────────────────────────────
@@ -166,6 +169,8 @@
       busy: false,       // a turn is streaming on this thread
       gen: 0,            // turn generation guard (a newer turn supersedes an older finalize)
       live: null,        // { m, isFirst, queue, after } while busy
+      liveAt: 0,         // last streamed event (stale-run heal, see healStaleRunThreads)
+      liveRun: null,     // session id of a run ADOPTED from the server (not sent by this page)
       suppressed: false, // busy but not visible — events update the model only
       dialogs: new Map(),// open extension_ui dialogs for this thread
       pendingCustom: null,
@@ -424,6 +429,7 @@
     el.thinking = $("#chat-thinking");
     el.steer = $("#chat-steer");
     el.stop = $("#chat-stop");
+    el.extRun = $("#chat-ext-run");
     el.listen = $("#chat-listen");
   }
 
@@ -498,6 +504,9 @@
     updateHeader();
     updateScrollDown();
     attemptRestore();
+    // A run can be live on the server without this page knowing (a reload just
+    // lost it, or another tab started it) — recover it on every poll.
+    void syncLiveRuns();
     refreshOpenSession();
   }
 
@@ -510,6 +519,9 @@
     renderComposerModel();
     renderChat();
     attemptRestore();
+    // Coming back to the view: re-attach to a run that is still live (the page
+    // was reloaded, or the run outlived this thread's stream).
+    void syncLiveRuns();
     refreshOpenSession();
     startFooterTicker();
     // Returning to the Chat view should land ready to type: the view switch is
@@ -1341,6 +1353,10 @@
     // their session row is clicked). Nothing is restored before a selection.
     attemptRestore();
     ensureChatSession();
+    // The workspace's own conversation may still be working on the server (this
+    // page is a reload): recover its live run AFTER the snapshot restore, so the
+    // adoption wraps the restored history instead of replacing it.
+    void syncLiveRuns();
     // Selecting a workspace is a request to type here: put the caret in the
     // composer so the keyboard works immediately, without an extra click. The
     // click target is a plain div (not focusable), so without this focus stays
@@ -1409,6 +1425,11 @@
           resumeFile: CH.resumeFile || "",
           threadId: CH.curId || "",
           openSid: CH.openSid || "",
+          // The server subprocess key this conversation runs on. Persisting it
+          // lets a reloaded page bind the SAME conversation (and, when it is
+          // still working, adopt its live run) instead of treating the restored
+          // messages as an unrelated new conversation.
+          key: CH.chatSessionId || "",
         }));
       } catch {}
     }, 800);
@@ -1457,6 +1478,10 @@
     t.history = snap.msgs;
     t.openSid = null; // a free conversation never has a recorded session on screen
     t.resumeFile = snap.resumeFile || t.resumeFile || null;
+    // Re-bind the subprocess this conversation was running on. Without it the
+    // restored conversation looked idle while a run for it was still in flight
+    // (and the next prompt would spawn a SECOND pi beside that run).
+    if (!t.key && snap.key) t.key = snap.key;
     t.loadingSid = null;
     t.lastOpenCount = null; // point-in-time copy — refetch on next poll
     bindThread(t);
@@ -1488,6 +1513,233 @@
     // the count was already "seen", so the next poll saw nothing new to load —
     // leaving a stale transcript until the session gained another event.
     void loadSessionChat(t.openSid, true);
+  }
+
+  // ─── Recovering a LIVE run (reload, view switch, second tab) ──────────────
+  // Every page load starts from scratch, but pi does not: a run keeps going on
+  // the server when the page that started it is gone (clicking Chat hard-reloads
+  // the page, and the poll/`fetchSessions` abort is not a cancellation). Without
+  // this the returning page looked idle — no "working" badge, no animated pill,
+  // no Stop button — while the agent was still mid-turn, and a new prompt could
+  // be queued onto a session that was already working.
+  //
+  // GET /chat/status lists the live runs; GET /chat/attach replays a run from
+  // its start and then streams it live, so the thread picks the turn back up
+  // exactly where the previous page stopped reading it.
+  const LIVE_RUNS_TTL = 2500; // ms a /chat/status snapshot stays fresh
+  // Grace before an adopted run is declared dead by the poll. A run that really
+  // ended delivers its `done` within milliseconds, so this window only ever
+  // covers a stream that is genuinely gone (the server restarted, the
+  // subprocess was killed) — exactly the case the heal exists for.
+  const LIVE_HEAL_GRACE_MS = 3000;
+  let liveFetch = null; // in-flight /chat/status request (one at a time)
+
+  async function fetchLiveRuns(force) {
+    if (liveFetch) return liveFetch;
+    if (!force && Date.now() - CH.liveRunsAt < LIVE_RUNS_TTL) return;
+    liveFetch = (async () => {
+      try {
+        const { res, data } = await window.SCOPE.api("/chat/status");
+        if (!res.ok || !Array.isArray(data?.runs)) return;
+        const runs = new Map();
+        for (const r of data.runs) if (r && r.sessionId) runs.set(r.sessionId, r);
+        CH.liveRuns = runs;
+        CH.liveRunsAt = Date.now();
+      } catch { /* server unreachable — keep the last snapshot */ }
+    })();
+    try { await liveFetch; } finally { liveFetch = null; }
+  }
+  // Load a fresh snapshot before a decision that depends on it (opening a
+  // session) so a live run is never mistaken for an idle one.
+  async function ensureLiveRuns() {
+    await fetchLiveRuns(false);
+  }
+  async function syncLiveRuns() {
+    await fetchLiveRuns(false);
+    reconcileLiveRuns();
+  }
+
+  // The thread a live run belongs to: a thread already bound to the run's
+  // subprocess key, or — for a workspace's own conversation (fresh) — that
+  // workspace's free thread. A recorded-session run whose row was never opened
+  // has no thread yet; opening it later adopts it (loadSessionChat).
+  function threadForRun(run) {
+    for (const t of CH.threads.values()) if (t.key === run.sessionId) return t;
+    const direct = CH.threads.get(run.sessionId);
+    if (direct) return direct;
+    if (run.fresh && (CH.threads.has(freeThreadIdFor(run.cwd)) || CH.workspace === run.cwd)) return freeThread(run.cwd);
+    return null;
+  }
+  function freeThreadIdFor(cwd) {
+    return "free:" + (cwd || "");
+  }
+  // A live run belonging to a workspace's OWN conversation (its pre-spawned
+  // "new conversation" subprocess), if any. Used so a reloaded page adopts that
+  // run instead of pre-spawning a second one beside it.
+  function liveRunForFreeThread(cwd) {
+    for (const run of CH.liveRuns.values()) {
+      if (run.active && run.fresh && run.cwd === cwd) return run;
+    }
+    return null;
+  }
+
+  function reconcileLiveRuns() {
+    for (const run of CH.liveRuns.values()) {
+      if (!run.active) continue;
+      const t = threadForRun(run);
+      if (t && !t.busy) void adoptLiveRun(t, run);
+    }
+    healStaleRunThreads();
+  }
+
+  // A thread that adopted a run whose session the server no longer reports live
+  // would otherwise stay "working" forever (the transcript refresh is skipped
+  // for a busy thread): the attach stream died before its `done` (server
+  // restart, killed subprocess, dropped connection), so settle it here.
+  function healStaleRunThreads() {
+    const now = Date.now();
+    for (const t of CH.threads.values()) {
+      if (!t.busy || !t.liveRun) continue;
+      if (CH.liveAdopting.has(t.liveRun)) continue; // attach still being opened
+      if (now - (t.liveAt || 0) < LIVE_HEAL_GRACE_MS) continue; // the stream is live
+      const run = CH.liveRuns.get(t.liveRun);
+      if (run && run.active) continue; // still ours
+      settleAdoptedRun(t, true);
+    }
+  }
+
+  // Settle a thread whose adopted run is over: clear the busy flag (and with it
+  // the Stop button), then pick up the recorded transcript. A SESSION thread's
+  // earlier turns were deliberately not fetched while a run was live (the
+  // replayed stream would have duplicated the recorded part), so its
+  // authoritative transcript is loaded once the turn is over.
+  function settleAdoptedRun(t, bumpGen) {
+    if (bumpGen) t.gen++;
+    const gen = t.gen;
+    if (t.liveRun) CH.liveAdopting.delete(t.liveRun);
+    t.liveRun = null;
+    finalizeChatTurn(t, gen);
+    if (t.kind === "free") return;
+    const sid = t.openSid || t.sid;
+    if (!sid) return;
+    t.lastOpenCount = null;
+    void loadSessionChat(sid, t !== curThread());
+  }
+
+  // ─── A run we can only WATCH (a pi started in the user's terminal) ────────
+  // Pi Scope observes such a session through the events its own extension posts
+  // (that is why its transcript shows up in Chat), but there is no channel back
+  // into that pi process — so the view must show that it is working AND surface
+  // its errors, while the Stop button stays out of reach (it cannot be stopped
+  // from here; it is stopped in the terminal).
+  //
+  // The recorded turn lifecycle is the source of truth: the extension emits
+  // turn_start when the agent starts working and turn_end when it settles, which
+  // subagentStatus() reads as green (= working) vs orange (= waiting).
+  function visibleSessionRow() {
+    const t = curThread();
+    if (!t) return null;
+    const sid = t.openSid || (t.kind === "session" ? t.sid : null);
+    if (!sid) return null;
+    return CH.sessions.find((s) => s.session_id === sid) || null;
+  }
+  // A turn that never recorded its end (the pi process was killed, or the
+  // session is simply old) must not read as "working now" forever: the turn
+  // lifecycle is only evidence while it is recent. Generous, because a single
+  // non-streaming tool call (a build, a test run) can be silent for minutes.
+  const EXTERNAL_RUN_STALE_MS = 10 * 60 * 1000;
+  function externalRunLive() {
+    if (CH.chatBusy) return false; // an in-app run owns the indicator (and Stop)
+    const row = visibleSessionRow();
+    if (!row || S.subagentStatus(row) !== "green") return false;
+    // A session a chat SUBPROCESS of ours serves is never "external": its
+    // working state is `CH.chatBusy` (and /chat/status knows the session), so
+    // the recency heuristic must not re-light the terminal indicator the moment
+    // one of our own turns ends.
+    if (CH.liveRuns.has(row.session_id)) return false;
+    // Tolerate either an ISO string (what the DB serves) or an epoch number.
+    const ts = Date.parse(row.last_ts || "") || Number(row.last_ts) || 0;
+    return Date.now() - ts <= EXTERNAL_RUN_STALE_MS;
+  }
+
+  // Take over a run that is already in flight: show the working state, then
+  // stream the run's events (replayed from its start) into a live bubble.
+  async function adoptLiveRun(t, run) {
+    if (!t || t.busy || CH.liveAdopting.has(run.sessionId)) return;
+    CH.liveAdopting.add(run.sessionId);
+    // A transcript fetch started before the status snapshot landed must not
+    // render on top of the replayed run (it is partial during a run, and the
+    // replay would then show the same content twice).
+    t.loadGen++;
+    t.loadingSid = null;
+    t.key = run.sessionId;
+    t.liveRun = run.sessionId;
+    const before = t.history.length;
+    const gen = ++t.gen;
+    t.busy = true;
+    // The prompt that started the turn is not part of the stream (the client
+    // renders it), so restore it unless the thread already ends with it — a
+    // restored free conversation keeps its own snapshot bubble.
+    const lastUser = [...t.history].reverse().find((m) => m.role === "user");
+    if (run.prompt && (!lastUser || lastUser.text !== run.prompt)) {
+      t.history.push({ role: "user", text: run.prompt, ts: run.startedAt || Date.now() });
+    }
+    const aiMsg = {
+      role: "assistant", text: "", thinking: "", tools: [], usage: null,
+      model: run.model || CH.chatModel, ts: Date.now(), streaming: true,
+    };
+    t.history.push(aiMsg);
+    t.live = { body: null, m: aiMsg, isFirst: true, queue: [], after: null };
+    t.liveAt = Date.now();
+    const visible = t === curThread();
+    t.suppressed = !visible;
+    syncCurThread();
+    if (visible) {
+      renderChat();
+      attachLiveDom(t);
+      setComposerEnabled(true);
+      updateHeader();
+      setHint("reconnected to the running turn — live again", "busy");
+      scrollToBottom(true);
+      renderChatFooter();
+    }
+    try {
+      const res = await fetch(window.apiUrl("/chat/attach", { sessionId: run.sessionId }), { headers: window.authHeaders() });
+      const ct = res.headers.get("content-type") || "";
+      if (!res.ok || !ct.includes("ndjson")) {
+        // The run settled between the status snapshot and the attach (or the
+        // server never had it): drop the placeholder and show what was recorded
+        // instead of waiting on a stream that will not produce anything. The
+        // snapshot is now KNOWN stale for this session — forget the run, or the
+        // transcript load below would see it again and adopt in a loop.
+        CH.liveRuns.delete(run.sessionId);
+        t.history.length = before;
+        t.busy = false;
+        t.suppressed = false;
+        t.live = null;
+        CH.liveAdopting.delete(run.sessionId);
+        t.liveRun = null;
+        t.gen++; // supersede this adoption: nothing else may finalize it
+        if (t === curThread()) {
+          syncCurThread();
+          renderChat();
+          updateHeader();
+          setComposerEnabled(true);
+          setHint("that turn finished before it could be reconnected", "");
+        }
+        if (t.kind !== "free") {
+          const sid = t.openSid || t.sid;
+          if (sid) { t.lastOpenCount = null; void loadSessionChat(sid, t !== curThread()); }
+        }
+        return;
+      }
+      CH.liveAdopting.delete(run.sessionId); // attached — progress now guards it
+      await consumeChatStream(res, t);
+    } catch (err) {
+      CH.liveAdopting.delete(run.sessionId);
+      if (t.live) streamError(t.live.body, t.live.m, (err && err.message) || String(err));
+    }
+    settleAdoptedRun(t, false);
   }
 
   // ─── Interactive chat with the pi coding agent ────────────────────────────
@@ -1567,6 +1819,7 @@
     t.suppressed = false;
     t.gen = 0;
     t.live = null;
+    t.liveRun = null;
     t.dialogs.clear();
     t.pendingCustom = null;
     t.history = [];
@@ -1589,6 +1842,11 @@
     if (!CH.workspace) return;
     const t = freeThread(CH.workspace);
     if (t.key || t.busy) return;
+    // A run is already in flight for this workspace's conversation: pre-spawning
+    // a second subprocess would leave the live one unreachable (the adoption
+    // binds its session id instead).
+    await ensureLiveRuns();
+    if (liveRunForFreeThread(CH.workspace)) return;
     try {
       const { res, data } = await window.SCOPE.api("/chat/start", {}, { cwd: CH.workspace, model: CH.chatModel || defaultChatModel() });
       if (res.ok && data?.sessionId) {
@@ -1984,7 +2242,7 @@
       : "";
     const body = m.text
       ? `<div class="chat-text">${markdownHtml(m.text)}</div>`
-      : (!m.streaming && !m.thinking && !(m.tools || []).length
+      : (!m.streaming && !m.thinking && !(m.tools || []).length && !m.errorNote
           ? `<div class="chat-msg-time">(no text response)</div>`
           : "");
     // Answered questions (ask_user_question cards answered live in this bubble)
@@ -2093,6 +2351,16 @@
       // back to a session that is still running).
       if (showLive && m === curT.live.m) html += renderChatMsgLivePlaceholder(m, idx);
       else html += renderChatMsg(m, idx);
+    }
+    // A session working OUTSIDE this page (its pi runs in the user's terminal)
+    // gets the same motion the in-app run pill gives: a strip pinned under the
+    // transcript, since there is no in-flight bubble here to carry it.
+    if (!showLive && externalRunLive()) {
+      html +=
+        `<div class="chat-ext-live">` +
+        `<span class="chat-live-run-dots"><i></i><i></i><i></i></span>` +
+        `<span class="chat-ext-live-label">working in your terminal…</span>` +
+        `</div>`;
     }
     el.msg.innerHTML = html;
     if (stickBottom) scrollToBottom(true);
@@ -2612,6 +2880,7 @@
   // was sent.
   function handleChatEvent(ev, t) {
     if (!t || !t.busy || !t.live) return;
+    t.liveAt = Date.now(); // feed the stale-run heal (see healStaleRunThreads)
     const attached = t === curThread() && !t.suppressed;
     const body = attached ? t.live.body : null;
     const m = t.live.m;
@@ -2688,6 +2957,17 @@
         if (ev.sessionId) t.key = ev.sessionId;
         if (t === curThread()) syncCurThread();
         break;
+      case "ui_open": {
+        // A page that attached to a run already in flight: the question pi is
+        // BLOCKED on, re-emitted so it can be rendered (and answered) here. An
+        // answered dialog is never replayed — its id can no longer be answered,
+        // so it would leave a dead card on screen.
+        const inner = ev.dlg || {};
+        if (!body) break;
+        if (inner.type === "ui_input") showUiInput(body, m, inner, t);
+        else showUiSelect(body, m, inner, t);
+        break;
+      }
       case "ui_select":
         // Attached: render an answerable card. Background thread: decline so
         // pi never hangs on an invisible question.
@@ -2821,17 +3101,31 @@
     el.headerModel.title = CH.chatModel || "";
     const orch = wsSessions(CH.workspace).find((s) => (s.agent_name || "").toLowerCase() === "orchestrator");
     const st = orch ? S.activityStatus(orch) : "gray";
-    const busy = CH.chatBusy;
+    // The visible session may be working somewhere this page does not drive (a
+    // pi running in the user's terminal). Its recorded turn lifecycle says so,
+    // and the header must show it — just without a Stop button that could not
+    // work.
+    const extLive = externalRunLive();
+    const busy = CH.chatBusy || extLive;
     const stateTxt = busy ? "working" : (CH.chatSessionId ? "ready" : (st === "green" ? "active" : "idle"));
     const stateCls = busy ? "busy" : (CH.chatSessionId ? "" : "off");
     if (el.state) {
       el.state.hidden = false;
       el.state.textContent = stateTxt;
       el.state.className = "chat-header-state " + stateCls;
+      el.state.title = extLive ? "this session runs in your terminal — stop it there" : "";
     }
     if (el.liveDot) {
       el.liveDot.className = "chat-live-dot " + (busy ? "green" : st);
-      el.liveDot.title = busy ? "pi is working…" : st === "green" ? "agent running" : "idle";
+      el.liveDot.title = extLive
+        ? "the agent is working in your terminal"
+        : busy ? "pi is working…" : st === "green" ? "agent running" : "idle";
+    }
+    // Where the Stop button would be: an honest marker for a run this page
+    // cannot stop (see externalRunLive).
+    if (el.extRun) {
+      el.extRun.hidden = !extLive;
+      el.extRun.title = "This session runs in your own terminal — Pi Scope watches it, but stopping it happens there.";
     }
     if (el.btnNew) {
       // "Start a new session" is available whenever a workspace is open and no
@@ -3539,6 +3833,7 @@
   function finalizeChatTurn(t, gen) {
     if (!t || gen !== t.gen) return;
     t.busy = false;
+    if (t.liveRun) { CH.liveAdopting.delete(t.liveRun); t.liveRun = null; }
     t.suppressed = false;
     t.live = null;
     t.dialogs.clear();
@@ -3664,8 +3959,10 @@
 
     const model = CH.chatModel || defaultChatModel();
     const gen = ++t.gen;
+    const beforeIdx = t.history.length; // rollback point if the server refuses
     t.busy = true;
     t.suppressed = false;
+    t.liveRun = null; // this turn is OURS (no longer an adopted run)
     setComposerEnabled(true);
     setHint("pi is thinking…", "busy");
 
@@ -3713,7 +4010,25 @@
           sessionFile: t.resumeFile || "",
         }),
       });
-      if (!res.ok || !res.body) {
+      if (res.status === 409) {
+        // The server is still working this session — this page did not know it
+        // (it was reloaded mid-turn, and the live run outlived its stream). Roll
+        // the optimistic turn back, put the typed message back in the composer
+        // and re-attach: sending again then queues it (steer / follow-up)
+        // instead of colliding with the running turn.
+        t.history.length = beforeIdx;
+        t.busy = false;
+        t.suppressed = false;
+        t.live = null;
+        t.gen++; // supersede this turn so the finalize below is a no-op
+        syncCurThread();
+        renderChat();
+        updateHeader();
+        setComposerEnabled(true);
+        if (el.input && !el.input.value) { el.input.value = text; autoGrow(el.input); }
+        setHint("pi is still working this session — reconnecting; send again to queue your message", "busy");
+        void syncLiveRuns();
+      } else if (!res.ok || !res.body) {
         let detail = "";
         try { detail = (await res.json())?.error || ""; } catch { /* non-JSON body */ }
         streamError(t.live.body, aiMsg, `HTTP ${res.status}${detail ? ": " + detail : ""}`);
@@ -3792,6 +4107,16 @@
     if (prev && prev !== t) detachThread(prev);
     bindThread(t);
     renderAgents(); // highlight the subagent role that owns the open session
+    // A run for THIS session may still be in flight on the server (the page was
+    // reloaded mid-turn, or another tab started it). Attach to it rather than
+    // fetching the transcript: during a run the recording is partial, and the
+    // replayed stream would then show that part twice.
+    await ensureLiveRuns();
+    const liveRun = CH.liveRuns.get(sid);
+    if (liveRun?.active && !t.busy) {
+      await adoptLiveRun(t, liveRun);
+      return;
+    }
     if (t.loadingSid === sid) {
       // A transcript fetch for this thread is already in flight — bind to it
       // and show the current state; the in-flight fetch renders when done.
@@ -3917,6 +4242,18 @@
         pendingTools = [];
         const text = p.text || p.content || "";
         msgs.push({ role: "assistant", text, thinking, tools, usage: p.usage, model: evModel(ev), ts: ev.ts, recorded: true, sid: evSid });
+        // A provider failure is recorded ON the message it killed (e.g. "Error:
+        // model overloaded"). The terminal shows it; the transcript used to drop
+        // it, so a failed run looked like a silent no-op here.
+        if (p.error_message) msgs[msgs.length - 1].errorNote = String(p.error_message);
+      } else if (ev.type === "error") {
+        // Server/extension-side error events (e.g. the extension's event queue
+        // overflowed) — a note of their own, or attached to the reply they cut
+        // off.
+        const note = String(p.message || p.detail || "error");
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === "assistant" && !last.errorNote) last.errorNote = note;
+        else msgs.push({ role: "assistant", text: "", thinking: "", tools: [], ts: ev.ts, errorNote: note, recorded: true, sid: evSid });
       } else if (ev.type === "thinking") {
         // Thinking arrives as a series of events. Some producers send chunked
         // deltas, others send a growing snapshot of the full thought — so
@@ -4200,11 +4537,46 @@
     attemptRestore();
     fetchChatFooter(true);
     startFooterTicker();
+    // The first paint of a reloaded page must already know about a run that is
+    // still working server-side (the reported "no working status / no Stop
+    // button after coming back" bug).
+    void syncLiveRuns();
   }
 
   // Expose hooks for app.js
   window.__chatOnView = onView;
   window.__chatOnSessions = onSessions;
+  // One live event arrived over SSE (app.js's patchSessionFromSSE has already
+  // applied it to the session row). Chat needs this for the sessions it only
+  // OBSERVES — a pi running in the user's terminal: its turn lifecycle is what
+  // turns the header (and the canvas strip) into "working", and its recorded
+  // messages have to reach the transcript without waiting for the next poll.
+  window.__chatOnEvent = function (evt) {
+    if (!el.msg) return; // booted before init() cached the DOM
+    const type = evt?.type;
+    const sid = evt?.session_id;
+    if (!type || !sid) return;
+    const t = curThread();
+    const openSid = t ? (t.openSid || (t.kind === "session" ? t.sid : null)) : null;
+    const isOpen = !!openSid && openSid === sid && !t.busy;
+    const lifecycle = type === "turn_start" || type === "turn_end" || type === "session_shutdown";
+    const content =
+      type === "assistant_message" || type === "user_message" || type === "tool_result" || type === "error";
+    // Only the visible session's content is worth reacting to; lifecycle events
+    // matter for any session (the header status follows the visible one, but the
+    // rails/state must stay current either way).
+    if (!lifecycle && !(isOpen && content)) return;
+    if (isOpen) {
+      // Forget the seen event count so refreshOpenSession refetches NOW: new
+      // content appears without waiting for the next poll, and a turn boundary
+      // re-renders the canvas so the working strip follows the header.
+      t.lastOpenCount = null;
+    }
+    if (isOpen && type === "turn_start") {
+      setHint("this session runs in your terminal — its output streams here live", "busy");
+    }
+    onSessions();
+  };
   // Chat hides: stop the footer ticker so it does not keep polling from another
   // view (onView restarts it when the user comes back).
   window.__chatOnHide = stopFooterTicker;

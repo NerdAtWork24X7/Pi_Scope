@@ -77,6 +77,14 @@ open any run as a full conversation. The right-hand **Agent Team** rail mirrors 
 touching the terminal. Pick a model and thinking level, hit **Steer** to interrupt a live
 run with a new instruction, or open any session in the full timeline.
 
+Chat never loses a turn: the agent runs on the server, so reloading the page (or switching
+views and coming back) restores the conversation exactly as it was — **working** badge,
+animated run pill and **Stop** included — and re-attaches to the live stream where the
+previous page stopped reading. A `pi` you started **in your own terminal** shows up here
+too: its messages, its working state and its errors stream in from the events its extension
+posts, with a small *terminal* chip where Stop would be (that run is stopped in your
+terminal, where it lives).
+
 <p align="center">
   <img src="docs/shots/chat.png" alt="Chat view (light)" width="880" />
 </p>

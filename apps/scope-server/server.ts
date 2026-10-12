@@ -29,7 +29,7 @@ import {
   storeFor,
   isEnabled as isPluginEnabled,
 } from "./plugins.ts";
-import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus } from "./chat.ts";
+import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatLiveRuns, attachChatRun } from "./chat.ts";
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
 import { checkPiUpdate, updatePi } from "./pi-update.ts";
@@ -4150,6 +4150,10 @@ const pluginKit = {
   // The Chat feature plugin owns the /chat routes; it needs the full subprocess
   // lifecycle + the STT machinery + the reference-library preamble.
   startChatSession, killChatSession, pushChatPrefs, answerChatUi,
+  // …and the recovery half of a run: which runs are live (so a page that lost
+  // its stream, or one that never had it, can restore the working state) and
+  // how to attach a fresh reader to one still in flight.
+  chatLiveRuns, attachChatRun,
   sttStatus, startStt, stopStt,
   // The live shared cwd (mutable; the STT status fallback needs its current value).
   terminalCwd: () => TERMINAL_CWD,

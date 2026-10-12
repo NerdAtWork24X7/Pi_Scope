@@ -35,8 +35,31 @@ import { PI_BIN } from "./pi-bundle.ts";
 
 const ENCODER = new TextEncoder();
 
-interface ActivePrompt {
-  controller: ReadableStreamDefaultController<Uint8Array>;
+// Replay buffer bounds for an in-flight run. A browser that attaches late (a
+// reloaded page, a second tab) replays the run from its first event, so the log
+// is bounded by BOTH a count and a byte budget — a tool-heavy run must not be
+// able to grow the server's heap without limit. When the budget is exceeded the
+// oldest events are dropped (the turn's tail is what is still streaming).
+const RUN_LOG_MAX_EVENTS = 20000;
+const RUN_LOG_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * One in-flight prompt (a "run") on a chat session.
+ *
+ * The run OWNS the readers watching it rather than the other way around: the
+ * response stream of the POST /chat that started it is just the first
+ * subscriber. A page that reloads when its fetch is cancelled (or a second tab)
+ * therefore ATTACHES to the same run instead of losing the turn — the bounded
+ * `log` lets the attach replay everything emitted so far, and pi's completion is
+ * still recorded server-side either way.
+ */
+interface ChatRun {
+  subs: Set<ReadableStreamDefaultController<Uint8Array>>;
+  log: Array<{ obj: any; bytes: number }>; // replay buffer for late subscribers
+  bytes: number; // running size of `log`
+  prompt: string; // the user prompt that started this run
+  startedAt: number;
+  openUi: Map<string, any>; // extension_ui dialogs still waiting for an answer
 }
 
 interface ChatSession {
@@ -46,7 +69,7 @@ interface ChatSession {
   proc: ChildProcess;
   buffer: string;
   stderrBuf: string; // accumulated stderr, used to surface the real pi error on close
-  active: ActivePrompt | null;
+  run: ChatRun | null;
   lastUsed: number;
   dead: boolean;
   prompted: boolean; // has ever received a prompt (vs idle pre-spawn)
@@ -67,6 +90,11 @@ const IDLE_TIMEOUT = 10 * 60 * 1000;
 setInterval(() => {
   const now = Date.now();
   for (const [id, sess] of sessions) {
+    // A run in flight is never "idle": a long turn can be silent for a while (a
+    // single slow tool call, or pi blocked on a host dialog), and killing it
+    // would drop the turn the user is watching. `handleLine` keeps lastUsed
+    // fresh while output streams; this guard covers the silent stretches.
+    if (sess.run) continue;
     if (now - sess.lastUsed > IDLE_TIMEOUT) {
       try { sess.proc.kill(); } catch { /* already dead */ }
       sessions.delete(id);
@@ -74,19 +102,52 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-function enqueue(controller: ReadableStreamDefaultController<Uint8Array>, obj: any) {
+function enqueueRaw(controller: ReadableStreamDefaultController<Uint8Array>, line: string): boolean {
   try {
-    controller.enqueue(ENCODER.encode(JSON.stringify(obj) + "\n"));
+    controller.enqueue(ENCODER.encode(line));
+    return true;
   } catch {
-    /* controller closed */
+    return false; // the reader is gone (closed/errored) — the caller drops it
   }
 }
 
-function closeActive(sess: ChatSession) {
-  const ctrl = sess.active?.controller;
-  if (!ctrl) return;
-  try { ctrl.close(); } catch { /* already closed */ }
-  sess.active = null;
+function enqueue(controller: ReadableStreamDefaultController<Uint8Array>, obj: any) {
+  enqueueRaw(controller, JSON.stringify(obj) + "\n");
+}
+
+/** Emit one event of a run: record it in the replay buffer (so a late attach
+ *  can rebuild the whole turn) and push it to every attached reader. */
+function runEmit(run: ChatRun, obj: any) {
+  const line = JSON.stringify(obj);
+  // UTF-8 bytes, not UTF-16 code units: the budget guards heap, and a reply full
+  // of multi-byte characters (CJK, emoji) must not slip past it.
+  const bytes = Buffer.byteLength(line, "utf8") + 1;
+  run.log.push({ obj, bytes });
+  run.bytes += bytes;
+  while (run.log.length > RUN_LOG_MAX_EVENTS || (run.bytes > RUN_LOG_MAX_BYTES && run.log.length > 1)) {
+    run.bytes -= run.log.shift()!.bytes;
+  }
+  const encoded = line + "\n";
+  for (const c of [...run.subs]) {
+    // A controller that refuses bytes is a reader nobody is reading: drop it, so
+    // a dead stream is not written to for the rest of the run.
+    if (!enqueueRaw(c, encoded)) run.subs.delete(c);
+  }
+}
+
+/** Finish a run: hand the terminal events (error, then done) to every attached
+ *  reader, close them, and drop the run (the idle session stays alive for the
+ *  next prompt). */
+function endRun(sess: ChatSession, ...events: any[]) {
+  const run = sess.run;
+  if (!run) return;
+  sess.run = null;
+  run.openUi.clear();
+  for (const c of run.subs) {
+    for (const ev of events) enqueue(c, ev);
+    try { c.close(); } catch { /* already closed */ }
+  }
+  run.subs.clear();
 }
 
 /** Pull the first fatal pi error line out of captured stderr. pi writes startup
@@ -106,6 +167,10 @@ function handleLine(sess: ChatSession, line: string) {
   if (!line.trim()) return;
   let ev: any;
   try { ev = JSON.parse(line); } catch { return; }
+  // Streaming output is proof of life: an idle-reaper kill must never land
+  // mid-run (a long turn can outlast the 10-minute idle window), and lastUsed
+  // is what the reaper reads.
+  sess.lastUsed = Date.now();
 
   // Completion is recorded even when no browser is reading the stream: a page
   // that reloads away (or a second tab) abandons the response, but pi keeps
@@ -114,17 +179,13 @@ function handleLine(sess: ChatSession, line: string) {
   if (ev.type === "agent_settled") {
     sess.runState = null;
     sess.lastRun = { outcome: sess.stopRequested ? "aborted" : "done", at: Date.now() };
-    const ctrl = sess.active?.controller;
-    if (ctrl) {
-      enqueue(ctrl, { type: "done", sessionId: sess.id, model: sess.model, aborted: sess.stopRequested });
-      closeActive(sess);
-    }
+    endRun(sess, { type: "done", sessionId: sess.id, model: sess.model, aborted: sess.stopRequested });
     sess.stopRequested = false;
     return;
   }
 
-  const ctrl = sess.active?.controller;
-  if (!ctrl) return; // stray event with no in-flight prompt — ignore
+  const run = sess.run;
+  if (!run) return; // stray event with no in-flight prompt — ignore
 
   switch (ev.type) {
     case "response": {
@@ -137,7 +198,7 @@ function handleLine(sess: ChatSession, line: string) {
         if (ev.success && !ev.data?.cancelled) {
           cb();
         } else {
-          enqueue(ctrl, { type: "error", message: "⚠ could not resume the session — continuing without it" });
+          runEmit(run, { type: "error", message: "⚠ could not resume the session — continuing without it" });
           cb();
         }
         return;
@@ -145,19 +206,19 @@ function handleLine(sess: ChatSession, line: string) {
       // A rejected command (e.g. a queued steer/follow-up that pi refused)
       // should surface to the client instead of a misleading "accepted".
       if (ev.success === false) {
-        enqueue(ctrl, { type: "error", message: ev.error || "pi rejected the command" });
+        runEmit(run, { type: "error", message: ev.error || "pi rejected the command" });
         return;
       }
-      enqueue(ctrl, { type: "accepted" });
+      runEmit(run, { type: "accepted" });
       return;
     }
     case "message_update":
       if (ev.assistantMessageEvent) {
         const a = ev.assistantMessageEvent;
-        if (a.type === "text_delta") enqueue(ctrl, { type: "text", delta: a.delta || "" });
-        else if (a.type === "thinking_delta") enqueue(ctrl, { type: "thinking", delta: a.delta || "" });
+        if (a.type === "text_delta") runEmit(run, { type: "text", delta: a.delta || "" });
+        else if (a.type === "thinking_delta") runEmit(run, { type: "thinking", delta: a.delta || "" });
       }
-      if (ev.usage) enqueue(ctrl, { type: "usage", usage: ev.usage });
+      if (ev.usage) runEmit(run, { type: "usage", usage: ev.usage });
       return;
     case "message_start":
       // A single run can contain several assistant messages (one per LLM call in
@@ -165,7 +226,7 @@ function handleLine(sess: ChatSession, line: string) {
       // the per-message `final` snapshot land in their own message instead of
       // piling into one bubble where a later snapshot overwrites earlier text.
       if (ev.message?.role === "assistant") {
-        enqueue(ctrl, { type: "msg_start" });
+        runEmit(run, { type: "msg_start" });
       } else if (ev.message?.role === "user") {
         // A queued steer/follow-up message was just picked up by pi's run loop.
         // pi does NOT emit a fresh agent_start for these (they run inside the
@@ -173,7 +234,7 @@ function handleLine(sess: ChatSession, line: string) {
         // equivalent run_start. This lets the client adopt the queued user
         // bubble as the anchor for the incoming assistant response AND drop the
         // "waiting for its turn" status the moment pi starts working on it.
-        enqueue(ctrl, { type: "run_start" });
+        runEmit(run, { type: "run_start" });
       }
       return;
     case "message_end": {
@@ -184,15 +245,15 @@ function handleLine(sess: ChatSession, line: string) {
         const content = Array.isArray(ev.message.content) ? ev.message.content : [];
         const text = content.filter((c: any) => c.type === "text").map((c: any) => c.text || "").join("");
         const thinking = content.filter((c: any) => c.type === "thinking").map((c: any) => c.thinking || "").join("");
-        enqueue(ctrl, { type: "final", text, thinking });
+        runEmit(run, { type: "final", text, thinking });
       }
       return;
     }
     case "tool_execution_start":
-      enqueue(ctrl, { type: "tool_start", name: ev.toolName || ev.tool || "", args: ev.args || "" });
+      runEmit(run, { type: "tool_start", name: ev.toolName || ev.tool || "", args: ev.args || "" });
       return;
     case "tool_execution_end":
-      enqueue(ctrl, { type: "tool_end", name: ev.toolName || ev.tool || "" });
+      runEmit(run, { type: "tool_end", name: ev.toolName || ev.tool || "" });
       return;
     case "extension_ui_request": {
       // An extension asked the HOST to render UI and is blocking until it gets a
@@ -205,22 +266,29 @@ function handleLine(sess: ChatSession, line: string) {
       const id = typeof u.id === "string" ? u.id : "";
       if (!id) return;
       if (u.method === "select") {
-        enqueue(ctrl, {
+        const dlg = {
           type: "ui_select",
           id,
           title: typeof u.title === "string" ? u.title : "",
           options: Array.isArray(u.options) ? u.options.filter((o: any) => typeof o === "string") : [],
-        });
+        };
+        // Remember the question until it is answered: pi BLOCKS on it, so a page
+        // that reattaches must be able to show (and answer) it again instead of
+        // leaving the agent waiting on a dialog nobody can see.
+        run.openUi.set(id, dlg);
+        runEmit(run, dlg);
       } else if (u.method === "input") {
-        enqueue(ctrl, {
+        const dlg = {
           type: "ui_input",
           id,
           title: typeof u.title === "string" ? u.title : "",
           placeholder: typeof u.placeholder === "string" ? u.placeholder : "",
-        });
+        };
+        run.openUi.set(id, dlg);
+        runEmit(run, dlg);
       } else if (u.method === "notify") {
         // Fire-and-forget host notifications; surface as a lightweight status.
-        enqueue(ctrl, { type: "ui_notify", message: u.message || "", kind: u.notifyType || "info" });
+        runEmit(run, { type: "ui_notify", message: u.message || "", kind: u.notifyType || "info" });
       }
       return;
     }
@@ -229,7 +297,7 @@ function handleLine(sess: ChatSession, line: string) {
       // assistant messages of a queued steer/follow-up right after the user
       // bubble that triggered it (and to place an earlier run's leftover
       // tool-loop messages before that bubble).
-      enqueue(ctrl, { type: "run_start" });
+      runEmit(run, { type: "run_start" });
       return;
     case "agent_end":
       // A single low-level run completed; queued steer/follow-up, retry or
@@ -515,7 +583,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
     out = proc.stdout as NodeJS.ReadableStream;
   }
 
-  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", active: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh, librarySent: false, runState: null, lastRun: null };
+  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", run: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh, librarySent: false, runState: null, lastRun: null };
 
   out.on("data", (d: Buffer) => {
     sess.buffer += d.toString();
@@ -531,8 +599,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
     // Bound the retained stderr: a long-lived session could otherwise accumulate
     // it forever. Keep only the tail — enough to surface the error on close.
     if (sess.stderrBuf.length > 64 * 1024) sess.stderrBuf = sess.stderrBuf.slice(-64 * 1024);
-    const ctrl = sess.active?.controller;
-    if (ctrl) enqueue(ctrl, { type: "stderr", text: d.toString() });
+    if (sess.run) runEmit(sess.run, { type: "stderr", text: d.toString() });
   });
   proc.on("error", () => {
     sess.dead = true;
@@ -540,7 +607,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
     // "close", leaving the entry in the sessions Map until the 10-min idle
     // reaper. Drop an idle entry now; an in-flight run still gets its "close"
     // teardown (and its recorded outcome) below.
-    if (!sess.active) sessions.delete(id);
+    if (!sess.run) sessions.delete(id);
   });
   proc.on("close", () => {
     sess.dead = true;
@@ -550,12 +617,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
       sess.runState = null;
       sess.lastRun = { outcome: "error", at: Date.now() };
     }
-    const ctrl = sess.active?.controller;
-    if (ctrl) {
-      enqueue(ctrl, { type: "done", sessionId: id, model, error: extractPiError(sess.stderrBuf) || "process closed" });
-      try { ctrl.close(); } catch { /* already closed */ }
-      sess.active = null;
-    }
+    endRun(sess, { type: "done", sessionId: id, model, error: extractPiError(sess.stderrBuf) || "process closed" });
     sessions.delete(id);
   });
 
@@ -603,10 +665,12 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
   }
   sess.lastUsed = Date.now();
   sess.prompted = true;
-  if (sess.active) {
+  if (sess.run) {
     // A prompt is already streaming to this session. With a steer/follow-up
     // behavior we queue the message to pi (it streams back over the existing
-    // controller); without one we reject, preserving the old one-at-a-time rule.
+    // run); without one we reject, preserving the one-at-a-time rule. This also
+    // holds while NO reader is attached (every browser reloaded): pi is still
+    // working, and a second prompt would interleave into the running turn.
     if (opts.streamingBehavior === "steer" || opts.streamingBehavior === "followUp") {
       try {
         sess.proc.stdin.write(JSON.stringify({ type: "prompt", message: prompt, streamingBehavior: opts.streamingBehavior }) + "\n");
@@ -621,15 +685,26 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      sess!.active = { controller };
+      // The run exists as soon as the prompt is accepted: it owns this reader
+      // (and any later attach) plus the replay buffer of everything emitted.
+      const run: ChatRun = {
+        subs: new Set([controller]),
+        log: [],
+        bytes: 0,
+        prompt,
+        startedAt: Date.now(),
+        openUi: new Map(),
+      };
+      sess!.run = run;
       // A prompt is now in flight: record it so a page that abandons this stream
-      // (reload) can still learn how the run ended (see chatRunStatus).
+      // (reload) can still learn how the run ended (see chatRunStatus) and
+      // re-attach to it (see attachChatRun).
       sess!.runState = "running";
       sess!.lastRun = null;
       // Announce the real subprocess session id first. The browser may not have
       // one yet (no pre-spawn, or a request without a sessionId), but answers to
       // extension dialogs (POST /chat/ui) must target the actual session.
-      enqueue(controller, { type: "session", sessionId: sid, model });
+      runEmit(run, { type: "session", sessionId: sid, model });
       // Push the latest model/thinking choice into the running subprocess before
       // prompting. pi resolves --model and the thinking level only at boot, so a
       // subprocess spawned (or pointed at a recorded session) earlier would
@@ -645,7 +720,7 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
             sess!.proc.stdin.write(JSON.stringify({ type: "set_model", provider: model.slice(0, slash), modelId: model.slice(slash + 1) }) + "\n");
             sess!.model = model;
           } catch (err: any) {
-            enqueue(controller, { type: "error", message: err.message || String(err) });
+            runEmit(run, { type: "error", message: err.message || String(err) });
           }
         }
         if (level) {
@@ -653,7 +728,7 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
             sess!.proc.stdin.write(JSON.stringify({ type: "set_thinking_level", level }) + "\n");
             sess!.thinkingLevel = level;
           } catch (err: any) {
-            enqueue(controller, { type: "error", message: err.message || String(err) });
+            runEmit(run, { type: "error", message: err.message || String(err) });
           }
         }
       };
@@ -667,14 +742,18 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
         sess!.librarySent = true;
         return `${block}\n\n${prompt}`;
       };
+      // A write into a dead subprocess ends the run immediately (pi never got
+      // the prompt, so no agent_settled will ever arrive).
+      const failRun = (err: any) => {
+        sess!.runState = null;
+        sess!.lastRun = { outcome: "error", at: Date.now() };
+        endRun(sess!, { type: "error", message: err.message || String(err) }, { type: "done", sessionId: sid, model });
+      };
       const sendPrompt = () => {
         try {
           sess!.proc.stdin.write(JSON.stringify({ type: "prompt", message: promptForSend() }) + "\n");
         } catch (err: any) {
-          enqueue(controller, { type: "error", message: err.message || String(err) });
-          enqueue(controller, { type: "done", sessionId: sid, model });
-          try { controller.close(); } catch { /* ignore */ }
-          sess!.active = null;
+          failRun(err);
         }
       };
       // Point the subprocess at the requested session before the prompt and send
@@ -690,10 +769,7 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
           sess!.proc.stdin.write(JSON.stringify(cmd) + "\n");
         } catch (err: any) {
           sess!.resumeCallback = null;
-          enqueue(controller, { type: "error", message: err.message || String(err) });
-          enqueue(controller, { type: "done", sessionId: sid, model });
-          try { controller.close(); } catch { /* ignore */ }
-          sess!.active = null;
+          failRun(err);
         }
       };
       if (sessionFile) {
@@ -713,10 +789,13 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
         sendPrompt();
       }
     },
+    // The browser went away (a reload abandons the fetch). The run is NOT
+    // cancelled: pi keeps working, the events keep accumulating in the replay
+    // log, and the run stays attached to the session so a returning page can
+    // attach to it (GET /chat/attach) and pick up where this reader stopped.
     cancel() {
-      if (sess && sess.active && sess.active.controller === controller) {
-        sess.active = null;
-      }
+      const run = sess?.run;
+      if (run) run.subs.delete(controller);
     },
   });
 
@@ -736,7 +815,7 @@ export function startChatSession(opts: { cwd: string; model?: string }): { sessi
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   for (const [id, sess] of sessions) {
     if (!sess.fresh) continue; // never touch recorded-session subprocesses
-    if (sess.active || sess.prompted) continue; // in-flight or already conversed
+    if (sess.run || sess.prompted) continue; // in-flight or already conversed
     if (sess.cwd !== opts.cwd || sess.model !== model) {
       try { sess.proc.kill(); } catch { /* already dead */ }
       sessions.delete(id);
@@ -744,7 +823,7 @@ export function startChatSession(opts: { cwd: string; model?: string }): { sessi
   }
   for (const sess of sessions.values()) {
     if (!sess.fresh) continue;
-    if (sess.cwd === opts.cwd && sess.model === model && !sess.dead && sess.proc.exitCode === null && !sess.active) {
+    if (sess.cwd === opts.cwd && sess.model === model && !sess.dead && sess.proc.exitCode === null && !sess.run) {
       sess.lastUsed = Date.now();
       return { sessionId: sess.id, reused: true };
     }
@@ -762,6 +841,81 @@ export function chatRunStatus(id: string): { present: boolean; active: boolean; 
   const sess = sessions.get(id);
   if (!sess) return { present: false, active: false, outcome: null };
   return { present: true, active: sess.runState === "running" && !sess.dead, outcome: sess.lastRun?.outcome ?? null };
+}
+
+/** Everything a page needs to pick a live run back up after it lost its stream
+ *  (a reload or a view switch that reloads Chat) or never had one (a second
+ *  tab): which chat sessions exist on the server, where they run, whether a
+ *  prompt is in flight, and what that prompt was.
+ *
+ *  A run whose reader went away is reported `active` — pi keeps working — which
+ *  is exactly the state the Chat view must recover: the "working" badge, the
+ *  animated run pill and the Stop button all derive from it. */
+export interface ChatLiveRun {
+  sessionId: string;
+  cwd: string;
+  model: string;
+  active: boolean;
+  fresh: boolean; // a workspace's own "new conversation" subprocess
+  prompted: boolean; // has ever been prompted (vs an idle pre-spawn)
+  resumedFile: string | null; // pi session file it is currently on
+  startedAt: number | null; // start of the in-flight run (null when idle)
+  prompt: string; // the prompt of the in-flight run ("" when idle)
+}
+
+export function chatLiveRuns(): ChatLiveRun[] {
+  const out: ChatLiveRun[] = [];
+  for (const [id, sess] of sessions) {
+    if (sess.dead || sess.proc.exitCode !== null) continue;
+    const run = sess.run;
+    out.push({
+      sessionId: id,
+      cwd: sess.cwd,
+      model: sess.model,
+      active: !!run && sess.runState === "running",
+      fresh: sess.fresh,
+      prompted: sess.prompted,
+      resumedFile: sess.resumedFile,
+      startedAt: run ? run.startedAt : null,
+      prompt: run ? run.prompt : "",
+    });
+  }
+  return out;
+}
+
+/** Attach a NEW reader to a run that is already in flight, replaying everything
+ *  emitted so far (bounded — see RUN_LOG_MAX_*) and then streaming live. Returns
+ *  null when the session has no live run, so the caller can answer "the run
+ *  already finished" instead of leaving a page waiting on a stream that will
+ *  never produce anything.
+ *
+ *  Answered extension dialogs are NOT replayed (their id can no longer be
+ *  answered); the still-open ones are re-emitted as `ui_open` so the page can
+ *  render and answer the question pi is blocked on. */
+export function attachChatRun(id: string): Response | null {
+  const sess = sessions.get(id);
+  const run = sess?.run;
+  if (!sess || !run || sess.dead || sess.proc.exitCode !== null) return null;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const entry of run.log) {
+        // Extension dialogs are replayed separately (below): a request that was
+        // already answered must not come back as an answerable card, and the
+        // ones still open are re-sent as `ui_open`.
+        if (entry.obj.type === "ui_select" || entry.obj.type === "ui_input") continue;
+        enqueue(controller, entry.obj);
+      }
+      for (const dlg of run.openUi.values()) enqueue(controller, { type: "ui_open", dlg });
+      run.subs.add(controller);
+    },
+    cancel() {
+      run.subs.delete(controller);
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-cache", "x-accel-buffering": "no" },
+  });
 }
 
 /** Kill a specific chat subprocess by session ID. */
@@ -821,6 +975,9 @@ export function answerChatUi(id: string, uiId: string, opts: { value?: string; c
   } catch {
     return false;
   }
+  // The question is resolved — a page that attaches later must not be shown a
+  // card for it again (see attachChatRun's open-dialog replay).
+  sess.run?.openUi.delete(uiId);
   return true;
 }
 
@@ -831,7 +988,7 @@ export function answerChatUi(id: string, uiId: string, opts: { value?: string; c
 export function stopChat(id: string): boolean {
   const sess = sessions.get(id);
   if (!sess) return false;
-  const wasActive = !!sess.active;
+  const wasActive = !!sess.run;
   if (wasActive) sess.stopRequested = true;
   try {
     // clear_queue first so queued steer/follow-up messages don't continue after

@@ -26,10 +26,35 @@ export function activate(api: any): void {
     killChatSession,
     pushChatPrefs,
     answerChatUi,
+    chatLiveRuns,
+    attachChatRun,
     sttStatus,
     startStt,
     stopStt,
   } = api.kit;
+
+  // ── GET /chat/status (which chat runs are live right now) ──────────────
+  // The Chat view is a fresh page after every reload, but pi keeps working:
+  // a run whose browser went away is still in flight, and its subprocess holds
+  // the conversation context. This reports those runs so the view can restore
+  // the working state (badge, run pill, Stop button) and re-attach to the
+  // stream instead of looking idle. Cheap and read-only: in-memory session
+  // state, no DB, no subprocess.
+  api.route("GET", "/chat/status", () => jsonResponse({ runs: chatLiveRuns() }));
+
+  // ── GET /chat/attach?sessionId=… (stream a run already in flight) ──────
+  // Replays the run's events from its start, then streams it live until pi
+  // settles — the same NDJSON protocol as POST /chat, so the client consumes
+  // both with one reader. 409 when the run is gone (already finished or never
+  // existed): the caller settles the thread from the recorded transcript
+  // instead of waiting on a stream that will never produce anything.
+  api.route("GET", "/chat/attach", (ctx) => {
+    const sessionId = (ctx.url.searchParams.get("sessionId") || "").trim();
+    if (!sessionId) return jsonResponse({ error: "missing sessionId" }, 400);
+    const stream = attachChatRun(sessionId);
+    if (!stream) return jsonResponse({ error: "no live run for this session", active: false }, 409);
+    return stream;
+  });
 
   // ── POST /chat/start (pre-spawn the pi session for a workspace) ────────
   // Called when the user selects a workspace in the Chat view so `pi --mode

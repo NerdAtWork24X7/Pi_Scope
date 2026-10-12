@@ -1335,3 +1335,252 @@ describe("global sidebar workspace rail", () => {
     await page.waitForFunction((cwd) => window.__SCOPE_STATE.cwd === cwd, WS_B);
   });
 });
+
+// ─── Recovering a live run after the page is reloaded ──────────────────────
+// Reported flow: the agent is working in Chat, the user switches page (clicking
+// Chat hard-reloads the document) and comes back — the canvas looked idle, the
+// header showed no "working" badge and the Stop button was gone, even though the
+// run was still in flight on the server. The server keeps the run (and a bounded
+// replay of its events) so the reloaded page can restore the state and re-attach.
+describe("live-run recovery", () => {
+  /** Reload the page the way the Chat nav button does, then reopen the
+   *  workspace — the exact user flow behind the report. */
+  async function reloadAndReopenWs() {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => typeof window.__chatOnView === "function" && window.__SCOPE_STATE?.sessionsLoaded === true
+    );
+    await wsRow(page, WS_A).click();
+    await page.waitForSelector(`.chat-ws.active[data-cwd="${WS_A}"]`);
+  }
+
+  test("a reload mid-turn restores the working state, Stop, and the live stream", async () => {
+    await boot({ team: defaultTeam({ chatWorkspaces: [WS_A] }) });
+    await wsRow(page, WS_A).click();
+    const turn = await send(page, mock, "long task");
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "text", delta: "EARLY-DELTA" });
+    await page.waitForFunction(() => document.getElementById("chat-messages").textContent.includes("EARLY-DELTA"));
+    await sleep(900); // the conversation snapshot is written on an 800ms debounce
+
+    await reloadAndReopenWs();
+
+    // Working again: badge, animated pill, and a Stop that targets the live run.
+    await page.waitForFunction(() => document.getElementById("chat-header-state").textContent === "working");
+    await page.waitForSelector("#chat-stop.show", { state: "visible" });
+    await page.waitForSelector(".chat-live-run", { state: "visible" });
+    assert.equal(await page.locator("#chat-ext-run").isVisible(), false, "an in-app run offers Stop, not the terminal marker");
+    // Everything emitted before the reload is replayed, so nothing is lost.
+    await page.waitForFunction(() => document.getElementById("chat-messages").textContent.includes("EARLY-DELTA"));
+    assert.match(await canvas(), /long task/, "the prompt that started the turn is back on screen");
+
+    // …and the run keeps streaming into the reloaded page.
+    turn.text("TAIL-DELTA");
+    await page.waitForFunction(() => document.getElementById("chat-messages").textContent.includes("TAIL-DELTA"));
+
+    turn.send({ type: "done", sessionId: turn.sessionId });
+    turn.end();
+    await page.waitForFunction(() => !document.getElementById("chat-stop").classList.contains("show"));
+    assert.equal(await page.locator(".chat-live-run").count(), 0, "the pill clears when the recovered turn ends");
+    assert.equal(await page.textContent("#chat-header-state"), "ready");
+  });
+
+  test("Stop on a recovered run targets the session that is still working", async () => {
+    await boot({ team: defaultTeam({ chatWorkspaces: [WS_A] }) });
+    await wsRow(page, WS_A).click();
+    const turn = await send(page, mock, "long task");
+    turn.send({ type: "msg_start" });
+    turn.text("WORKING-IN-THE-BACKGROUND");
+    await sleep(900);
+    await reloadAndReopenWs();
+    await page.waitForSelector("#chat-stop.show", { state: "visible" });
+    await page.click("#chat-stop");
+    const stop = mock.requestsFor("/chat/stop", "POST").at(-1);
+    assert.ok(stop, "Stop posts to the server");
+    assert.equal(stop.body.sessionId, turn.sessionId, "Stop targets the recovered session, not a new one");
+
+    turn.send({ type: "done", sessionId: turn.sessionId, aborted: true });
+    turn.end();
+    await page.waitForFunction(() => !document.getElementById("chat-stop").classList.contains("show"));
+    await page.waitForFunction(() => !!document.querySelector(".chat-stopped-note"));
+  });
+
+  test("a second tab adopts the live run instead of starting its own", async () => {
+    await boot({ team: defaultTeam({ chatWorkspaces: [WS_A] }) });
+    await wsRow(page, WS_A).click();
+    const turn = await send(page, mock, "long task");
+    turn.send({ type: "msg_start" });
+    turn.text("RUNNING-ALREADY");
+    await sleep(900);
+
+    const p2 = await env.context.newPage();
+    await p2.goto(`${mock.base}/?token=test-token&view=chat`, { waitUntil: "domcontentloaded" });
+    await p2.waitForFunction(
+      () => typeof window.__chatOnView === "function" && window.__SCOPE_STATE?.sessionsLoaded === true
+    );
+    await wsRow(p2, WS_A).click();
+    await p2.waitForFunction(() => document.getElementById("chat-header-state").textContent === "working");
+    await p2.waitForSelector("#chat-stop.show", { state: "visible" });
+    assert.match(await p2.textContent("#chat-messages"), /RUNNING-ALREADY/, "the second tab streams the same run");
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1, "no second pi was started for the same session");
+
+    turn.send({ type: "done", sessionId: turn.sessionId });
+    turn.end();
+    await p2.waitForFunction(() => !document.getElementById("chat-stop").classList.contains("show"));
+  });
+
+  test("a run that finished while the page was away is shown from its transcript, not re-attached", async () => {
+    const events = [
+      { type: "user_message", ts: 1, payload: { text: "from the terminal" } },
+      { type: "assistant_message", ts: 2, payload: { text: "RECORDED-AWAY" } },
+    ];
+    await boot({
+      sessions: [makeSession({ ...SESS_A, first_msg: "from the terminal" })],
+      events: { "sess-a": events },
+      seed: { "scope-chat-ws-expanded": JSON.stringify([WS_A]) },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "sess-a").click();
+    const turn = await send(page, mock, "typed here");
+    reply(turn, "FINISHED-AWAY");
+    await page.waitForFunction(() => document.getElementById("chat-messages").textContent.includes("FINISHED-AWAY"));
+
+    await reloadAndReopenWs();
+    await sessRow(page, "sess-a").click();
+    await page.waitForFunction(() => document.getElementById("chat-messages").textContent.includes("RECORDED-AWAY"));
+    assert.equal(mock.requestsFor("/chat/attach").length, 0, "nothing live to attach to — the transcript is authoritative");
+  });
+
+  test("an attach that loses the race with the turn's end falls back to the transcript", async () => {
+    // The status snapshot still lists the run, but it settles before the attach
+    // lands. The page must not sit on an empty live bubble: it rolls back and
+    // shows the recorded transcript of that session.
+    const events = [
+      { type: "user_message", ts: 1, payload: { text: "terminal turn" } },
+      { type: "assistant_message", ts: 2, payload: { text: "RECORDED-TURN" } },
+    ];
+    mock.setLiveRun("sess-a", { cwd: WS_A, prompt: "terminal turn" });
+    mock.setRunStatus("sess-a", { active: true }); // status still says "working"…
+    await boot({
+      // A session that is NOT working right now (its last recorded event is old
+      // enough to fall out of the activity window).
+      sessions: [makeSession({
+        ...SESS_A, first_msg: "terminal turn",
+        last_ts: new Date(Date.now() - 30_000).toISOString(),
+        last_turn_event: "turn_end",
+      })],
+      events: { "sess-a": events },
+      seed: { "scope-chat-ws-expanded": JSON.stringify([WS_A]) },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "sess-a").click();
+    await page.waitForFunction(() => document.getElementById("chat-messages").textContent.includes("RECORDED-TURN"), undefined, { timeout: 4000 });
+    assert.equal(await page.locator(".chat-live-run").count(), 0, "no phantom live bubble");
+    assert.equal(await page.locator("#chat-stop").isVisible(), false, "and nothing to stop");
+    assert.notEqual(await page.textContent("#chat-header-state"), "working");
+  });
+
+  test("a recovered run the server no longer reports is settled instead of hanging on 'working'", async () => {
+    // The attach stream can die before its terminal event (server restart, a
+    // killed subprocess): the status poll is what heals the thread, otherwise
+    // the Stop button and the pill would stay on forever and the transcript
+    // could never refresh again (the poll skips a busy thread).
+    await boot({ team: defaultTeam({ chatWorkspaces: [WS_A] }) });
+    await wsRow(page, WS_A).click();
+    const turn = await send(page, mock, "long task");
+    turn.send({ type: "msg_start" });
+    turn.text("STUCK-WORKING");
+    await sleep(900);
+    await reloadAndReopenWs();
+    await page.waitForSelector("#chat-stop.show", { state: "visible" });
+
+    // The server forgets the run without ever closing the attach stream.
+    mock.setRunStatus(turn.sessionId, { active: false });
+    await sleep(3000); // the status snapshot has a 2.5s freshness window
+    await page.evaluate(() => window.__chatOnSessions());
+    await page.waitForFunction(() => !document.getElementById("chat-stop").classList.contains("show"), undefined, { timeout: 4000 });
+    assert.equal(await page.locator(".chat-live-run").count(), 0);
+    assert.notEqual(await page.textContent("#chat-header-state"), "working");
+    turn.end();
+  });
+});
+
+// ─── A pi running in the user's TERMINAL (observable, not stoppable) ───────
+// Pi Scope watches such a session through the events its extension posts, but
+// there is no channel back into that pi process. Chat must still show that it is
+// working (and surface its errors) — with no Stop button, because there is
+// nothing here that could stop it.
+describe("a session running in the terminal", () => {
+  const now = new Date().toISOString();
+  const EXT = (extra = {}) => makeSession({
+    session_id: "ext-1", cwd: WS_A, first_msg: "terminal work", first_ts: now, last_ts: now, ...extra,
+  });
+
+  test("Chat reports it as working and replaces Stop with an explanation", async () => {
+    await boot({
+      sessions: [EXT({ last_turn_event: "turn_start" })],
+      events: { "ext-1": [
+        { type: "user_message", ts: now, payload: { text: "terminal work" } },
+        { type: "turn_start", ts: now, payload: {} },
+      ] },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "ext-1").click();
+    await page.waitForFunction(() => document.getElementById("chat-header-state").textContent === "working");
+    assert.equal(await page.locator("#chat-stop").isVisible(), false, "nothing in-app to stop");
+    assert.equal(await page.locator("#chat-ext-run").isVisible(), true, "the terminal marker takes Stop's place");
+    assert.match(await page.getAttribute("#chat-ext-run", "title"), /terminal/i);
+    await page.waitForSelector(".chat-ext-live", { state: "visible" });
+
+    // The turn ends in the terminal: the motion stops here too.
+    await page.evaluate((ts) => {
+      const row = window.__SCOPE_STATE.sessions.find((s) => s.session_id === "ext-1");
+      row.last_turn_event = "turn_end";
+      row.last_ts = ts;
+      window.__chatOnEvent({ type: "turn_end", session_id: "ext-1", ts });
+    }, new Date().toISOString());
+    await page.waitForFunction(() => document.getElementById("chat-header-state").textContent !== "working");
+    await page.waitForFunction(() => document.querySelectorAll(".chat-ext-live").length === 0, undefined, { timeout: 4000 });
+    assert.equal(await page.locator("#chat-ext-run").isVisible(), false);
+  });
+
+  test("a live event flips the indicator immediately (no wait for the poll)", async () => {
+    await boot({
+      sessions: [EXT({ last_turn_event: "turn_end" })],
+      events: { "ext-1": [{ type: "user_message", ts: now, payload: { text: "terminal work" } }] },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "ext-1").click();
+    await page.waitForFunction(() => document.getElementById("chat-header-state").textContent !== "working");
+
+    // What the SSE handler does: the row is patched first (app.js), then Chat's
+    // own onEvent hook runs.
+    await page.evaluate((ts) => {
+      const row = window.__SCOPE_STATE.sessions.find((s) => s.session_id === "ext-1");
+      row.last_turn_event = "turn_start";
+      row.last_ts = ts;
+      window.__chatOnEvent({ type: "turn_start", session_id: "ext-1", ts });
+    }, new Date().toISOString());
+    await page.waitForFunction(() => document.getElementById("chat-header-state").textContent === "working");
+    await page.waitForSelector(".chat-ext-live", { state: "visible" });
+  });
+
+  test("a recorded provider error and error events reach the transcript", async () => {
+    await boot({
+      sessions: [EXT({ last_turn_event: "turn_end" })],
+      events: { "ext-1": [
+        { type: "user_message", ts: now, payload: { text: "terminal work" } },
+        { type: "assistant_message", ts: now, payload: { text: "", error_message: "Error: model overloaded" } },
+        { type: "error", ts: now, payload: { message: "extension event queue overflowed" } },
+        { type: "turn_end", ts: now, payload: {} },
+      ] },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "ext-1").click();
+    await page.waitForFunction(() => document.querySelectorAll(".chat-error-note").length === 2, undefined, { timeout: 4000 });
+    const text = await canvas();
+    assert.match(text, /model overloaded/, "the provider failure is shown where it happened");
+    assert.match(text, /queue overflowed/, "a server-side error event is shown too");
+    assert.ok(!/no text response/.test(text), "an error-only bubble does not claim there was no response");
+  });
+});

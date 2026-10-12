@@ -7212,6 +7212,54 @@
       box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.25);
       outline: none;
     }
+    /* A session Pi Scope can only WATCH: its pi runs in the user's own
+       terminal, so its working state comes from the recorded turn lifecycle
+       and there is no Stop to offer. The chip sits where the Stop button
+       would be and says so, instead of leaving that spot conspicuously empty. */
+    .chat-ext-run {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: 26px;
+      padding: 0 9px;
+      border-radius: var(--r-pill);
+      background: var(--accent-soft);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      cursor: help;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    .chat-ext-run[hidden] {
+      display: none;
+    }
+    .chat-ext-run svg {
+      opacity: 0.85;
+    }
+    /* The same motion the in-app run pill gives, pinned under a transcript whose
+       agent is working elsewhere (there is no in-flight bubble to carry it). */
+    .chat-ext-live {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      align-self: flex-start;
+      max-width: 100%;
+      margin: 6px 0 2px 38px;
+      padding: 3px 11px 3px 9px;
+      border-radius: var(--r-pill);
+      background: var(--accent-soft);
+      border: 1px solid var(--border);
+    }
+    .chat-ext-live-label {
+      font-size: 11.5px;
+      font-weight: 500;
+      letter-spacing: 0.1px;
+      color: var(--muted);
+    }
+
     .chat-stopped-note {
       display: inline-flex;
       align-items: center;
