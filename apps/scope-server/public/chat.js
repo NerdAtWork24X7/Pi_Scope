@@ -126,7 +126,7 @@
     footerFetchedAt: 0,
     thinkingLevel: null,   // selected thinking level (defaults to footer.thinking)
     showThinking: loadBool("scope-chat-show-thinking", false), // global fold/unfold of thought blocks
-    expandTools: loadBool("scope-chat-expand-tools", false),   // fold chips vs. show tool calls with results
+    expandTools: loadBool("scope-chat-expand-tools", false),   // compact chips vs. folded per-call rows (click to open)
     steer: loadBool("scope-chat-steer", false), // send next message mid-run (steer) vs queue until done
     listening: false,   // dictation (speech to text) is recording on the host
     sttInFlight: false, // a stop/transcribe request is pending
@@ -2083,8 +2083,11 @@
     return { cls: "ok", word: "done" };
   }
 
-  // One tool call as an expandable block (used in "show tool calls with result").
-  function toolCallHtml(t) {
+  // One tool call as an expandable block (used in "show tool calls with
+  // result"). Rows render FOLDED so a long tool loop stays scannable — a click
+  // on the summary reveals that call's args + result. `openTools[ti]` remembers
+  // the rows the user opened so a re-render (turn end, view switch) keeps them.
+  function toolCallHtml(t, ti, open) {
     const st = toolStateMeta(t.state);
     const args = fmtArgs(t.args);
     const hasResult = t.result != null && t.result !== "";
@@ -2097,7 +2100,7 @@
         : (st.cls === "live" ? `<div class="chat-tool-call-live"><span class="chat-tool-call-k">Running…</span></div>` : "")) +
       `</div>`;
     return (
-      `<details class="chat-tool-call ${st.cls}" data-name="${esc(t.name)}" open>` +
+      `<details class="chat-tool-call ${st.cls}" data-name="${esc(t.name)}" data-ti="${ti}"${open ? " open" : ""}>` +
       `<summary>` +
       `<span class="chat-tool-icon">${toolIcon(t.name)}</span>` +
       `<span class="chat-tool-name">${esc(t.name)}</span>` +
@@ -2110,8 +2113,10 @@
   }
 
   // Render a message's tool activity in the current display mode. Folded mode
-  // shows compact chips; expanded mode shows each call with its args + result.
-  function renderToolsHtml(tools) {
+  // shows compact chips; expanded mode shows each call as a FOLDED row (args +
+  // result hide behind a click) unless the user opened that row.
+  function renderToolsHtml(m) {
+    const tools = m.tools;
     if (!tools || !tools.length) return "";
     if (!CH.expandTools) {
       // data-name lets the live stream resolve a chip after a mid-run re-render
@@ -2122,7 +2127,8 @@
         `<span class="chat-tool-name">${esc(t.name)}</span><span class="chat-tool-dot"></span></span>`
       ).join("") + `</div>`;
     }
-    return `<div class="chat-tools chat-tools-expanded">` + tools.map(toolCallHtml).join("") + `</div>`;
+    const open = m.openTools || {};
+    return `<div class="chat-tools chat-tools-expanded">` + tools.map((t, ti) => toolCallHtml(t, ti, !!open[ti])).join("") + `</div>`;
   }
 
   // ─── View toggles: fold/unfold thinking, show/fold tool calls ─────────────
@@ -2137,7 +2143,9 @@
     if (tl) {
       tl.classList.toggle("on", CH.expandTools);
       tl.setAttribute("aria-pressed", CH.expandTools ? "true" : "false");
-      tl.title = CH.expandTools ? "Fold tool calls" : "Show tool call results";
+      tl.title = CH.expandTools
+        ? "Tool call rows — click one to see its args & result"
+        : "Tool call chips — click for expandable rows";
     }
   }
 
@@ -2201,7 +2209,7 @@
       const body = node.querySelector(".chat-msg-body");
       if (!body) return;
       body.querySelectorAll(".chat-tools").forEach((t) => t.remove());
-      const toolsHtml = renderToolsHtml(m.tools || []);
+      const toolsHtml = renderToolsHtml(m);
       if (toolsHtml) {
         const wrap = document.createElement("div");
         wrap.innerHTML = toolsHtml;
@@ -2220,6 +2228,63 @@
     refreshToolDisplay();
   }
 
+  // Per-message usage row: input / output / cache tokens + the message's cost.
+  // Two shapes carry it — pi's live usage object is camelCase (`cacheRead`,
+  // `cost.total`, `cost.cacheRead`) while a recorded assistant_message payload is
+  // snake_case (`cache_read`, `cost_total`) — so every field accepts both.
+  // A provider without prompt caching reports 0 (or omits) the cache fields:
+  // those chips are dropped instead of printed as zeros, and a message with no
+  // usage at all (a capture that missed the response) renders no row.
+  function usageRowHtml(m) {
+    const u = m.usage;
+    if (!u) return "";
+    const num = (a, b) => { const v = a ?? b; return v == null ? null : (Number(v) || 0); };
+    const input = num(u.input), output = num(u.output);
+    const cRead = num(u.cache_read, u.cacheRead), cWrite = num(u.cache_write, u.cacheWrite);
+    // The cost tooltip itemizes the call when pi priced its token classes.
+    const parts = [
+      ["input", num(u.cost?.input)], ["output", num(u.cost?.output)],
+      ["cache read", num(u.cost?.cacheRead, u.cost?.cache_read)],
+      ["cache write", num(u.cost?.cacheWrite, u.cost?.cache_write)],
+    ].filter(([, v]) => v);
+    const partsSum = parts.reduce((a, [, v]) => a + v, 0);
+    let cost = num(u.cost_total, u.cost?.total);
+    // pi always ships a total, but a payload carrying only the per-class prices
+    // (or a total left at 0) must not claim "$0.00000" beside real part costs.
+    if (parts.length && !cost) cost = partsSum;
+    const chip = (cls, title, text) =>
+      `<span class="chat-badge${cls}" title="${esc(title)}">${esc(text)}</span>`;
+    const costTitle = parts.length
+      ? `cost: $${cost.toFixed(5)} — ${parts.map(([k, v]) => `${k} $${v.toFixed(5)}`).join(" · ")}`
+      : `cost for this message: $${(cost || 0).toFixed(5)}`;
+    // Nothing recorded at all (a capture that missed the response, or no usage
+    // event yet): no row beats a row of zeros. Once anything was measured, every
+    // field that was reported is shown — including a 0 the provider really sent.
+    if (![input, output, cRead, cWrite].some((v) => v) && !cost) return "";
+    const chips = [
+      input != null ? chip("", `${input.toLocaleString()} input tokens`, `in ${S.fmtTokens(input)}`) : "",
+      output != null ? chip("", `${output.toLocaleString()} output tokens`, `out ${S.fmtTokens(output)}`) : "",
+      cRead ? chip("", `cache read: ${cRead.toLocaleString()} tokens`, `cache ${S.fmtTokens(cRead)} r`) : "",
+      cWrite ? chip("", `cache write: ${cWrite.toLocaleString()} tokens`, `cache ${S.fmtTokens(cWrite)} w`) : "",
+      cost != null ? chip(" cost", costTitle, `$${cost.toFixed(5)}`) : "",
+    ].filter(Boolean);
+    return chips.length ? `<div class="chat-usage">${chips.join("")}</div>` : "";
+  }
+
+  // Keep the LIVE bubble's usage row current: pi emits a usage snapshot per LLM
+  // call, and the per-message breakdown should be readable while the run is
+  // still going rather than only once the turn finalizes and the list re-renders.
+  function updateLiveUsage(body, m) {
+    const html = usageRowHtml(m);
+    const cur = body.querySelector(".chat-usage");
+    if (!html) { cur?.remove(); return; }
+    const wrap = document.createElement("div");
+    wrap.innerHTML = html;
+    const node = wrap.firstElementChild;
+    if (cur) cur.replaceWith(node);
+    else livePrependTextNode(body, node, ".chat-live-run");
+  }
+
   function renderChatMsg(m, i) {
     if (m.role === "user") {
       const copyAttr = esc(m.text || "");
@@ -2236,13 +2301,8 @@
         `</div></div></div>`
       );
     }
-    const badges = [];
-    const usage = m.usage || {};
-    const tokens = usage.totalTokens ?? usage.total_tokens;
-    const cost = usage.cost?.total ?? usage.cost_total;
-    if (tokens != null) badges.push(`<span class="chat-badge">${esc(S.fmtTokens(tokens))} tokens</span>`);
-    if (cost != null) badges.push(`<span class="chat-badge cost">$${Number(cost).toFixed(5)}</span>`);
-    const tools = renderToolsHtml(m.tools || []);
+    const usageRow = usageRowHtml(m);
+    const tools = renderToolsHtml(m);
     const thinking = m.thinking
       ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre>${esc(m.thinking)}</pre></details>`
       : "";
@@ -2280,7 +2340,7 @@
       thinking +
       tools +
       body +
-      (badges.length ? `<div class="chat-usage">${badges.join("")}</div>` : "") +
+      usageRow +
       asksHtml +
       errNote +
       stoppedNote +
@@ -2394,7 +2454,7 @@
     const thinking = m.thinking
       ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre>${esc(m.thinking)}</pre></details>`
       : "";
-    const tools = renderToolsHtml(m.tools || []);
+    const tools = renderToolsHtml(m);
     const text = m.text ? `<div class="chat-text chat-stream-text">${esc(m.text)}</div>` : "";
     return (
       `<div class="chat-msg chat-ai chat-ai-live" data-i="${dataIdx}">` +
@@ -2409,6 +2469,7 @@
       thinking +
       tools +
       text +
+      usageRowHtml(m) +
       liveRunHtml(m) +
       `</div></div>`
     );
@@ -2514,7 +2575,9 @@
     if (!t) {
       t = document.createElement("div");
       t.className = "chat-text chat-stream-text";
-      livePrependTextNode(body, t, null);
+      // Above the usage row and the run pill, so a bubble whose usage snapshot
+      // arrived early still reads text-then-usage (as the final render does).
+      livePrependTextNode(body, t, ".chat-usage, .chat-live-run");
     }
     // Append the delta to ONE text node instead of re-assigning textContent:
     // re-copying the whole message on every token is O(n²) over a long reply
@@ -2548,7 +2611,10 @@
       const det = document.createElement("details");
       det.className = "chat-tool-call live";
       det.dataset.name = name;
-      det.open = true;
+      det.dataset.ti = String(m.tools.length - 1);
+      // Folded like the replayed rows: the summary already carries the live
+      // state (blinking dot + "running"), and streamToolEnd only mutates its
+      // children — so an open row is never required for the stream to work.
       det.innerHTML =
         `<summary>` +
         `<span class="chat-tool-icon">${toolIcon(name)}</span>` +
@@ -2992,6 +3058,7 @@
         break;
       case "usage":
         m.usage = ev.usage || m.usage;
+        if (body) updateLiveUsage(body, m);
         break;
       case "final": {
         // Authoritative snapshot (some providers only deliver it on message_end).
@@ -4431,6 +4498,18 @@
 
     if (el.msg) {
       el.msg.addEventListener("scroll", updateScrollDown);
+      // `<details>` fires `toggle` at the element (it does not bubble), so this
+      // delegates in the CAPTURE phase. Tool rows start folded; remembering an
+      // opened row on its message keeps it open across the turn-end / view-switch
+      // re-render instead of snapping shut under the user.
+      el.msg.addEventListener("toggle", (e) => {
+        const det = e.target;
+        if (!det?.classList?.contains("chat-tool-call")) return;
+        const m = CH.chatHistory[Number(det.closest(".chat-msg")?.dataset.i)];
+        const ti = Number(det.dataset.ti);
+        if (!m || !Number.isInteger(ti)) return;
+        (m.openTools || (m.openTools = {}))[ti] = det.open;
+      }, true);
     }
     if (el.scrollDown) {
       el.scrollDown.addEventListener("click", () => scrollToBottom(true));

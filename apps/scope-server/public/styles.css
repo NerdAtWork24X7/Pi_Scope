@@ -6423,7 +6423,6 @@
     .chat-tool-call-state {
       font-size: 11px;
       font-weight: 600;
-      margin-left: auto;
     }
     .chat-tool-call.ok .chat-tool-call-state { color: var(--green); }
     .chat-tool-call.err .chat-tool-call-state { color: var(--red); }

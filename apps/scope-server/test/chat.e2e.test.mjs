@@ -759,6 +759,159 @@ describe("chat streaming", () => {
     turn.end();
   });
 
+  test("show-tools mode folds every tool call: collapsed by default, click to open, sticky across a re-render", async () => {
+    await boot({ sessions: [makeSession(SESS_A)], seed: { "scope-chat-expand-tools": "1" } });
+    await wsRow(page, WS_A).click();
+    await page.waitForSelector(".chat-ws.active");
+    const turn = await send(page, mock, "do work");
+    turn.send({ type: "session", sessionId: "live-tools" });
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "tool_start", name: "read_file", args: { path: "a.txt" } });
+    // Folded even WHILE the call runs — the summary carries the state (blinking
+    // dot + "running") and the run pill still names the tool.
+    await page.waitForSelector(".chat-tool-call.live");
+    assert.equal(await page.$eval(".chat-tool-call.live", (d) => d.open), false, "a running call starts folded");
+    turn.send({ type: "tool_end", name: "read_file" });
+    turn.send({ type: "done", sessionId: "live-tools" });
+    turn.end();
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live) .chat-tool-call");
+    assert.equal(await page.$eval(".chat-tool-call", (d) => d.open), false, "the final transcript folds tool calls");
+    assert.equal(await page.locator(".chat-tool-call-body").isVisible(), false, "args + result stay hidden");
+
+    // The status dot pairs with its state word at the row's right edge — it must
+    // not float in the middle of the row (two `margin-left:auto` used to split
+    // the free space between the dot and the word).
+    const geo = await page.evaluate(() => {
+      const sum = document.querySelector(".chat-tool-call > summary").getBoundingClientRect();
+      const dot = document.querySelector(".chat-tool-call > summary .chat-tool-dot").getBoundingClientRect();
+      const state = document.querySelector(".chat-tool-call-state").getBoundingClientRect();
+      return { gap: Math.round(state.left - dot.right), fromRight: Math.round(sum.right - dot.right), w: Math.round(sum.width) };
+    });
+    assert.ok(geo.gap < 20, `status dot hugs its state word (gap ${geo.gap}px)`);
+    assert.ok(geo.fromRight < geo.w / 2, `status sits at the row's right edge, not the middle (${geo.fromRight}px of ${geo.w}px)`);
+
+    // A click opens that ONE row…
+    await page.click(".chat-tool-call > summary");
+    assert.equal(await page.$eval(".chat-tool-call", (d) => d.open), true);
+    assert.match(await page.textContent(".chat-tool-call-body"), /a\.txt/);
+
+    // …and it survives a full canvas re-render instead of snapping shut.
+    await page.evaluate(() => window.setView("files"));
+    await page.evaluate(() => window.setView("chat"));
+    await page.waitForSelector(".chat-tool-call");
+    assert.equal(await page.$eval(".chat-tool-call", (d) => d.open), true, "an opened row stays open");
+  });
+
+  test("turning the Tools toggle on folds an existing chip transcript into rows", async () => {
+    await selectA();
+    const turn = await send(page, mock, "work");
+    turn.send({ type: "session", sessionId: "live-fold" });
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "tool_start", name: "bash", args: { command: "ls" } });
+    await page.waitForSelector('.chat-tool[data-name="bash"]');
+    turn.send({ type: "tool_end", name: "bash" });
+    turn.send({ type: "done", sessionId: "live-fold" });
+    turn.end();
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live) .chat-tool");
+
+    await page.click("#chat-toggle-tools");
+    await page.waitForSelector(".chat-tool-call");
+    assert.equal(await page.getAttribute("#chat-toggle-tools", "aria-pressed"), "true");
+    assert.equal(await page.locator(".chat-tool").count(), 0, "chips were replaced by the rows");
+    assert.equal(await page.$eval(".chat-tool-call", (d) => d.open), false, "turning Tools on folds every call");
+  });
+
+  test("each assistant message shows input, output, cache tokens and cost — live and after the turn", async () => {
+    await selectA();
+    const turn = await send(page, mock, "do work");
+    turn.send({ type: "session", sessionId: "live-usage" });
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "text", delta: "done" });
+    // pi's live usage object is camelCase, with the cost split per token class.
+    turn.send({
+      type: "usage",
+      usage: {
+        input: 1234, output: 567, cacheRead: 98_000, cacheWrite: 0, totalTokens: 99801,
+        cost: { input: 0.00123, output: 0.00456, cacheRead: 0.0007, cacheWrite: 0, total: 0.00649 },
+      },
+    });
+    // The breakdown is readable WHILE the run is still going…
+    await page.waitForFunction(() =>
+      document.querySelector(".chat-ai-live .chat-usage")?.textContent.includes("98.0k"));
+    const live = await page.evaluate(() =>
+      [...document.querySelectorAll(".chat-ai-live .chat-badge")].map((b) => b.textContent));
+    assert.deepEqual(live, ["in 1.2k", "out 567", "cache 98.0k r", "$0.00649"], "live per-message usage");
+    assert.match(
+      await page.getAttribute(".chat-ai-live .chat-badge.cost", "title"),
+      /cost: \$0\.00649 — input \$0\.00123 · output \$0\.00456 · cache read \$0\.00070/,
+      "the cost chip breaks the total down per token class",
+    );
+    turn.send({ type: "done", sessionId: "live-usage" });
+    turn.end();
+    // …and survives the final re-render (no zero-cache-write chip is printed).
+    await page.waitForFunction(() =>
+      document.querySelector(".chat-ai:not(.chat-ai-live) .chat-usage")?.textContent.includes("98.0k"));
+    const done = await page.evaluate(() =>
+      [...document.querySelectorAll(".chat-ai:not(.chat-ai-live) .chat-badge")].map((b) => b.textContent));
+    assert.deepEqual(done, live);
+  });
+
+  test("the usage row degrades gracefully: a price-only snapshot sums, an empty one renders nothing", async () => {
+    await selectA();
+    const turn = await send(page, mock, "do work");
+    turn.send({ type: "session", sessionId: "live-usage2" });
+    turn.send({ type: "msg_start" });
+    // Token counts and total missing — only the per-class prices arrived.
+    turn.send({ type: "usage", usage: { cost: { input: 0.001, output: 0.002, total: 0 } } });
+    await page.waitForSelector(".chat-ai-live .chat-usage");
+    const chips = await page.evaluate(() =>
+      [...document.querySelectorAll(".chat-ai-live .chat-usage .chat-badge")].map((b) => b.textContent));
+    assert.deepEqual(chips, ["$0.00300"], "a price-only snapshot sums its classes instead of claiming $0.00000");
+    // An all-zero snapshot means nothing was measured: the row disappears again
+    // rather than printing a row of zeros.
+    turn.send({ type: "usage", usage: { input: 0, output: 0, cache_read: 0, cache_write: 0, cost_total: 0 } });
+    await page.waitForFunction(() => !document.querySelector(".chat-ai-live .chat-usage"));
+    turn.send({ type: "done", sessionId: "live-usage2" });
+    turn.end();
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live)");
+    assert.equal(await page.locator(".chat-ai:not(.chat-ai-live) .chat-usage").count(), 0, "no row of zeros");
+  });
+
+  test("a replayed transcript shows its recorded (snake_case) usage", async () => {
+    const s1 = { session_id: "s1", cwd: WS_A, agent_name: "orchestrator", first_msg: "hello" };
+    await boot({
+      sessions: [makeSession(s1)],
+      events: {
+        s1: [
+          { type: "user_message", ts: 1, payload: { text: "hello" } },
+          { type: "assistant_message", ts: 2, payload: {
+            text: "RECORDED-USAGE",
+            usage: { input: 1200, output: 340, cache_read: 56_000, cache_write: 900, total_tokens: 1540, cost_total: 0.0021 },
+          } },
+          { type: "user_message", ts: 3, payload: { text: "again" } },
+          // An uncached provider (deepseek-like): 0 cache fields, no pricing.
+          { type: "assistant_message", ts: 4, payload: {
+            text: "NO-CACHE-USAGE",
+            usage: { input: 900, output: 100, cache_read: 0, cache_write: 0, total_tokens: 1000, cost_total: 0 },
+          } },
+        ],
+      },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "s1").click();
+    await page.waitForFunction(
+      () => document.getElementById("chat-messages").textContent.includes("NO-CACHE-USAGE"),
+      undefined, { timeout: 4000 },
+    );
+    const chips = await page.evaluate(() =>
+      [...document.querySelectorAll(".chat-ai")].map((m) =>
+        [...m.querySelectorAll(".chat-usage .chat-badge")].map((b) => b.textContent)));
+    assert.deepEqual(chips, [
+      ["in 1.2k", "out 340", "cache 56.0k r", "cache 900 w", "$0.00210"],
+      ["in 900", "out 100", "$0.00000"],
+    ], "a recorded payload's snake_case usage renders the same breakdown — zero cache chips are dropped");
+  });
+
   test("a message sent mid-run is queued after the live reply and then answered", async () => {
     await selectA();
     const turn = await send(page, mock, "first");
