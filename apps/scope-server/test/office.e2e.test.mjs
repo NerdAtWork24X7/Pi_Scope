@@ -95,6 +95,20 @@ async function until(fn, what, timeout = 8000) {
   }
 }
 
+/**
+ * True while `fn` never becomes true over `ms` — the bounded negative watch an
+ * "it must not happen" assertion needs. It fails the moment the state flips, so
+ * it never passes merely because a fixed sleep ended early.
+ */
+async function never(fn, ms) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    if (await fn()) return false;
+    await sleep(100);
+  }
+  return true;
+}
+
 /** An agent's own events, as `GET /sessions/<sid>/events` returns them. */
 function agentEvents(list) {
   const ts = new Date().toISOString();
@@ -1004,7 +1018,7 @@ describe("office view", () => {
         "team meta": '.office-room[data-room="team:dev"] .office-room-meta',
         "cubicle name": '.office-pod[data-key="builder"] .office-name',
         "activity label": '.office-pod[data-key="builder"] .office-bubble',
-        "off-duty tag": '.office-pod[data-key="critic"] .office-leave-tag',
+        "off-duty name tag": '.office-pod[data-key="critic"] .office-name',
         "off duty button": '.office-pod[data-key="builder"] .office-act.duty',
         "settings button": '.office-pod[data-key="builder"] .office-act[data-act="settings"]',
         "model label": '.office-pod[data-key="builder"] .office-model-label',
@@ -1127,9 +1141,20 @@ describe("office view", () => {
 
     assert.ok(await pod("critic").evaluate((el) => el.classList.contains("leave")), "the pod shows the off-duty state");
     assert.equal(await pod("critic").evaluate((el) => el.classList.contains("working")), false, "a disabled agent is never working");
-    assert.match(await page.textContent('#office-pane .office-pod[data-key="critic"] .office-leave-tag'), /off duty/i);
-    assert.ok(await pod("critic").locator(".office-leave-tag").isVisible(), "the plate says Off duty");
+    // The plate carries the agent's NAME only — an empty desk is read from the
+    // desk itself, not from a status chip beside the name.
+    assert.equal(await pod("critic").locator(".office-leave-tag").count(), 0, "the plate carries no off-duty chip");
+    assert.match(await pod("critic").locator(".office-name").textContent(), /critic/, "the plate still names the desk");
     assert.equal(await pod("critic").locator(".office-person").isVisible(), false, "nobody is sitting at the desk");
+    // The state reads from the desk: dimmed, dashed, and offering the way back.
+    assert.match(await pod("critic").locator(".office-act.duty").textContent(), /on duty/i);
+    const leave = await page.evaluate(() => {
+      const el = document.querySelector('#office-pane .office-pod[data-key="critic"]');
+      const cs = getComputedStyle(el);
+      return { opacity: Number(cs.opacity), border: cs.borderTopStyle };
+    });
+    assert.ok(leave.opacity < 1, `an off-duty desk is dimmed (${leave.opacity})`);
+    assert.equal(leave.border, "dashed", "an off-duty desk is dashed");
     // The tooltip carries the same state (lower-case, like the other activities).
     assert.match(await pod("critic").getAttribute("title"), /off duty/i);
     assert.match(await counts(), /1\s*off duty/);
@@ -2023,6 +2048,43 @@ describe("office view", () => {
     turn.end();
     await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "done", "the run finishes");
     assert.equal(mock.requestsFor("/chat", "POST").length, 1, "and it is never dispatched a second time");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a run that settled elsewhere is never reopened by a tab that adopted it", async () => {
+    // A page that adopted a live run keeps polling the recorded run state. Once
+    // the run has been settled by whoever finished it — another tab, or the
+    // server — the task leaves In Progress and its run record is cleared, so the
+    // poll's "no recorded run" branch must read that as DONE, not as a run that
+    // vanished. Before the guard it moved the finished task back to Planned and
+    // re-dispatched it (a second pi run for work that was already finished).
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: { runnerPaused: false, tasks: [{ id: "t1", title: "shared work", status: "planned", createdAt: 1, plannedAt: 2 }] },
+    });
+    const turn = await mock.nextTurn();
+    await until(() => mock.officeState().tasks.find((t) => t.id === "t1").status === "in_progress", "the first tab dispatches");
+
+    // A second tab opens on the live board and adopts the run (it must not
+    // dispatch): it is now watching the recorded run state.
+    const page2 = await context.newPage();
+    await page2.goto(`${mock.base}/?token=test-token#view=office`, { waitUntil: "domcontentloaded" });
+    await page2.waitForSelector("#office-pane .office-pod");
+    await sleep(1200);
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1, "the second tab adopts the live run");
+
+    // The owner settles it (as the first tab does on `done`), which clears the
+    // task's run record — exactly the state the adopt poll used to misread.
+    mock.setOffice({ tasks: [{ id: "t1", title: "shared work", status: "done", createdAt: 1, plannedAt: 2, finishedAt: 3 }] });
+    turn.send({ type: "done", sessionId: turn.sessionId });
+    turn.end();
+
+    // Watch past at least two adopt-poll cycles (1.5 s each): the settled task
+    // must never re-enter In Progress, and nothing may be dispatched for it.
+    const status = () => mock.officeState().tasks.find((t) => t.id === "t1")?.status;
+    assert.ok(await never(() => status() === "in_progress", 4000), "the finished task is never reopened");
+    assert.equal(status(), "done", "it stays done");
+    assert.equal(mock.requestsFor("/chat", "POST").length, 1, "no second dispatch for a finished task");
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 

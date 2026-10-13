@@ -118,17 +118,23 @@ thinking budget, tools, the whole thing.
 
 ### 🏢 Office — watch your agent team work
 
-The **Office** view turns your roster into a **top-down office floor**: every agent gets a
-**cubicle** — partition walls on three sides, a desk with a screen, a chair — and sits in it,
-seen from above. Agents that are **working** have their screen lit and their arms typing;
-a chair pushed back and an orange dot mean **waiting**; a greyed cubicle is **stopped** or
-idle. The floor reads like a real plan: the **orchestrator** gets its own office at the top
-(marked ★), the **meeting room** sits to its right, and the **team rooms** are laid out two
-left and two right around a center pathway. Only the **active team** is staffed, so its
-desks are the ones that animate; the same subagent sitting on an inactive team stays
-dormant there, even while it works on the active one. Every room is labelled at its
-top-left, with its control at its top-right: the active team is **badged**, the others carry
-**activate**.
+The **Office** view turns your roster into a **pixel-art office floor**. It is drawn on a
+16-pixel tile grid — carpet, auto-tiled room walls, a walkway — with the sprite atlas and
+the typeface of [pixel-agents](https://github.com/pixel-agents-hq/pixel-agents) (MIT; see
+`apps/scope-server/plugins/office/assets/NOTICE.md`), and a `<canvas>` paints the world
+under the DOM that carries the desks. **Every team gets one shared room**, sized to its own
+team, with the same desk for everyone sitting side by side in rows that wrap to the room's
+width — each with **its own chair and its own screen**, so no two seats read alike. Floor
+that a small team leaves over is furnished rather than stretched: a plant, a coffee table,
+a bin. Agents that are **working** have their screen lit, their code lines running and their
+character typing (reading, when the tool they are on is a read); an orange dot and a chair
+pushed back mean **waiting**; a greyed desk is **stopped** or idle. The floor reads like a
+real plan: the **orchestrator** gets its own office at the top (marked ★), the **meeting
+room** sits to its right, and the **team rooms** follow in two columns either side of the
+walkway. Only the **active team** is staffed, so its desks are the ones that animate; the
+same subagent sitting on an inactive team stays dormant there, even while it works on the
+active one. Every room is labelled at its top-left, with its control at its top-right: the
+active team is **badged**, the others carry **activate**.
 
 Under each seated worker a desk prints the **model** it runs on and what it has spent so
 far — **tokens and cost** (`12.3k tok · $0.042`), refreshed from the server while it
@@ -140,9 +146,11 @@ run a different model on each team it sits on. Every per-member control follows 
 the desk's **off duty** toggle, its **name** and **fire** touch only the row of the team that
 desk sits in, so a member on several teams keeps its own model, label and duty on each.
 
-A cubicle's header carries its name (a real id `file_reader` can read **Bob**, and the id
-stays beside it), then its own **off duty / on duty** control — an off-duty agent keeps its
-cubicle but shows an empty desk — and a round **settings** gear. That popup gathers the whole
+A cubicle's header carries its **name** as a name tag (a real id `file_reader` can read
+**Bob**, and the id stays beside it), then its own **off duty / on duty** control and a round
+**settings** gear. An off-duty agent keeps its cubicle with an empty desk and no status text
+beside the name: the desk itself says it — dimmed, dashed, chair empty, and the control
+offering the way back on duty. That popup gathers the whole
 agent in
 one place: its **model**, its **name** (the display label), **duty**, **markdown** (its whole
 `agents/*.md` definition, frontmatter + prompt, in a full-screen editor), the **skills**,
@@ -192,10 +200,10 @@ each cubicle labels what its agent is doing *right now* from the live event stre
 `→ bash`, `thinking…`, `writing…` — so you can watch a dispatch fan out across the floor.
 
 <p align="center">
-  <img src="docs/shots/office-dark.png" alt="Office view — top-down cubicles, desk token/cost totals and the orchestrator's model picker" width="880" />
+  <img src="docs/shots/office-dark.png" alt="Office view — a pixel-art floor of shared team rooms, with each desk's model and token/cost totals" width="880" />
   <img src="docs/shots/office-kanban-dark.png" alt="Kanban board — Todo, Planned, In Progress, Done" width="880" />
   <img src="docs/shots/office-library-dark.png" alt="Reference library — full-screen manager" width="880" />
-  <img src="docs/shots/office-hire-dark.png" alt="Hire — two-column form, with a Reference files template for the new agents/*.md" width="880" />
+  <img src="docs/shots/office-hire-dark.png" alt="A desk's settings — model, name, duty, definition, skills, tools, extensions, hire/fire" width="880" />
 </p>
 
 ### 🧭 Trajectory — where did the time go?

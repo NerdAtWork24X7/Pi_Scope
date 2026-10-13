@@ -66,6 +66,31 @@
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   const lower = (s) => String(s || "").toLowerCase();
 
+  /**
+   * Where this bundle was loaded from — the plugin's own directory, behind the
+   * token the host appended. Everything else this view needs (the tile engine,
+   * the art, the pixel font) is fetched relative to it, carrying the same token,
+   * because a plugin's files are served authenticated and a `url()` or an
+   * `<img>` cannot send an Authorization header.
+   */
+  const SELF = document.currentScript || document.querySelector('script[data-plugin="office"]');
+  const SELF_URL = (() => {
+    try { return SELF ? new URL(SELF.src, location.href) : null; } catch { return null; }
+  })();
+  const withToken = (u) => {
+    try {
+      const url = new URL(u, location.href);
+      const token = state().token;
+      if (token) url.searchParams.set("token", token);
+      return url.toString();
+    } catch { return ""; }
+  };
+  // A *directory* base, deliberately without the query: pixel.js appends sprite
+  // paths to it and adds the token itself (concatenating onto a URL that already
+  // carries `?token=` would swallow the path into the query value).
+  const ASSET_BASE = SELF_URL ? new URL("assets/", SELF_URL).toString() : "";
+  const PIXEL_SRC = SELF_URL ? withToken(new URL("pixel.js", SELF_URL)) : "";
+
   /** How long a live "doing X" label stays on a desk without fresh activity. */
   const ACTIVITY_TTL_MS = 25_000;
   /** Status recompute cadence — the statuses themselves are time-based. */
@@ -91,6 +116,7 @@
   let team = null;          // latest /agent-team snapshot
   let teamCwd = null;       // cwd it was fetched for
   let teamAt = 0;
+  let rosterAsked = false;  // the roster has been fetched at least once (see floorPlan)
   let lastActivitySeen = 0;
   let renderSig = "";
   let popKey = null;        // agent whose popup is open
@@ -117,6 +143,68 @@
 
   function state() { return window.__SCOPE_STATE || {}; }
 
+  // ─── The pixel floor ──────────────────────────────────────────────────────
+
+  let pixel = null;        // the tile engine, once its module and art loaded
+  let pixelMount = null;   // its handle on this plan
+  let pixelLoading = null;
+
+  /**
+   * Load the tile engine and its art, then mount the floor.
+   *
+   * `pixel.js` sits beside this bundle rather than in the host's script list, so
+   * it is injected here — with the token — and awaited. Everything about it is
+   * optional: if it never arrives the office still works, with the plain carpet
+   * and DOM-drawn desks (client.css falls back to the palette's own colours).
+   */
+  function loadPixel() {
+    if (pixelLoading) return pixelLoading;
+    pixelLoading = (async () => {
+      if (!PIXEL_SRC) return null;
+      const mod = await new Promise((resolve) => {
+        const el = document.createElement("script");
+        el.src = PIXEL_SRC;
+        el.onload = () => resolve(window.SCOPE.OfficePixel || null);
+        el.onerror = () => resolve(null);
+        document.head.appendChild(el);
+      });
+      if (!mod || !pane || !planEl) return mod || null;
+      pixel = mod;
+      await mod.load(pane, ASSET_BASE, state().token || "");
+      pixelMount = mod.mount(pane, planEl, { roomStyle: roomStyleOf });
+      return mod;
+    })();
+    return pixelLoading;
+  }
+
+  /** Classify a room for the canvas: which rug it gets. */
+  function roomStyleOf(el) {
+    const id = (el && el.dataset && el.dataset.room) || "";
+    if (id === "meeting") return "meeting";
+    if (id === "orchestrator") return "orchestrator";
+    return id.indexOf("team:") === 0 ? "team" : "adhoc";
+  }
+
+  /** Which of the six character sheets an agent wears — stable per key. */
+  function charIndex(key) {
+    return pixel ? pixel.charIndex(key) : 0;
+  }
+
+  /**
+   * A tool that leaves the agent *reading* rather than typing: the character
+   * sheet draws the two poses differently (a page held up vs. hands on a
+   * keyboard), so the desk can show what the agent is actually doing. Names are
+   * matched on their verbs, which is what upstream's `isReadingToolName` does for
+   * its own provider's taxonomy.
+   */
+  const READ_TOOL = /(^|[^a-z])(read|grep|glob|search|find|list|ls|cat|view|fetch|web|browse|inspect|lookup|query|status|diff|docs?)([^a-z]|$)/i;
+
+  function isReading(key) {
+    const hit = activity.get(key);
+    const tool = hit && hit.tool ? hit.tool : "";
+    return !!tool && READ_TOOL.test(tool) && !/(^|[^a-z])(write|edit|create|delete|remove|apply|patch|bash|run|exec|shell)([^a-z]|$)/i.test(tool);
+  }
+
   // ─── Roster ───────────────────────────────────────────────────────────────
 
   function sessions() {
@@ -124,16 +212,55 @@
     return Array.isArray(list) ? list : [];
   }
 
+  /**
+   * The session list is indexed ONCE per render pass — never per desk.
+   *
+   * A workspace accumulates hundreds of sessions, and the floor plan asks
+   * "which session belongs to this agent?" once per desk. Scanning the list per
+   * desk is O(desks × sessions), and it was the office's hottest path: at ~400
+   * sessions a single `render()` cost ~10 ms, and `render()` runs on every live
+   * SSE event. The index is O(sessions) — a hash per session, then one lookup
+   * per desk — and a `WeakMap` caches each session's parsed `last_ts` (the
+   * string is unchanged on most renders), so `Date.parse` no longer runs inside
+   * a comparison loop.
+   */
+  let idx = null;          // { byKey: Map<agentKey, {ts, s}>, byAge: session[] }
+  let idxGen = -1;         // the render pass it was built in
+  let renderGen = 0;       // bumped by render(); see sessionIndex()
+  const tsCache = new WeakMap(); // session -> { raw, ts }
+
+  function tsOf(s) {
+    const raw = s && s.last_ts;
+    const hit = tsCache.get(s);
+    if (hit && hit.raw === raw) return hit.ts;
+    const ts = Date.parse(raw) || 0;
+    tsCache.set(s, { raw, ts });
+    return ts;
+  }
+
+  function sessionIndex() {
+    if (idxGen === renderGen) return idx;
+    const byKey = new Map();
+    const list = sessions();
+    for (const s of list) {
+      if (!s || typeof s !== "object") continue;
+      const key = lower(s.agent_name);
+      if (!key) continue;
+      const ts = tsOf(s);
+      const cur = byKey.get(key);
+      if (!cur || ts >= cur.ts) byKey.set(key, { ts, s });
+    }
+    // Oldest first, so the loose-desk pass can read it as a queue.
+    const byAge = list.filter((s) => s && typeof s === "object").sort((a, b) => tsOf(a) - tsOf(b));
+    idx = { byKey, byAge };
+    idxGen = renderGen;
+    return idx;
+  }
+
   /** Most recently active session for an agent (undefined when none). */
   function sessionFor(key) {
-    let best = null;
-    let bestTs = -Infinity;
-    for (const s of sessions()) {
-      if (lower(s.agent_name) !== key) continue;
-      const ts = Date.parse(s.last_ts) || 0;
-      if (ts >= bestTs) { bestTs = ts; best = s; }
-    }
-    return best || undefined;
+    const hit = sessionIndex().byKey.get(key);
+    return hit ? hit.s : undefined;
   }
 
   /**
@@ -211,9 +338,14 @@
     // A subagent fired while this view is open stays off the floor: its past
     // sessions are still in the list, and without this filter the desk would
     // pop straight back up under "Ad-hoc desks" the moment it was fired.
+    //
+    // Not until the roster has been asked for, though: sessions alone would put
+    // every running agent on an ad-hoc desk for the first frames of the view,
+    // then move them into their team's room — a flash of the wrong floor.
     const loose = [];
+    if (!rosterAsked) return { orch, rooms: out };
     const seenLoose = new Set();
-    const byAge = sessions().slice().sort((a, b) => (Date.parse(a.last_ts) || 0) - (Date.parse(b.last_ts) || 0));
+    const byAge = sessionIndex().byAge;
     for (const s of byAge) {
       const a = agentFor(s.agent_name, s.model);
       if (!a || a.isOrch || inTeams.has(a.key) || seenLoose.has(a.key) || firedKeys.has(a.key)) continue;
@@ -244,7 +376,15 @@
     return cwd && p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p;
   }
 
-  /** A cheap signature of the plan, so a re-render only rebuilds on real change. */
+  /**
+   * A cheap signature of the plan, so a re-render only rebuilds on real change.
+   *
+   * Only what `buildPlan` actually writes belongs here. The Kanban board and the
+   * office's own name are drawn *outside* `#office-plan` (the board into
+   * `#office-board-host`, the name into the header button), and `render()` keeps
+   * both in step on its own — so listing them here would re-parse every room,
+   * re-measure and re-paint the canvas on every task the runner moves.
+   */
   function sigOf(plan) {
     const orch = plan && plan.orch ? `orch:${plan.orch.key}` : "orch:-";
     // `!` marks an agent on leave, so hiring/firing a subagent rebuilds the plan
@@ -254,10 +394,7 @@
     // The meeting room's library is drawn from the roster snapshot too, so it
     // has to be part of the signature for adds/removes to repaint.
     const lib = libraryOf().map((e) => `${e.id}:${e.path}:${e.note || ""}`).join(",");
-    // The office's name and its board are drawn from the same snapshot, so a
-    // rename or a moved task has to show up in the signature too.
-    const tasks = tasksOf().map((t) => `${t.id}:${t.status}:${t.title}`).join(",");
-    return `${orch}|${rooms}|lib:${lib}|name:${officeName()}|tasks:${tasks}`;
+    return `${orch}|${rooms}|lib:${lib}`;
   }
 
   // ─── Status ───────────────────────────────────────────────────────────────
@@ -402,7 +539,17 @@
     if (!key) return;
     const text = eventText(evt);
     if (!text) return;
-    activity.set(key, { text, at: Date.now() });
+    // Keep the tool an agent is on: it is what tells the typing frames from the
+    // reading ones on its desk (see isReading). Only tool events carry one, so a
+    // result or a label never clears the pose the agent is working in.
+    const payload = (evt && evt.payload) || {};
+    const isTool = evt && (evt.type === "tool_call" || evt.type === "tool_result");
+    const prev = activity.get(key);
+    activity.set(key, {
+      text,
+      at: Date.now(),
+      tool: isTool ? String(payload.tool_name || "") : (prev && prev.tool) || "",
+    });
     lastActivitySeen = Date.now();
 
     const line = eventLine(evt);
@@ -527,26 +674,14 @@
 
   // ─── Rendering ────────────────────────────────────────────────────────────
 
-  /** Deterministic shirt hue per agent so desks read apart at a glance. */
-  function hueFor(key) {
-    let h = 0;
-    for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
-    return Math.abs(h) % 360;
-  }
-
   /**
-   * The agent seen from above: shoulders, a head, and two arms reaching onto
-   * the keyboard. `--office-hue` gives each agent a stable shirt colour.
+   * The agent: one character sheet, cycled through the walk / typing / reading
+   * frames by `background-position` (client.css owns the frame numbers).
+   * `--px-char-sheet` picks one of the six palettes, fixed per agent key so a
+   * desk never swaps character between renders.
    */
   function personHtml(agent) {
-    return (
-      `<div class="office-person" style="--office-hue:${hueFor(agent.key)}" aria-hidden="true">` +
-        `<span class="office-shoulders"></span>` +
-        `<span class="office-head"></span>` +
-        `<span class="office-arm office-arm-l"></span>` +
-        `<span class="office-arm office-arm-r"></span>` +
-      `</div>`
-    );
+    return `<div class="office-person" style="--px-char-sheet:var(--px-char-${charIndex(agent.key)})" aria-hidden="true"></div>`;
   }
 
   /**
@@ -554,6 +689,15 @@
    * the corridor below), a desk with a screen and a keyboard along it, a chair,
    * and the agent seated in the middle of it. The screen holds the code lines
    * that animate while the agent works.
+   */
+  /**
+   * One desk of a shared room.
+   *
+   * Every desk in a team's room is the same desk — that is the point of one room
+   * per team — and the room lays them out in rows that wrap to its own width
+   * (see `.office-room-floor` in client.css). What makes a seat its own is the
+   * chair it is dealt and the screen it is running: `--px-chair` and
+   * `--px-pc-hue`, both keyed off the agent, so no two desks read alike.
    */
   function podHtml(agent, room) {
     const live = roomLive(room);
@@ -572,15 +716,17 @@
         ` data-live="${live ? "1" : "0"}"` +
         (team ? ` data-team="${escAttr(team)}"` : "") +
         ` tabindex="0" role="group" aria-label="${escAttr(`${shown}, ${role}, ${statusLabel(agent, live)}`)}" title="${escAttr(title)}">` +
-        // The cubicle's header: the name at its top-left, then the desk's own
-        // controls (off duty / settings) directly beneath it.
+        // The desk's plate: the agent's name as a name tag, then the desk's own
+        // controls (off duty / settings) directly beneath it. The plate carries
+        // the *identity* only — an empty desk is read from the desk itself (a
+        // dimmed, dashed cubicle with nobody in the chair, and the "on duty"
+        // control), never from a status chip beside the name.
         `<div class="office-pod-head">` +
           `<div class="office-plate">` +
             `<span class="status-dot ${st}"></span>` +
             `<span class="office-name">${esc(shown)}</span>` +
             (agent.displayName ? `<span class="office-realname" title="real name">${esc(agent.name)}</span>` : "") +
             `<span class="office-crown" title="Orchestrator">★</span>` +
-            `<span class="office-leave-tag">Off duty</span>` +
           `</div>` +
           podControlsHtml(agent, team) +
           `<div class="office-bubble"></div>` +
@@ -670,9 +816,20 @@
   }
 
   /**
+   * The chairs a desk can be dealt. Every desk in a room is the same desk; the
+   * chair and the screen's tint are what make each seat its own (see podHtml).
+   */
+  const CHAIRS = ["front", "side", "back", "bench"];
+
+  /**
    * One team (or ad-hoc) room. Every team in the roster is drawn whether or not
    * it is active; an inactive team gets an Activate control that switches the
    * roster over to it (the active one is badged instead).
+   *
+   * The room is shared: the team's desks sit side by side in rows that wrap to
+   * whatever width the room has (`.office-room-floor`), so a two-person team
+   * reads as one row and a wide team grows a second row — the room, not the
+   * roster, decides how many sit together.
    */
   function roomHtml(room) {
     const isTeam = room.kind === "team" && !!room.team;
@@ -1104,6 +1261,9 @@
       if (arr) arr.push(el); else pods.set(el.dataset.key, [el]);
     }
     renderSig = sigOf(plan);
+    // The tiles and the room walls are the canvas' job, and the plan was just
+    // replaced underneath it — tell it the floor moved.
+    if (pixelMount) pixelMount.refresh();
   }
 
   function updatePod(agent) {
@@ -1125,19 +1285,49 @@
       el.dataset.st = st;
       const title = `${shown}${seat.displayName ? ` (${seat.name})` : ""} · ${role}${seat.model ? ` · ${seat.model}` : ""} — ${text}`;
 
+      // One cache of this desk's parts per plan build: the office repaints on
+      // every live event, and four `querySelector`s per desk per repaint are pure
+      // DOM walking. The elements are re-created by every `buildPlan`, so they
+      // are cached on the element itself and can never go stale.
+      const refs = el.__officeRefs || (el.__officeRefs = {
+        dot: el.querySelector(".status-dot"),
+        bubble: el.querySelector(".office-bubble"),
+        stats: el.querySelector(".office-stats"),
+        pick: el.querySelector(".office-model-select"),
+      });
+
       el.classList.remove("working", "waiting", "stopped", "idle", "leave");
       el.classList.add(cls);
+      // The character shows what the agent is doing: typing, or reading a file
+      // it just opened. `reading` only ever decorates a working desk.
+      el.classList.toggle("reading", cls === "working" && isReading(seat.key));
       if (prev && prev !== "green" && st === "green" && !seat.disabled) {
         // Just got to work — play the walk-in once, then let it settle.
         el.classList.add("arriving");
         setTimeout(() => el.classList.remove("arriving"), ARRIVE_MS);
       }
 
-      const dot = el.querySelector(".status-dot");
-      if (dot) dot.className = `status-dot ${st}`;
-      const bubble = el.querySelector(".office-bubble");
+      // This desk's own machine and chair: a different chair sprite and a
+      // differently tuned screen per agent, so no two seats in a room read
+      // alike. Set here rather than in the markup, so a sprite atlas that lands
+      // after the first paint is picked up without rebuilding the plan.
+      // Written only when the palette changes: a custom-property write
+      // invalidates style for the whole desk, and the palette is fixed per agent.
+      if (pixel) {
+        const pick = charIndex(seat.key);
+        if (el.dataset.pxPick !== String(pick)) {
+          el.dataset.pxPick = String(pick);
+          el.style.setProperty("--px-chair", `var(--px-spr-chair-${CHAIRS[pick % CHAIRS.length]}, none)`);
+          el.style.setProperty("--px-pc-hue", `${pick * 47}deg`);
+        }
+      }
+
+      const dot = refs.dot;
+      const dotCls = `status-dot ${st}`;
+      if (dot && dot.className !== dotCls) dot.className = dotCls;
+      const bubble = refs.bubble;
       if (bubble && bubble.textContent !== text) bubble.textContent = text;
-      const statsEl = el.querySelector(".office-stats");
+      const statsEl = refs.stats;
       if (statsEl) {
         const line = statsLine(agent.session);
         if (statsEl.textContent !== line) {
@@ -1147,16 +1337,18 @@
       }
       // The desk's model picker follows the roster: rebuild its options when the
       // registry changes, and snap the selection to the stored model.
-      const pick = el.querySelector(".office-model-select");
-      if (pick) {
-        const now = pick.dataset.modelFor === "orchestrator"
+      const pickEl = refs.pick;
+      if (pickEl) {
+        const now = pickEl.dataset.modelFor === "orchestrator"
           ? orchModel()
-          : memberModel(pick.dataset.team, pick.dataset.agent);
-        syncModelSelect(pick, now);
+          : memberModel(pickEl.dataset.team, pickEl.dataset.agent);
+        syncModelSelect(pickEl, now);
       }
       if (el.getAttribute("title") !== title) el.setAttribute("title", title);
     }
   }
+
+  let countsSig = "";
 
   function renderCounts(agents, liveByKey) {
     if (!countsEl) return;
@@ -1166,16 +1358,62 @@
     const isLive = (a) => !liveByKey || liveByKey.get(a.key) !== false;
     const of = (s) => on.filter((a) => podStatus(a, isLive(a)) === s).length;
     const leave = agents.length - on.length;
-    countsEl.innerHTML =
+    const html =
       `<span class="office-count working"><span class="status-dot green"></span>${of("green")} working</span>` +
       `<span class="office-count"><span class="status-dot orange"></span>${of("orange")} waiting</span>` +
       `<span class="office-count"><span class="status-dot red"></span>${of("red")} stopped</span>` +
       `<span class="office-count"><span class="status-dot gray"></span>${of("gray")} idle</span>` +
       (leave ? `<span class="office-count leave"><span class="status-dot gray"></span>${leave} off duty</span>` : "");
+    // The readout is usually identical from render to render (the office paints
+    // on every live event); re-parsing a constant line would throw away and
+    // rebuild its dots each time for nothing.
+    if (html === countsSig) return;
+    countsSig = html;
+    countsEl.innerHTML = html;
+  }
+
+  // ─── Repaint scheduling ───────────────────────────────────────────────────
+
+  let pendingFrame = 0;
+  let renderPending = false;
+
+  /** Cancel a scheduled repaint (the view left, or a render ran synchronously). */
+  function cancelScheduledRender() {
+    if (pendingFrame) cancelAnimationFrame(pendingFrame);
+    pendingFrame = 0;
+    renderPending = false;
+  }
+
+  /**
+   * Repaint on the next frame, at most once.
+   *
+   * The office repaints from sources with wildly different cadences: a live SSE
+   * stream (many events per second while an agent works), the 1 s status ticker,
+   * roster and stats polls. Painting synchronously per event meant a burst of
+   * events cost one full `render()` each — with a large session list that is
+   * hundreds of milliseconds of blocked main thread for a single frame that
+   * shows the last state anyway. Coalescing keeps the same correctness (the
+   * render always reads the freshest state) at one repaint per frame.
+   */
+  function scheduleRender() {
+    if (!pane || renderPending) return;
+    renderPending = true;
+    pendingFrame = requestAnimationFrame(() => {
+      pendingFrame = 0;
+      renderPending = false;
+      render();
+    });
   }
 
   function render() {
     if (!pane || !planEl) return;
+    // A synchronous render supersedes a scheduled one: callers that must paint
+    // before they return (a duty toggle, a task move) would otherwise schedule a
+    // duplicate for the next frame. Dropping the pending frame here keeps
+    // `render()` the single implementation with a single repaint per change.
+    cancelScheduledRender();
+    // Every pass gets a fresh session index (see sessionIndex).
+    renderGen++;
     let plan = { orch: null, rooms: [] };
     try { plan = floorPlan(); } catch { plan = { orch: null, rooms: [] }; }
     const agents = [];
@@ -1653,7 +1891,7 @@
     } catch { /* keep the last numbers */ } finally {
       statsBusy = false;
     }
-    render();
+    scheduleRender();
   }
 
   /** Every agent a reference can be assigned to: the orchestrator first, then
@@ -1733,7 +1971,7 @@
       const { res, data } = await S.api("/office", cwd ? { cwd } : {});
       if (res.ok && data) {
         office = data; officeCwd = cwd; officeAt = Date.now();
-        render();
+        scheduleRender();
         // The board overlay is not part of render(); repaint it here so a
         // server-run queue (or another tab) shows up on the next poll.
         renderKanbanOverlay();
@@ -2437,8 +2675,20 @@
   }
 
   /** Act on one recorded-run task: recover it if its session is gone, settle it
-   *  if its run has finished, or leave it (still live) for the next poll. */
+   *  if its run has finished, or leave it (still live) for the next poll.
+   *
+   *  Recovery is only ever for a task that is STILL waiting on that run: a task
+   *  that has left In Progress (the owner finished it, another tab moved it) has
+   *  already been settled and its run record cleared, so "no recorded run" there
+   *  means "done", not "the session vanished". Without this guard a poll that
+   *  fired just after the run was settled reopened the finished task and
+   *  dispatched it a second time. */
   async function checkAdopted(task) {
+    if (task.status && task.status !== "in_progress") {
+      adopted.delete(task.id);
+      inFlight.delete(task.id);
+      return;
+    }
     let rs = runStateOf(task.id);
     if (!rs || !rs.present) {
       // The snapshot may predate the dispatch (runStates is computed at read
@@ -3222,7 +3472,9 @@
       const { res, data } = await S.api("/agent-team", cwd ? { cwd } : {});
       if (res.ok && data) { team = data; teamCwd = cwd; teamAt = Date.now(); noteDefaults(data); }
     } catch { /* keep the last roster — the office still animates from sessions */ }
-    render();
+    // Asked for, one way or another: the floor may now draw ad-hoc desks.
+    rosterAsked = true;
+    scheduleRender();
   }
 
   // ─── Lifecycle (called by the plugin spec) ────────────────────────────────
@@ -3266,6 +3518,11 @@
     countsEl = pane.querySelector("#office-counts");
     emptyEl = pane.querySelector("#office-empty");
     popEl = pane.querySelector("#office-pop");
+    // A fresh pane is empty, so the gated repaints (the floor plan and the
+    // header readout, both written only when their signature changes) must not
+    // believe the previous DOM is still behind them.
+    renderSig = "";
+    countsSig = "";
 
     pane.querySelector("#office-refresh").addEventListener("click", () => {
       // Force a refetch but keep the roster we have: if the request fails the
@@ -3334,6 +3591,10 @@
     });
     // The popup is anchored to a cubicle: scrolling would leave it behind.
     sceneEl.addEventListener("scroll", hidePop, { passive: true });
+
+    // Start the tile floor. It is optional: until (or unless) it arrives, the
+    // plan paints the palette's own carpet and the desks keep their DOM chips.
+    void loadPixel();
   }
 
   function startTicker() {
@@ -3343,7 +3604,7 @@
       // the floor and the board reflect it without waiting for a manual refresh.
       if (office && office.serverRunner && !runnerPaused()) void refreshOffice(true);
       // Time-based statuses (the 10s activity window) and expiring labels.
-      render();
+      scheduleRender();
       if (lastActivitySeen && Date.now() - lastActivitySeen > ACTIVITY_TTL_MS) lastActivitySeen = 0;
     }, TICK_MS);
   }
@@ -3353,15 +3614,14 @@
 
   /**
    * The plugin's own stylesheet, co-located with this bundle and fetched from
-   * the same plugin directory. `document.currentScript` is this <script> (the
-   * host injects it dynamically), so its `?token=` carries over and the sheet
-   * needs no knowledge of the host's auth scheme.
+   * the same plugin directory — with the same token, from the base URL captured
+   * when this bundle ran (`document.currentScript` is gone by the time the host
+   * asks for the pane).
    */
   function loadStyles() {
-    const src = document.currentScript && document.currentScript.src;
-    if (!src) return;
-    const href = src.replace(/client\.js(\?|$)/, "client.css$1");
-    if (!href || href === src || document.querySelector(`link[href="${href}"]`)) return;
+    if (!SELF_URL) return;
+    const href = withToken(new URL("client.css", SELF_URL));
+    if (!href || document.querySelector(`link[href="${href}"]`)) return;
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.href = href;
@@ -3384,7 +3644,7 @@
         const el = document.getElementById("office-pane");
         if (!el) return;
         if (!pane || pane !== el) build(el);
-        void refreshTeam(false);
+        const roster = refreshTeam(false);
         // Nudge the server runner once the board is known: a queue left running
         // (e.g. across a server restart) resumes when a page comes back.
         void refreshOffice(false).then(() => {
@@ -3392,17 +3652,27 @@
         });
         void refreshDefs(false);
         render();
+        // Bring up the tile floor once the roster is in: the art is forty
+        // sprites and a 1 MB font, and fetching it first would both delay that
+        // fetch and paint a floor the roster is about to replace. `render()`
+        // runs again once it lands, because the character palettes and the
+        // sprite properties only exist from that moment on.
+        void roster
+          .catch(() => {})
+          .then(() => loadPixel())
+          .then(() => scheduleRender());
         startTicker();
       },
       onHide: () => {
         stopTicker();
+        cancelScheduledRender();
         hidePop();
         // The full-screen surfaces are chrome; leaving the view takes them with it.
         closeLibrary();
         closeKanban();
         closeAgentSettings();
       },
-      onSessions: () => { render(); },
+      onSessions: () => { scheduleRender(); },
       onCwd: () => {
         // A different project gets a fresh floor: yesterday's firing does not carry,
         // and a run adopted in the previous project is no longer ours to watch.
@@ -3414,8 +3684,12 @@
       },
       onReconnect: () => { void refreshTeam(true); void refreshOffice(true); void refreshDefs(true); },
       onEvent: (evt) => {
+        // The label is recorded immediately (it is state, and the next paint must
+        // read the newest event), but the repaint is coalesced: an agent
+        // streaming a turn produces events far faster than the screen refreshes,
+        // and each of them used to cost a full render of every desk.
         noteActivity(evt);
-        render();
+        scheduleRender();
       },
     },
   });
