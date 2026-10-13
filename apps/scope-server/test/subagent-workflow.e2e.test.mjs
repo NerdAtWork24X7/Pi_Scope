@@ -180,6 +180,43 @@ async function buildApprovalGraph(w) {
   return { start, first, gate, last, end };
 }
 
+/**
+ * Wire a workspace into start → first → loop → body → end, plus a *side* node
+ * that the start node also feeds — it is reachable without the loop, so the loop
+ * must not repeat it. Custom `printf` harnesses keep the run hermetic.
+ */
+async function buildLoopGraph(w, { count = 3, bodyPrompt = "{input}|{iteration}/{iterations}" } = {}) {
+  const s = await snapshot(w);
+  const start = s.nodes.find((n) => n.type === "start");
+  const first = s.nodes.find((n) => n.type === "agent");
+  const end = s.nodes.find((n) => n.type === "end");
+  assert.ok((await act("updateNode", { id: first.id, name: "first", config: {
+    harness: "custom", command: `printf 'A1[%s]' "$SW_PROMPT"`, prompt: "{task}",
+  } }, w)).res.ok);
+
+  const loop = (await act("addNode", { type: "loop", x: 420, y: 120 }, w)).data.nodes.at(-1);
+  assert.ok((await act("updateNode", { id: loop.id, name: "loop", config: { count } }, w)).res.ok);
+  const body = (await act("addNode", { type: "agent", x: 640, y: 120 }, w)).data.nodes.at(-1);
+  assert.ok((await act("updateNode", { id: body.id, name: "body", config: {
+    harness: "custom", command: `printf 'B[%s]' "$SW_PROMPT"`, prompt: bodyPrompt,
+  } }, w)).res.ok);
+  // A sibling branch off the start: not dominated by the loop.
+  const side = (await act("addNode", { type: "agent", x: 420, y: 480 }, w)).data.nodes.at(-1);
+  assert.ok((await act("updateNode", { id: side.id, name: "side", config: {
+    harness: "custom", command: `printf 'S[%s]' "$SW_PROMPT"`, prompt: "{task}",
+  } }, w)).res.ok);
+
+  for (const e of s.edges) await act("removeEdge", { id: e.id }, w);
+  for (const [from, to] of [
+    [start.id, first.id], [first.id, loop.id], [loop.id, body.id], [body.id, end.id],
+    [start.id, side.id], [side.id, end.id],
+  ]) {
+    const r = await act("addEdge", { from, to }, w);
+    assert.ok(r.res.ok, r.data?.error);
+  }
+  return { start, first, loop, body, side, end };
+}
+
 /** Wait until one node reaches `status`, returning the whole run each poll. */
 async function waitNode(w, nodeId, status, timeoutMs = 20_000) {
   const start = Date.now();
@@ -271,6 +308,9 @@ before(async () => {
       SCOPE_FILE_ROOT: tmpDir,
       // Evaluate schedules fast, so a trigger test need not wait 20s a tick.
       SCOPE_WORKFLOW_TRIGGER_TICK_MS: "700",
+      // A low run-level loop ceiling, so the "a runaway loop is cut off" test
+      // reaches the guard in a dozen passes instead of five hundred.
+      SCOPE_MAX_LOOP_PASSES: "12",
       // Keep the model catalogue exactly the fixture's `models-store.json`: the
       // runtime "available models" read would otherwise merge in whatever the
       // bundled agent reports for this machine's credentials.
@@ -512,6 +552,181 @@ describe("subagent workflow plugin (server)", () => {
     assert.ok((await act("moveNode", { id: node.id, x: 900, y: 520 })).res.ok);
     const store = JSON.parse(fs.readFileSync(storePath(ws), "utf8"));
     assert.ok(store.workspaces[fs.realpathSync(ws)].nodes.some((n) => n.id === node.id && n.name === "researcher"));
+  });
+
+  test("stores a loop's pass count, clamped to the server's ceiling", async () => {
+    const added = await act("addNode", { type: "loop", x: 300, y: 520 });
+    assert.ok(added.res.ok);
+    const loop = added.data.nodes.at(-1);
+    assert.equal(loop.type, "loop");
+    assert.equal(loop.name, "Loop");
+    assert.equal(loop.config.count, 2, "a fresh loop repeats twice");
+
+    const setCount = async (count) => {
+      const r = await act("updateNode", { id: loop.id, config: { count } });
+      assert.ok(r.res.ok, r.data?.error);
+      return r.data.nodes.find((n) => n.id === loop.id).config.count;
+    };
+    assert.equal(await setCount(5), 5);
+    assert.equal(await setCount(0.4), 1, "below 1 clamps to a single pass");
+    assert.equal(await setCount(9999), 100, "and above the ceiling to the ceiling");
+    assert.equal(await setCount("nonsense"), 2, "a non-number falls back to the default");
+    // A loop is a repeatable kind, like an agent or a gate.
+    assert.ok((await act("duplicateNode", { id: loop.id })).res.ok);
+  });
+
+  test("a loop repeats the section it dominates, and only that section", async () => {
+    const solo = path.join(tmpDir, "ws-loop-run");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildLoopGraph(solo, { count: 3 });
+
+    assert.ok((await runApi("start", { task: "world" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done");
+    assert.equal(run.nodes[g.loop.id].status, "done");
+    assert.equal(run.nodes[g.loop.id].iterations, 3);
+    assert.equal(run.nodes[g.loop.id].iteration, 3, "it reports the last pass it ran");
+
+    const text = run.log.map((l) => l.text).join("\n");
+    const ownLines = (id) => run.log.filter((l) => l.nodeId === id && l.stream === "stdout").map((l) => l.text);
+    // The dominated section ran exactly once per pass…
+    assert.equal(ownLines(g.body.id).length, 3, "the body ran on every pass");
+    for (const i of [1, 2, 3]) {
+      assert.ok(ownLines(g.body.id).some((t) => t.includes(`|${i}/3]`)), `pass ${i} knew its own number`);
+    }
+    assert.ok(/pass 2\/3/.test(text), "every pass is logged");
+    // …while the sibling branch off the start, which the loop does not own, ran once.
+    assert.equal(ownLines(g.side.id).length, 1, "a node outside the loop is not repeated");
+
+    // The loop's own output is only assembled at the end: what reached it, then
+    // every pass, so the node after it reads the whole loop.
+    const out = run.nodes[g.loop.id].outputTail;
+    assert.match(out, /^A1\[world\]/, "what reached the loop comes first");
+    for (const i of [1, 2, 3]) assert.ok(out.includes(`|${i}/3]`), `the loop kept pass ${i}`);
+    assert.equal((run.nodes[g.end.id].outputTail.match(/\|3\/3\]/g) || []).length, 1, "the end node saw the last pass");
+  });
+
+  test("a switched-off loop runs its section exactly once", async () => {
+    const solo = path.join(tmpDir, "ws-loop-off");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildLoopGraph(solo, { count: 4 });
+    assert.ok((await act("updateNode", { id: g.loop.id, config: { enabled: false } }, solo)).res.ok);
+
+    assert.ok((await runApi("start", { task: "world" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done");
+    assert.equal(run.nodes[g.loop.id].status, "skipped");
+    assert.equal(run.nodes[g.loop.id].bypassed, true);
+    const text = run.log.map((l) => l.text).join("\n");
+    assert.equal(run.log.filter((l) => l.nodeId === g.body.id && l.stream === "stdout").length, 1,
+      "a bypassed loop is a pass-through, not a repeater");
+    assert.ok(!/passes over/.test(text), "and it never announces passes");
+    // The end node still reads what the section produced: a bypassed loop is a
+    // wire, not a hole in the graph.
+    assert.match(run.nodes[g.end.id].outputTail, /B\[/, "the end node saw the section's output");
+  });
+
+  test("a nested loop runs its section fully inside every pass of its parent", async () => {
+    const solo = path.join(tmpDir, "ws-loop-nested");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildLoopGraph(solo, { count: 2 });
+    // Insert an inner loop between the outer loop and the body:
+    //   outer → inner → body, so the inner section is inside the outer's.
+    const inner = (await act("addNode", { type: "loop", x: 520, y: 120 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: inner.id, name: "inner", config: { count: 2 } }, solo)).res.ok);
+    const outerToBody = (await snapshot(solo)).edges.find((e) => e.from === g.loop.id && e.to === g.body.id);
+    assert.ok((await act("removeEdge", { id: outerToBody.id }, solo)).res.ok);
+    assert.ok((await act("addEdge", { from: g.loop.id, to: inner.id }, solo)).res.ok);
+    assert.ok((await act("addEdge", { from: inner.id, to: g.body.id }, solo)).res.ok);
+
+    assert.ok((await runApi("start", { task: "world" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done");
+    // The inner section ran twice per outer pass, so the body ran 2 × 2 times.
+    const bodyLines = run.log.filter((l) => l.nodeId === g.body.id && l.stream === "stdout");
+    assert.equal(bodyLines.length, 4, "the body ran on every pass of the inner loop");
+    // The innermost loop shadows its parent, so the body counts 1…2, twice.
+    assert.equal(bodyLines.filter((l) => /\|1\/2\]/.test(l.text)).length, 2, "inner pass 1 in both outer passes");
+    assert.equal(bodyLines.filter((l) => /\|2\/2\]/.test(l.text)).length, 2, "and inner pass 2 in both");
+    assert.equal(run.nodes[inner.id].iterations, 2);
+    assert.equal(run.nodes[g.loop.id].iterations, 2);
+    // The outer loop folds ONE entry per outer pass — the inner loop's own
+    // output is rebuilt per outer pass, never carried over stale.
+    const outerOut = run.nodes[g.loop.id].outputTail;
+    assert.equal((outerOut.match(/B\[/g) || []).length, 2, `one entry per outer pass (${outerOut})`);
+  });
+
+  test("a node failing inside a loop stops the run at that pass", async () => {
+    const solo = path.join(tmpDir, "ws-loop-fail");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildLoopGraph(solo, { count: 4 });
+    assert.ok((await act("updateNode", { id: g.body.id, config: {
+      harness: "custom", command: "printf 'boom' >&2; exit 3", prompt: "{input}",
+    } }, solo)).res.ok);
+
+    assert.ok((await runApi("start", { task: "world" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "error");
+    assert.equal(run.nodes[g.body.id].status, "error");
+    assert.ok(run.nodes[g.loop.id].status !== "done", "the loop did not complete");
+    const text = run.log.map((l) => l.text).join("\n");
+    assert.ok(!/pass 2\/4/.test(text), "no further pass was started");
+  });
+
+  test("a runaway loop is cut off by the run's pass budget, not wedged", async () => {
+    const solo = path.join(tmpDir, "ws-loop-budget");
+    fs.mkdirSync(solo, { recursive: true });
+    // The suite lowers SCOPE_MAX_LOOP_PASSES to 12, so a 20-pass loop must be
+    // stopped by the budget rather than run to its own count.
+    const g = await buildLoopGraph(solo, { count: 20 });
+
+    assert.ok((await runApi("start", { task: "world" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "error", "the run ends, it does not hang");
+    assert.equal(run.nodes[g.loop.id].status, "error");
+    assert.match(run.nodes[g.loop.id].error, /loop budget/);
+    assert.ok(run.log.some((l) => /hit the loop ceiling/.test(l.text)));
+    assert.ok(run.finishedAt, "and it is recorded as finished");
+  });
+
+  test("an approval gate inside a loop asks again on every pass", async () => {
+    const solo = path.join(tmpDir, "ws-loop-gate");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildLoopGraph(solo, { count: 2 });
+    const gate = (await act("addNode", { type: "approval", x: 520, y: 120 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: gate.id, name: "gate", config: {
+      message: "pass {iteration}/{iterations}?",
+    } }, solo)).res.ok);
+    const len = (await snapshot(solo)).edges.find((e) => e.from === g.loop.id && e.to === g.body.id);
+    assert.ok((await act("removeEdge", { id: len.id }, solo)).res.ok);
+    assert.ok((await act("addEdge", { from: g.loop.id, to: gate.id }, solo)).res.ok);
+    assert.ok((await act("addEdge", { from: gate.id, to: g.body.id }, solo)).res.ok);
+
+    // Wait for the gate to ask a *specific* pass, so a stale wait can never be
+    // mistaken for the next pass's.
+    const waitAsk = async (message) => {
+      const t0 = Date.now();
+      for (;;) {
+        const r = await liveRun(solo);
+        if (r?.nodes?.[gate.id]?.status === "waiting" && r.nodes[gate.id].approval?.message === message) return r;
+        if (Date.now() - t0 > 20_000) throw new Error(`the gate never asked “${message}”`);
+        await sleep(100);
+      }
+    };
+
+    assert.ok((await runApi("start", { task: "world" }, solo)).res.ok);
+    await waitAsk("pass 1/2?");
+    assert.ok((await runApi("approve", { nodeId: gate.id, note: "go" }, solo)).res.ok);
+    await waitAsk("pass 2/2?");
+
+    const mid = await liveRun(solo);
+    assert.equal(mid.nodes[gate.id].decision, null, "the first pass's decision was cleared for the second");
+    assert.ok((await runApi("approve", { nodeId: gate.id }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done");
+    assert.equal(run.nodes[gate.id].decision.approve, true);
+    assert.equal(run.nodes[gate.id].decision.note, "", "the second pass was decided on its own");
+    assert.equal((run.log.map((l) => l.text).join("\n").match(/awaiting approval/g) || []).length, 2);
   });
 
   test("refuses graph shapes the runner could not execute", async () => {
@@ -1368,6 +1583,38 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
+  test("+ Loop adds a loop node, and its settings edit the pass count", async () => {
+    const solo = path.join(tmpDir, "ws-loop-ui");
+    fs.mkdirSync(solo, { recursive: true });
+    const { page, context, errors } = await openWorkflow(solo);
+
+    await page.click("#sw-add-loop");
+    await page.waitForSelector(".sw-node.sw-t-loop");
+    const node = page.locator(".sw-node.sw-t-loop");
+    assert.match(await node.textContent(), /Repeat ×2/, "a fresh loop shows its default count");
+
+    await node.locator(".sw-node-config").click();
+    await page.waitForSelector("#sw-f-count");
+    assert.equal(await page.inputValue("#sw-f-count"), "2");
+    // The section's nodes can read the pass they are on.
+    assert.match(await page.textContent("#sw-modal .sw-dlg-body"), /\{iteration\}/);
+    await page.fill("#sw-f-count", "4");
+    await page.fill("#sw-f-desc", "review rounds");
+    await page.click("#sw-save");
+
+    await page.waitForFunction(() =>
+      /Repeat ×4/.test(document.querySelector(".sw-node.sw-t-loop")?.textContent || ""));
+    assert.match(await page.textContent(".sw-node.sw-t-loop"), /review rounds/);
+    const loop = (await snapshot(solo)).nodes.find((n) => n.type === "loop");
+    assert.equal(loop.config.count, 4);
+    assert.equal(loop.config.description, "review rounds");
+    // A count outside the range is clamped by the server, and the panel shows it.
+    assert.ok((await act("updateNode", { id: loop.id, config: { count: 500 } }, solo)).res.ok);
+    assert.equal((await snapshot(solo)).nodes.find((n) => n.id === loop.id).config.count, 100);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
   test("a Pi node's model names its provider, and an ambiguous one is not guessed", async () => {
     const solo = path.join(tmpDir, "ws-model");
     fs.mkdirSync(solo, { recursive: true });
@@ -1949,6 +2196,126 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
+  test("the messages sidebar resizes by its handle and remembers the width", async () => {
+    const solo = path.join(tmpDir, "ws-msgs-size");
+    fs.mkdirSync(solo, { recursive: true });
+    await buildCustomGraph(solo);
+    const { page, context, errors } = await openWorkflow(solo);
+
+    const sideW = () => page.$eval("#sw-msg-side", (el) => Math.round(el.getBoundingClientRect().width));
+    const start = await sideW();
+    assert.ok(start >= 300, `the sidebar starts at its default width (${start}px)`);
+
+    // Drag the handle LEFT: the sidebar grows.
+    const box = await page.locator("#sw-msg-resizer").boundingBox();
+    const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    await page.mouse.move(cx - 160, cy, { steps: 8 });
+    await page.mouse.up();
+    const grown = await sideW();
+    assert.ok(grown >= start + 140, `the sidebar grew with the drag (${start} → ${grown})`);
+
+    // It still sits flush at the canvas edge — the sidebar never covers the
+    // canvas (the drag handle straddles the seam, costing the row no width) —
+    // and the canvas keeps a workable width.
+    const layout = await page.evaluate(() => {
+      const side = document.getElementById("sw-msg-side").getBoundingClientRect();
+      const canvas = document.querySelector(".sw-canvas-scroll").getBoundingClientRect();
+      return { sideL: Math.round(side.left), canvasR: Math.round(canvas.right), canvasW: Math.round(canvas.width) };
+    });
+    assert.ok(Math.abs(layout.sideL - layout.canvasR) <= 1,
+      `the sidebar sits flush at the canvas edge (${layout.sideL} vs ${layout.canvasR})`);
+    assert.ok(layout.canvasW > 0, `which keeps its own width (${layout.canvasW}px)`);
+
+    // The chosen width survives a reload (it is remembered per browser).
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#sw-msg-resizer");
+    await page.waitForFunction((w) =>
+      Math.abs(document.getElementById("sw-msg-side").getBoundingClientRect().width - w) < 4, grown);
+
+    // Double-clicking the handle restores the default.
+    await page.dblclick("#sw-msg-resizer");
+    await page.waitForFunction((w) =>
+      Math.abs(document.getElementById("sw-msg-side").getBoundingClientRect().width - w) < 4, start);
+
+    // The handle is a keyboard-operable separator, and folding the panel hides it.
+    assert.equal(await page.getAttribute("#sw-msg-resizer", "role"), "separator");
+    assert.equal(await page.getAttribute("#sw-msg-resizer", "aria-orientation"), "vertical");
+    await page.focus("#sw-msg-resizer");
+    await page.keyboard.press("ArrowLeft");
+    assert.ok(await sideW() > start, "ArrowLeft grows the sidebar");
+    await page.click("#sw-msg-toggle");
+    assert.equal(await page.locator("#sw-msg-resizer:visible").count(), 0, "the handle folds away with the panel");
+    await page.click("#sw-msg-toggle");
+    assert.equal(await page.locator("#sw-msg-resizer:visible").count(), 1);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("the canvas zooms, and a drag stays true to the pointer at any zoom", async () => {
+    const solo = path.join(tmpDir, "ws-zoom");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildCustomGraph(solo);
+    const { page, context, errors } = await openWorkflow(solo);
+
+    const pct = () => page.textContent("#sw-zoom-pct");
+    const canvasW = () => page.$eval("#sw-canvas", (el) => Math.round(el.getBoundingClientRect().width));
+    const at1 = await canvasW();
+    assert.equal(await pct(), "100%");
+
+    await page.click("#sw-zoom-in");
+    assert.equal(await pct(), "120%");
+    assert.ok(Math.abs((await canvasW()) - at1 * 1.2) <= 2, `the canvas is scaled (${at1} → ${await canvasW()})`);
+
+    // A node drag is measured in canvas px, so at 120% a 120px screen drag must
+    // move the node 100 canvas px — not 120.
+    const before = (await snapshot(solo)).nodes.find((n) => n.id === g.a2.id);
+    const box = await page.locator(`.sw-node[data-id="${g.a2.id}"]`).boundingBox();
+    await page.mouse.move(box.x + 60, box.y + 12);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 60 + 120, box.y + 12 + 60, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForFunction((id) => {
+      const el = document.querySelector(`.sw-node[data-id="${id}"]`);
+      return el && el.style.left !== "";
+    }, g.a2.id);
+    const moved = (await snapshot(solo)).nodes.find((n) => n.id === g.a2.id);
+    assert.ok(Math.abs(moved.x - before.x - 100) <= 3, `x moved in canvas px (${before.x} → ${moved.x})`);
+    assert.ok(Math.abs(moved.y - before.y - 50) <= 3, `and so did y (${before.y} → ${moved.y})`);
+
+    // Ctrl/⌘ + wheel zooms about the pointer.
+    await page.evaluate(() => {
+      document.querySelector(".sw-canvas-scroll").dispatchEvent(new WheelEvent("wheel",
+        { deltaY: -240, ctrlKey: true, clientX: 500, clientY: 300, bubbles: true, cancelable: true }));
+    });
+    assert.ok(parseInt(await pct(), 10) > 120, "ctrl+wheel zooms in");
+
+    // The chosen zoom survives a reload, and the percentage resets it.
+    const kept = await pct();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#sw-zoom-pct");
+    assert.equal(await pct(), kept, "the zoom is remembered per browser");
+    await page.click("#sw-zoom-pct");
+    assert.equal(await pct(), "100%");
+
+    // Fit brings the whole graph on screen (never zooming in past 1:1).
+    await page.click("#sw-zoom-out");
+    await page.click("#sw-zoom-fit");
+    const fitted = parseInt(await pct(), 10);
+    assert.ok(fitted <= 100 && fitted >= 40, `Fit picks a zoom that shows the graph (${fitted}%)`);
+    const allInside = await page.evaluate(() => {
+      const view = document.querySelector(".sw-canvas-scroll").getBoundingClientRect();
+      return [...document.querySelectorAll("#sw-canvas .sw-node")].every((el) => {
+        const r = el.getBoundingClientRect();
+        return r.left >= view.left - 1 && r.right <= view.right + 1 && r.top >= view.top - 1 && r.bottom <= view.bottom + 1;
+      });
+    });
+    assert.ok(allInside, "every node is on screen after Fit");
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
   test("the end node's sidebar separates what each agent wired into it produced", async () => {
     const solo = path.join(tmpDir, "ws-msgs-end");
     fs.mkdirSync(solo, { recursive: true });
@@ -1991,12 +2358,23 @@ describe("subagent workflow plugin (client)", () => {
     assert.match(await page.textContent(".sw-msg-gate .sw-msg-gate-msg"), /Please review: A1\[hello\]/);
     assert.equal(await page.locator(".sw-msg-gate [data-approve]").count(), 1);
     assert.equal(await page.locator(".sw-msg-gate [data-reject]").count(), 1);
-    // Clicking the card focuses the gate: what it received, per input agent.
+    // Even unfocused, the gate section reads the agents wired into it as briefs:
+    // the message each was handed and its final result, never the raw stream.
+    const inline = page.locator(`#sw-msg-body .sw-msg-gate-wrap .sw-msg-input[data-input="${g.first.id}"]`);
+    assert.equal(await inline.count(), 1, "the gate section carries its input agent");
+    assert.equal(await inline.locator(".sw-msg-lines").count(), 0, "and not the agent's raw stream");
+    assert.match(await inline.locator(".sw-msg-sent pre").textContent(), /\{task\}/, "the message it was handed");
+    assert.match(await inline.locator(".sw-msg-pre").textContent(), /A1\[hello\]/, "its final result");
+
+    // Clicking the card focuses the gate: the same reading, per input agent.
     await page.click(`#sw-msg-body .sw-msg-section[data-node="${g.gate.id}"] .sw-msg-gate-name`);
     await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "review");
     const inputs = await page.$$eval("#sw-msg-body .sw-msg-input", (els) => els.map((e) => e.dataset.input));
     assert.deepEqual(inputs, [g.first.id], "the agent feeding the gate");
-    assert.match(await page.textContent(`#sw-msg-body .sw-msg-input[data-input="${g.first.id}"] pre`), /A1\[hello\]/);
+    const brief = page.locator(`#sw-msg-body .sw-msg-input[data-input="${g.first.id}"]`);
+    assert.match(await brief.locator(".sw-msg-sent pre").textContent(), /\{task\}/, "its user message");
+    assert.match(await brief.locator(".sw-msg-pre").textContent(), /A1\[hello\]/, "its final result");
+    assert.equal(await brief.locator(".sw-msg-lines").count(), 0, "no raw stream in a gate brief");
 
     // Approving from here decides the run, exactly like the banner.
     await page.fill(".sw-msg-gate .sw-msg-note", "ship it");

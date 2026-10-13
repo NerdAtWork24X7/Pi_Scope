@@ -171,10 +171,12 @@ describe("git commit message settings", () => {
     assert.equal(after.data.gitCommitModel, "test/stub-model");
   });
 
-  test("the template is exposed, defaults to a {{diff}} template, and persists", async () => {
+  test("the template is exposed, defaults to a paths template, and persists", async () => {
     const before = await api("/settings");
     assert.equal(before.data.gitCommitTemplate, "");
-    assert.match(before.data.gitCommitTemplateDefault, /\{\{diff\}\}/);
+    assert.match(before.data.gitCommitTemplateDefault, /\{\{files\}\}/);
+    assert.doesNotMatch(before.data.gitCommitTemplateDefault, /\{\{diff\}\}/,
+      "the default hands the model the paths, not the diff");
 
     const set = await api("/settings", {
       method: "POST", body: JSON.stringify({ action: "setGitCommitTemplate", value: CUSTOM_TEMPLATE }),
@@ -204,12 +206,42 @@ describe("git commit message generation", () => {
     assert.ok(argv.includes("--print"), "ran pi non-interactively");
     assert.ok(argv.includes("--no-session"), "kept out of the session store");
     assert.ok(argv.includes("test/stub-model"), "used the configured model");
-    assert.ok(argv.some((a) => a.includes("feature.js")), "prompt carried the diff");
+    assert.ok(argv.some((a) => a.includes("feature.js")), "prompt carried the changed path");
     // The custom template from Settings was substituted (marker + {{branch}}).
     const prompt = argv.find((a) => a.includes("TEMPLATE-MARKER")) || "";
     assert.ok(prompt, "prompt used the configured template");
     assert.ok(!prompt.includes("{{branch}}"), "{{branch}} was substituted");
     assert.ok(!prompt.includes("{{diff}}"), "{{diff}} was substituted");
+  });
+
+  test("the default template sends the changed paths and lets the model inspect the files", async () => {
+    // Clear the custom template (Settings → Plugins → Git) so the built-in
+    // default is used: it must hand over the paths only — no diff, no hunks —
+    // and tell the model to go and look for itself.
+    const clear = await api("/settings", {
+      method: "POST", body: JSON.stringify({ action: "setGitCommitTemplate", value: "" }),
+    });
+    assert.ok(clear.res.ok, `clear failed: ${JSON.stringify(clear.data)}`);
+
+    if (fs.existsSync(argvLog)) fs.rmSync(argvLog);
+    const { res, data } = await api("/git/commit-message", {
+      method: "POST", body: JSON.stringify({ cwd: repoDir }),
+    });
+    assert.ok(res.ok, `expected 200, got ${res.status}: ${JSON.stringify(data)}`);
+    assert.equal(data.source, "staged");
+
+    const prompt = fs.readFileSync(argvLog, "utf8");
+    assert.ok(prompt.includes("feature.js"), "the changed path is sent");
+    assert.ok(!prompt.includes("@@"), "no diff hunk is sent");
+    assert.ok(!prompt.includes("diff --git"), "no diff header is sent");
+    assert.ok(!prompt.includes("+export const answer"), "no added line is sent");
+    assert.match(prompt, /git diff/, "the model is told to inspect the files itself");
+    assert.ok(!prompt.includes("{{files}}"), "{{files}} was substituted");
+
+    // Restore the custom template the rest of the suite reads back.
+    await api("/settings", {
+      method: "POST", body: JSON.stringify({ action: "setGitCommitTemplate", value: CUSTOM_TEMPLATE }),
+    });
   });
 
   test("falls back to the working tree when nothing is staged", async () => {

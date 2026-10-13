@@ -86,6 +86,13 @@
       --glass-bg-strong: rgba(255, 255, 255, 0.94);
       --glass-border: rgba(10, 10, 10, 0.08);
       --glass-shadow: 0 24px 64px rgba(10, 10, 10, 0.12);
+      /* Every surface that covers the app shares one scrim and one stacking
+         ladder: anchored menus float above the page, a popup's scrim above
+         those, toasts above everything they can cover. */
+      --scrim: rgba(0, 0, 0, 0.66);
+      --z-menu: 1000;
+      --z-modal: 1200;
+      --z-toast: 1300;
       --bg-gradient: linear-gradient(180deg, #fcfcfb 0%, #f7f7f5 45%, #f1f1ee 100%);
       --grid-line: rgba(10, 10, 10, 0.030);
       --shadow-panel: 0 0 0 1px var(--hairline), 0 24px 64px rgba(10, 10, 10, 0.10);
@@ -152,6 +159,10 @@
       --glass-bg-strong: rgba(18, 18, 18, 0.94);
       --glass-border: rgba(255, 255, 255, 0.08);
       --glass-shadow: 0 24px 64px rgba(0, 0, 0, 0.60);
+      --scrim: rgba(0, 0, 0, 0.66);
+      --z-menu: 1000;
+      --z-modal: 1200;
+      --z-toast: 1300;
       --bg-gradient: linear-gradient(180deg, #121212 0%, #0a0a0a 45%, #050505 100%);
       --grid-line: rgba(255, 255, 255, 0.025);
       --shadow-panel: 0 0 0 1px var(--hairline), 0 24px 64px rgba(0, 0, 0, 0.55);
@@ -9183,7 +9194,8 @@ body.set-cost-resizing * { user-select: none; }
   opacity: 0;
   pointer-events: none;
   transition: opacity .2s ease, transform .2s ease;
-  z-index: 200;
+  /* Toasts sit above the popups they may report on (see --z-toast). */
+  z-index: var(--z-toast);
 }
 .settings-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .settings-toast.err { border-color: var(--red); color: var(--red); }
@@ -9412,7 +9424,7 @@ body.sidebar-collapsed .sidebar-rail {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.2s ease, transform 0.2s ease;
-  z-index: 300;
+  z-index: var(--z-toast);
   max-width: min(92vw, 640px);
   text-align: center;
 }
@@ -9694,4 +9706,120 @@ select, textarea { border-radius: var(--r-control); }
 .chat-ws-add-btn, .chat-stopped-note, .chat-msg-cancelled, .set-toggle-track,
 .dstat, .dprogress {
   border-radius: var(--r-pill);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   superdesign-alpha — popups
+   ═══════════════════════════════════════════════════════════════════════════
+   Every surface that covers the app shares one chrome, so a dialog opened from
+   Git looks like one opened from the Office. What is shared:
+
+     · the scrim (`--scrim`) and the stacking ladder (`--z-modal`);
+     · the panel — `--r-panel` radius, a `--border` hairline and `--shadow-panel`;
+     · the head / body / actions rhythm and its hairlines;
+     · the title ramp (display face, 15px, 600);
+     · the close button and the primary/secondary action pair.
+
+   Two variants are deliberate, not drift:
+
+     · floating panel — centred and capped by width/height (every dialog);
+     · full bleed — fills the viewport, square, no shadow, no border (the
+       workflow settings modal and the markdown editor: reading surfaces rather
+       than dialogs, so they get the whole screen on purpose).
+
+   Appended last, so equal-specificity rules win over the legacy blocks above.
+   The two plugin sheets (office, subagent-workflow) mirror the plugin-owned
+   popups, because a plugin bundle is injected after this sheet.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Scrim + stacking ────────────────────────────────────────────────────── */
+#sp-overlay,
+.cp-modal,
+.git-modal-backdrop,
+.def-editor-backdrop,
+.plugin-settings-backdrop {
+  background: var(--scrim);
+  z-index: var(--z-modal);
+}
+/* A dialog may also be taller than the viewport: scroll the backdrop, not the
+   body, so the panel's own scroll area is the only one that moves. */
+.plugin-settings-backdrop { align-items: flex-start; padding: 8vh 16px 16px; }
+.git-modal-backdrop, .cp-modal { align-items: center; justify-content: center; padding: 20px; }
+#sp-overlay { align-items: center; justify-content: center; padding: 20px; }
+
+/* ── Floating panel ─────────────────────────────────────────────────────── */
+#sp-box,
+.cp-modal-box,
+.git-modal-box,
+.plugin-settings-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-panel);
+  box-shadow: var(--shadow-panel);
+}
+/* Popups that scroll their content need their own cap, not a page-level one. */
+#sp-box { max-height: 86vh; }
+.plugin-settings-modal { max-height: 84vh; }
+
+/* ── Head / title / body / actions ───────────────────────────────────────── */
+#sp-head,
+.plugin-settings-head,
+.plugin-settings-body {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+#sp-head, .plugin-settings-head { border-bottom: 1px solid var(--hairline); }
+#sp-body, .plugin-settings-body { padding-top: 16px; padding-bottom: 16px; }
+
+/* One title ramp for every popup. */
+#sp-title,
+.cp-modal-title,
+.git-modal-title,
+.plugin-settings-title,
+.def-editor-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+/* A one-line intro under a title is body copy, not a second title. */
+.plugin-settings-sub { font-family: var(--font-body); font-size: 12px; }
+
+/* The small confirm boxes (checkpoints, Git) carry no head of their own, so
+   their padding *is* the rhythm; their actions line up with it. */
+.cp-modal-box, .git-modal-box { padding: 16px; }
+.cp-modal-title, .git-modal-title { margin-bottom: 6px; }
+.cp-modal-subtitle, .git-modal-msg { margin-bottom: 12px; }
+.cp-modal-actions, .git-modal-actions { margin-top: 4px; gap: 8px; }
+
+/* ── Close buttons ───────────────────────────────────────────────────────── */
+.plugin-settings-close,
+.office-lib-close,
+.office-set-close {
+  width: 28px; height: 28px; padding: 0;
+  display: grid; place-items: center;
+  font-family: var(--font-body); font-size: 15px; line-height: 1;
+  color: var(--text-subtle);
+  background: transparent;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-btn);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-std), border-color var(--dur-fast) var(--ease-std);
+}
+.plugin-settings-close:hover,
+.office-lib-close:hover,
+.office-set-close:hover { color: var(--text); border-color: var(--accent); }
+
+/* ── Anchored popups (menus) ─────────────────────────────────────────────── */
+/* One card treatment for the surfaces that hang off a click. The Office's hover
+   card (`.office-pop`) is a card rather than a menu and already uses the card
+   language (surface · border · r-card · shadow-panel), so it is left to it. */
+.term-menu,
+.git-menu {
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-panel);
+  z-index: var(--z-menu);
 }

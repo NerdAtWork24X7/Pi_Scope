@@ -151,7 +151,9 @@
             `placeholder="${ctx.esc(sr.gitCommitTemplateDefault || "")}">${ctx.esc(sr.gitCommitTemplate || "")}</textarea>`) +
           `<div class="set-field-hint">Placeholders: <code>{{branch}}</code> ` +
           `<code>{{source}}</code> <code>{{files}}</code> <code>{{diff}}</code>. ` +
-          `Leave empty to use the default template (shown as the placeholder).</div>`
+          `Leave empty to use the default template (shown as the placeholder). ` +
+          `The default sends only the changed file paths and lets the model inspect the files itself; ` +
+          `a template that uses <code>{{diff}}</code> sends the unified diff instead.</div>`
         );
       },
       onMount(panel, ctx) { ctx.wire(panel); },

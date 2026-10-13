@@ -479,8 +479,10 @@
     }
   }
 
-  // Draft a commit message from the pending diff with the model configured in
-  // Settings → Models (server-side; falls back to the agent's default model).
+  // Draft a commit message from the changed files with the model configured in
+  // Settings → Plugins → Git (server-side; falls back to the agent's default
+  // model). The server hands the model the changed paths and lets it inspect
+  // the files itself.
   async function generateMessage() {
     const cwd = selectedCwd(); if (!cwd) return;
     genBaseline = commitMsg.value;

@@ -327,6 +327,26 @@ describe("office view", () => {
     const hireBox = await page.locator("#office-dlg-backdrop .office-dialog").boundingBox();
     assert.ok(hireBox.width >= 860, `the hire dialog is wide (${hireBox.width}px)`);
     assert.ok(hireBox.height >= 420, `and tall (${hireBox.height}px)`);
+    // It is a centred dialog, not a panel glued to the corner (the backdrop is
+    // the app's shared `.def-editor-backdrop`, which is a bare flex row).
+    const centred = await page.evaluate(() => {
+      const b = document.getElementById("office-dlg-backdrop").getBoundingClientRect();
+      const d = document.querySelector("#office-dlg-backdrop .office-dialog").getBoundingClientRect();
+      return {
+        left: Math.round(d.left - b.left), right: Math.round(b.right - d.right),
+        top: Math.round(d.top - b.top), bottom: Math.round(b.bottom - d.bottom),
+        scrim: getComputedStyle(document.getElementById("office-dlg-backdrop")).backgroundColor,
+        radius: getComputedStyle(document.querySelector("#office-dlg-backdrop .office-dialog")).borderRadius,
+        shadow: getComputedStyle(document.querySelector("#office-dlg-backdrop .office-dialog")).boxShadow,
+      };
+    });
+    // A few px of sub-pixel slack: the point is that it is centred, not glued
+    // to a corner (it used to sit at 0/520).
+    assert.ok(Math.abs(centred.left - centred.right) <= 6, `centred horizontally (${centred.left} vs ${centred.right})`);
+    assert.ok(Math.abs(centred.top - centred.bottom) <= 6, `and vertically (${centred.top} vs ${centred.bottom})`);
+    assert.equal(centred.scrim, "rgba(0, 0, 0, 0.66)", "over the shared scrim");
+    assert.equal(centred.radius, "16px", "on the shared panel radius");
+    assert.notEqual(centred.shadow, "none", "with the shared panel shadow");
     assert.ok(
       await page.locator("#office-dlg-backdrop .office-dialog").evaluate((el) => el.classList.contains("office-dialog-wide")),
       "the hire form uses the wide layout",
@@ -717,6 +737,36 @@ describe("office view", () => {
     assert.match(await page.locator("#office-lib-backdrop .office-lib-hd-title").textContent(), /Reference library/);
     assert.match(await page.locator("#office-lib-backdrop .office-lib-hd-sub").textContent(), /injected at the start of every new conversation/);
     assert.ok(await page.locator("#office-lib-backdrop").evaluate((el) => getComputedStyle(el).position === "fixed"), "it is an overlay");
+    // The popup design system: the Office's surfaces wear the same chrome as
+    // every other popup (see popups.e2e.test.mjs for the shared contract).
+    const chrome = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.cssText = "position:fixed;left:-9999px;background:var(--scrim);border:1px solid var(--border);" +
+        "border-radius:var(--r-panel);box-shadow:var(--shadow-panel);font-family:var(--font-display)";
+      document.body.appendChild(probe);
+      const pcs = getComputedStyle(probe);
+      const tokens = { scrim: pcs.backgroundColor, border: pcs.borderTopColor, radius: pcs.borderRadius, shadow: pcs.boxShadow, face: pcs.fontFamily };
+      probe.remove();
+      const bd = getComputedStyle(document.querySelector("#office-lib-backdrop"));
+      const panel = getComputedStyle(document.querySelector("#office-lib-backdrop .office-lib-panel"));
+      const title = getComputedStyle(document.querySelector("#office-lib-backdrop .office-lib-hd-title"));
+      return {
+        scrim: bd.backgroundColor, z: bd.zIndex,
+        radius: panel.borderRadius, border: panel.borderTopColor, shadow: panel.boxShadow,
+        title: { size: title.fontSize, weight: title.fontWeight, family: title.fontFamily },
+        close: getComputedStyle(document.querySelector("#office-lib-backdrop .office-lib-close")).width,
+        tokens,
+      };
+    });
+    assert.equal(chrome.scrim, chrome.tokens.scrim, "the shared scrim");
+    assert.equal(chrome.radius, chrome.tokens.radius, "the shared panel radius");
+    assert.equal(chrome.border, chrome.tokens.border, "the shared hairline");
+    assert.equal(chrome.shadow, chrome.tokens.shadow, "the shared panel shadow");
+    assert.equal(chrome.z, "1200", "the shared stacking order");
+    assert.equal(chrome.title.size, "15px", "the shared title size");
+    assert.equal(chrome.title.weight, "600", "the shared title weight");
+    assert.equal(chrome.title.family, chrome.tokens.face, "the display face");
+    assert.equal(chrome.close, "28px", "the shared close button");
     // It closes with an icon, like the agent settings popup.
     const libClose = page.locator("#office-lib-backdrop .office-lib-close");
     assert.equal(await libClose.count(), 1, "the header carries a close control");

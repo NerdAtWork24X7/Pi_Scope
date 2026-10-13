@@ -1997,19 +1997,23 @@ async function jsonBody(req: Request): Promise<{ value: any; error?: Response }>
 }
 
 /** Default instructions for Git → “✨ generate”, substituted into the prompt
- *  sent to the model. Settings → Models can override this with a custom
+ *  sent to the model. Settings → Plugins → Git can override this with a custom
  *  template; the following placeholders are replaced server-side:
  *    {{branch}}  current branch (or "(detached)")
  *    {{source}}  "staged" | "working tree"
- *    {{files}}   changed file paths, one per line
- *    {{diff}}    the unified diff (clipped to a safe size for argv) */
+ *    {{files}}   changed file paths, one per line, each with its git status
+ *    {{diff}}    the unified diff (clipped to a safe size for argv) — only sent
+ *                when a template asks for it; the default hands the model the
+ *                paths and lets it inspect the files itself */
 const DEFAULT_COMMIT_TEMPLATE =
-  "Write a git commit message for the change below.\n" +
+  "Write a git commit message for the change on branch {{branch}} ({{source}}).\n" +
+  "The changed files are listed below. Inspect them before you write: read the files, and run " +
+  "`git diff` — with `--cached` for staged changes — to see exactly what changed. Never guess the " +
+  "change from the file names alone.\n" +
   "Rules: follow Conventional Commits (type(scope): summary). One imperative subject line, " +
   "at most 72 characters, no trailing period. Add a short body only when it earns its place. " +
   "Return the commit message text only — no code fences, no commentary, no quotes.\n\n" +
-  "Branch: {{branch}}\n" +
-  "Changes ({{source}}):\n{{diff}}";
+  "Changed files ({{source}}):\n{{files}}";
 
 /** How much git output the async runner keeps (tail, for diagnostics). */
 const MAX_GIT_OUTPUT = 32 * 1024 * 1024;

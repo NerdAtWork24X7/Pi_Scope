@@ -358,29 +358,29 @@ export function activate(api: any): void {
    * Render the draft prompt for a repo, or return the Response to fail with.
    * Kept separate from the job so the request still answers 400/409 (nothing to
    * describe, diff failure) before anything is spawned.
+   *
+   * The change itself is never sent: the model is handed the changed paths and
+   * inspects them itself (`pi --print` runs in the repo with its read/bash
+   * tools), which keeps the prompt small — no clipped diff, no argv size risk —
+   * and bases the message on the real code rather than a truncated hunk. A
+   * custom template that still references `{{diff}}` keeps the old behaviour.
    */
   function buildCommitPrompt(absCwd: string): { prompt: string; model: string; source: string } | Response {
     // Prefer the index (what a commit would actually contain); fall back to the
-    // worktree so the button still helps before anything is staged.
-    let diff = gitTry(absCwd, ["diff", "--cached", "--no-color", "--unified=3"]);
+    // worktree so the button still helps before anything is staged. `--name-status`
+    // gives the model each path with the status that changed it (A/M/D/R), which
+    // is all it needs to go and look.
+    let listed = gitTry(absCwd, ["diff", "--cached", "--name-status"]);
     let source = "staged";
-    if (!diff.ok || !diff.out.trim()) {
-      diff = gitTry(absCwd, ["diff", "--no-color", "--unified=3"]);
+    if (!listed.ok || !listed.out.trim()) {
+      listed = gitTry(absCwd, ["diff", "--name-status"]);
       source = "working tree";
     }
-    if (!diff.ok) return jsonResponse({ error: diff.out || "git diff failed" }, 409);
-    const diffText = diff.out.trim();
-    if (!diffText) return jsonResponse({ error: "nothing to describe — no staged or unstaged changes" }, 400);
-
-    // Keep the prompt bounded: a commit message only needs the shape of the
-    // change, and argv has a hard size limit on every platform.
-    const MAX_DIFF = 12_000;
-    const clipped = diffText.length > MAX_DIFF
-      ? `${diffText.slice(0, MAX_DIFF)}\n\n… (diff truncated; ${diffText.length - MAX_DIFF} more characters)`
-      : diffText;
+    if (!listed.ok) return jsonResponse({ error: listed.out || "git diff failed" }, 409);
+    const files = listed.out.trim();
+    if (!files) return jsonResponse({ error: "nothing to describe — no staged or unstaged changes" }, 400);
 
     const branch = gitTry(absCwd, ["rev-parse", "--abbrev-ref", "HEAD"]).out.trim();
-    const files = gitTry(absCwd, ["diff", ...(source === "staged" ? ["--cached"] : []), "--name-only"]).out.trim();
     // The commit-message model/template are this feature's own settings, kept in
     // the plugin's own store (`<plugins dir>/.data/git.json` — the same file the
     // settings writers in server.ts write); only the default-model fallback comes
@@ -393,21 +393,33 @@ export function activate(api: any): void {
     const configured = setting("commitModel");
     const model = configured || String(settings.defaultModel || "").trim() || "google/gemini-2.5-flash-lite";
 
-    // The user's instruction template (Settings → Models), with placeholders
+    // The user's instruction template (Settings → Plugins → Git), with placeholders
     // substituted. An empty setting means the built-in default.
     const templateCfg = setting("commitTemplate");
     const template = templateCfg || DEFAULT_COMMIT_TEMPLATE;
     const usesDiffSlot = /\{\{\s*diff\s*\}\}/.test(template);
+    const usesChangeSlot = /\{\{\s*(?:files|diff)\s*\}\}/.test(template);
+    // Legacy path only: a template that still asks for `{{diff}}` gets it, capped
+    // so argv stays a sane size. The default template asks for the paths instead.
+    const MAX_DIFF = 12_000;
+    let clipped = "";
+    if (usesDiffSlot) {
+      const diff = gitTry(absCwd, ["diff", ...(source === "staged" ? ["--cached"] : []), "--no-color", "--unified=3"]);
+      const diffText = diff.ok ? diff.out.trim() : "";
+      clipped = diffText.length > MAX_DIFF
+        ? `${diffText.slice(0, MAX_DIFF)}\n\n… (diff truncated; ${diffText.length - MAX_DIFF} more characters)`
+        : diffText;
+    }
     const rendered = template
       .replace(/\{\{\s*branch\s*\}\}/g, branch || "(detached)")
       .replace(/\{\{\s*source\s*\}\}/g, source)
       .replace(/\{\{\s*files\s*\}\}/g, files || "(none listed)")
       .replace(/\{\{\s*diff\s*\}\}/g, clipped);
-    // A template that never references {{diff}} still needs the change itself,
-    // otherwise the model has nothing to describe — append it.
-    const prompt = usesDiffSlot
+    // A template that never references the change still needs it, otherwise the
+    // model has nothing to describe — append the changed paths.
+    const prompt = usesChangeSlot
       ? rendered
-      : `${rendered}\n\nBranch: ${branch || "(detached)"}\nChanges (${source}):\n${clipped}`;
+      : `${rendered}\n\nBranch: ${branch || "(detached)"}\nChanged files (${source}):\n${files}`;
 
     return { prompt, model, source };
   }

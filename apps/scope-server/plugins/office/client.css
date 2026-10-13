@@ -580,9 +580,12 @@ body[data-ds-dark-theme] {
 
 /* The agent: the vendored character sheet (112×96 art — 7 frames of 16×32 per
    row, three rows: down / up / right), cycled by `background-position` through
-   the walk / typing / reading frames of its DOWN row — the row that faces the
-   desk's keyboard. All six palettes share the layout, so `--px-char-sheet` only
-   picks one.
+   the walk / typing / reading frames of its UP row. The desk is drawn above the
+   seat — the monitor at the top of the plot, the keyboard along it, the chair
+   behind the agent — so the agent sits with its back to the camera, facing the
+   screen; the DOWN row would have every worker facing the viewer, away from the
+   computer. All six palettes share the layout, so `--px-char-sheet` only picks
+   one.
 
    The sheet is drawn at exactly 2× its natural size in BOTH axes (224×192), so
    the 32×64 window below frames exactly ONE character: one frame is 16×32 art
@@ -598,11 +601,12 @@ body[data-ds-dark-theme] {
   background-image: var(--px-char-sheet, none);
   background-size: 224px 192px;     /* 112×96 art × 2 — 7 frames of 32×64 */
   background-repeat: no-repeat;
-  background-position: 0 0;
+  background-position: 0 -64px;     /* row 1 (up): seated facing the monitor */
 }
 /* Typing: frames 3 and 4. Reading: frames 5 and 6. Walking in: 0…2…1.
    Rows are one frame tall (64px on screen): 0 at the top, the up row at -64,
-   the right-facing row at -128. */
+   the right-facing row at -128. Every seated pose rides the UP row — the agent
+   walks in from the walkway below moving up, then keeps facing the desk. */
 .office-pod.working .office-person { animation: office-char-type .8s steps(1, end) infinite; }
 .office-pod.working.reading .office-person { animation-name: office-char-read; animation-duration: 1.1s; }
 .office-pod.arriving .office-person { animation: office-char-walk .6s steps(1, end) 2, office-walk-in .9s steps(6, end) 1; }
@@ -637,12 +641,16 @@ body[data-ds-dark-theme] {
 .office-courier.dir-up .office-courier-body { animation-name: office-courier-walk-up; }
 .office-courier.dir-right .office-courier-body { animation-name: office-courier-walk-right; }
 .office-courier.dir-left .office-courier-body { animation-name: office-courier-walk-left; transform: scaleX(-1); }
-/* Standing at the desk, handing it over: the walk cycle stops on a facing frame. */
+/* Standing at the desk, handing it over: the walk cycle stops on a facing frame
+   of the row it arrived in — it keeps facing the desk it walked to, and never
+   spins round to face the camera. */
 .office-courier.handing .office-courier-body {
   animation: none;
-  background-position: 0 0;
 }
-.office-courier.dir-left.handing .office-courier-body { transform: scaleX(-1); }
+.office-courier.dir-down.handing .office-courier-body  { background-position: 0 0; }
+.office-courier.dir-up.handing .office-courier-body    { background-position: 0 -64px; }
+.office-courier.dir-right.handing .office-courier-body { background-position: 0 -128px; }
+.office-courier.dir-left.handing .office-courier-body  { background-position: 0 -128px; transform: scaleX(-1); }
 
 /* The task the orchestrator is carrying: a pixel card held up over its head. It
    only appears for the handover beat, so the walk reads as "on the way" first. */
@@ -1001,13 +1009,18 @@ body[data-ds-dark-theme] {
    changing content can never reuse its raster. A slightly deeper translucent
    solid dims the floor just as well and composites for almost nothing. */
 .office-lib-backdrop {
-  position: fixed; inset: 0; z-index: 1200;
+  position: fixed; inset: 0; z-index: var(--z-modal);
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
-  background: rgba(0, 0, 0, .62);
+  /* The app-wide popup scrim (see styles.css → superdesign-alpha — popups). */
+  background: var(--scrim);
   animation: office-fade var(--dur-fast) var(--ease-std) both;
 }
 .office-board-backdrop { padding: 12px; }
+/* The small modal forms borrow the app's full-screen editor backdrop
+   (`def-editor-backdrop`), which is a bare flex row: without this they would
+   hang off the top-left corner and stretch to the full viewport height. */
+.office-dialog-backdrop { align-items: center; justify-content: center; padding: 20px; }
 .office-lib-panel {
   display: flex; flex-direction: column;
   /* `min-height: 0` is what makes `max-height` bind — a flex item's automatic
@@ -1026,19 +1039,20 @@ body[data-ds-dark-theme] {
 
 .office-lib-head {
   display: flex; align-items: center; gap: 12px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--hairline);
 }
-.office-lib-hd-title { font-family: var(--font-display); font-size: 21px; font-weight: 600; letter-spacing: -.5px; color: var(--text); }
+.office-lib-hd-title { font-family: var(--font-display); font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
 .office-lib-hd-sub { font-family: var(--font-body); font-size: 12.5px; line-height: 1.5; color: var(--muted); max-width: 680px; }
 .office-lib-hd-spacer { flex: 1 1 auto; }
 
 /* Close: the app's outline button, sized square for a single glyph. */
+/* The shared popup close button (28px, hairline, accent on hover). */
 .office-lib-close,
 .office-set-close {
   display: inline-flex; align-items: center; justify-content: center;
   flex: 0 0 auto;
-  width: 30px; height: 30px;
+  width: 28px; height: 28px;
   color: var(--text-subtle);
   background: transparent;
   border: 1px solid var(--hairline-strong);
@@ -1047,7 +1061,7 @@ body[data-ds-dark-theme] {
   transition: color var(--dur-fast) var(--ease-std), border-color var(--dur-fast) var(--ease-std);
 }
 .office-lib-close:hover,
-.office-set-close:hover { color: var(--text); border-color: var(--border-strong); }
+.office-set-close:hover { color: var(--text); border-color: var(--accent); }
 .office-lib-close:focus-visible,
 .office-set-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .office-icon-close svg,
@@ -1322,16 +1336,16 @@ body[data-ds-dark-theme] {
 .office-dialog-wide { width: min(920px, 100%); }
 .office-dialog-head {
   display: flex; flex-direction: column; gap: 4px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--hairline);
 }
-.office-dialog-title { font-family: var(--font-display); font-size: 21px; font-weight: 600; letter-spacing: -.5px; color: var(--text); }
+.office-dialog-title { font-family: var(--font-display); font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
 .office-dialog-hint { font-family: var(--font-body); font-size: 12.5px; color: var(--muted); }
 .office-dialog-body { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; padding: 16px; overflow: auto; min-height: 0; }
 .office-dialog-foot {
-  display: flex; align-items: center; gap: 10px; justify-content: flex-end;
-  padding: 14px 16px;
-  border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px; justify-content: flex-end;
+  padding: 12px 16px;
+  border-top: 1px solid var(--hairline);
 }
 .office-dialog-cancel {
   font-family: var(--font-display); font-size: 12px; font-weight: 600;
@@ -1393,23 +1407,24 @@ body[data-ds-dark-theme] {
 }
 /* The character sheet is animated by `background-position`: two held frames a
    cycle for typing and reading, four for walking. Every stop is a whole frame
-   (16px of art = 32px on screen), so no frame is ever drawn half-way. */
+   (16px of art = 32px on screen), so no frame is ever drawn half-way. The seated
+   poses all ride the UP row (y: -64px) — the agent faces its monitor. */
 @keyframes office-char-type {
-  0%   { background-position: -96px 0; }
-  50%  { background-position: -128px 0; }
-  100% { background-position: -96px 0; }
+  0%   { background-position: -96px -64px; }
+  50%  { background-position: -128px -64px; }
+  100% { background-position: -96px -64px; }
 }
 @keyframes office-char-read {
-  0%   { background-position: -160px 0; }
-  50%  { background-position: -192px 0; }
-  100% { background-position: -160px 0; }
+  0%   { background-position: -160px -64px; }
+  50%  { background-position: -192px -64px; }
+  100% { background-position: -160px -64px; }
 }
 @keyframes office-char-walk {
-  0%   { background-position: 0 0; }
-  25%  { background-position: -32px 0; }
-  50%  { background-position: -64px 0; }
-  75%  { background-position: -32px 0; }
-  100% { background-position: 0 0; }
+  0%   { background-position: 0 -64px; }
+  25%  { background-position: -32px -64px; }
+  50%  { background-position: -64px -64px; }
+  75%  { background-position: -32px -64px; }
+  100% { background-position: 0 -64px; }
 }
 /* Clocking in: the agent walks up the room from the walkway below its desk. */
 @keyframes office-walk-in {

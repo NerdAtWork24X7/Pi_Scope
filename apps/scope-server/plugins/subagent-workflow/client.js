@@ -100,6 +100,7 @@
 
   let pane = null;
   let canvasEl = null, nodesEl = null, svgEl = null, edgePathsEl = null, tmpPathEl = null, edgeBtnsEl = null;
+  let canvasScrollEl = null;   // the scroller holding the canvas (zoom + grid owner)
   let dlgEl = null, modalEl = null, statusEl = null, nameInput = null, taskInput = null;
   let runStatusEl = null, runLogEl = null, runSummaryEl = null, runBtn = null, stopBtn = null;
   let approvalsEl = null, approvalSig = "";
@@ -344,6 +345,111 @@
     svgEl.setAttribute("height", String(maxY));
   }
 
+  // ── Zoom ──────────────────────────────────────────────────────────────────
+  //
+  // One `scale()` on `.sw-canvas` scales the nodes, the edges, the ports and the
+  // edge buttons together — they all share the canvas's coordinate space, so the
+  // wiring can never drift from the cards at any zoom. Three places do their own
+  // arithmetic in canvas px and so have to divide by the scale: pointer → canvas
+  // (`canvasPoint`), a drag's screen deltas (`applyDrag`), and a new node's
+  // placement from the scroll offsets (`addNode`). The grid is painted by the
+  // *scroller*, so it is re-sized alongside instead of sliding under the cards.
+
+  const ZOOM_MIN = 0.4, ZOOM_MAX = 2, ZOOM_STEP = 1.2, ZOOM_KEY = "scope-sw-zoom";
+  let zoom = 1;
+  let zoomPctEl = null;
+  /** The scroller's grid pitch (from `--grid-size`), read once so the graph
+   *  paper scales with the canvas instead of sliding under it. */
+  let gridBase = 26;
+
+  const clampZoom = (z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+
+  /** Write the current zoom onto the canvas, the scroller's grid and the label. */
+  function applyZoom() {
+    if (!canvasEl || !canvasScrollEl) return;
+    canvasEl.style.transformOrigin = "0 0";
+    canvasEl.style.transform = zoom === 1 ? "" : `scale(${zoom})`;
+    // The graph paper is painted by the scroller, so its pitch has to be scaled
+    // by the same factor or the grid would slide against the cards.
+    canvasScrollEl.style.backgroundSize = zoom === 1 ? "" : `${gridBase * zoom}px ${gridBase * zoom}px`;
+    if (zoomPctEl) zoomPctEl.textContent = `${Math.round(zoom * 100)}%`;
+  }
+
+  /** Zoom about a point in the scroller's viewport (the centre, by default), so
+   *  what the user is looking at stays put. */
+  function setZoom(next, anchor) {
+    if (!canvasScrollEl) return;
+    const a = anchor || { x: canvasScrollEl.clientWidth / 2, y: canvasScrollEl.clientHeight / 2 };
+    const before = {
+      x: (canvasScrollEl.scrollLeft + a.x) / zoom,
+      y: (canvasScrollEl.scrollTop + a.y) / zoom,
+    };
+    zoom = clampZoom(next);
+    applyZoom();
+    canvasScrollEl.scrollLeft = before.x * zoom - a.x;
+    canvasScrollEl.scrollTop = before.y * zoom - a.y;
+    try { localStorage.setItem(ZOOM_KEY, String(zoom)); } catch { /* private mode */ }
+  }
+
+  /** Frame the whole graph: the zoom that fits every node, then centred. */
+  function fitCanvas() {
+    if (!canvasScrollEl) return;
+    const ns = nodes();
+    const pad = 48;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of ns) {
+      minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
+      maxX = Math.max(maxX, n.x + NODE_W); maxY = Math.max(maxY, n.y + 170);
+    }
+    if (!ns.length) { setZoom(1); return; }
+    const vw = canvasScrollEl.clientWidth - pad * 2;
+    const vh = canvasScrollEl.clientHeight - pad * 2;
+    const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
+    // Never zoom *in* past 1:1 — "fit" is about getting the whole graph on
+    // screen, not about blowing up a two-node workflow.
+    const z = clampZoom(Math.min(1, vw / w, vh / h));
+    zoom = z;
+    applyZoom();
+    canvasScrollEl.scrollLeft = (minX + w / 2) * z - canvasScrollEl.clientWidth / 2;
+    canvasScrollEl.scrollTop = (minY + h / 2) * z - canvasScrollEl.clientHeight / 2;
+    try { localStorage.setItem(ZOOM_KEY, String(zoom)); } catch { /* private mode */ }
+  }
+
+  /** Wire the zoom cluster, the ctrl/⌘+wheel shortcut and the keyboard keys. */
+  function initCanvasZoom() {
+    const cluster = pane?.querySelector("#sw-zoom");
+    zoomPctEl = pane?.querySelector("#sw-zoom-pct") || null;
+    if (cluster) {
+      cluster.querySelector("#sw-zoom-out").addEventListener("click", () => setZoom(zoom / ZOOM_STEP));
+      cluster.querySelector("#sw-zoom-in").addEventListener("click", () => setZoom(zoom * ZOOM_STEP));
+      // The percentage doubles as "reset to 100%".
+      zoomPctEl?.addEventListener("click", () => setZoom(1));
+      cluster.querySelector("#sw-zoom-fit").addEventListener("click", fitCanvas);
+    }
+    // The grid pitch comes from the theme, not a hardcoded 26px.
+    const pitch = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--grid-size"));
+    if (Number.isFinite(pitch) && pitch > 0) gridBase = pitch;
+    try {
+      const saved = parseFloat(localStorage.getItem(ZOOM_KEY) || "");
+      if (Number.isFinite(saved) && saved >= ZOOM_MIN && saved <= ZOOM_MAX) zoom = saved;
+    } catch { /* private mode */ }
+    applyZoom();
+    // Ctrl/⌘ + wheel is the gesture every canvas editor uses; a plain wheel
+    // still scrolls, which is what the rest of the app expects.
+    canvasScrollEl?.addEventListener("wheel", (e) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const rect = canvasScrollEl.getBoundingClientRect();
+      setZoom(zoom * Math.exp(-e.deltaY * 0.002), { x: e.clientX - rect.left, y: e.clientY - rect.top });
+    }, { passive: false });
+    pane?.addEventListener("keydown", (e) => {
+      if (e.target?.closest?.("input, textarea, select")) return;
+      if (e.key === "+" || e.key === "=") { e.preventDefault(); setZoom(zoom * ZOOM_STEP); }
+      else if (e.key === "-" || e.key === "_") { e.preventDefault(); setZoom(zoom / ZOOM_STEP); }
+      else if (e.key === "0") { e.preventDefault(); setZoom(1); }
+    });
+  }
+
   /** The provider's display name, whether or not the machine reported it. */
   function providerLabel(id) {
     const meta = harnessMeta(id);
@@ -415,6 +521,11 @@
     box.innerHTML = finalOutputHtml();
   }
 
+  /** The mark a non-agent node wears on the canvas and in its settings head. */
+  function nodeGlyph(type) {
+    return type === "start" ? "▶" : type === "end" ? "■" : type === "loop" ? "🔁" : "✋";
+  }
+
   function nodeSummary(n) {
     if (n.type === "agent") {
       const h = harnessMeta(n.config?.harness);
@@ -432,6 +543,16 @@
       const off = n.config?.enabled === false ? ' <span class="sw-off-tag">off</span>' : "";
       return `<div class="sw-node-model">Human approval${off}</div>` +
         `<div class="sw-node-desc">${esc(n.config?.description || "Pauses the run for a review")}</div>`;
+    }
+    if (n.type === "loop") {
+      const off = n.config?.enabled === false ? ' <span class="sw-off-tag">off</span>' : "";
+      const count = Math.max(1, Math.round(Number(n.config?.count) || 1));
+      const rs = runNode(n.id);
+      // While it runs, the pass it is on is the useful number — "2/5" beside the
+      // configured count, so the canvas shows progress through the loop.
+      const live = rs?.iterations > 0 ? ` <span class="sw-loop-pass">${rs.iteration || 1}/${rs.iterations}</span>` : "";
+      return `<div class="sw-node-model">Repeat ×${count}${live}${off}</div>` +
+        `<div class="sw-node-desc">${esc(n.config?.description || "Repeats the section it feeds")}</div>`;
     }
     if (n.type === "end") {
       // The graph's answer. Filled in by syncFinalOutput once a run reaches it.
@@ -457,7 +578,7 @@
       // node's settings. The mark carries the provider's name as its tooltip.
       const glyph = n.type === "agent"
         ? harnessIcon(n.config?.harness, providerLabel(n.config?.harness))
-        : `<span class="sw-node-glyph">${n.type === "start" ? "▶" : n.type === "end" ? "■" : "✋"}</span>`;
+        : `<span class="sw-node-glyph">${nodeGlyph(n.type)}</span>`;
       // The gear is how a node is configured: there is no settings sidebar, so a
       // node's settings open over the canvas from its own head (or on a
       // double-click of the card).
@@ -980,6 +1101,7 @@
   function renderNodeDialog(n) {
     const title = n.type === "agent" ? "Agent node"
       : n.type === "approval" ? "Approval node"
+      : n.type === "loop" ? "Loop node"
       : n.type === "start" ? "Start node" : "End node";
     // A node's settings are three things, deliberately: which provider runs it,
     // which model it uses, and the message it is handed. Everything else a node
@@ -1007,6 +1129,18 @@
         `<label class="sw-field"><span>User message</span>` +
           `<textarea class="set-input sw-textarea" id="sw-f-message" rows="5" spellcheck="false" placeholder="Approve the plan above before it is implemented.">${esc(c.message || "")}</textarea>` +
           `<div class="sw-hint">Shown in the approval banner while the run is paused. <code>{input}</code> = upstream output, <code>{task}</code> = the run task.</div></label>`;
+    } else if (n.type === "loop") {
+      const c = n.config || {};
+      const count = Math.max(1, Math.round(Number(c.count) || 1));
+      fields =
+        `<label class="sw-field"><span>Passes</span>` +
+          `<input class="set-input sw-count-input" id="sw-f-count" type="number" min="1" max="100" step="1" value="${count}">` +
+          `<div class="sw-hint">How many times the section this loop feeds is repeated. Every pass re-runs the nodes that ` +
+          `only this loop reaches, in order; the end node is never repeated. An approval gate inside the section asks again each pass.</div></label>` +
+        `<label class="sw-field"><span>Note <em>(canvas label)</em></span>` +
+          `<input class="set-input" id="sw-f-desc" value="${escAttr(c.description || "")}" maxlength="300" placeholder="Repeats the section it feeds">` +
+          `<div class="sw-hint">Shown on the node. A node inside the loop can use <code>{iteration}</code>, ` +
+          `<code>{iterations}</code> and <code>{loop}</code> in its message (and <code>$SW_ITERATION</code> in a command).</div></label>`;
     } else if (n.type === "start") {
       fields =
         `<label class="sw-field"><span>User message <em>(default task)</em></span>` +
@@ -1020,7 +1154,7 @@
     dlgEl.innerHTML = dialogHtml(
       (n.type === "agent"
         ? harnessIcon(n.config?.harness, providerLabel(n.config?.harness))
-        : `<span class="sw-dlg-glyph sw-t-${n.type}">${n.type === "start" ? "▶" : n.type === "end" ? "■" : "✋"}</span>`) +
+        : `<span class="sw-dlg-glyph sw-t-${n.type}">${nodeGlyph(n.type)}</span>`) +
       // The name is the node's label on the canvas, so it stays editable — it is
       // not one of the node's three settings, just what it is called.
       `<input class="set-input sw-dlg-name" id="sw-f-name" value="${escAttr(n.name)}" maxlength="60" aria-label="Node name" placeholder="node name">` +
@@ -1106,6 +1240,13 @@
       };
     } else if (n.type === "approval") {
       config = { ...stored, message: read("#sw-f-message", stored.message || "") };
+    } else if (n.type === "loop") {
+      const raw = parseFloat(read("#sw-f-count", String(stored.count ?? 2)));
+      config = {
+        ...stored,
+        count: Number.isFinite(raw) ? Math.min(100, Math.max(1, Math.round(raw))) : 2,
+        description: read("#sw-f-desc", stored.description || ""),
+      };
     } else {
       config = { ...stored };
       if (n.type === "start") config.defaultTask = read("#sw-f-task", stored.defaultTask || "");
@@ -1114,10 +1255,12 @@
   }
 
   async function addNode(type) {
-    const scroll = pane.querySelector(".sw-canvas-scroll");
-    const x = Math.round((scroll?.scrollLeft || 0) + 260 + Math.random() * 80);
-    const y = Math.round((scroll?.scrollTop || 0) + 180 + Math.random() * 80);
-    const what = type === "agent" ? "Agent added" : type === "approval" ? "Approval gate added" : `${type} node added`;
+    // The scroll offsets are screen px, so a new node lands where the user is
+    // looking at any zoom.
+    const x = Math.round((canvasScrollEl?.scrollLeft || 0) / zoom + 260 + Math.random() * 80);
+    const y = Math.round((canvasScrollEl?.scrollTop || 0) / zoom + 180 + Math.random() * 80);
+    const what = type === "agent" ? "Agent added" : type === "approval" ? "Approval gate added"
+      : type === "loop" ? "Loop added" : `${type} node added`;
     await run_(() => post("addNode", { type, x, y }), what);
   }
   async function duplicateNode(id) {
@@ -1180,7 +1323,8 @@
 
   function canvasPoint(cx, cy) {
     const rect = canvasEl.getBoundingClientRect();
-    return { x: cx - rect.left, y: cy - rect.top };
+    // The canvas is scaled, so a screen offset is `zoom` canvas px per screen px.
+    return { x: (cx - rect.left) / zoom, y: (cy - rect.top) / zoom };
   }
   /** Coalesce high-frequency pointer work to one animation frame. */
   let frameQueued = false;
@@ -1207,7 +1351,8 @@
    *  layout at all, and the canvas size is left alone until the drop. */
   function applyDrag() {
     if (!drag) return;
-    const dx = drag.px - drag.sx, dy = drag.py - drag.sy;
+    // Pointer deltas are screen px; node positions are canvas px.
+    const dx = (drag.px - drag.sx) / zoom, dy = (drag.py - drag.sy) / zoom;
     const nx = Math.max(0, Math.round(drag.x + dx)), ny = Math.max(0, Math.round(drag.y + dy));
     drag.el.style.left = `${nx}px`; drag.el.style.top = `${ny}px`;
     const n = nodeById(drag.id);
@@ -1442,6 +1587,28 @@
   }
 
   /**
+   * What an approval gate reads from one agent wired into it: the message it was
+   * handed, then its final result — the two things a review needs, and nothing
+   * of the stream in between (that is what the agent's own section is for).
+   */
+  function agentBriefHtml(n) {
+    const out = nodeOutputText(n.id).trim();
+    const st = runNode(n.id)?.status;
+    return `<div class="sw-msg-section sw-msg-input" data-input="${escAttr(n.id)}">` +
+        `<div class="sw-msg-sec-head">` +
+          harnessIcon(n.config?.harness, providerLabel(n.config?.harness)) +
+          `<span class="sw-msg-sec-name">${esc(n.name)}</span>` +
+          `<span class="sw-msg-sec-tag">input agent</span>` +
+          statusPill(n.id) +
+        `</div>` +
+        promptHtml(n) +
+        `<div class="sw-msg-group">Final result</div>` +
+        (out ? `<pre class="sw-msg-pre">${esc(out)}</pre>`
+             : `<div class="sw-msg-none">${st ? `Nothing captured — ${esc(st)}.` : "Nothing from this agent yet."}</div>`) +
+      `</div>`;
+  }
+
+  /**
    * A human gate's card: the message the reviewer is asked to read, what its
    * input agents produced (wired in below it by the caller), and — while the
    * gate is the one holding the run — the note box and the two buttons. The
@@ -1499,7 +1666,7 @@
       const inputs = inputAgentsOf(n.id);
       return gateCardHtml(n, waiting.includes(n.id)) +
         `<div class="sw-msg-group">Input from</div>` +
-        (inputs.length ? inputs.map(agentOutputHtml).join("")
+        (inputs.length ? inputs.map(agentBriefHtml).join("")
                        : `<div class="sw-msg-none">Nothing is wired into this gate.</div>`);
     }
     if (n.type === "end") return endOutputHtml(n);
@@ -1519,9 +1686,14 @@
     for (const g of nodes().filter((n) => n.type === "approval")) {
       // A waiting gate (or one that has been decided) gets a card — wrapped in a
       // section so that clicking it focuses the gate, exactly like an agent.
+      // Under it, each agent wired in reads as a brief: the message it was handed
+      // and its final result, never its raw stream (the agent has a section of
+      // its own above for that).
       if (waiting.includes(g.id) || runNode(g.id)?.decision) {
+        const inputs = inputAgentsOf(g.id);
         parts.push(`<div class="sw-msg-section sw-msg-gate-wrap" data-node="${escAttr(g.id)}" ` +
-          `title="Focus ${escAttr(g.name)}">${gateCardHtml(g, waiting.includes(g.id))}</div>`);
+          `title="Focus ${escAttr(g.name)}">${gateCardHtml(g, waiting.includes(g.id))}` +
+          `${inputs.map(agentBriefHtml).join("")}</div>`);
       }
     }
     const end = nodes().find((n) => n.type === "end");
@@ -1567,6 +1739,87 @@
   function selectionChanged() {
     msgSig = "";
     renderMessages();
+  }
+
+  /**
+   * The drag handle between the canvas and the messages sidebar. It grows the
+   * sidebar as it is dragged LEFT (the sidebar sits on the right), remembers the
+   * chosen width per browser, and keeps the user's intent while clamping the
+   * shown width to 75% of the viewport as the window shrinks. Keyboard: ←/→
+   * nudge (Shift for a bigger step), Home/Delete — or a double-click — restore
+   * the default. Mirrors the Git view's commit-box resizer.
+   */
+  function initMsgSideResizer(mainEl, sideEl, handle) {
+    if (!mainEl || !sideEl || !handle) return;
+    const MIN = 240, KEY = "scope-sw-msg-width";
+    let desired = null; // preferred sidebar width in px (kept unclamped)
+    const maxWidth = () => Math.max(MIN, Math.round(window.innerWidth * 0.75));
+
+    function render() {
+      if (desired == null) {
+        sideEl.style.width = "";
+        handle.removeAttribute("aria-valuenow");
+        return;
+      }
+      const shown = Math.min(maxWidth(), Math.max(MIN, desired));
+      sideEl.style.width = shown + "px";
+      handle.setAttribute("aria-valuemin", String(MIN));
+      handle.setAttribute("aria-valuemax", String(maxWidth()));
+      handle.setAttribute("aria-valuenow", String(shown));
+    }
+
+    function set(w, persist) {
+      desired = Math.max(MIN, Math.round(w));
+      render();
+      if (persist) { try { localStorage.setItem(KEY, desired); } catch { /* private mode */ } }
+    }
+
+    function reset() {
+      desired = null;
+      render();
+      try { localStorage.removeItem(KEY); } catch { /* private mode */ }
+    }
+
+    try {
+      const saved = parseInt(localStorage.getItem(KEY), 10);
+      if (saved >= MIN) { desired = saved; render(); }
+    } catch { /* private mode */ }
+
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = desired ?? sideEl.getBoundingClientRect().width;
+      handle.classList.add("dragging");
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "col-resize";
+
+      const onMove = (ev) => set(startW + (startX - ev.clientX), false);
+      const onUp = () => {
+        handle.classList.remove("dragging");
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        if (desired != null) {
+          try { localStorage.setItem(KEY, Math.round(sideEl.getBoundingClientRect().width)); } catch { /* private mode */ }
+        }
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+
+    handle.addEventListener("dblclick", reset);
+
+    handle.addEventListener("keydown", (e) => {
+      const cur = desired ?? sideEl.getBoundingClientRect().width;
+      const step = e.shiftKey ? 40 : 12;
+      if (e.key === "ArrowLeft") { e.preventDefault(); set(cur + step, true); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); set(cur - step, true); }
+      else if (e.key === "Home" || e.key === "Delete") { e.preventDefault(); reset(); }
+    });
+
+    // Keep the sidebar in the viewport when it shrinks (the intent is preserved).
+    window.addEventListener("resize", () => { if (desired != null) render(); });
   }
 
   // ─── Run history ──────────────────────────────────────────────────────────
@@ -1715,6 +1968,7 @@
         `<div class="sw-toolbar">` +
           `<button class="btn-sm sw-primary" id="sw-add-agent" type="button" title="Add an agent node">+ Agent</button>` +
           `<button class="btn-sm" id="sw-add-approval" type="button" title="Add a human approval gate">+ Approval</button>` +
+          `<button class="btn-sm" id="sw-add-loop" type="button" title="Add a loop node — repeats the section it feeds">+ Loop</button>` +
           `<button class="btn-sm" id="sw-add-start" type="button" title="Add the start node">+ Start</button>` +
           `<button class="btn-sm" id="sw-add-end" type="button" title="Add the end node">+ End</button>` +
           `<button class="btn-sm" id="sw-triggers" type="button" title="Start this workflow on a schedule or an observed event">⏱ Triggers</button>` +
@@ -1741,6 +1995,18 @@
               `<div class="sw-edge-btns" id="sw-edge-btns"></div>` +
             `</div>` +
           `</div>` +
+          // Zoom controls for the canvas: a floating cluster at the canvas's
+          // bottom-left, outside the scroller so it never scrolls away.
+          `<div class="sw-zoom" id="sw-zoom" role="group" aria-label="Canvas zoom">` +
+            `<button class="btn-sm sw-zoom-btn" id="sw-zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>` +
+            `<button class="btn-sm sw-zoom-pct" id="sw-zoom-pct" type="button" title="Reset the zoom to 100% (0)">100%</button>` +
+            `<button class="btn-sm sw-zoom-btn" id="sw-zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>` +
+            `<button class="btn-sm sw-zoom-btn" id="sw-zoom-fit" type="button" title="Fit the whole workflow on screen" aria-label="Fit to screen">⤢</button>` +
+          `</div>` +
+          // The drag handle that resizes the sidebar (see initMsgSideResizer).
+          `<div class="sw-msg-resizer" id="sw-msg-resizer" role="separator" aria-orientation="vertical" ` +
+            `tabindex="0" aria-label="Resize the messages sidebar" ` +
+            `title="Drag to resize the messages sidebar · double-click to reset"></div>` +
           // What each agent actually said, beside the canvas. Reading, not
           // configuring: a node's settings stay in their own popup.
           `<aside class="sw-msg-side" id="sw-msg-side" aria-label="Agent messages">` +
@@ -1778,6 +2044,7 @@
     runBtn = pane.querySelector("#sw-run");
     stopBtn = pane.querySelector("#sw-stop");
     canvasEl = pane.querySelector("#sw-canvas");
+    canvasScrollEl = pane.querySelector(".sw-canvas-scroll");
     nodesEl = pane.querySelector("#sw-nodes");
     svgEl = pane.querySelector("svg.sw-edges");
     edgePathsEl = pane.querySelector("#sw-edge-paths");
@@ -1807,6 +2074,8 @@
       renderNodes();
       selectionChanged();
     });
+    initMsgSideResizer(mainEl, msgSideEl, pane.querySelector("#sw-msg-resizer"));
+    initCanvasZoom();
     // Clicks inside the sidebar: the gate's own approve/reject, and focusing an
     // agent by clicking its section (the same as clicking its card).
     msgBodyEl.addEventListener("click", (e) => {
@@ -1826,6 +2095,7 @@
     nameInput.addEventListener("change", () => run_(() => post("setWorkflowName", { name: nameInput.value.trim() || "My Workflow" }), "Renamed"));
     pane.querySelector("#sw-add-agent").addEventListener("click", () => addNode("agent"));
     pane.querySelector("#sw-add-approval").addEventListener("click", () => addNode("approval"));
+    pane.querySelector("#sw-add-loop").addEventListener("click", () => addNode("loop"));
     pane.querySelector("#sw-add-start").addEventListener("click", () => addNode("start"));
     pane.querySelector("#sw-add-end").addEventListener("click", () => addNode("end"));
     pane.querySelector("#sw-export").addEventListener("click", exportWorkflow);

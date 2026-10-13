@@ -9,6 +9,15 @@
  * the background** — it keeps going with no page open, streaming each node's
  * output into the run log.
  *
+ * A **`loop` node** repeats the section it *dominates* — the nodes that exist
+ * only because the loop feeds them — `config.count` times, one pass after the
+ * next, re-arming that section between passes. Its section sees
+ * `{iteration}`/`{iterations}`/`{loop}` (and `SW_ITERATION`/`SW_ITERATIONS`/
+ * `SW_LOOP` for a command), an approval gate inside the section asks again on
+ * every pass, and the loop node's own output is what its section produced on
+ * each pass, so a downstream node reads the whole loop. A node the `start` node
+ * can still reach without the loop is *not* in the section — it runs once.
+ *
  *   GET  /subagent-workflow?cwd=<workspace>            → graph + run + history +
  *                                                        triggers snapshot
  *   GET  /subagent-workflow/harnesses                  → harness list + availability,
@@ -96,13 +105,25 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-/** Node kinds. `approval` is a human gate that pauses the run. */
-const NODE_TYPES = ["start", "agent", "approval", "end"];
+/** Node kinds. `approval` is a human gate that pauses the run; `loop` repeats
+ *  the section it dominates. */
+const NODE_TYPES = ["start", "agent", "approval", "loop", "end"];
 /** Where the graph lives in the plugin store: `{ [workspace]: graph }`. */
 const KEY = "workspaces";
 
 const MAX_NODES = 200;
 const MAX_EDGES = 400;
+/** A loop node's pass count is clamped to MAX_LOOPS. Nesting multiplies (an
+ *  inner loop runs fully inside every pass of its parent), so a RUN also carries
+ *  a total-pass budget — MAX_LOOP_PASSES across every loop — and is aborted with
+ *  an error when it is spent, rather than exploring a product of user counts.
+ *  `SCOPE_MAX_LOOP_PASSES` overrides it (the e2e suite lowers it, so the guard
+ *  itself is exercised in a dozen passes instead of five hundred). */
+const MAX_LOOPS = 100;
+const MAX_LOOP_PASSES = (() => {
+  const env = Number(process.env.SCOPE_MAX_LOOP_PASSES);
+  return Number.isFinite(env) && env > 0 ? Math.floor(env) : 500;
+})();
 const NAME_MAX = 60;
 const DESC_MAX = 300;
 const PROMPT_MAX = 20000;
@@ -530,6 +551,22 @@ function normaliseApprovalConfig(raw: any) {
   };
 }
 
+/**
+ * The loop node's config: how many times the section it dominates is repeated.
+ * `count` is clamped to 1…MAX_LOOPS; the default (2) is the smallest count that
+ * actually loops, so a freshly dropped node is visible as a loop.
+ */
+function normaliseLoopConfig(raw: any) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const n = Math.round(Number(r.count));
+  return {
+    description: collapse(r.description).slice(0, DESC_MAX),
+    count: Number.isFinite(n) ? clamp(n, 1, MAX_LOOPS) : 2,
+    enabled: r.enabled !== false,
+    when: normaliseCondition(r.when),
+  };
+}
+
 function normaliseNode(raw: any, index: number) {
   if (!raw || typeof raw !== "object") return null;
   const type = NODE_TYPES.includes(String(raw.type)) ? String(raw.type) : null;
@@ -538,13 +575,14 @@ function normaliseNode(raw: any, index: number) {
     id: String(raw.id ?? "").trim() || `node_${index}`,
     type,
     name: collapse(raw.name).slice(0, NAME_MAX) ||
-      (type === "start" ? "Start" : type === "end" ? "End" : type === "approval" ? "Approval" : "agent"),
+      (type === "start" ? "Start" : type === "end" ? "End" : type === "approval" ? "Approval" : type === "loop" ? "Loop" : "agent"),
     x: clamp(Number(raw.x), 0, CANVAS_MAX),
     y: clamp(Number(raw.y), 0, CANVAS_MAX),
   };
   const r = raw.config && typeof raw.config === "object" ? raw.config : {};
   if (type === "agent") node.config = normaliseAgentConfig(r);
   else if (type === "approval") node.config = normaliseApprovalConfig(r);
+  else if (type === "loop") node.config = normaliseLoopConfig(r);
   else node.config = { description: collapse(r.description).slice(0, DESC_MAX), defaultTask: type === "start" ? multiline(r.defaultTask).slice(0, PROMPT_MAX) : undefined };
   return node;
 }
@@ -866,6 +904,12 @@ export function activate(api: any): void {
         approval: s.approval || null,
         decision: s.decision || null,
       };
+      // A loop node reports which pass it is on, so the canvas can show "2/5"
+      // without a second request.
+      if (s.iterations > 0) {
+        nodes[id].iteration = s.iteration || 0;
+        nodes[id].iterations = s.iterations;
+      }
       if (!incremental) nodes[id].outputTail = s.output ? String(s.output).slice(-4000) : "";
     }
     return {
@@ -1146,16 +1190,113 @@ export function activate(api: any): void {
     const running = new Set<string>();      // node ids currently executing
     const runningByParent = new Map<string, Set<string>>();
 
+    // ── Loops ───────────────────────────────────────────────────────────────
+    // A loop node repeats the section it *dominates* — the nodes that exist only
+    // because the loop feeds them — `config.count` times, one pass after another.
+    // The engine re-arms that section between passes instead of letting it settle
+    // once, and the loop node itself keeps the run open until the last pass ends.
+    const loopNodes = wf.nodes.filter((n: any) => n.type === "loop" && reachable.has(n.id));
+    /** loop id → the nodes one pass of it runs (never includes the end node). */
+    const loopBodies = new Map<string, string[]>();
+    /** loop id → the body's terminal nodes, whose output one pass hands back. */
+    const loopExits = new Map<string, string[]>();
+    for (const L of loopNodes) {
+      // Everything downstream of the loop…
+      const downstream = new Set<string>();
+      const q = [...(children.get(L.id) || [])];
+      while (q.length) {
+        const id = q.pop()!;
+        if (downstream.has(id)) continue;
+        downstream.add(id);
+        for (const c of children.get(id) || []) q.push(c);
+      }
+      // …minus everything the start node can still reach WITHOUT going through
+      // the loop. Those nodes do not exist because of the loop, so it must not
+      // re-run them (and with two loops, this is exactly what makes their
+      // sections disjoint and nest correctly). The end node is never repeated.
+      const avoided = new Set<string>();
+      const q2 = [start.id];
+      while (q2.length) {
+        const id = q2.pop()!;
+        if (id === L.id || avoided.has(id)) continue;
+        avoided.add(id);
+        for (const c of children.get(id) || []) q2.push(c);
+      }
+      const body = [...downstream].filter((id) => !avoided.has(id) && byId.get(id)?.type !== "end");
+      loopBodies.set(L.id, body);
+      loopExits.set(L.id, body.filter((id) => !(children.get(id) || []).some((c) => body.includes(c))));
+    }
+    /**
+     * What a loop is holding while it iterates: the input it was handed (passed
+     * through to its section unchanged, so every pass starts from the same
+     * material) and one entry per finished pass. It is scratch state, not part of
+     * `run.nodes`, so it is never serialized; the loop's *output* is only built
+     * from it when the last pass ends.
+     */
+    const loopLogs = new Map<string, { input: string; parts: string[]; size: number }>();
+    /** Passes this run has completed, across every loop — the run-level budget. */
+    let totalPasses = 0;
+
     const settled = (id: string) => {
       const s = run.nodes[id].status;
       return s === "done" || s === "error" || s === "skipped" || s === "stopped";
     };
+    /** A loop that has begun satisfies its children, so its section can run while
+     *  the loop itself is still iterating (it never settles until the last pass). */
+    const provides = (id: string) => settled(id) || (byId.get(id)?.type === "loop" && run.nodes[id].status === "running");
+    /** True while any loop still has passes to run — nothing may finish yet. */
+    const loopBusy = () => loopNodes.some((L: any) => run.nodes[L.id].status === "running");
+    /** True once every node of a loop's section has settled: one pass is done. */
+    const passDone = (id: string) => (loopBodies.get(id) || []).every((b) => settled(b));
+    /**
+     * The loop a node is currently running inside, innermost first (the tightest
+     * body wins, so a nested loop's counter shadows its parent's). Drives
+     * `{iteration}`/`{iterations}`/`{loop}` and the SW_* variables.
+     */
+    const loopContextFor = (nodeId: string) => {
+      let ctx: any = null;
+      for (const L of loopNodes) {
+        const s = run.nodes[L.id];
+        if (s.status !== "running") continue;
+        const body = loopBodies.get(L.id) || [];
+        if (!body.includes(nodeId)) continue;
+        if (!ctx || body.length <= ctx.size) ctx = { size: body.length, loop: L.name, iteration: s.iteration, iterations: s.iterations };
+      }
+      return ctx;
+    };
+    /** Re-arm one pass: every node in the section goes back to pending. */
+    function rearmBody(ids: string[]) {
+      for (const id of ids) {
+        const s = run.nodes[id];
+        s.status = "pending";
+        s.output = "";
+        s.error = "";
+        s.exitCode = null;
+        s.startedAt = null;
+        s.finishedAt = null;
+        s.bypassed = false;
+        s.approval = null;
+        s.decision = null;
+        // A nested loop in this section re-reads its own count on the next pass.
+        s.iteration = 0;
+        s.iterations = 0;
+        s.passes = 0;
+      }
+    }
+    /** One pass's contribution to the loop node's own output: what its section
+     *  ended up producing, so a downstream node sees the whole loop. */
+    function passOutput(loopId: string) {
+      return (loopExits.get(loopId) || [])
+        .map((id) => run.nodes[id].output)
+        .filter(Boolean)
+        .join("\n\n---\n\n");
+    }
     const parentsReady = (node: any) => {
       const ps = parents.get(node.id) || [];
       if (!ps.length) return false;
       const join = node.type === "agent" ? node.config.join : "all";
-      if (join === "first") return ps.some(settled);
-      return ps.every(settled);
+      if (join === "first") return ps.some(provides);
+      return ps.every(provides);
     };
     const gateFree = (node: any) => {
       for (const pid of parents.get(node.id) || []) {
@@ -1178,7 +1319,16 @@ export function activate(api: any): void {
     function resolvePrompt(node: any) {
       const input = upstreamOutput(node);
       const tmpl = node.config.prompt && node.config.prompt.trim() ? node.config.prompt : "{input}";
-      return tmpl.replace(/\{input\}/g, input).replace(/\{task\}/g, run.task).trim();
+      // `{iteration}`/`{iterations}`/`{loop}` are only meaningful inside a loop's
+      // section; elsewhere they render empty rather than as literal braces.
+      const it = loopContextFor(node.id);
+      return tmpl
+        .replace(/\{input\}/g, input)
+        .replace(/\{task\}/g, run.task)
+        .replace(/\{iteration\}/g, it ? String(it.iteration) : "")
+        .replace(/\{iterations\}/g, it ? String(it.iterations) : "")
+        .replace(/\{loop\}/g, it ? it.loop : "")
+        .trim();
     }
 
     /**
@@ -1209,12 +1359,63 @@ export function activate(api: any): void {
       let progressed = true;
       while (progressed) {
         progressed = false;
+        // A loop whose section has settled either starts its next pass (re-arming
+        // the section) or, on the last one, settles itself and lets the run go on.
+        for (const L of loopNodes) {
+          const s = run.nodes[L.id];
+          if (s.status !== "running" || !passDone(L.id)) continue;
+          const body = loopBodies.get(L.id) || [];
+          const log = loopLogs.get(L.id);
+          if (log) {
+            const text = passOutput(L.id);
+            if (text) {
+              log.parts.push(text);
+              log.size += text.length;
+              // A long loop keeps its newest passes; the old ones fall off, the
+              // same way a node's own output is capped.
+              while (log.size > RUN_OUTPUT_MAX && log.parts.length > 1) log.size -= log.parts.shift()!.length;
+            }
+          }
+          // The run's whole loop budget, spent: stop with an error rather than
+          // walking a product of counts (nested loops multiply).
+          if (totalPasses >= MAX_LOOP_PASSES) {
+            s.status = "error";
+            s.error = `the run used its whole loop budget (${MAX_LOOP_PASSES} passes) at ${L.name}`;
+            s.finishedAt = Date.now();
+            logLine(run, L.id, "status", `✖ ${L.name}: ${s.error}`);
+            saveRun(run);
+            abortRun(run, "error", `run aborted: ${L.name} hit the loop ceiling (${MAX_LOOP_PASSES})`);
+            return;
+          }
+          totalPasses++;
+          if (s.iteration < s.iterations) {
+            s.iteration++;
+            s.passes++;
+            rearmBody(body);
+            logLine(run, L.id, "status", `↻ ${L.name} — pass ${s.iteration}/${s.iterations}`);
+            saveRun(run);
+          } else {
+            s.status = "done";
+            s.finishedAt = Date.now();
+            // Only now does the loop's own output become the whole loop: what
+            // reached it, then what each pass produced — so a node after the loop
+            // reads every iteration.
+            const parts = log ? [log.input, ...log.parts] : [];
+            s.output = parts.filter(Boolean).join("\n\n---\n\n").slice(-RUN_OUTPUT_MAX);
+            logLine(run, L.id, "status", `✔ ${L.name} — ${s.iterations} pass${s.iterations === 1 ? "" : "es"} done`);
+            saveRun(run);
+          }
+          progressed = true;
+        }
         for (const node of wf.nodes) {
           if (node.type === "start" || !reachable.has(node.id)) continue;
           if (run.nodes[node.id].status !== "pending") continue;
           if (!parentsReady(node) || !gateFree(node)) continue;
-          // The end node is a sentinel: it settles as soon as its parents do.
+          // The end node is a sentinel: it settles as soon as its parents do —
+          // but never while a loop still has passes to run, or the run would be
+          // declared finished mid-loop.
           if (node.type === "end") {
+            if (loopBusy()) continue;
             const s = run.nodes[node.id];
             s.status = "done";
             s.output = upstreamOutput(node);
@@ -1223,8 +1424,9 @@ export function activate(api: any): void {
             progressed = true;
             continue;
           }
-          // Off, or gated out: settle it in place and pass the input along.
-          const skipped = node.type === "agent" || node.type === "approval" ? bypassReason(node) : null;
+          // Off, or gated out: settle it in place and pass the input along (for a
+          // loop, that means its section runs exactly once, like a pass-through).
+          const skipped = node.type === "agent" || node.type === "approval" || node.type === "loop" ? bypassReason(node) : null;
           if (skipped) {
             const s = run.nodes[node.id];
             s.status = "skipped";
@@ -1251,6 +1453,28 @@ export function activate(api: any): void {
             progressed = true;
             continue;
           }
+          // A loop holds its section open: it starts iterating here, and only
+          // settles once its last pass has run (see the top of this loop).
+          if (node.type === "loop") {
+            const s = run.nodes[node.id];
+            const body = loopBodies.get(node.id) || [];
+            s.status = "running";
+            s.startedAt = Date.now();
+            s.iterations = s.iterations > 0 ? s.iterations : clamp(Math.round(Number(node.config.count)), 1, MAX_LOOPS);
+            s.iteration = 1;
+            s.passes = s.passes || 0;
+            // The loop passes what reached it straight into its section, so every
+            // pass starts from the same material; its own output is only assembled
+            // once the last pass has run.
+            s.output = upstreamOutput(node).slice(0, RUN_OUTPUT_MAX);
+            loopLogs.set(node.id, { input: s.output, parts: [], size: 0 });
+            logLine(run, node.id, "status", body.length
+              ? `🔁 ${node.name} — ${s.iterations} ${s.iterations === 1 ? "pass" : "passes"} over ${body.length} node${body.length === 1 ? "" : "s"}`
+              : `🔁 ${node.name} — nothing downstream belongs to this loop alone, so it repeats nothing`);
+            saveRun(run);
+            progressed = true;
+            continue;
+          }
           if (running.size >= MAX_CONCURRENT) return;
           startNode(node);
           progressed = true;
@@ -1263,9 +1487,13 @@ export function activate(api: any): void {
      *  interpolated, falling back to its note so a gate is never blank. */
     function approvalMessage(node: any) {
       const tmpl = node.config.message && node.config.message.trim() ? node.config.message : "";
+      const it = loopContextFor(node.id);
       const rendered = tmpl
         .replace(/\{input\}/g, upstreamOutput(node))
         .replace(/\{task\}/g, run.task)
+        .replace(/\{iteration\}/g, it ? String(it.iteration) : "")
+        .replace(/\{iterations\}/g, it ? String(it.iterations) : "")
+        .replace(/\{loop\}/g, it ? it.loop : "")
         .trim();
       return (rendered || node.config.description || "").slice(0, PROMPT_MAX);
     }
@@ -1388,11 +1616,16 @@ export function activate(api: any): void {
       return new Promise((resolve) => {
         // The node's capability selection always rides along as env vars (a
         // `custom` shell command can use them); a harness that has a real flag
-        // for one of them also gets it as an argument below.
+        // for one of them also gets it as an argument below. Inside a loop's
+        // section the pass counter is exported too, so a command can act on it.
+        const it = loopContextFor(node.id);
         const env = {
           ...process.env,
           SW_PROMPT: prompt, SW_TASK: run.task, SW_NODE: node.name, SW_WORKFLOW: wf.name,
           SW_MODEL: node.config.model || "",
+          SW_ITERATION: it ? String(it.iteration) : "",
+          SW_ITERATIONS: it ? String(it.iterations) : "",
+          SW_LOOP: it ? it.loop : "",
           // The node's reference files, one path per entry (already part of
           // $SW_PROMPT, which carries each with its description).
           SW_REFS: (node.config.refs || []).map((r: any) => r.path).join(","),
@@ -1543,6 +1776,9 @@ export function activate(api: any): void {
     function maybeFinish() {
       if (run.status !== "running") return;
       if (running.size > 0) return;
+      // A loop between passes spawns no process, so it is not in `running` — but
+      // the run is not over until its section has run its last pass.
+      if (loopBusy()) return;
       const end = wf.nodes.find((n: any) => n.type === "end");
       const endSettled = !!(end && reachable.has(end.id) && settled(end.id));
       // "Unsettled" covers a node that is still eligible *and* one parked on an
@@ -1722,11 +1958,12 @@ export function activate(api: any): void {
           if (type === "end" && current.nodes.some((n: any) => n.type === "end")) { exists = true; return current; }
           const node: any = {
             id: nextId("node"), type,
-            name: type === "start" ? "Start" : type === "end" ? "End" : type === "approval" ? "Approval" : "agent",
+            name: type === "start" ? "Start" : type === "end" ? "End" : type === "approval" ? "Approval" : type === "loop" ? "Loop" : "agent",
             x: clamp(Number(body.x), 0, CANVAS_MAX), y: clamp(Number(body.y), 0, CANVAS_MAX),
           };
           node.config = type === "agent" ? normaliseAgentConfig({})
             : type === "approval" ? normaliseApprovalConfig({})
+            : type === "loop" ? normaliseLoopConfig({})
             : { description: "", defaultTask: "" };
           current.nodes.push(node);
           return current;
@@ -1782,6 +2019,13 @@ export function activate(api: any): void {
                 enabled: patch.enabled != null ? patch.enabled : node.config.enabled,
                 when: patch.when != null ? patch.when : node.config.when,
               });
+            } else if (node.type === "loop") {
+              node.config = normaliseLoopConfig({
+                description: patch.description != null ? patch.description : node.config.description,
+                count: patch.count != null ? patch.count : node.config.count,
+                enabled: patch.enabled != null ? patch.enabled : node.config.enabled,
+                when: patch.when != null ? patch.when : node.config.when,
+              });
             } else {
               node.config = {
                 description: collapse(patch.description != null ? patch.description : node.config.description).slice(0, DESC_MAX),
@@ -1830,9 +2074,9 @@ export function activate(api: any): void {
         const src = before.nodes.find((n: any) => n.id === id);
         if (!src) return jsonResponse({ error: "no such node" }, 404);
         // A graph has exactly one start and one end, so only the repeatable
-        // kinds (agents and approval gates) clone.
-        if (src.type !== "agent" && src.type !== "approval") {
-          return jsonResponse({ error: "only agent and approval nodes can be duplicated" }, 409);
+        // kinds (agents, approval gates and loops) clone.
+        if (src.type !== "agent" && src.type !== "approval" && src.type !== "loop") {
+          return jsonResponse({ error: "only agent, approval and loop nodes can be duplicated" }, 409);
         }
         const state = commit(workspace, (current) => {
           const from = current.nodes.find((n: any) => n.id === id);

@@ -42,7 +42,7 @@
 /* ── Layout ─────────────────────────────────────────────────────────────── */
 
 .sw-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.sw-main { flex: 1; min-height: 0; display: flex; }
+.sw-main { flex: 1; min-height: 0; display: flex; position: relative; }
 .sw-canvas-scroll {
   position: relative; flex: 1 1 auto; min-width: 0; overflow: auto;
   /* Same faint blueprint grid as every other content canvas (no second
@@ -52,6 +52,26 @@
   background-size: var(--grid-size);
 }
 .sw-canvas { position: relative; width: 1000px; height: 700px; }
+
+/* ── Zoom cluster ───────────────────────────────────────────────────────── */
+/*
+ * Sits at the canvas's bottom-left, outside the scroller, so it stays put while
+ * the graph scrolls. The percentage in the middle is also the reset control.
+ */
+.sw-zoom {
+  position: absolute; left: 12px; bottom: 12px; z-index: 15;
+  display: flex; align-items: center; gap: 4px; padding: 4px;
+  background: var(--glass-bg-strong); border: 1px solid var(--border);
+  border-radius: var(--r-btn); box-shadow: var(--shadow-card);
+}
+.sw-zoom-btn {
+  width: 26px; height: 24px; padding: 0;
+  display: grid; place-items: center; font-size: 14px; line-height: 1;
+}
+.sw-zoom-pct {
+  height: 24px; padding: 0 8px;
+  font-family: var(--mono), var(--emoji); font-size: 11px; font-variant-numeric: tabular-nums;
+}
 
 .sw-edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
 .sw-edge { fill: none; stroke: color-mix(in srgb, var(--muted) 75%, transparent); stroke-width: 2; pointer-events: stroke; cursor: pointer; }
@@ -90,6 +110,13 @@
 .sw-node.sw-t-agent { border-top: 3px solid var(--accent); }
 .sw-node.sw-t-approval { border-top: 3px solid var(--orange); }
 .sw-node.sw-t-approval .sw-node-glyph { color: var(--orange); }
+.sw-node.sw-t-loop { border-top: 3px solid var(--cyan); }
+.sw-node.sw-t-loop .sw-node-glyph { color: var(--cyan); }
+/* The pass a loop is on, in the node's own body: the live "2/5". */
+.sw-loop-pass {
+  font-family: var(--mono), var(--emoji); font-size: 10px; color: var(--cyan);
+  border: 1px solid color-mix(in srgb, var(--cyan) 45%, var(--border)); border-radius: var(--r-pill); padding: 0 5px;
+}
 
 .sw-node-head { display: flex; align-items: center; gap: 7px; padding: 8px 10px 6px; }
 .sw-node-glyph { font-size: 12px; color: var(--accent); }
@@ -102,6 +129,7 @@
 .sw-node-head .sw-hicon svg { width: 13px; height: 13px; }
 .sw-node.sw-t-start .sw-node-glyph { color: var(--green); }
 .sw-node.sw-t-end .sw-node-glyph { color: var(--red); }
+.sw-node.sw-t-loop .sw-node-glyph { font-size: 11px; }
 .sw-node-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The gear on a node's head. Node settings live in a popup now, so this is the
    way in — unlike the delete ✕ it stays visible, because it is the node's main
@@ -189,15 +217,31 @@
 /*
  * What each agent actually says, beside the canvas: one section per agent, the
  * gate's own Approve / Reject, and the end node's output split per agent. It is
- * a reading surface — settings stay in the node's popup (see below) — so it is
- * narrower than the settings panel it replaces and can be folded away.
+ * a reading surface — settings stay in the node's popup (see below) — so it can
+ * be folded away and resized by the handle on its edge (see `initMsgSideResizer`
+ * in client.js; the width is remembered per browser).
  */
+
+/* The drag handle between the canvas and the sidebar. Transparent until it is
+   hovered, dragged or focused, so the sidebar's own edge is the resting chrome.
+   Dragging LEFT grows the sidebar (it lives on the right-hand side). The handle
+   straddles the seam — its -3px side margins cancel its 6px width, so it costs
+   the flex row nothing and its centre sits exactly on the boundary, leaving the
+   sidebar flush beside the canvas (the edge the layout test asserts). */
+.sw-msg-resizer {
+  flex: 0 0 auto; width: 6px; margin: 0 -3px;
+  cursor: col-resize; background: transparent; position: relative; z-index: 20;
+}
+.sw-msg-resizer:hover,
+.sw-msg-resizer.dragging,
+.sw-msg-resizer:focus-visible { background: var(--accent); opacity: .5; outline: none; }
 
 .sw-msg-side {
   flex: 0 0 auto; width: 360px; min-width: 0;
   display: flex; flex-direction: column;
   background: var(--surface); border-left: 1px solid var(--border);
 }
+.sw-main.no-msgs .sw-msg-resizer,
 .sw-main.no-msgs .sw-msg-side { display: none; }
 .sw-msg-head {
   flex: 0 0 auto; display: flex; align-items: baseline; gap: 8px;
@@ -280,15 +324,18 @@
  */
 
 .sw-modal-backdrop {
-  position: fixed; inset: 0; z-index: 1200;
+  position: fixed; inset: 0; z-index: var(--z-modal);
   display: flex; align-items: center; justify-content: center;
   padding: 0;
-  background: rgba(0, 0, 0, .5);
+  /* The app-wide popup scrim (see styles.css → superdesign-alpha — popups). */
+  background: var(--scrim);
 }
 /* A closed popup is marked with `hidden`; the author `display: flex` above would
    otherwise beat the user agent's rule for [hidden] and it would never hide. */
 .sw-modal-backdrop[hidden] { display: none; }
 
+/* The full-bleed variant of the popup chrome: a reading surface, not a dialog,
+   so it fills the viewport square and carries no border or shadow. */
 .sw-modal {
   display: flex; flex-direction: column;
   width: 100%; height: 100%; max-width: none; max-height: none;
@@ -298,14 +345,17 @@
 @keyframes sw-dlg-in { from { opacity: 0; transform: translateY(8px) scale(.99); } }
 @media (prefers-reduced-motion: reduce) { .sw-modal { animation: none; } }
 
-.sw-dlg-head { display: flex; align-items: center; gap: 9px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.sw-dlg-head { display: flex; align-items: center; gap: 9px; padding: 12px 16px; border-bottom: 1px solid var(--hairline); }
 .sw-dlg-head .sw-hicon { width: 22px; height: 22px; border-radius: var(--r-control); background: var(--accent-soft); }
 .sw-dlg-glyph {
   width: 22px; height: 22px; flex: 0 0 auto; display: grid; place-items: center;
   border-radius: var(--r-control); font-size: 11px; color: var(--accent); background: var(--accent-soft);
 }
 .sw-dlg-glyph.sw-t-approval { color: var(--orange); background: color-mix(in srgb, var(--orange) 15%, transparent); }
-.sw-dlg-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.sw-dlg-glyph.sw-t-loop { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 15%, transparent); }
+.sw-dlg-glyph.sw-t-start { color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }
+.sw-dlg-glyph.sw-t-end { color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }
+.sw-dlg-title { font-family: var(--font-display); font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
 /* The node's name is its label on the canvas, so it is edited in the head. */
 .sw-dlg-name {
   flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600;
@@ -315,20 +365,21 @@
   flex: 0 0 auto; font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
   text-transform: uppercase; color: var(--muted);
 }
+/* The shared popup close button (28px, hairline, accent on hover). */
 .sw-dlg-x {
-  flex: 0 0 auto; width: 24px; height: 24px; padding: 0;
-  display: grid; place-items: center; border-radius: var(--r-control);
-  font-family: inherit; font-size: 12px; line-height: 1;
-  color: var(--muted); background: transparent; border: 1px solid transparent;
+  flex: 0 0 auto; width: 28px; height: 28px; padding: 0;
+  display: grid; place-items: center; border-radius: var(--r-btn);
+  font-family: inherit; font-size: 13px; line-height: 1;
+  color: var(--text-subtle); background: transparent; border: 1px solid var(--hairline-strong);
   cursor: pointer; transition: color .12s ease, background .12s ease, border-color .12s ease;
 }
-.sw-dlg-x:hover { color: var(--text); background: var(--surface-3); border-color: var(--border); }
+.sw-dlg-x:hover { color: var(--text); background: var(--surface-3); border-color: var(--accent); }
 
 /* The popup is a whole screen now, so the form inside it is centred in a
    readable column rather than stretched across a wide monitor. */
 .sw-dlg-body { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; padding: 16px max(16px, calc((100% - 1080px) / 2)); overflow: auto; min-height: 0; }
 .sw-dlg-body p { margin: 0; }
-.sw-dlg-actions { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border); }
+.sw-dlg-actions { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--hairline); }
 /* The destructive action sits apart, on the left; save and close stay together. */
 .sw-dlg-actions .sw-danger { margin-right: auto; }
 
@@ -344,6 +395,8 @@
 .sw-field > span { font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
 .sw-field > span em { font-style: normal; font-weight: 400; text-transform: none; letter-spacing: 0; opacity: .8; }
 .sw-textarea { resize: vertical; font-family: monospace, var(--emoji); font-size: 12px; line-height: 1.45; }
+/* A loop's pass count is a single small number, not a field-wide value. */
+.sw-count-input { width: 120px; font-family: var(--mono), var(--emoji); }
 /* Only the custom-command provider renders this field. */
 .sw-only-custom { display: none; }
 /* A plain checkbox line — still used by the workflow-level trigger form. */

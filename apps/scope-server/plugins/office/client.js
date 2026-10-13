@@ -1577,9 +1577,9 @@
         await walkLeg(courier, at, next, facing(at, next));
         at = next;
       }
-      // The handover: turn to the desk, hold the task up, then let go of it.
+      // The handover: hold the task up at the desk, still facing the way it
+      // walked in (so it faces the desk, never the camera), then let go of it.
       courier.classList.add("handing");
-      courier.classList.remove("dir-down", "dir-up", "dir-left", "dir-right");
       at = to;
       await sleep(HANDOVER_MS);
       courier.classList.remove("handing");
@@ -1995,7 +1995,7 @@
   function openDialog({ title, hint, body, submitLabel, onSubmit, onMount, wide }) {
     closeDialog();
     const overlay = document.createElement("div");
-    overlay.className = "def-editor-backdrop";
+    overlay.className = "def-editor-backdrop office-dialog-backdrop";
     overlay.id = "office-dlg-backdrop";
     overlay.innerHTML =
       `<form class="office-dialog${wide ? " office-dialog-wide" : ""}" role="dialog" aria-modal="true" aria-label="${escAttr(title)}">` +
