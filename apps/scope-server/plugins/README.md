@@ -320,7 +320,7 @@ export function activate(api) {
 
 The kit exposes `fs`, `path`, `jsonResponse`, `textResponse`, `readBody`,
 `intParam`, `intOrNull`, `validateCwd`, `requireCwd`, `jsonBody`,
-`resolveProjectDir`, `readSettingsJson`,
+`resolveProjectDir`, `readSettingsJson`, `modelsMeta`,
 `DEFAULT_COMMIT_TEMPLATE`, `generateCommitMessage`, `git`,
 `gitTry`, `gitConfigArgs`, `ensureGitRepo`, `resolveWithinCwd`, `cleanPaths`,
 `rejectOptionLike`, `parsePorcelainLine`, `porcelainStatus`, `buildRepoGraph`,
@@ -346,6 +346,14 @@ For plugins that *run* an agent, two more members matter:
   `SCOPE_AGENT_DIR` moves the directory, so a second guess at the default would
   resolve to the wrong tree. Feature-detect it and say so in the UI when it is
   absent rather than resolving against somewhere else.
+* `modelsMeta()` — the host's model catalogue, re-read on call:
+  `{ "<provider>/<id>": { provider, contextWindow, maxTokens, cost, … } }`, built
+  from pi's model store, the dynamic provider caches and pi's own
+  available-models read. A plugin whose picker offers *models* should offer these
+  keys rather than build a catalogue itself: they are the `<provider>/<id>`
+  strings pi resolves, and a bare id is ambiguous the moment two authenticated
+  providers ship the same name (pi then fails the run with `Model "x" is
+  ambiguous across providers`).
 
 `readSettingsJson()` is pi's `settings.json` — read-only, for the keys pi itself
 owns (`defaultModel`, `theme`, `editorPaddingX`, …). It is **not** where a

@@ -1,0 +1,1164 @@
+/* mobile.css — Amber Terminal Noir: the phone layout's design system.
+ *
+ * Loaded only by mobile.html, which the server serves for phone entries (see
+ * wantsMobileDocument in server.ts). It is deliberately NOT styles.css: a phone
+ * has no room for the desktop chrome (header nav, resizable rails, terminal,
+ * office floor), and shipping 9.6k lines of it to hide it again is exactly what
+ * this layout replaces.
+ *
+ * The visual system is "Amber Terminal Noir": a near-black engineering-console
+ * field, a hairline blueprint texture under every panel, a strict three-step
+ * grayscale text hierarchy, and a single RATIONED amber accent standing in for
+ * "signal". Typography carries the personality — Clash Grotesk for display and
+ * labels at negative tracking, Satoshi for prose, and the system monospace for
+ * console readouts and the command input ONLY (never for prose).
+ *
+ * Ground rules for anything added here:
+ *   • Amber is rationed: a two-tone headline word, icon glyphs, the primary
+ *     button, selected-state ticks, the amber "waiting" status dot, and the
+ *     soft radial glow behind one panel. It NEVER fills a background.
+ *   • Structure comes from typography + hairline rules, not card chrome: message
+ *     rows and drawer rows are zero-fill "ghost" containers separated by 1px
+ *     borders. Panels (#121212 + hairline + deep shadow) are reserved for
+ *     floating surfaces (drawer, sheet, tool output, ask cards).
+ *   • Text hierarchy is exactly three steps: --text (#FFFFFF) / --text-2
+ *     (#71717A) / --text-3 (#A1A1AA). No other text colors.
+ *   • The texture stays at 2-3% alpha and only on panel backdrops — never a
+ *     bold visible grid.
+ *   • Mobile-first, single column, no hover-only affordances. Touch targets
+ *     >= 44px (the reference's 34px controls are desktop-scale), and safe-area
+ *     padding on the edges iOS cuts out. `100dvh` (not vh) so the collapsible
+ *     URL bar cannot hide the composer.
+ */
+
+/* ── Fonts ──────────────────────────────────────────────────────────────────
+ * Self-hosted variable weights (see fonts/NOTICE.md, fonts/ITF-FFL.txt). The
+ * mobile layout must not depend on a third-party font host: phones reach this
+ * server over a LAN that may have no internet route. */
+
+@font-face {
+  font-family: "Clash Grotesk";
+  src: url("fonts/ClashGrotesk-Variable.woff2") format("woff2");
+  font-weight: 200 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Satoshi";
+  src: url("fonts/Satoshi-Variable.woff2") format("woff2");
+  font-weight: 300 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── Tokens ──────────────────────────────────────────────────────────────── */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces: near-black, stepped only slightly (#0A0A0A → #121212 → #141414). */
+  --bg: #0a0a0a;
+  --surface: #121212;
+  --surface-alt: #141414;
+  --bg-deep: #080808;
+
+  /* Text: three steps, no fourth. */
+  --text: #ffffff;
+  --text-2: #71717a;
+  --text-3: #a1a1aa;
+  --text-muted: #52525b;
+
+  /* Accents. `--accent` is for fills and glyphs; `--accent-ink` is the accent
+   * as TEXT (in the light theme they differ, so contrast survives). */
+  --accent: #f5c400;
+  --accent-ink: #f5c400;
+  --accent-alt: #ff5a3c;
+  --warn: #ff5a3c; /* the coral slot: warning-adjacent states only, never fills */
+  --danger: #dc2626;
+  --success: #10b981;
+
+  /* Borders: near-invisible hairlines. */
+  --border-subtle: #2a2a2a;
+  --hairline: rgba(255, 255, 255, 0.1);
+  --border-panel: rgba(255, 255, 255, 0.06);
+
+  /* Elevation: a 1px "ring" plus a large soft drop, for floating panels. */
+  --shadow-panel: rgba(255, 255, 255, 0.06) 0 0 0 1px, rgba(0, 0, 0, 0.55) 0 24px 64px 0;
+  --shadow-card: rgba(255, 255, 255, 0.04) 0 0 0 1px, rgba(0, 0, 0, 0.45) 0 8px 32px 0;
+  --glow-accent: rgba(245, 196, 0, 0.25) 0 0 24px 0;
+  --glow-accent-soft: radial-gradient(60% 40% at 50% 0%, rgba(245, 196, 0, 0.07), rgba(0, 0, 0, 0) 70%);
+
+  /* Type */
+  --font-display: "Clash Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-body: "Satoshi", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* Radii */
+  --r-sharp: 2px;
+  --r-control: 6px;
+  --r-button: 8px;
+  --r-card: 12px;
+  --r-panel: 16px;
+  --r-pill: 9999px;
+
+  /* Spacing */
+  --sp: 8px;
+  --gap: 16px;
+  --pad-x: 14px;
+  /* The app column: past 700px the phone layout keeps this width and centers
+   * instead of stretching across a monitor. */
+  --app-col: 430px;
+  --app-col-half: 215px;
+
+  /* Motion: unhurried macro settles, snappy micro feedback. */
+  --ease-settle: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* The blueprint texture: a fine 8px graph at 3% over a coarse 32px grid at
+   * 2% — faint, and only painted on panel backdrops. */
+  --texture:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  --texture-size: 8px 8px, 8px 8px, 32px 32px, 32px 32px;
+}
+
+/* The reference is a dark-only system. Pi Scope still honours an explicit light
+ * choice, so the light theme keeps the same structure and the same token names —
+ * paper field, near-black text, amber darkened where it is used as text. */
+body:not([data-ds-dark-theme]) {
+  color-scheme: light;
+  --bg: #f4f4f5;
+  --surface: #ffffff;
+  --surface-alt: #fafafa;
+  --bg-deep: #e9e9eb;
+  --text: #0a0a0a;
+  --text-2: #52525b;
+  --text-3: #71717a;
+  --text-muted: #a1a1aa;
+  --accent-ink: #7a5c00;
+  --border-subtle: #e4e4e7;
+  --hairline: rgba(0, 0, 0, 0.12);
+  --border-panel: rgba(0, 0, 0, 0.07);
+  --shadow-panel: rgba(0, 0, 0, 0.08) 0 0 0 1px, rgba(0, 0, 0, 0.16) 0 24px 64px 0;
+  --shadow-card: rgba(0, 0, 0, 0.06) 0 0 0 1px, rgba(0, 0, 0, 0.12) 0 8px 32px 0;
+  --texture:
+    linear-gradient(rgba(0, 0, 0, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.035) 1px, transparent 1px),
+    linear-gradient(rgba(0, 0, 0, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.02) 1px, transparent 1px);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body { height: 100%; margin: 0; }
+
+/* Never let a mobile browser inflate text on its own. iOS/Android text
+ * autosizing ("font boosting") renders a LAN-served page visibly larger than it
+ * was designed — which is exactly what makes a phone feel like it needs zooming
+ * out. The sizes in this file are the sizes. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14px; /* the system's body-sm: the phone reading baseline */
+  line-height: 1.5;
+  overscroll-behavior-y: none;
+}
+
+/* ── Shared primitives ───────────────────────────────────────────────────── */
+
+/* Icon utilities: square ghost buttons. 44px keeps the touch target, which the
+ * reference's 34px desktop controls do not. */
+.m-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color 150ms var(--ease-standard), background-color 150ms var(--ease-standard);
+}
+.m-icon-btn:active { background: var(--surface); color: var(--text); }
+@media (hover: hover) {
+  .m-icon-btn:hover { color: var(--text); }
+}
+
+/* Buttons: primary is the ONE amber solid on a screen; secondary is a ghost
+ * with a hairline that brightens. */
+.m-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: var(--r-button);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  cursor: pointer;
+  transition: border-color 150ms var(--ease-standard), color 150ms var(--ease-standard),
+    background-color 150ms var(--ease-standard), opacity 150ms var(--ease-standard);
+}
+.m-btn:disabled { opacity: 0.45; }
+
+.m-btn-primary {
+  background: var(--accent);
+  color: #000000;
+  box-shadow: var(--glow-accent);
+}
+.m-btn-primary:active { background: #ffd83d; }
+
+.m-btn-soft {
+  background: transparent;
+  border-color: var(--hairline);
+  color: var(--text-3);
+}
+.m-btn-soft:active { color: var(--text); border-color: var(--text-muted); }
+@media (hover: hover) {
+  .m-btn-soft:hover { color: var(--text); border-color: var(--text-muted); }
+}
+
+/* The mono readout treatment: small, uppercase, tracked-out, dim. Used for
+ * status lines and metadata — never for prose. */
+.m-readout,
+#m-sub,
+.m-sess-meta,
+.m-hint,
+.m-model-chip,
+.m-drawer-count,
+.m-chrome-label,
+.m-stat-k,
+.m-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.45;
+}
+
+/* Status dots. Green is the live/breathing state, amber is "waiting/reconnecting"
+ * (the rationed accent used as signal), red is stopped. */
+.m-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: var(--r-pill);
+  background: var(--text-muted);
+}
+.m-dot.green {
+  background: var(--success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 18%, transparent);
+  animation: m-pulse 2.4s var(--ease-standard) infinite;
+}
+.m-dot.orange { background: var(--accent); }
+.m-dot.red { background: var(--danger); }
+
+@keyframes m-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Faux window chrome for console panels: three traffic-light dots, a centered
+ * path/status label, right-aligned utilities. */
+.m-chrome {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 10px 8px 10px 14px;
+  border-bottom: 1px solid var(--border-panel);
+}
+.m-chrome-dots { display: inline-flex; gap: 5px; flex: 0 0 auto; }
+.m-chrome-dots i {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--border-subtle);
+}
+.m-chrome-dots i.danger { background: color-mix(in srgb, var(--danger) 75%, transparent); }
+.m-chrome-dots i.accent { background: color-mix(in srgb, var(--accent) 75%, transparent); }
+.m-chrome-dots i.success { background: color-mix(in srgb, var(--success) 75%, transparent); }
+
+.m-chrome-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Navbar ──────────────────────────────────────────────────────────────────
+ * Flush, square, edge-to-edge, 57px, sticky: never rounded, never inset. */
+
+#m-top {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 57px;
+  padding: max(env(safe-area-inset-top), 0px) 8px 0 4px;
+  padding-left: calc(4px + env(safe-area-inset-left));
+  padding-right: calc(8px + env(safe-area-inset-right));
+  background: var(--bg);
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  flex: 0 0 auto;
+  z-index: 10;
+}
+
+#m-head-text { flex: 1 1 auto; min-width: 0; text-align: center; }
+
+#m-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#m-sub {
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Drawer ──────────────────────────────────────────────────────────────── */
+
+#m-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.66);
+  opacity: 0;
+  transition: opacity 150ms var(--ease-standard);
+}
+#m-scrim.shown { opacity: 1; }
+
+#m-drawer {
+  position: fixed;
+  z-index: 21;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(88vw, 400px);
+  display: flex;
+  flex-direction: column;
+  background-color: var(--surface);
+  background-image: var(--texture);
+  background-size: var(--texture-size);
+  border-right: 1px solid var(--border-panel);
+  box-shadow: var(--shadow-panel);
+  transform: translateX(-101%);
+  transition: transform 300ms var(--ease-settle);
+  padding-left: env(safe-area-inset-left);
+}
+#m-drawer.open { transform: none; }
+
+.m-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: max(env(safe-area-inset-top), 10px) 8px 10px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex: 0 0 auto;
+}
+
+/* The wordmark: one amber-accented word against the white rest. */
+.m-wordmark {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.4px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.m-wordmark span + span { margin-left: 0.28em; }
+.m-wordmark-amber { color: var(--accent-ink); }
+
+.m-head-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+
+.m-drawer-count { color: var(--text-muted); white-space: nowrap; }
+
+/* "New session" in the drawer head — a secondary text action, not chrome. */
+.m-new-txt {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.m-new-txt:active { color: var(--text); }
+
+.m-drawer-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 0 calc(20px + env(safe-area-inset-bottom));
+}
+
+.m-ws + .m-ws { margin-top: 4px; }
+
+/* Workspace label: an eyebrow with a hairline rule running to the edge. */
+.m-ws-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 6px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.m-ws-name::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+/* Ghost rows: zero fill, zero radius, hairlines between. The active session is
+ * marked with a 2px amber rule and a brighter label — not a filled card. */
+.m-sess-row {
+  display: flex;
+  align-items: stretch;
+  border-top: 1px solid var(--border-panel);
+}
+
+.m-sess {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 48px;
+  padding: 8px 4px 8px 16px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 150ms var(--ease-standard);
+}
+.m-sess:active { background: var(--surface-alt); }
+.m-sess.active {
+  border-left-color: var(--accent);
+  background: linear-gradient(90deg, rgba(245, 196, 0, 0.06), rgba(245, 196, 0, 0) 60%);
+}
+.m-sess.active .m-sess-name { color: var(--text); }
+
+.m-sess-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.m-sess-name {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.m-sess-meta { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.m-sess-model {
+  flex: 0 0 auto;
+  max-width: 42%;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sharp);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Touch has no hover, so the delete affordance is always visible — but it sits
+ * apart from the row's tap area and is gated behind a confirm() in JS. */
+.m-sess-del {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 40px;
+  width: 40px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 150ms var(--ease-standard);
+}
+.m-sess-del:active { color: var(--danger); }
+
+/* ── Transcript ──────────────────────────────────────────────────────────────
+ * The reading surface: a textured panel whose structure is typography plus
+ * hairlines. Messages are ghost rows — no bubbles, no fills. */
+
+#m-transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 0 8px;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg);
+  background-image: var(--texture);
+  background-size: var(--texture-size);
+}
+
+/* ── Empty / hero state ──────────────────────────────────────────────────── */
+
+.m-empty {
+  margin: auto;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 18px;
+  text-align: center;
+  position: relative;
+}
+/* The rationed amber wash, behind this one panel only. */
+.m-empty::before {
+  content: "";
+  position: absolute;
+  inset: -40px 0 auto 0;
+  height: 60%;
+  background: var(--glow-accent-soft);
+  pointer-events: none;
+}
+
+.m-empty-ic { font-size: 18px; color: var(--accent); position: relative; }
+
+.m-hero-title {
+  position: relative;
+  font-family: var(--font-display);
+  font-size: clamp(26px, 8.5vw, 34px);
+  font-weight: 600;
+  line-height: 0.95;
+  letter-spacing: -0.8px;
+  color: var(--text);
+}
+.m-hero-amber { color: var(--accent-ink); }
+
+.m-hero-body {
+  position: relative;
+  margin: 0;
+  max-width: 34ch;
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.m-empty-sub { margin-top: 2px; font-size: 11px; color: var(--text-3); }
+
+/* Stat readouts: label above value, in mono. */
+.m-stats {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 16px;
+  margin: 4px 0 8px;
+}
+.m-stat { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.m-stat-k { color: var(--text-muted); }
+.m-stat-v {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.6px;
+  color: var(--text);
+}
+.m-stat-v.hot { color: var(--accent-ink); }
+
+.m-loading {
+  padding: 18px 16px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+/* Message rows */
+.m-msg {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+  padding: 10px var(--pad-x);
+  border-top: 1px solid var(--border-panel);
+}
+.m-transcript-first, .m-msg:first-child { border-top: 0; }
+.m-msg.m-user { align-items: flex-end; }
+.m-msg.m-ai { align-items: flex-start; }
+
+/* Ghost container: the bubble is only a column, never a card. */
+.m-bubble {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow-wrap: anywhere;
+}
+.m-msg.m-user .m-bubble { align-items: flex-end; text-align: right; }
+.m-msg.m-user .m-text { color: var(--text-3); }
+
+/* Lead label ("pi" / "you"): mono eyebrow with an accent glyph for the agent. */
+.m-ai-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.m-ai-head::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+}
+.m-user-head::before { background: var(--text-muted); }
+
+/* Prose keeps its own line breaks (agents answer in plain text / fenced code);
+ * `pre-wrap` preserves both without a markdown pass. Body face only — never
+ * mono for prose. */
+.m-text {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.m-caret {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  animation: m-pulse 1s var(--ease-standard) infinite;
+}
+
+.m-think {
+  margin: 8px 0 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.m-think summary {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.m-think pre {
+  margin: 6px 0 0;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-subtle);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+/* Tool rows: console panels (a browsable readout, so mono is right here). */
+.m-row {
+  align-self: stretch;
+  margin: 8px 0;
+  border: 1px solid var(--border-panel);
+  border-radius: var(--r-card);
+  background-color: var(--surface);
+  background-image: var(--texture);
+  background-size: var(--texture-size);
+  overflow: hidden;
+}
+.m-row > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 9px 11px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+}
+.m-row pre {
+  margin: 0;
+  padding: 0 12px 12px;
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.m-tool-name { color: var(--text); overflow-wrap: anywhere; }
+.m-row.m-err { border-color: color-mix(in srgb, var(--danger) 45%, var(--border-panel)); }
+.m-row.m-err > summary { color: var(--danger); }
+
+.m-badge {
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sharp);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.m-badge.err {
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+  color: var(--danger);
+}
+
+.m-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.m-chip {
+  padding: 1px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sharp);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.m-note {
+  align-self: stretch;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-left: 2px solid var(--border-subtle);
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+.m-note.err {
+  border-left-color: var(--danger);
+  color: var(--danger);
+}
+
+/* ── Ask card (a question pi is blocked on) ──────────────────────────────── */
+
+.m-ask {
+  align-self: stretch;
+  margin: 12px var(--pad-x);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border-panel));
+  border-radius: var(--r-card);
+  background-color: var(--surface);
+  background-image: var(--texture);
+  background-size: var(--texture-size);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+.m-ask.answered { opacity: 0.6; }
+.m-ask-title {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-panel);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.m-ask-opts { display: flex; flex-direction: column; }
+.m-ask-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 0;
+  border-top: 1px solid var(--border-panel);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-3);
+  font-family: var(--font-body);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 150ms var(--ease-standard), color 150ms var(--ease-standard);
+}
+.m-ask-opt:first-child { border-top: 0; }
+.m-ask-opt:active { background: var(--surface-alt); color: var(--text); }
+.m-ask-opt:disabled { opacity: 0.5; }
+
+.m-ask-input {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 12px 14px 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-control);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 16px; /* >=16px stops iOS Safari zooming the page on focus */
+}
+.m-ask-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.m-ask-foot { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border-panel); }
+.m-ask-send { flex: 1 1 auto; }
+.m-ask-cancel { background: transparent; border-color: var(--hairline); color: var(--text-3); }
+
+/* ── Composer ────────────────────────────────────────────────────────────────
+ * The console's input line: a mono prompt glyph, a mono command field, an amber
+ * send control and a red stop control. */
+
+#m-composer {
+  flex: 0 0 auto;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  padding-left: calc(12px + env(safe-area-inset-left));
+  padding-right: calc(12px + env(safe-area-inset-right));
+  background: var(--bg);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.m-composer-row { display: flex; align-items: flex-end; gap: 8px; }
+
+.m-prompt {
+  flex: 0 0 auto;
+  padding-bottom: 11px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 16px;
+  line-height: 1;
+}
+
+#m-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  max-height: 40vh;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-control);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 16px; /* 16px keeps iOS from zooming on focus */
+  line-height: 1.4;
+  resize: none;
+  overflow-y: auto;
+  transition: border-color 150ms var(--ease-standard);
+}
+#m-input::placeholder { color: var(--text-muted); }
+#m-input:focus { outline: none; border-color: var(--accent); }
+
+.m-send {
+  width: 46px;
+  padding: 0;
+  background: var(--accent);
+  color: #000000;
+  box-shadow: var(--glow-accent);
+}
+.m-stop {
+  width: 46px;
+  padding: 0;
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #ffffff;
+}
+
+.m-hint {
+  padding: 6px 2px 2px;
+  color: var(--text-muted);
+}
+.m-hint.err { color: var(--danger); }
+.m-hint.warn { color: var(--warn); }
+
+/* The model/workspace readout under the composer: mono, ghost, tappable. */
+.m-foot {
+  display: flex;
+  justify-content: center;
+  padding: 6px 2px 0;
+}
+
+.m-model-chip {
+  max-width: 100%;
+  min-height: 32px;
+  padding: 5px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sharp);
+  background: transparent;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: color 150ms var(--ease-standard), border-color 150ms var(--ease-standard);
+}
+.m-model-chip:active { color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+
+/* ── Jump-to-latest ──────────────────────────────────────────────────────── */
+
+.m-jump {
+  position: fixed;
+  right: calc(12px + env(safe-area-inset-right));
+  bottom: calc(104px + env(safe-area-inset-bottom));
+  z-index: 15;
+  min-height: 36px;
+  padding: 8px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-button);
+  background: rgba(18, 18, 18, 0.86);
+  backdrop-filter: blur(8px);
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+}
+
+/* ── Session sheet (a console panel) ─────────────────────────────────────── */
+
+/* `display: flex` beats the `hidden` attribute's `display: none` from the UA
+ * sheet, so the hidden state has to be spelled out explicitly. */
+#m-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(0, 0, 0, 0.66);
+  opacity: 0;
+  transition: opacity 150ms var(--ease-standard);
+}
+#m-sheet[hidden] { display: none; }
+#m-sheet.open { opacity: 1; }
+
+.m-sheet-card {
+  width: 100%;
+  max-height: 90dvh;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--surface);
+  background-image: var(--texture);
+  background-size: var(--texture-size);
+  border-top: 1px solid var(--border-panel);
+  border-radius: var(--r-panel) var(--r-panel) 0 0;
+  box-shadow: var(--shadow-panel);
+  transform: translateY(18px);
+  transition: transform 300ms var(--ease-settle);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+#m-sheet.open .m-sheet-card { transform: none; }
+
+.m-sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 16px var(--pad-x);
+  padding-left: calc(var(--pad-x) + env(safe-area-inset-left));
+  padding-right: calc(var(--pad-x) + env(safe-area-inset-right));
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.m-field { display: flex; flex-direction: column; gap: 10px; }
+.m-field[hidden] { display: none; }
+
+.m-label { color: var(--text-muted); }
+
+/* Workspace options: ghost rows in a hairline-bounded list; the chosen one is
+ * marked with an amber rule + tick, never a filled card. */
+.m-opts {
+  display: flex;
+  flex-direction: column;
+  max-height: 34dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--border-panel);
+  border-radius: var(--r-card);
+}
+.m-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 12px;
+  border: 0;
+  border-top: 1px solid var(--border-panel);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 150ms var(--ease-standard);
+}
+.m-opt:first-child { border-top: 0; }
+.m-opt.on {
+  background: linear-gradient(90deg, rgba(245, 196, 0, 0.07), rgba(245, 196, 0, 0) 70%);
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+.m-opt-tick {
+  flex: 0 0 14px;
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.m-opt-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.m-opt-name {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.m-opt-path {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.m-add-ws { display: flex; gap: 8px; }
+
+.m-text-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-control);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 16px;
+}
+.m-text-input::placeholder { color: var(--text-muted); }
+.m-text-input:focus { outline: none; border-color: var(--accent); }
+
+.m-select {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-control);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 16px; /* >=16px, same reason as the composer: no iOS focus zoom */
+}
+.m-select:focus { outline: none; border-color: var(--accent); }
+
+.m-sheet-foot {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding: 12px var(--pad-x) 14px;
+  border-top: 1px solid var(--border-panel);
+}
+.m-sheet-foot .m-btn { flex: 1 1 auto; }
+.m-sheet-foot .m-btn[hidden] { display: none; }
+.m-sheet-foot .m-btn-soft { flex: 0 1 auto; }
+
+/* ── Wide screens ────────────────────────────────────────────────────────────
+ * The phone layout opened in a desktop browser (?ui=mobile) used to stretch
+ * across the whole monitor — that is what reads as "the mobile page is huge and
+ * needs zooming out". On a mouse-driven viewport it keeps its phone width as a
+ * centered column, and the overlay surfaces (drawer, scrim, jump pill) belong
+ * to the column instead of the window.
+ *
+ * It is deliberately gated on the POINTER, not just the width: an Android phone
+ * or foldable reports a wide layout viewport (Desktop-site mode is 980px, an
+ * unfolded Fold is ~673px), and those must keep the full-bleed phone layout
+ * rather than be squeezed into a 430px strip on their own screen. Touch input
+ * therefore never takes this branch. */
+
+@media (min-width: 700px) and (hover: hover) and (pointer: fine) {
+  html, body { background: var(--bg-deep); }
+  body {
+    max-width: var(--app-col);
+    margin: 0 auto;
+    border-left: 1px solid var(--border-subtle);
+    border-right: 1px solid var(--border-subtle);
+  }
+  /* The drawer slides in from the window edge and comes to rest against the
+   * column, so its closed -101% still parks it fully off-screen (anchoring it at
+   * the column would leave a sliver of panel in the gutter). */
+  #m-drawer {
+    left: 0;
+    transition: transform 300ms var(--ease-settle), left 300ms var(--ease-settle);
+  }
+  #m-drawer.open { left: max(0px, calc(50% - var(--app-col-half))); }
+  #m-scrim,
+  #m-sheet {
+    left: max(0px, calc(50% - var(--app-col-half)));
+    right: max(0px, calc(50% - var(--app-col-half)));
+  }
+  .m-jump { right: calc(max(0px, 50% - var(--app-col-half)) + 12px); }
+  .m-sheet-card { max-width: var(--app-col); margin: 0 auto; border-radius: var(--r-panel); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #m-drawer, #m-scrim, #m-sheet, .m-sheet-card { transition: none; }
+  .m-caret { animation: none; opacity: 1; }
+  .m-dot.green { animation: none; }
+}

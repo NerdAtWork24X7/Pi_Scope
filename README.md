@@ -493,14 +493,81 @@ shell environment). Real environment variables still win, so `SCOPE_HOST=0.0.0.0
 overrides the file.
 
 **2. Start Pi Scope and click the phone icon** in the header. A QR appears — point your
-phone's camera at it and the Chat view opens. The QR already carries this run's auth token,
-so bookmark it rather than sharing it. If the machine has more than one network interface
-(wifi, ethernet, docker), pick the address the phone can actually reach.
+phone's camera at it and Pi Scope opens **in a mobile layout**, not a shrunk copy of the
+desktop screen. The QR already carries this run's auth token, so bookmark it rather than
+sharing it. If the machine has more than one network interface (wifi, ethernet, docker),
+pick the address the phone can actually reach.
+
+**The mobile layout** is a small, purpose-built phone app: a ☰ drawer of workspaces and
+sessions (with their live/waiting/stopped state), the selected session's transcript —
+recorded messages plus the live stream as pi works — and a composer that sends prompts
+straight to pi. A question pi asks appears as an answerable card, and **Stop** aborts the
+run. The desktop views (Terminal, Files, Git, Checkpoints, Office) are deliberately absent,
+and the phone does not download them: it loads `mobile.html` + `mobile.js` + `mobile.css`,
+not the desktop bundle.
+
+**Starting a conversation from the phone.** The ＋ in the header (or **New session** in the
+drawer) opens a sheet where you pick the **workspace**, the **model**, the **agent team** and
+the **mode**; the first message then spawns pi in that directory with exactly those settings,
+like the desktop's new chat. Workspaces come from your project config plus any workspace the
+phone has seen, and a new directory can be added by typing its path. Team and mode are
+per-project settings that pi reads when the agent starts, so they are written just before the
+first message spawns it (and they are the same settings the desktop switcher writes).
+
+The chip under the composer names the model the next message will run with — tap it to switch
+models on the open chat (applies in place when pi is already running). pi records the
+conversation as usual, and the phone binds to that row once it appears, so reopening it later
+continues the same session rather than starting a second one.
+
+**Deleting a session.** Each row in the drawer has a ✕ beside it for the same destructive
+action the desktop rail offers: it kills the pi subprocess behind the conversation and then
+deletes the session and its recorded events from the database. It asks for confirmation
+first (the delete cannot be undone), and deleting the session you are reading returns the
+phone to its start state.
+
+**The look.** The phone layout is one deliberate visual system — call it *Amber Terminal
+Noir*: a near-black engineering-console field (#0A0A0A) with a hairline blueprint texture
+under every panel, a strict three-step grayscale for text, and a single rationed amber
+accent (#F5C400) that means "signal" — a highlighted word, the one primary button, a live
+status dot — never a background. Structure comes from typography and 1px rules rather than
+card chrome: messages and session rows are unfilled ghost rows, while panels (#121212,
+12px, hairline + deep shadow) are reserved for floating surfaces. Type does the work:
+Clash Grotesk for display and labels, Satoshi for prose, and the system monospace only for
+readouts and the command input. The light theme keeps the same structure with an amber
+darkened to stay legible as text.
+
+**Fitting the screen.** The layout is sized for a thumb, not a monitor: the reading baseline is
+14px/1.5 (the system's own body-sm), rows and controls are compact, and `text-size-adjust` is
+pinned so no mobile browser inflates the type on its own. Width is decided by the *input
+device*, not just the viewport. On a mouse-driven window — the desktop preview via `ui=mobile`
+— the phone layout keeps a 430px column centered in the window rather than stretching across
+it. Anything with a touch pointer stays full-bleed: an Android phone in Desktop-site mode
+reports a 980px viewport and an unfolded foldable ~673px, and neither should be squeezed into
+a strip with gutters on the device's own screen.
+
+Both web faces are **self-hosted** (`public/fonts/*.woff2`, ~90 KB total) under the ITF Free
+Font License — deliberately not linked from a font CDN, because the phone reaches this
+server over a LAN that may have no internet route. See
+[`public/fonts/NOTICE.md`](apps/scope-server/public/fonts/NOTICE.md).
+
+The layout is chosen at the document, three ways:
+
+| How you open it | What you get |
+|---|---|
+| `http://<lan-ip>:<port>/m?token=…` (the QR) | The mobile layout, always (list, chat, and new sessions) |
+| `http://<lan-ip>:<port>/?token=…` on a phone | The mobile layout (User-Agent / Client Hint) |
+| `http://<lan-ip>:<port>/?token=…&ui=desktop` | The desktop UI, even on a phone |
+
+The 🖥 button in the mobile header opens the same session in the desktop layout; `ui=mobile`
+does the reverse, so neither is a one-way door.
 
 > ⚠️ **This exposes a shell.** With `SCOPE_HOST=0.0.0.0` anyone on that network who knows
-> the token gets the full UI — including **Terminal**, a real shell on the host — plus file
-> edits and git operations. Only do this on a network you trust. The token is minted
-> randomly at boot; pin `SCOPE_AUTH_TOKEN` in `scope.env` if you want a stable URL.
+> the token can drive your agents. The mobile layout is smaller than the desktop UI, not
+> harmless: prompts run real commands on this host, it can retarget a project's team/mode,
+> and it can delete sessions, and the desktop layout (reachable with
+> `ui=desktop`) adds **Terminal**, a real shell, plus file edits and git operations. Only do
+> this on a network you trust. The token is minted randomly at boot; pin `SCOPE_AUTH_TOKEN`
+in `scope.env` if you want a stable URL.
 
 Running from source instead of the launcher? `SCOPE_HOST=0.0.0.0 npm start` in
 `apps/scope-server` works the same way; the boot banner prints the phone URL.
@@ -578,5 +645,10 @@ where state is persisted — and copy the working example in
 
 See [`LICENSE`](LICENSE). Pi Scope is an extended fork of
 [disler/pi-agent-observability](https://github.com/disler/pi-agent-observability).
+
+Bundled third-party assets: the mobile layout's [Clash Grotesk](https://www.fontshare.com/fonts/clash-grotesk)
+and [Satoshi](https://www.fontshare.com/fonts/satoshi) webfonts (ITF Free Font License —
+full text in [`apps/scope-server/public/fonts/ITF-FFL.txt`](apps/scope-server/public/fonts/ITF-FFL.txt))
+and the terminal's MesloLGS Nerd Font Mono.
 
 ---

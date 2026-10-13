@@ -1461,8 +1461,11 @@ if (LAN_EXPOSED) {
   if (lanIps.length === 0) {
     console.log("  LAN:   no external IPv4 interface found — reachable on loopback only.");
   } else {
-    console.log(`  LAN:   ${lanIps.map((ip) => `http://${ip}:${PORT}/?token=${encodeURIComponent(AUTH_TOKEN)}`).join("\n         ")}`);
-    console.log("         (open on a phone on the same Wi-Fi; token required)");
+    // Print the MOBILE entry (`/m`), not the bare origin: that is what a phone
+    // should open, and it does not depend on the phone's User-Agent being
+    // recognised. A hand-typed origin still resolves to the right layout.
+    console.log(`  Phone: ${lanIps.map((ip) => `http://${ip}:${PORT}/m?token=${encodeURIComponent(AUTH_TOKEN)}`).join("\n         ")}`);
+    console.log("         (opens the mobile layout from a phone on the same Wi-Fi; token required)");
   }
 }
 console.log("");
@@ -1806,7 +1809,8 @@ function serveStatic(relPath: string, req?: Request): Response | null {
 }
 
 /**
- * Serve index.html, propagating a cache-bust marker to the page's local assets.
+ * Serve an HTML document (index.html or the mobile entry), propagating a
+ * cache-bust marker to the page's local assets.
  *
  * The Chat button hard-reloads the app with `?_=<ts>` so a stale Electron
  * renderer can never keep running old chat JS/CSS. Adding the marker to the
@@ -1816,10 +1820,10 @@ function serveStatic(relPath: string, req?: Request): Response | null {
  * cached, forcing a network fetch. The HTML itself is `no-store` for the same
  * reason. Without the marker this is a plain (ETag-revalidated) static read.
  */
-async function serveIndex(req: Request, url: URL): Promise<Response | null> {
+async function serveDocument(file: string, req: Request, url: URL): Promise<Response | null> {
   const bust = url.searchParams.get("_");
-  if (!bust) return serveStatic("index.html", req);
-  const base = serveStatic("index.html");
+  if (!bust) return serveStatic(file, req);
+  const base = serveStatic(file);
   if (!base) return null;
   const html = (await base.text()).replace(
     /\b(src|href)="([^"#?]+)"/g,
@@ -1832,6 +1836,30 @@ async function serveIndex(req: Request, url: URL): Promise<Response | null> {
   return new Response(html, {
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
   });
+}
+
+// ─── Mobile entry ──────────────────────────────────────────────────────────
+// A phone that pairs over the LAN gets a purpose-built mobile layout instead of
+// the desktop dashboard rendered into a phone viewport. The decision is made
+// server-side, at the document, so the phone never downloads the desktop bundle
+// (styles.css + the terminal/xterm/office scripts) only to hide it again.
+//
+// Three signals, in priority order:
+//   1. `?ui=mobile` / `?ui=desktop` — explicit, and what the QR carries, so the
+//      primary path needs no sniffing at all and the user always has an escape
+//      hatch to the desktop UI.
+//   2. `Sec-CH-UA-Mobile: ?1` — the client hint, when a browser sends it.
+//   3. The User-Agent — the fallback for a hand-typed URL with no hints.
+// Tablets and desktop browsers fall through to the desktop app (the hint is the
+// only positive signal; a `?M` UA token alone is not treated as a phone).
+const MOBILE_UA = /Android|iPhone|iPod|Windows Phone|IEMobile|Opera Mini|webOS|BlackBerry|Mobile Safari|Firefox\/[\d.]+ Mobile/i;
+
+function wantsMobileDocument(req: Request, url: URL): boolean {
+  const ui = url.searchParams.get("ui");
+  if (ui === "mobile") return true;
+  if (ui === "desktop") return false;
+  if (req.headers.get("sec-ch-ua-mobile") === "?1") return true;
+  return MOBILE_UA.test(req.headers.get("user-agent") ?? "");
 }
 
 // ─── File diff helpers (git working-tree vs HEAD) ──────────────────────
@@ -2623,8 +2651,19 @@ async function handle(req: Request): Promise<Response> {
     return new Response(null, { status: 204 });
   }
 
-  if (pathname === "/" || pathname === "/index.html") {
-    return (await serveIndex(req, url)) ?? textResponse("not found", 404, "text/plain");
+  // ── The app document (desktop, or the mobile layout on a phone) ────────
+  // `/m` (and `/mobile`) is the explicit mobile entry the QR points at; `/`
+  // resolves by the request's own signals so a hand-typed LAN URL also gets the
+  // right layout; `/index.html` is the file itself and always the desktop app,
+  // so an old bookmark can never be silently swapped for the phone layout.
+  // Either way the query string (token, ui override) is preserved.
+  if (pathname === "/" || pathname === "/m" || pathname === "/mobile") {
+    const mobile = pathname !== "/" || wantsMobileDocument(req, url);
+    return (await serveDocument(mobile ? "mobile.html" : "index.html", req, url))
+      ?? textResponse("not found", 404, "text/plain");
+  }
+  if (pathname === "/index.html") {
+    return (await serveDocument("index.html", req, url)) ?? textResponse("not found", 404, "text/plain");
   }
 
   // ── User plugin client bundles ─────────────────────────────────────────
@@ -4230,6 +4269,15 @@ const pluginKit = {
   // paths — and it must be the host's value (SCOPE_AGENT_DIR-aware), never a
   // second guess at the default.
   agentDir: AGENT_DIR,
+  // The model catalogue — `{ "<provider>/<id>": { provider, contextWindow, … } }`
+  // — as the host sees it (pi's model store + the dynamic provider caches + the
+  // runtime's own available models). A plugin whose picker offers *models* rather
+  // than a fixed list of aliases (the Workflow's Pi nodes) must offer exactly
+  // these keys: they are the `<provider>/<id>` strings pi resolves, and a bare
+  // id is ambiguous whenever two authenticated providers ship the same name.
+  // A function, not a snapshot: the catalogue is re-read from disk. Feature-
+  // detect it (an older host does not have it).
+  modelsMeta: () => buildModelMeta(),
 };
 
 // Discover + activate plugins before accepting traffic so a plugin's routes are

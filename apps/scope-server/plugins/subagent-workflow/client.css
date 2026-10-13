@@ -37,6 +37,7 @@
 .sw-rs-done { color: var(--green); }
 .sw-rs-error { color: var(--red); }
 .sw-rs-stopped { color: var(--orange); }
+.sw-rs-waiting { color: var(--orange); }
 
 /* ── Layout ─────────────────────────────────────────────────────────────── */
 
@@ -87,9 +88,18 @@
 .sw-node.sw-t-start { border-left: 4px solid var(--green); }
 .sw-node.sw-t-end { border-right: 4px solid var(--red); }
 .sw-node.sw-t-agent { border-top: 3px solid var(--accent); }
+.sw-node.sw-t-approval { border-top: 3px solid var(--orange); }
+.sw-node.sw-t-approval .sw-node-glyph { color: var(--orange); }
 
 .sw-node-head { display: flex; align-items: center; gap: 7px; padding: 8px 10px 6px; }
 .sw-node-glyph { font-size: 12px; color: var(--accent); }
+/* The provider's mark on the node itself: a tinted chip, not a bare glyph, so
+   which agent a node runs is readable at canvas scale. */
+.sw-node-head .sw-hicon {
+  width: 20px; height: 20px; border-radius: var(--r-control);
+  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.sw-node-head .sw-hicon svg { width: 13px; height: 13px; }
 .sw-node.sw-t-start .sw-node-glyph { color: var(--green); }
 .sw-node.sw-t-end .sw-node-glyph { color: var(--red); }
 .sw-node-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -106,6 +116,37 @@
 .sw-node-body { padding: 0 10px 9px; display: flex; flex-direction: column; gap: 3px; }
 .sw-node-model { font-size: 11px; color: var(--accent); font-family: monospace, var(--emoji); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sw-node-desc { font-size: 11.5px; color: var(--muted); line-height: 1.35; max-height: 2.7em; overflow: hidden; }
+/* The end node carries the workflow's final output: inert until a run has
+   settled there, then the run's own colour so the answer stands out on canvas. */
+.sw-node-final {
+  font-size: 11.5px; color: var(--muted); line-height: 1.35; max-height: 2.7em; overflow: hidden;
+  font-family: monospace, var(--emoji); overflow-wrap: anywhere;
+}
+.sw-node-final.has-output { color: var(--green); }
+
+/* The provider's mark: on an agent node's head and in the inspector. */
+.sw-hicon { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: 0 0 auto; color: var(--accent); }
+
+/* The inspector's head: the provider mark (or a node-type glyph), the node's
+   name as an inline title, and a small type readout. */
+.sw-insp-name {
+  flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600;
+  padding: 5px 8px; background: var(--surface); border-color: var(--border);
+}
+.sw-insp-kind {
+  flex: 0 0 auto; font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted);
+}
+.sw-hicon svg { display: block; }
+
+/* A node switched off (or gated out) reads as inert on the canvas. */
+.sw-node.sw-off { opacity: .66; border-top-color: var(--muted); }
+.sw-node.sw-off .sw-node-model { color: var(--muted); }
+.sw-off-tag {
+  font-size: 9.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--orange); border: 1px solid color-mix(in srgb, var(--orange) 45%, var(--border));
+  border-radius: var(--r-btn); padding: 0 4px; margin-left: 4px;
+}
 
 /* Live run status, badged on each node. */
 .sw-badge {
@@ -114,6 +155,7 @@
   font-size: 9px; line-height: 1;
 }
 .sw-b-running { color: var(--accent); background: var(--accent-soft); animation: sw-pulse 1.1s ease-in-out infinite; }
+.sw-b-waiting { color: var(--orange); background: color-mix(in srgb, var(--orange) 18%, transparent); animation: sw-pulse 1.1s ease-in-out infinite; }
 .sw-b-done { color: var(--green); background: color-mix(in srgb, var(--green) 16%, transparent); }
 .sw-b-error { color: var(--red); background: color-mix(in srgb, var(--red) 16%, transparent); }
 .sw-b-stopped { color: var(--orange); background: color-mix(in srgb, var(--orange) 16%, transparent); }
@@ -122,6 +164,7 @@
 .sw-node.sw-run-done { border-color: color-mix(in srgb, var(--green) 55%, var(--border-strong)); }
 .sw-node.sw-run-error { border-color: color-mix(in srgb, var(--red) 55%, var(--border-strong)); }
 .sw-node.sw-run-skipped { opacity: .6; }
+.sw-node.sw-run-waiting { border-color: var(--orange); box-shadow: 0 0 0 2px color-mix(in srgb, var(--orange) 22%, transparent); }
 @keyframes sw-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
 /* Connection ports. */
@@ -152,14 +195,19 @@
 
 .sw-insp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .sw-insp-glyph { width: 22px; height: 22px; flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--r-control); font-size: 11px; color: var(--accent); background: var(--accent-soft); }
+.sw-insp-glyph.sw-t-approval { color: var(--orange); background: color-mix(in srgb, var(--orange) 15%, transparent); }
+.sw-insp-head .sw-hicon { width: 22px; height: 22px; border-radius: var(--r-control); background: var(--accent-soft); }
+.sw-field-label { display: inline-flex; align-items: center; gap: 6px; }
+.sw-field-label .sw-hicon { width: 14px; height: 14px; }
 .sw-insp-body { display: flex; flex-direction: column; gap: 12px; }
-.sw-row { display: flex; gap: 10px; align-items: flex-end; }
-.sw-row > .sw-field { flex: 1; min-width: 0; }
 
 .sw-field { display: flex; flex-direction: column; gap: 5px; }
 .sw-field > span { font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
 .sw-field > span em { font-style: normal; font-weight: 400; text-transform: none; letter-spacing: 0; opacity: .8; }
 .sw-textarea { resize: vertical; font-family: monospace, var(--emoji); font-size: 12px; line-height: 1.45; }
+/* Only the custom-command provider renders this field. */
+.sw-only-custom { display: none; }
+/* A plain checkbox line — still used by the workflow-level trigger form. */
 .sw-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text); cursor: pointer; }
 .sw-check-line { padding-bottom: 6px; white-space: nowrap; }
 
@@ -170,6 +218,37 @@
 .sw-danger { color: color-mix(in srgb, var(--red) 70%, var(--text)); background: color-mix(in srgb, var(--red) 10%, var(--surface-2)); border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border)); }
 .sw-danger:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--red) 20%, var(--surface-2)); border-color: var(--red); }
 .sw-conn-label { font-size: 13.5px; margin: 0 0 8px; }
+
+/* Workflow-level triggers, shown when no node is selected. */
+.sw-triggers {
+  display: flex; flex-direction: column; gap: 12px;
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border);
+}
+.sw-triggers .sw-insp-title { margin-bottom: 0; }
+.sw-triggers p { margin: 0; line-height: 1.5; }
+
+/* ── Approval banner (human-in-the-loop) ─────────────────────────────────── */
+
+.sw-approvals { display: none; }
+.sw-approvals.show {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 14px; max-height: 40%; overflow: auto;
+  background: color-mix(in srgb, var(--orange) 8%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--orange) 35%, var(--border));
+}
+.sw-approval { display: flex; flex-direction: column; gap: 7px; }
+.sw-approval + .sw-approval { border-top: 1px solid var(--border); padding-top: 8px; }
+.sw-approval-head { display: flex; align-items: center; gap: 7px; }
+.sw-approval-glyph { font-size: 13px; line-height: 1; }
+.sw-approval-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.sw-approval-msg {
+  margin: 0; max-height: 8em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-family: monospace, var(--emoji); font-size: 11.5px; line-height: 1.5; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-control); padding: 7px 9px;
+}
+.sw-approval-actions { display: flex; gap: 8px; align-items: center; }
+.sw-approval-note { flex: 1 1 auto; min-width: 0; }
+.sw-approval-actions .btn-sm { flex: 0 0 auto; }
 
 /* ── Run panel ──────────────────────────────────────────────────────────── */
 
@@ -183,6 +262,8 @@
 .sw-run-head { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--surface-2); border-bottom: 1px solid var(--border); }
 .sw-run-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
 .sw-run-summary { font-size: 11.5px; color: var(--muted); margin-left: auto; }
+.sw-history-select { flex: 0 1 240px; min-width: 0; font-size: 12px; padding: 4px 8px; }
+.sw-history-select:disabled { opacity: .5; }
 .sw-run-toggle { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: var(--r-control); }
 .sw-run-toggle:hover { color: var(--text); background: var(--surface-3); }
 .sw-run-log { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 8px 14px; font-family: monospace, var(--emoji); font-size: 11.5px; line-height: 1.5; }
@@ -194,18 +275,48 @@
 .sw-log-stderr .sw-log-text { color: var(--red); }
 .sw-log-tool .sw-log-text { color: var(--orange); }
 
-/* ── Node access: model dropdown + skill/tool/extension toggles ──────────── */
+/* ── The end node's final output (inspector) ────────────────────────────── */
+
+.sw-final-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.sw-final-title { font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
+.sw-final-meta { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-final-pre {
+  margin: 0 0 8px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-family: monospace, var(--emoji); font-size: 11.5px; line-height: 1.5; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-control); padding: 8px 10px;
+}
+
+/* ── The model dropdown ──────────────────────────────────────────────────── */
 
 .sw-model-custom { margin-top: 6px; }
-.sw-caps-wrap { gap: 8px; }
-.sw-caps { border: 1px solid var(--border); border-radius: var(--r-control); padding: 8px 10px; background: var(--surface-2); }
-.sw-caps + .sw-caps { margin-top: 8px; }
-.sw-caps-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
-.sw-caps-head > span { font-size: 12px; font-weight: 600; color: var(--text); }
-.sw-caps-head > em { font-style: normal; font-size: 11px; color: var(--muted); margin-left: auto; text-align: right; }
-.sw-caps-head code { font-size: 11px; }
-.sw-cap { display: flex; align-items: baseline; gap: 7px; padding: 3px 0; font-size: 12.5px; color: var(--text); cursor: pointer; }
-.sw-cap input { margin: 0; flex: 0 0 auto; }
-.sw-cap.off { color: var(--muted); cursor: not-allowed; }
-.sw-cap-name { font-family: monospace, var(--emoji); }
-.sw-cap-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+
+/* ── Reference files (node settings) ────────────────────────────────────── */
+
+.sw-ref-list { display: flex; flex-direction: column; gap: 5px; }
+.sw-ref-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 6px; border: 1px solid var(--border);
+  border-radius: var(--r-control); background: var(--surface);
+}
+.sw-ref-row:hover { border-color: var(--border-strong); }
+.sw-ref-path {
+  flex: 0 1 auto; min-width: 0; max-width: 46%;
+  font-family: monospace, var(--emoji); font-size: 11px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sw-ref-note { flex: 1 1 auto; min-width: 0; font-size: 11.5px; padding: 4px 7px; }
+.sw-ref-del {
+  flex: 0 0 auto; width: 18px; height: 18px; padding: 0;
+  display: grid; place-items: center; border-radius: var(--r-control);
+  font-family: inherit; font-size: 11px; line-height: 1;
+  color: var(--muted); background: transparent; border: 1px solid transparent; cursor: pointer;
+}
+.sw-ref-del:hover { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+.sw-ref-add { display: flex; gap: 6px; align-items: center; }
+.sw-ref-add #sw-ref-path { flex: 1.5 1 120px; min-width: 0; font-size: 11.5px; padding: 4px 7px; }
+.sw-ref-add #sw-ref-note { flex: 1 1 100px; min-width: 0; font-size: 11.5px; padding: 4px 7px; }
+.sw-ref-add .btn-sm { flex: 0 0 auto; }
+
+/* The count on a node that carries references: the message it sends is more
+   than what the panel's User message box shows. */
+.sw-ref-tag { font-size: 9.5px; color: var(--muted); white-space: nowrap; }

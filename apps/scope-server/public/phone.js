@@ -73,10 +73,34 @@
     }
   }
 
-  /** Phone URL: the Chat view, since that is what pairing is for. */
+  /**
+   * The mobile entry URL for a LAN base URL: the mobile layout (`/m`), carrying
+   * this session's token.
+   *
+   * `/m` is the explicit mobile entry, so the phone never has to be detected:
+   * the layout is chosen by where the QR points, not by sniffing a User-Agent.
+   * `ui=mobile` is belt-and-braces for a hand-edited URL (and for the case where
+   * the phone follows a redirect), and the mobile page's own "desktop" button
+   * flips back with `ui=desktop`.
+   *
+   * Pure, and exported on window.SCOPE, so the pairing test can assert the URL
+   * the QR actually encodes without scanning it.
+   */
+  function mobileUrlFor(base) {
+    if (!base) return "";
+    try {
+      const url = new URL(base, location.origin);
+      url.pathname = "/m";
+      url.searchParams.set("ui", "mobile");
+      return url.toString();
+    } catch {
+      return base + (base.includes("?") ? "&" : "?") + "view=chat";
+    }
+  }
+  window.SCOPE.mobileUrlFor = mobileUrlFor;
+
   function phoneUrl(i) {
-    const base = LAN_STATE.urls[i] || "";
-    return base ? base + (base.includes("?") ? "&" : "?") + "view=chat" : "";
+    return mobileUrlFor(LAN_STATE.urls[i] || "");
   }
 
   function render() {
@@ -98,8 +122,8 @@
           : "The server is LAN-bound, but no external IPv4 address is available to reach it from a phone. Check that this machine is on a network, then reload."}</p>
         ${loopbackBound ? '<pre class="phone-cmd">SCOPE_HOST=0.0.0.0 node apps/scope-server/server.ts</pre>' : ""}
         ${target ? `<p>${target}</p>` : ""}
-        <p class="phone-hint">Only rebind on a Wi-Fi you trust: the phone gets the full UI, and the
-        Terminal view is a real shell on this host.</p>
+        <p class="phone-hint">Only rebind on a Wi-Fi you trust: the phone gets the mobile layout
+        (the Chat view and live activity for this run), which can still run code on this host.</p>
       </div>`;
       return;
     }
@@ -126,8 +150,11 @@
       ${picker}
       <div class="phone-hint">
         Point your phone's camera at the code (or open the URL). The phone must be on the
-        <strong>same Wi-Fi</strong>. The URL already carries this session's auth token —
-        treat it like a password, and bookmark it rather than sharing it.
+        <strong>same Wi-Fi</strong>. It opens a <strong>mobile layout</strong> — a sessions list,
+        the live transcript, a composer, and a new-session sheet (workspace, model, team,
+        mode) — not the desktop app; open the URL with
+        <code>ui=desktop</code> to mirror this screen instead. The URL already carries this
+        session's auth token — treat it like a password, and bookmark it rather than sharing it.
       </div>`;
 
     const copyBtn = $("#phone-copy");

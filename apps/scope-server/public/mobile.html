@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <!-- viewport-fit=cover lets the layout paint into the notch/home-indicator area;
+       the CSS pads with env(safe-area-inset-*) instead of leaving dead bands. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0a0a0a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Pi Scope">
+  <title>Pi Scope</title>
+  <link rel="icon" type="image/png" href="logo.png">
+  <link rel="stylesheet" href="mobile.css">
+</head>
+
+<body>
+  <script>(function () { try { var t = localStorage.getItem('scope-theme'); if (t !== 'light') t = 'dark'; document.documentElement.style.colorScheme = t === 'dark' ? 'dark' : 'light'; if (t === 'dark') document.body.setAttribute('data-ds-dark-theme', ''); } catch (e) { } })();</script>
+
+  <header id="m-top">
+    <button id="m-menu" class="m-icon-btn" type="button" aria-label="Sessions" aria-expanded="false">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
+    </button>
+    <div id="m-head-text">
+      <div id="m-title" title="Selected session">Pi Scope</div>
+      <div id="m-sub">pick a session</div>
+    </div>
+    <span id="m-live" class="m-dot red" role="status" aria-label="live feed" title="live feed"></span>
+    <button id="m-new" class="m-icon-btn" type="button" aria-label="New session" title="New session">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button id="m-desktop" class="m-icon-btn" type="button" aria-label="Open the desktop layout" title="Open the desktop layout">
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2"/><line x1="8" y1="20.5" x2="16" y2="20.5"/><line x1="12" y1="17" x2="12" y2="20.5"/></svg>
+    </button>
+  </header>
+
+  <div id="m-scrim" hidden></div>
+
+  <aside id="m-drawer" aria-hidden="true" aria-label="Sessions">
+    <div class="m-drawer-head">
+      <div class="m-wordmark"><span>PI</span><span class="m-wordmark-amber">SCOPE</span></div>
+      <span id="m-drawer-count" class="m-drawer-count"></span>
+      <div class="m-head-actions">
+        <button id="m-drawer-new" class="m-new-txt" type="button">New</button>
+        <button id="m-drawer-close" class="m-icon-btn" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="m-sessions" class="m-drawer-scroll"></div>
+  </aside>
+
+  <main id="m-transcript" aria-live="polite">
+    <!-- Empty state = the layout's hero: two-tone wordmark, one line of
+         positioning, the stat readouts, then the single amber CTA. -->
+    <div class="m-empty">
+      <span class="m-empty-ic" aria-hidden="true">◈</span>
+      <div class="m-hero-title">Pi <span class="m-hero-amber">Scope</span></div>
+      <p class="m-hero-body">Watch and steer a pi agent from this phone — its live transcript, its
+        questions, and its stop button. Open a session, or start a new one in any workspace.</p>
+      <div class="m-stats" id="m-empty-stats"></div>
+      <div class="m-empty-sub">Tap ☰ to pick a session</div>
+      <button class="m-btn m-btn-primary" type="button" data-new>New session</button>
+    </div>
+  </main>
+
+  <button id="m-jump" class="m-jump" type="button" hidden>↓ latest</button>
+
+  <footer id="m-composer">
+    <div id="m-hint" class="m-hint" hidden></div>
+    <div class="m-composer-row">
+      <span class="m-prompt" aria-hidden="true">›</span>
+      <textarea id="m-input" rows="1" placeholder="Message pi…" enterkeyhint="send"
+        autocomplete="off" autocorrect="off" autocapitalize="sentences" spellcheck="false" disabled></textarea>
+      <button id="m-stop" class="m-btn m-stop" type="button" aria-label="Stop the agent" hidden>
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+      </button>
+      <button id="m-send" class="m-btn m-send" type="button" aria-label="Send to pi" disabled>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+      </button>
+    </div>
+    <div class="m-foot">
+      <button id="m-model-chip" class="m-model-chip" type="button" hidden title="Change the model or workspace"></button>
+    </div>
+  </footer>
+
+  <!-- New-session / model sheet. One container, two modes (see openSheet in
+       mobile.js): "new" picks a workspace + model and starts a conversation,
+       "model" re-points the open chat at another model. -->
+  <div id="m-sheet" hidden aria-hidden="true">
+    <div class="m-sheet-card" role="dialog" aria-modal="true" aria-labelledby="m-sheet-title">
+      <div class="m-chrome">
+        <span class="m-chrome-dots" aria-hidden="true"><i class="danger"></i><i class="accent"></i><i class="success"></i></span>
+        <span id="m-sheet-title" class="m-chrome-label">New session</span>
+        <button id="m-sheet-close" class="m-icon-btn" type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="m-sheet-body">
+        <div class="m-field" id="m-field-ws">
+          <div class="m-label">Workspace</div>
+          <div id="m-ws-list" class="m-opts"></div>
+          <div class="m-add-ws">
+            <input id="m-ws-input" class="m-text-input" type="text" placeholder="/path/to/project"
+              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+            <button id="m-ws-add" class="m-btn m-btn-soft" type="button">Add</button>
+          </div>
+        </div>
+        <div class="m-field">
+          <div class="m-label">Model</div>
+          <select id="m-model-select" class="m-select"></select>
+        </div>
+        <!-- Team + mode are read by pi at agent start, so they are part of
+             STARTING a session (a running one keeps the harness it booted with). -->
+        <div class="m-field" id="m-field-team">
+          <div class="m-label">Agent team</div>
+          <select id="m-team-select" class="m-select"></select>
+        </div>
+        <div class="m-field" id="m-field-mode">
+          <div class="m-label">Mode</div>
+          <select id="m-mode-select" class="m-select"></select>
+        </div>
+      </div>
+      <div class="m-sheet-foot">
+        <button id="m-apply-model" class="m-btn m-btn-soft" type="button">Use for this chat</button>
+        <button id="m-start" class="m-btn m-btn-primary" type="button">Start session</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="helpers.js"></script>
+  <script src="mobile.js"></script>
+</body>
+
+</html>
