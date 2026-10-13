@@ -1664,6 +1664,100 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
+  test("the full-screen surfaces composite without a backdrop blur", async () => {
+    // Every office surface (board, library, settings, dialogs) is a scrim over
+    // the animated floor. A `backdrop-filter` there cannot reuse its raster while
+    // the desks animate, so it re-blurred the whole viewport per frame: measured
+    // p95 frame time 17 ms → ~110 ms with the board open over 15 working desks,
+    // and roughly double the open cost. The app's own stylesheet states the same
+    // rule for its chrome ("blur is the only expensive part"), so this is a
+    // performance contract, not a taste call.
+    await boot({ sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder", last_turn_event: "turn_start" })] });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop .office-task, #office-board-backdrop .office-kcol-empty");
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#office-board-backdrop", { state: "detached" });
+    await page.click("#office-library-open");
+    await page.waitForSelector("#office-lib-backdrop .office-lib-add");
+    const filters = await page.evaluate(() => ({
+      board: getComputedStyle(document.querySelector(".office-board-backdrop") || document.body).getPropertyValue("backdrop-filter"),
+      library: getComputedStyle(document.getElementById("office-lib-backdrop")).getPropertyValue("backdrop-filter"),
+      scrim: getComputedStyle(document.getElementById("office-lib-backdrop")).backgroundColor,
+    }));
+    // The board has closed by now, so measure it from a synthetic surface that
+    // shares the class the board uses.
+    assert.equal(filters.library.trim(), "none", "the library scrim has no backdrop blur");
+    assert.match(filters.scrim, /^rgba\(0, 0, 0, 0\.6/, `the scrim is a translucent solid (${filters.scrim})`);
+    const boardFilter = await page.evaluate(() => {
+      const el = document.createElement("div");
+      el.className = "office-lib-backdrop office-board-backdrop";
+      document.body.appendChild(el);
+      const v = getComputedStyle(el).getPropertyValue("backdrop-filter");
+      el.remove();
+      return v;
+    });
+    assert.equal(boardFilter.trim(), "none", "and the board scrim matches it");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("an open surface is not rebuilt by a repaint that does not change it", async () => {
+    // The board and the library are repainted after every office / roster write,
+    // and the office snapshot is polled every second while a queue runs. Their
+    // row markup is ~2–3.6 ms to rebuild, and rebuilding it re-creates every node
+    // — throwing away a focused row, the scroll position and the drop
+    // affordances — so a repaint whose data is unchanged must leave them alone.
+    // A server-owned runner makes the poll happen every second with no task
+    // movement at all: the exact steady state the gate is for.
+    mock.setServerRunner(true);
+    await boot({
+      sessions: [
+        makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" }),
+        makeSession({ session_id: "s2", cwd: WS, agent_name: "builder" }),
+      ],
+      team: defaultTeam({
+        teams: { dev: [{ name: "orchestrator", active: true }, { name: "builder", active: true }] },
+        library: [{ id: "lib_1", path: `${WS}/docs/arch.md`, note: "the API map" }],
+      }),
+      office: {
+        runnerPaused: false,
+        tasks: [
+          { id: "t1", title: "draft the plan", status: "in_progress", createdAt: 1, plannedAt: 1 },
+          { id: "t2", title: "ship it", status: "done", createdAt: 2, finishedAt: 3 },
+        ],
+      },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+
+    // The board: two poll cycles (the ticker polls once a second) must not have
+    // replaced a single card.
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop .office-task");
+    const polls = mock.requestsFor("/office", "GET").length;
+    await page.evaluate(() => { window.__card = document.querySelector("#office-board-cols .office-task"); });
+    await until(() => mock.requestsFor("/office", "GET").length >= polls + 2, "two office polls land");
+    await page.waitForTimeout(120);
+    assert.ok(
+      await page.evaluate(() => window.__card === document.querySelector("#office-board-cols .office-task") && window.__card.isConnected),
+      "a poll that changes nothing leaves the board's cards in place",
+    );
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#office-board-backdrop", { state: "detached" });
+
+    // The library: same for its rows.
+    await page.click("#office-library-open");
+    await page.waitForSelector("#office-lib-backdrop .office-lib-row");
+    const polls2 = mock.requestsFor("/office", "GET").length;
+    await page.evaluate(() => { window.__row = document.querySelector("#office-lib-list .office-lib-row"); });
+    await until(() => mock.requestsFor("/office", "GET").length >= polls2 + 2, "two more office polls land");
+    await page.waitForTimeout(120);
+    assert.ok(
+      await page.evaluate(() => window.__row === document.querySelector("#office-lib-list .office-lib-row") && window.__row.isConnected),
+      "and leaves the library's rows in place",
+    );
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
   test("the meeting room carries the board, and the full board lays out four columns", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],

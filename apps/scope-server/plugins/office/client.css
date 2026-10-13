@@ -871,12 +871,20 @@ body[data-ds-dark-theme] {
 .office-empty .settings-empty-title { font-family: var(--font-display); font-size: 15px; font-weight: 600; color: var(--text); }
 .office-empty .settings-empty-sub { font-family: var(--font-body); font-size: 12.5px; color: var(--muted); }
 
+/* The scrim under every full-screen office surface (board, library, settings,
+   agent markdown). Deliberately NO backdrop-filter, matching the rule the app's
+   own stylesheet states for its chrome — "blur is the only expensive part, it
+   forces per-frame recomposition behind scrolling/streaming surfaces". Measured
+   here with the board over 15 animating desks: the 2px blur pushed p95 frame
+   time from 17 ms to ~110 ms (a ~100 ms raster of the whole viewport whenever
+   the floor moved) and roughly doubled the board's open cost, because a blur over
+   changing content can never reuse its raster. A slightly deeper translucent
+   solid dims the floor just as well and composites for almost nothing. */
 .office-lib-backdrop {
   position: fixed; inset: 0; z-index: 1200;
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
-  background: rgba(0, 0, 0, .55);
-  backdrop-filter: blur(2px);
+  background: rgba(0, 0, 0, .62);
   animation: office-fade var(--dur-fast) var(--ease-std) both;
 }
 .office-board-backdrop { padding: 12px; }

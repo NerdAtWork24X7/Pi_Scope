@@ -2069,14 +2069,31 @@
 
   // ─── The full-screen reference-library manager ────────────────────────────
 
+  let libSig = "";
+
   /** Repaint the manager's rows (and the add form's picker) from the roster. */
   function renderLibraryOverlay() {
     const overlay = document.getElementById("office-lib-backdrop");
     if (!overlay) return;
     const list = overlay.querySelector("#office-lib-list");
-    if (list) list.innerHTML = libraryRowsHtml();
+    if (list) {
+      // Same reasoning as the board's columns: rebuilding the rows throws away a
+      // row the user may be editing, and the manager is repainted after every
+      // roster write.
+      const html = libraryRowsHtml();
+      if (html !== libSig) {
+        libSig = html;
+        list.innerHTML = html;
+      }
+    }
     const picker = overlay.querySelector("#office-lib-target");
-    if (picker) picker.innerHTML = targetOptions(picker.value);
+    if (picker) {
+      const opts = targetOptions(picker.value);
+      if (opts !== picker.dataset.sig) {
+        picker.dataset.sig = opts;
+        picker.innerHTML = opts;
+      }
+    }
   }
 
   /**
@@ -2107,6 +2124,7 @@
         `</form>` +
       `</div>`;
     document.body.appendChild(overlay);
+    libSig = "";             // a fresh panel holds no rows yet
     renderLibraryOverlay();
 
     overlay.querySelector(".office-lib-close").addEventListener("click", closeLibrary);
@@ -2207,12 +2225,24 @@
     return (map && map[id]) || null;
   }
 
+  let boardSig = "";
+
   /** Repaint the open board from the roster snapshot. */
   function renderKanbanOverlay() {
     const overlay = document.getElementById("office-board-backdrop");
     if (!overlay) return;
     const cols = overlay.querySelector("#office-board-cols");
-    if (cols) cols.innerHTML = kanbanColumnsHtml();
+    if (cols) {
+      // Rebuilding the columns re-creates every card, so it drops focus and any
+      // drag affordance — and it costs ~2 ms. The board is repainted after every
+      // office write and on every poll while the queue runs, so it is rebuilt
+      // only when the cards actually differ.
+      const html = kanbanColumnsHtml();
+      if (html !== boardSig) {
+        boardSig = html;
+        cols.innerHTML = html;
+      }
+    }
     const paused = runnerPaused();
     const run = overlay.querySelector("#office-run-toggle");
     if (run) {
@@ -2273,6 +2303,7 @@
         `</div>` +
       `</div>`;
     document.body.appendChild(overlay);
+    boardSig = "";           // a fresh panel holds no cards yet
     renderKanbanOverlay();
 
     const cols = overlay.querySelector("#office-board-cols");
@@ -2311,12 +2342,37 @@
     return card && card.closest("#office-board-cols") ? card : null;
   }
 
-  /** Clear every drop affordance the board is currently showing. */
-  function clearDropMarks(root) {
-    if (!root) return;
-    root.querySelectorAll(".office-task.drop-before, .office-task.drop-after")
-      .forEach((el) => el.classList.remove("drop-before", "drop-after"));
-    root.querySelectorAll(".office-kcol.drag-over").forEach((el) => el.classList.remove("drag-over"));
+  // The board shows an insertion point on exactly one card and one column, so
+  // the marks are remembered rather than searched for: `dragover` fires for every
+  // few pixels of pointer travel, and a pair of `querySelectorAll` scans (plus
+  // the class writes they follow) on each of them is the one part of a drag that
+  // scales with the board.
+  let markCard = null;
+  let markCls = "";
+  let markCol = null;
+
+  /** Take back whatever drop affordance the board is currently showing. */
+  function clearDropMarks() {
+    if (markCard) { markCard.classList.remove("drop-before", "drop-after"); markCard = null; markCls = ""; }
+    if (markCol) { markCol.classList.remove("drag-over"); markCol = null; }
+  }
+
+  /** Show the insertion point `info` describes, moving the marks if needed. */
+  function showDropMarks(info) {
+    if (markCol !== info.col) {
+      if (markCol) markCol.classList.remove("drag-over");
+      markCol = info.col;
+      markCol.classList.add("drag-over");
+    }
+    const card = info.mark ? info.mark.el : null;
+    const cls = info.mark ? info.mark.cls : "";
+    // The same card can change edge (before ↔ after) as the pointer crosses its
+    // midpoint, so the class is part of the comparison, not just the element.
+    if (markCard === card && markCls === cls) return;
+    if (markCard) markCard.classList.remove("drop-before", "drop-after");
+    markCard = card;
+    markCls = cls;
+    if (markCard) markCard.classList.add(cls);
   }
 
   /**
@@ -2358,6 +2414,7 @@
   function onDragStart(e) {
     const card = boardCardOf(e);
     if (!card) return;
+    clearDropMarks();
     dragId = card.dataset.id;
     card.classList.add("dragging");
     try { e.dataTransfer.setData("text/plain", dragId); e.dataTransfer.effectAllowed = "move"; } catch { /* older engines */ }
@@ -2369,22 +2426,20 @@
     if (!info) return;
     e.preventDefault();
     try { e.dataTransfer.dropEffect = "move"; } catch { /* ignore */ }
-    clearDropMarks(e.currentTarget);
-    info.col.classList.add("drag-over");
-    if (info.mark) info.mark.el.classList.add(info.mark.cls);
+    showDropMarks(info);
   }
 
   function onDragLeave(e) {
     // Only clear when the pointer really left the board (not moving between its
     // own children).
     if (e.currentTarget.contains(e.relatedTarget)) return;
-    clearDropMarks(e.currentTarget);
+    clearDropMarks();
   }
 
   function onDrop(e) {
     const id = dragId;
     const info = dragId ? dropTargetAt(e.clientX, e.clientY, e.currentTarget) : null;
-    clearDropMarks(e.currentTarget);
+    clearDropMarks();
     dragId = null;
     if (!id || !info) return;
     e.preventDefault();
@@ -2396,7 +2451,7 @@
     dragId = null;
     const card = boardCardOf(e);
     if (card) card.classList.remove("dragging");
-    clearDropMarks(document.getElementById("office-board-cols"));
+    clearDropMarks();
   }
 
   /** Arrow keys on a focused card: ← → move it between columns, ↑ ↓ resequence
@@ -2434,6 +2489,7 @@
 
   function closeKanban() {
     const overlay = document.getElementById("office-board-backdrop");
+    clearDropMarks();          // the marks live in the DOM the overlay takes with it
     if (overlay) overlay.remove();
     document.removeEventListener("keydown", kanbanKeys);
   }
