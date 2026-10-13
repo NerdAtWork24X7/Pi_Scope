@@ -1620,6 +1620,41 @@ export function activate(api: any): void {
 
   api.route("GET", "/subagent-workflow/harnesses", () => ({ harnesses: harnessList() }));
 
+  /**
+   * One folder of the workspace, for the reference browser: folders first, then
+   * files, hidden entries skipped. `path` is relative to the workspace and may
+   * not escape it — the browser walks down from the root and nothing else, so a
+   * reference is picked from the same tree the node will run in.
+   */
+  api.route("GET", "/subagent-workflow/entries", (ctx: any) => {
+    const workspace = workspaceOf(ctx.url.searchParams.get("cwd"));
+    const root = validateCwd(workspace) || workspace;
+    const rel = String(ctx.url.searchParams.get("path") ?? "").trim();
+    const target = rel ? path.resolve(root, rel) : root;
+    if (target !== root && !target.startsWith(root + path.sep)) {
+      return jsonResponse({ error: "outside the workspace" }, 400);
+    }
+    let dirents: any[];
+    try { dirents = fs.readdirSync(target, { withFileTypes: true }); }
+    catch { return jsonResponse({ error: `cannot read ${rel || "the workspace"}` }, 400); }
+    const entries = dirents
+      .filter((e: any) => !e.name.startsWith("."))
+      .map((e: any) => {
+        const abs = path.join(target, e.name);
+        let dir = e.isDirectory();
+        if (!dir && e.isSymbolicLink()) { try { dir = fs.statSync(abs).isDirectory(); } catch { /* broken link */ } }
+        return { name: e.name, rel: path.relative(root, abs).split(path.sep).join("/"), dir };
+      })
+      .sort((a: any, b: any) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1))
+      .slice(0, 500);
+    return {
+      workspace: root,
+      path: target,
+      rel: path.relative(root, target).split(path.sep).join("/"),
+      entries,
+    };
+  });
+
   api.route("GET", "/subagent-workflow/run", (ctx: any) => {
     const workspace = workspaceOf(ctx.url.searchParams.get("cwd"));
     const sinceRaw = ctx.url.searchParams.get("since");

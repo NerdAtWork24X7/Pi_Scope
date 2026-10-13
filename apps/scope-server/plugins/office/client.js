@@ -7,6 +7,9 @@
  * left, two right, wrapping down the floor), plus an ad-hoc desk room for
  * agents that ran without a team. Every team in the roster keeps a room whether
  * or not it is the active one; **+ team** in the header creates a new one.
+ * The walls belong to the team rooms and nobody else: the orchestrator's
+ * office, the meeting room and the ad-hoc desks sit on the open floor, and every
+ * team room has a **doorway** in the wall that faces the pathway.
  * Every room is labelled at its top-left with its control at its top-right: the
  * active team is badged, the others carry **activate** (which switches the
  * roster over to them). A desk carries its name at the top-left, then **off
@@ -25,13 +28,18 @@
  * user added, injected as a reference block at the start of every new
  * conversation. Only the **active team** is staffed, so a desk on an inactive
  * team stays dormant even when a same-named agent is working on the active one.
- * Every agent gets its own cubicle —
- * partition walls on three sides, a desk with a screen, a chair — and sits in it
- * seen from above. Working agents have their screen scrolling code and their
- * arms typing; a chair pushed back is "waiting"; a cubicle whose agent is
- * switched off in the team roster is **Off duty** (empty desk, greyed out).
+ * A desk is a MAT in that shared room, never a cubicle: no partition walls —
+ * and with them, no walls between the teammates sitting side by side. Each seat
+ * is a desk with a screen, a keyboard, a chair and its own character, seen from
+ * above. Working agents have their screen scrolling code and their arms typing; a
+ * chair pushed back is "waiting"; a desk whose agent is switched off in the team
+ * roster is **Off duty** (empty desk, greyed out).
  *
- * Hovering a cubicle (or tabbing to it) opens a popup with that agent's recent
+ * When a subagent is **dispatched** the orchestrator gets up and walks the task
+ * over: out of its own office, down the pathway, in through the team room's
+ * doorway, a handover beat at the desk, then back — see the errand section below.
+ *
+ * Hovering a desk (or tabbing to it) opens a popup with that agent's recent
  * messages — the tool calls, results and assistant text it produced, newest
  * last, the way they would scroll past in a terminal. Live lines arrive from the
  * SSE stream the host fans out to the active view; the back-history comes from
@@ -41,7 +49,7 @@
  *   • `window.__SCOPE_STATE.sessions` — the session list, kept live by app.js's
  *     poll and its SSE patching (`last_turn_event`, `last_ts`, `has_shutdown`).
  *   • `GET /agent-team` — the roster and its teams, so agents that have not run
- *     yet still get a desk (and disabled ones still get a cubicle).
+ *     yet still get a desk (and disabled ones still get one on the floor).
  *   • the live SSE events handed to the active view (`onEvent`) for instant
  *     labels and for the hover popup.
  *
@@ -97,6 +105,12 @@
   const TICK_MS = 1000;
   /** How long the walk-in animation runs before a pod settles. */
   const ARRIVE_MS = 900;
+  /** How long the orchestrator holds the task up at a desk before letting go. */
+  const HANDOVER_MS = 700;
+  /** How long the receiving desk stays lit once the task has changed hands. */
+  const HANDOVER_FLASH_MS = 1100;
+  /** How fast the errand walks: milliseconds per route pixel (with a floor). */
+  const ERRAND_MS_PER_PX = 5;
   /** Live message lines kept per agent (the popup shows the newest few). */
   const LOG_MAX = 40;
   /** Lines shown in the hover popup. */
@@ -140,6 +154,11 @@
   const fetched = new Map();  // agent key -> { sid, at, lines }     (from /events)
   const pods = new Map();     // agent key -> [elements] (a key can hold desks in several team rooms)
   const byKey = new Map();    // agent key -> agent (current render)
+  let floorModel = null;      // last measured floor (rooms + doorways) from pixel.js
+  const greeted = new Map();  // agent key -> the run the errand has already walked over
+  let greetedPrimed = false;  // the first pass only learns the floor (see pumpErrands)
+  const errands = [];         // agent keys waiting for the walker
+  let errandBusy = false;
 
   function state() { return window.__SCOPE_STATE || {}; }
 
@@ -171,7 +190,7 @@
       if (!mod || !pane || !planEl) return mod || null;
       pixel = mod;
       await mod.load(pane, ASSET_BASE, state().token || "");
-      pixelMount = mod.mount(pane, planEl, { roomStyle: roomStyleOf });
+      pixelMount = mod.mount(pane, planEl, { roomStyle: roomStyleOf, onMeasure: noteFloor });
       return mod;
     })();
     return pixelLoading;
@@ -183,6 +202,22 @@
     if (id === "meeting") return "meeting";
     if (id === "orchestrator") return "orchestrator";
     return id.indexOf("team:") === 0 ? "team" : "adhoc";
+  }
+
+  /**
+   * Remember the floor pixel.js just measured and stamp each team room's
+   * doorway on it (`data-door="left" | "right"`). The errand walks in through
+   * the real opening rather than a guessed one, and the room element carries the
+   * same fact for anyone reading the DOM.
+   */
+  function noteFloor(model) {
+    floorModel = model || null;
+    if (!planEl || !floorModel) return;
+    for (const d of (floorModel.doors || [])) {
+      if (!d.id) continue;
+      const el = planEl.querySelector(`.office-room[data-room="${CSS.escape(d.id)}"]`);
+      if (el && el.dataset.door !== d.side) el.dataset.door = d.side;
+    }
   }
 
   /** Which of the six character sheets an agent wears — stable per key. */
@@ -268,7 +303,7 @@
    * the plan (never a seat inside a team's room); the team rooms then follow in
    * the configured order (active team marked), laid out two-left / two-right of
    * the center pathway by CSS grid. Anything that ran without a team gets an
-   * ad-hoc room. Every agent keeps a cubicle even before it runs — and even
+   * ad-hoc room. Every agent keeps a desk even before it runs — and even
    * when it is switched off, where it sits "on leave".
    */
   function floorPlan() {
@@ -685,19 +720,16 @@
   }
 
   /**
-   * One cubicle, viewed from above: partition walls on three sides (open toward
-   * the corridor below), a desk with a screen and a keyboard along it, a chair,
-   * and the agent seated in the middle of it. The screen holds the code lines
-   * that animate while the agent works.
-   */
-  /**
-   * One desk of a shared room.
+   * One desk of a shared room, viewed from above: a mat with a desk, a screen
+   * and keyboard along it, a chair, and the agent seated in the middle of it. The
+   * screen holds the code lines that animate while the agent works.
    *
    * Every desk in a team's room is the same desk — that is the point of one room
    * per team — and the room lays them out in rows that wrap to its own width
-   * (see `.office-room-floor` in client.css). What makes a seat its own is the
-   * chair it is dealt and the screen it is running: `--px-chair` and
-   * `--px-pc-hue`, both keyed off the agent, so no two desks read alike.
+   * (see `.office-room-floor` in client.css). Nothing is drawn between seats: the
+   * room's walls are the only walls on the floor. What makes a seat its own is the
+   * mat's wash, the chair it is dealt and the screen it is running — `--px-chair`
+   * and `--px-pc-hue`, both keyed off the agent, so no two desks read alike.
    */
   function podHtml(agent, room) {
     const live = roomLive(room);
@@ -1266,6 +1298,24 @@
     if (pixelMount) pixelMount.refresh();
   }
 
+  /**
+   * Re-point every desk at THIS pass's seat.
+   *
+   * `buildPlan` only runs when the floor's structure changes, so the seat it
+   * stashed on each element would otherwise be frozen at that moment: the session
+   * list is rebuilt from scratch by every poll, and a desk reading a snapshot's
+   * session could never see the agent start (or stop) working. Duty, name and team
+   * stay per seat — those come from the fresh seat object too.
+   */
+  function refreshSeats(plan) {
+    if (!planEl) return;
+    const seats = [];
+    if (plan.orch) seats.push(plan.orch);
+    for (const r of plan.rooms) for (const a of r.agents) seats.push(a);
+    const els = planEl.querySelectorAll(".office-pod");
+    for (let i = 0; i < els.length; i++) if (seats[i]) els[i].__officeSeat = seats[i];
+  }
+
   function updatePod(agent) {
     const els = pods.get(agent.key);
     if (!els || !els.length) return;
@@ -1372,6 +1422,183 @@
     countsEl.innerHTML = html;
   }
 
+  // ─── The orchestrator's errands ───────────────────────────────────────────
+  // A dispatch is readable from the session list: the harness stamps the
+  // spawning session on the subagent's row (`parent_session_id`), so a subagent
+  // whose fresh, live session hangs off the orchestrator's own run has just been
+  // handed a job. That is what the walk animates — the orchestrator leaves its
+  // office, goes down the pathway, in through the team room's doorway and hands
+  // the task over, then walks back.
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /** Fresh dispatches on the floor, in floor order (roomLive rooms only). */
+  function freshDispatches(plan) {
+    const orchSid = String((plan.orch && plan.orch.session && plan.orch.session.session_id) || "");
+    const out = [];
+    for (const r of plan.rooms) {
+      if (!roomLive(r)) continue;
+      for (const a of r.agents) {
+        if (a.isOrch || a.disabled || !a.session) continue;
+        const sid = String(a.session.session_id || "");
+        if (!sid || greeted.get(a.key) === sid) continue;
+        // Only a desk that is actually working reads as a dispatch that just
+        // landed (a session still idling is not being handed anything yet).
+        if (statusOf(a) !== "green") continue;
+        // A stamped parent must be the orchestrator's own run. Without one (a
+        // harness that does not set SCOPE_PARENT_SESSION) a live subagent under
+        // a live orchestrator still reads as its dispatch.
+        const parent = String(a.session.parent_session_id || "");
+        if (parent ? parent !== orchSid : !orchSid) continue;
+        out.push({ key: a.key, sid });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Walk over every dispatch this pass found. The first pass only *learns* the
+   * floor: a page load rediscovers every subagent that was already working, and
+   * replaying all of their errands at once would be a parade, not a dispatch.
+   */
+  function pumpErrands(plan) {
+    const fresh = freshDispatches(plan);
+    for (const f of fresh) greeted.set(f.key, f.sid);
+    if (!greetedPrimed) { greetedPrimed = true; return; }
+    for (const f of fresh) if (!errands.includes(f.key)) errands.push(f.key);
+    if (errands.length && !errandBusy) void runErrands();
+  }
+
+  async function runErrands() {
+    errandBusy = true;
+    try {
+      while (errands.length) await runErrand(errands.shift());
+    } finally {
+      errandBusy = false;
+    }
+  }
+
+  /** The middle of a desk's workstation, in plan pixels. */
+  function stationCenter(podEl) {
+    const station = podEl && podEl.querySelector(".office-station");
+    if (!station || !planEl) return null;
+    const p = planEl.getBoundingClientRect();
+    const r = station.getBoundingClientRect();
+    return { x: r.left - p.left + r.width / 2, y: r.top - p.top + r.height / 2 };
+  }
+
+  /**
+   * Where a walk leaves the pathway and enters a room: the doorway pixel.js
+   * punched in the wall that faces the center path (stamped on the room as
+   * `data-door`). Until the canvas has measured the floor, the room's own edge on
+   * the pathway side is used instead.
+   */
+  function doorPoint(roomEl) {
+    if (!roomEl || !planEl) return null;
+    // The measured opening — the middle of the doorway pixel.js punched — is the
+    // waypoint when the floor has been drawn; the room's own edge on the pathway
+    // side is the fallback before that first measurement lands.
+    const id = (roomEl.dataset && roomEl.dataset.room) || "";
+    const measured = (id && floorModel ? floorModel.doors || [] : []).find((d) => d.id === id);
+    if (measured) return { x: measured.x, y: measured.y };
+    const p = planEl.getBoundingClientRect();
+    const r = roomEl.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    const stamped = roomEl.dataset.door;
+    const onPathway = stamped ? stamped === "right" : (r.left - p.left + r.width / 2) < (planEl.clientWidth / 2);
+    return {
+      x: (onPathway ? r.right : r.left) - p.left,
+      y: r.top - p.top + r.height / 2,
+    };
+  }
+
+  /** Which of the four facing rows a leg is walked in. */
+  function facing(a, b) {
+    if (Math.abs(b.x - a.x) >= Math.abs(b.y - a.y)) return b.x >= a.x ? "right" : "left";
+    return b.y >= a.y ? "down" : "up";
+  }
+
+  /** One straight run of the route, in one facing direction. */
+  function walkLeg(courier, from, to, dir) {
+    courier.classList.remove("dir-down", "dir-up", "dir-left", "dir-right");
+    courier.classList.add(`dir-${dir}`);
+    const dist = Math.hypot(to.x - from.x, to.y - from.y);
+    const ms = Math.max(240, Math.min(1800, Math.round(dist * ERRAND_MS_PER_PX)));
+    const anim = courier.animate(
+      [{ transform: `translate(${from.x}px, ${from.y}px)` }, { transform: `translate(${to.x}px, ${to.y}px)` }],
+      // Stepped, so the walk hops along the tiles like the sprite it draws.
+      { duration: ms, easing: "steps(8, end)", fill: "forwards" },
+    );
+    return anim.finished.catch(() => {});
+  }
+
+  /** The desk takes the task: one pulse, so the handover lands somewhere. */
+  function flashHandover(desk) {
+    desk.classList.add("handover");
+    setTimeout(() => desk.classList.remove("handover"), HANDOVER_FLASH_MS);
+  }
+
+  /**
+   * One errand: out of the office, down the pathway, in through the room's door,
+   * the handover beat at the desk, then home the same way. The orchestrator's own
+   * seat empties while it is away, so the character on the floor is the walker.
+   */
+  async function runErrand(key) {
+    const desk = (pods.get(key) || [])[0];
+    const home = (pods.get("orchestrator") || [])[0];
+    if (!planEl || !desk || !desk.isConnected || !home) return;
+    const from = stationCenter(home);
+    const to = stationCenter(desk);
+    const door = doorPoint(desk.closest(".office-room"));
+    if (!from || !to || !door) return;
+    // Reduced motion: skip the journey and show the result.
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      flashHandover(desk);
+      return;
+    }
+    const corridorX = planEl.clientWidth / 2;
+    const route = [
+      { x: corridorX, y: from.y },   // out of the office, to the pathway
+      { x: corridorX, y: door.y },   // down (or up) the pathway to the room
+      door,                          // through the doorway
+      { x: to.x, y: door.y },        // across the room to the desk's column
+      to,                            // and onto the desk
+    ];
+    const courier = document.createElement("div");
+    courier.className = "office-courier";
+    courier.style.setProperty("--px-char-sheet", `var(--px-char-${charIndex("orchestrator")})`);
+    courier.innerHTML = `<span class="office-courier-body"></span><span class="office-errand"></span>`;
+    courier.style.transform = `translate(${from.x}px, ${from.y}px)`;
+    planEl.appendChild(courier);
+    home.classList.add("on-errand");
+    let at = from;
+    try {
+      for (const next of route) {
+        await walkLeg(courier, at, next, facing(at, next));
+        at = next;
+      }
+      // The handover: turn to the desk, hold the task up, then let go of it.
+      courier.classList.add("handing");
+      courier.classList.remove("dir-down", "dir-up", "dir-left", "dir-right");
+      at = to;
+      await sleep(HANDOVER_MS);
+      courier.classList.remove("handing");
+      flashHandover(desk);
+      // Home, retracing the route so the walk never cuts through a wall.
+      for (const next of [...route].reverse()) {
+        if (Math.hypot(next.x - at.x, next.y - at.y) < 1) continue;
+        await walkLeg(courier, at, next, facing(at, next));
+        at = next;
+      }
+      if (Math.hypot(from.x - at.x, from.y - at.y) >= 1) {
+        await walkLeg(courier, at, from, facing(at, from));
+      }
+    } finally {
+      courier.remove();
+      home.classList.remove("on-errand");
+    }
+  }
+
   // ─── Repaint scheduling ───────────────────────────────────────────────────
 
   let pendingFrame = 0;
@@ -1440,9 +1667,16 @@
 
     const sig = sigOf(plan);
     if (sig !== renderSig) buildPlan(plan);
+    // The plan is reused while the roster and the desk list stand still, so the
+    // seats stashed on the elements are refreshed from this pass's plan (see
+    // refreshSeats — a stale seat freezes the desk).
+    refreshSeats(plan);
 
     const desks = [...unique.values()];
     for (const a of desks) updatePod(a);
+    // A subagent that has just started working was dispatched by the orchestrator:
+    // walk the task over to its desk (see pumpErrands).
+    pumpErrands(plan);
     // Duty is per desk (a member can sit on several teams), so the header counts
     // an agent as off duty only when every seat it holds is empty.
     const offEverywhere = new Map();
@@ -3688,7 +3922,7 @@
     id: "office",
     name: "Office",
     description:
-      "A live top-down office: each subagent has a cubicle with a desk, screen and chair, and animates while it works. Hire, fire, rename and enable subagents, manage teams, and keep a reference library of files and folders, straight from the floor.",
+      "A live top-down office: every team gets a room, each subagent sits at its own desk, and dispatching a task sends the orchestrator walking over to hand it over. Hire, fire, rename and enable subagents, manage teams, and keep a reference library of files and folders, straight from the floor.",
     nav: { label: "Office", order: 65, group: "timeline", title: "Watch your agent team work" },
     view: {
       // The host creates this pane inside <main> for the plugin (ensurePane).

@@ -576,8 +576,10 @@
   // Answers "what did this change touch, and what could it break?". Nodes are
   // files (or folders); changed nodes glow; clicking a node inspects its churn,
   // its dependents (fan-in) and jumps straight to the diff. "impact" highlights
-  // the transitive blast radius of the selected node. Review progress is kept
-  // per working directory so a long review can be resumed later.
+  // the transitive blast radius of the selected node — and ONLY impact does: a
+  // plain selection just outlines the node, so ticking the box is what dims the
+  // floor and paints its dependents red. Review progress is kept per working
+  // directory so a long review can be resumed later.
   const esc = window.SCOPE.escapeHtml;
   const STATUS_META = {
     modified: { cls: "modified" }, added: { cls: "added" }, deleted: { cls: "deleted" },
@@ -982,6 +984,23 @@
     LAY.ty = (LAY.h - bh * s) / 2 - minY * s;
   }
 
+  /**
+   * What impact highlights when it is switched on with nothing selected: the
+   * review queue's own top entry (the riskiest changed file, which is how the
+   * server orders it), else the most-depended-on node on the floor. Without
+   * this the toggle silently did nothing until a node had been clicked, which
+   * reads as a broken checkbox.
+   */
+  function defaultImpactNode() {
+    const model = graphModel();
+    if (!model.nodes.length) return null;
+    const onFloor = new Set(model.nodes.map((n) => n.id));
+    for (const c of (graph && graph.changed) || []) {
+      if (onFloor.has(c.path)) return c.path;
+    }
+    return model.nodes.slice().sort((a, b) => b.fanIn - a.fanIn)[0].id;
+  }
+
   function transitiveDependents(selId, edges) {
     const rev = new Map();
     for (const e of edges) {
@@ -1028,6 +1047,10 @@
     }
     if (selNodeId && !ids.has(selNodeId)) selNodeId = null;
     const sel = LAY.nodes.find((n) => n.id === selNodeId) || null;
+    // The blast radius is a Set of dependent ids (empty when nothing depends on
+    // the node), or null while impact is off. `impact > 0` is what the readout
+    // reports, so "nothing depends on this" is still distinguishable from "the
+    // toggle is off" — the two used to look identical on the floor.
     const impacted = (diagramImpact && sel) ? transitiveDependents(sel.id, LAY.edges) : null;
     const byId = new Map(LAY.nodes.map((n) => [n.id, n]));
     LAY.byId = byId; // kept so a live drag can re-route the edges it touches
@@ -1068,9 +1091,12 @@
       const cls = ["dnode"];
       if (nd.changed) cls.push("changed", "st-" + (nd.status || "modified"));
       if (isReviewed(nd.full)) cls.push("done");
+      // Selection only outlines the node; dimming is the impact highlight's own
+      // signal. (Dimming on a plain click too made the toggle look like it did
+      // nothing — the floor was already darkened before the box was ticked.)
       if (sel && nd.id === sel.id) cls.push("sel");
       else if (impacted && impacted.has(nd.id)) cls.push("impact");
-      else if (sel || impacted) cls.push("dim");
+      else if (impacted) cls.push("dim");
       const tip = `${nd.full}${nd.changed ? " · " + (nd.status || "modified") : ""}${nd.fanIn ? " · " + nd.fanIn + " dependents" : ""}${isReviewed(nd.full) ? " · reviewed" : ""}`;
       const sub = nodeSubLabel(nd);
       nodeHtml += `<g class="${cls.join(" ")}" data-node="${esc(nd.id)}" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})">`
@@ -1091,6 +1117,7 @@
       diagramStatsEl.textContent = `${model.nodes.length}/${model.total} ${gran === "files" ? "files" : "folders"}`
         + ` · ${(LAY.clusters || []).length} areas`
         + ` · ${st.changedFiles || 0} changed (+${st.add || 0} −${st.del || 0})`
+        + (impacted ? ` · impact ${impacted.size} ${impacted.size === 1 ? "dependent" : "dependents"}` : "")
         + (model.capped ? " · capped" : "");
     }
   }
@@ -1104,7 +1131,10 @@
       + `<span class="dlg"><span class="dsw modified"></span>modified</span>`
       + `<span class="dlg"><span class="dsw added"></span>added</span>`
       + `<span class="dlg"><span class="dsw deleted"></span>deleted</span>`
-      + `<span class="dlg"><span class="dsw done"></span>reviewed ${reviewed}/${changed.length}</span>`;
+      + `<span class="dlg"><span class="dsw done"></span>reviewed ${reviewed}/${changed.length}</span>`
+      // The impact chip only appears while the blast radius is being shown, so
+      // the legend always answers "what is the red outline?".
+      + (diagramImpact ? `<span class="dlg"><span class="dsw impact"></span>impact</span>` : "");
   }
 
   // ── Side panel ─────────────────────────────────────────────────────────────
@@ -1179,6 +1209,15 @@
     if (isFile) html += `<button class="btn-sm" id="dside-open" type="button">⇄ open diff</button>`;
     if (node.changed) html += `<label class="dside-review"><input type="checkbox" data-review="${esc(node.full)}"${done ? " checked" : ""}> reviewed</label>`;
     html += `</div>`;
+    // What the floor is showing for this node — the readout that was missing
+    // when impact looked like it did nothing (the count was never reported).
+    if (diagramImpact && node.id === selNodeId) {
+      const n = transitiveDependents(node.id, LAY.edges).size;
+      html += `<div class="dside-section"><div class="dside-kicker">impact · blast radius</div>`
+        + `<div class="dside-sub">${n
+          ? `${n} ${n === 1 ? "node depends" : "nodes depend"} on this — highlighted on the floor`
+          : "nothing on the floor depends on this"}</div></div>`;
+    }
     if (node.changed) {
       html += `<div class="dside-section"><div class="dside-kicker">changes</div><div class="dstats-row">`
         + (meta ? `<span class="st ${meta.cls}">${(STATUS_LABEL[node.status] || "?").toUpperCase()}</span>` : "")
@@ -1373,7 +1412,13 @@
     });
   }
   if (diagramChangedEl) diagramChangedEl.addEventListener("change", () => { diagramChangedOnly = diagramChangedEl.checked; renderDiagram(true); });
-  if (diagramImpactEl) diagramImpactEl.addEventListener("change", () => { diagramImpact = diagramImpactEl.checked; renderDiagram(); });
+  if (diagramImpactEl) diagramImpactEl.addEventListener("change", () => {
+    diagramImpact = diagramImpactEl.checked;
+    // Ticking impact with nothing selected highlights the review queue's top
+    // entry, so the toggle always shows a blast radius the moment it is on.
+    if (diagramImpact && !selNodeId) selNodeId = defaultImpactNode();
+    renderDiagram();
+  });
 
   // Defaults for the Review page: diagram view, file list collapsed, and
   // `.gitignore`d files hidden.

@@ -27,7 +27,7 @@
  *    console/status role the desk foot and the hover popup play.
  * 3. **Compact.** The floor is laid out on whole tiles with tight gaps (16px,
  *    half a tile) so a full roster reads at a glance without scrolling: a
- *    cubicle is 168px wide and ~192px tall, a workstation 108px.
+ *    desk mat is 144px wide and ~192px tall, a workstation 108px.
  * 4. **The accent is rationed.** Amber marks the active team, the primary action
  *    and the walkway only; status colour (working / waiting / stopped) comes from
  *    the app's semantic tokens, never from the accent.
@@ -395,41 +395,51 @@ body[data-ds-dark-theme] {
 .office-room-floor > .office-pod { flex: 0 0 144px; width: 144px; }
 
 /* ── One desk of the shared room ────────────────────────────────────────────
-   The team shares one room, so a desk is a *plot* in it, not a cubicle: a low
-   two-pixel edge on three sides marks where its mat ends, and the mat itself is
-   the station below. Nothing here walls an agent off from the team. */
+   The team shares one room and the room owns the walls (pixel.js), so a desk is
+   a MAT on that open floor, never a box: no edges between neighbours, which is
+   what makes a team read as one room instead of a row of cubicles. What is left
+   of the plot is its wash — a warm carpet with the working state lit into it,
+   and the desk's own mat edge along its near side. */
 
 .office-pod {
   position: relative;
   min-width: 0;
   padding: 0 0 2px;
-  border-top: 2px solid color-mix(in srgb, var(--office-frame) 42%, transparent);
-  border-left: 2px solid color-mix(in srgb, var(--office-frame) 42%, transparent);
-  border-right: 2px solid color-mix(in srgb, var(--office-frame) 42%, transparent);
-  border-radius: var(--r-sharp);
+  border-radius: var(--r-control);
   background: rgba(255, 252, 245, .22);
-  transition: border-color var(--dur-fast) var(--ease-std);
+  transition: background var(--dur-fast) var(--ease-std), box-shadow var(--dur-fast) var(--ease-std);
 }
 .office-pod:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Working / waiting light the mat itself; the near edge is the mat's own hem,
+   not a shared wall (nothing runs down either side of a desk). */
 .office-pod.working {
-  border-color: var(--green);
-  background: color-mix(in srgb, var(--green) 12%, rgba(255, 252, 245, .34));
+  background: color-mix(in srgb, var(--green) 13%, rgba(255, 252, 245, .34));
+  box-shadow: inset 0 -3px 0 color-mix(in srgb, var(--green) 72%, transparent);
 }
-.office-pod.waiting { border-color: var(--orange); }
+.office-pod.waiting {
+  background: color-mix(in srgb, var(--orange) 11%, rgba(255, 252, 245, .3));
+  box-shadow: inset 0 -3px 0 color-mix(in srgb, var(--orange) 66%, transparent);
+}
 .office-pod.stopped { opacity: .58; }
 .office-pod.idle { opacity: .9; }
 .office-pod.orch {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--office-frame));
   background: color-mix(in srgb, var(--accent) 8%, rgba(255, 252, 245, .34));
 }
-.office-pod.orch.working { border-color: var(--green); }
-/* On leave: an empty desk in a dimmed, dashed cubicle. */
-.office-pod.leave { opacity: .55; border-style: dashed; }
+.office-pod.orch.working { box-shadow: inset 0 -3px 0 color-mix(in srgb, var(--green) 72%, transparent); }
+/* On leave: an empty desk on a dimmed mat, marked out by a dashed outline (the
+   desk keeps its plot without the room drawing anything between seats). */
+.office-pod.leave {
+  opacity: .55;
+  outline: 2px dashed color-mix(in srgb, var(--office-frame) 70%, transparent);
+  outline-offset: -2px;
+}
+/* The focus ring outranks the shapes above, off-duty mat included. */
+.office-pod:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .office-pod.leave .office-person { display: none; }
 .office-pod.leave .office-chair { transform: translateX(-50%) translateY(6px); }
 .office-pod.leave .office-monitor { background-image: var(--px-spr-pc-off, none); }
 
-/* What the agent is doing, in the cubicle's own ink. */
+/* What the agent is doing, in the desk's own ink. */
 .office-bubble {
   font-family: var(--px-font); font-size: var(--px-fs); line-height: 1.1;
   color: color-mix(in srgb, var(--office-ink) 78%, var(--office-frame));
@@ -439,7 +449,7 @@ body[data-ds-dark-theme] {
 .office-pod.working .office-bubble { color: color-mix(in srgb, var(--office-ink) 74%, var(--green)); }
 .office-pod.leave .office-bubble { opacity: .85; }
 
-/* A pixel speech bubble at the cubicle's top-right when a desk needs attention:
+/* A pixel speech bubble at the desk's top-right when a desk needs attention:
    the amber "…" for an agent waiting on input, the red "!" for one that
    stopped. One element, one hard outline, no image. */
 .office-pod-head::after {
@@ -568,10 +578,17 @@ body[data-ds-dark-theme] {
   background-repeat: no-repeat;
 }
 
-/* The agent: the vendored character sheet, cycled by `background-position`
-   through the walk / typing / reading frames of its DOWN row — the row that
-   faces the desk's keyboard. All six palettes share the layout, so
-   `--px-char-sheet` only picks one. */
+/* The agent: the vendored character sheet (112×96 art — 7 frames of 16×32 per
+   row, three rows: down / up / right), cycled by `background-position` through
+   the walk / typing / reading frames of its DOWN row — the row that faces the
+   desk's keyboard. All six palettes share the layout, so `--px-char-sheet` only
+   picks one.
+
+   The sheet is drawn at exactly 2× its natural size in BOTH axes (224×192), so
+   the 32×64 window below frames exactly ONE character: one frame is 16×32 art
+   → 32×64 screen. Scaling only the width (the old 224×96) squashed the sprite to
+   half height and let a second row show through the window, which is why every
+   desk used to look like two people stacked. */
 .office-person {
   position: absolute;
   left: 50%; margin-left: -16px; top: 40px;
@@ -579,14 +596,117 @@ body[data-ds-dark-theme] {
   z-index: 4;
   image-rendering: pixelated;
   background-image: var(--px-char-sheet, none);
-  background-size: 224px 96px;      /* 7 frames × 16px, 3 directions × 32px, at 2× */
+  background-size: 224px 192px;     /* 112×96 art × 2 — 7 frames of 32×64 */
   background-repeat: no-repeat;
   background-position: 0 0;
 }
-/* Typing: frames 3 and 4. Reading: frames 5 and 6. Walking in: 0…2…1. */
+/* Typing: frames 3 and 4. Reading: frames 5 and 6. Walking in: 0…2…1.
+   Rows are one frame tall (64px on screen): 0 at the top, the up row at -64,
+   the right-facing row at -128. */
 .office-pod.working .office-person { animation: office-char-type .8s steps(1, end) infinite; }
 .office-pod.working.reading .office-person { animation-name: office-char-read; animation-duration: 1.1s; }
 .office-pod.arriving .office-person { animation: office-char-walk .6s steps(1, end) 2, office-walk-in .9s steps(6, end) 1; }
+
+/* ── The orchestrator's errand ──────────────────────────────────────────────
+   When a subagent is dispatched the orchestrator gets up, walks out of its own
+   office, down the pathway, in through the team room's doorway and hands the
+   task over — then walks back (client.js drives the route with the Web
+   Animations API; this is the walker itself).
+
+   The courier is a zero-sized anchor: JS animates its `transform`, so the
+   sprite is centred on the route's waypoints from a wrapper that can flip for
+   the left-facing row without fighting that transform. */
+.office-courier {
+  position: absolute;
+  left: 0; top: 0;
+  width: 0; height: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+.office-courier-body {
+  position: absolute;
+  left: -16px; top: -32px;
+  width: 32px; height: 64px;
+  image-rendering: pixelated;
+  background-image: var(--px-char-sheet, none);
+  background-size: 224px 192px;   /* one frame in the window, as .office-person */
+  background-repeat: no-repeat;
+  background-position: 0 0;
+  animation: office-courier-walk-down .5s steps(1, end) infinite;
+}
+.office-courier.dir-up .office-courier-body { animation-name: office-courier-walk-up; }
+.office-courier.dir-right .office-courier-body { animation-name: office-courier-walk-right; }
+.office-courier.dir-left .office-courier-body { animation-name: office-courier-walk-left; transform: scaleX(-1); }
+/* Standing at the desk, handing it over: the walk cycle stops on a facing frame. */
+.office-courier.handing .office-courier-body {
+  animation: none;
+  background-position: 0 0;
+}
+.office-courier.dir-left.handing .office-courier-body { transform: scaleX(-1); }
+
+/* The task the orchestrator is carrying: a pixel card held up over its head. It
+   only appears for the handover beat, so the walk reads as "on the way" first. */
+.office-errand {
+  position: absolute;
+  left: -11px; top: -54px;
+  width: 22px; height: 16px;
+  background-color: #fff;
+  border: 2px solid var(--office-ink);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-std), transform var(--dur-fast) var(--ease-std);
+  transform: translateY(4px);
+}
+.office-errand::after {
+  content: "";
+  position: absolute; left: 3px; top: 4px;
+  width: 12px; height: 2px;
+  background: var(--office-ink);
+  box-shadow: 0 4px 0 var(--office-ink);
+}
+.office-courier.handing .office-errand { opacity: 1; transform: translateY(0); }
+
+/* The orchestrator's own seat while it is away on an errand: the character is
+   the one walking, so the desk shows an empty chair rather than two of them. */
+.office-pod.on-errand .office-person { visibility: hidden; }
+
+/* The desk receiving the task: one warm pulse, so the handover lands on it. */
+.office-pod.handover { animation: office-handover 1.1s var(--ease-std) 1; }
+@keyframes office-handover {
+  0%   { box-shadow: inset 0 0 0 3px transparent; }
+  35%  { box-shadow: inset 0 0 0 3px var(--accent); }
+  100% { box-shadow: inset 0 0 0 3px transparent; }
+}
+
+/* The route's walk cycles: frames 0…2 of the down / up / right rows (the right
+   row is the left-facing one mirrored — see .dir-left above). */
+@keyframes office-courier-walk-down {
+  0%   { background-position: 0 0; }
+  25%  { background-position: -32px 0; }
+  50%  { background-position: -64px 0; }
+  75%  { background-position: -32px 0; }
+  100% { background-position: 0 0; }
+}
+@keyframes office-courier-walk-up {
+  0%   { background-position: 0 -64px; }
+  25%  { background-position: -32px -64px; }
+  50%  { background-position: -64px -64px; }
+  75%  { background-position: -32px -64px; }
+  100% { background-position: 0 -64px; }
+}
+@keyframes office-courier-walk-right {
+  0%   { background-position: 0 -128px; }
+  25%  { background-position: -32px -128px; }
+  50%  { background-position: -64px -128px; }
+  75%  { background-position: -32px -128px; }
+  100% { background-position: 0 -128px; }
+}
+@keyframes office-courier-walk-left {
+  0%   { background-position: 0 -128px; }
+  25%  { background-position: -32px -128px; }
+  50%  { background-position: -64px -128px; }
+  75%  { background-position: -32px -128px; }
+  100% { background-position: 0 -128px; }
+}
 
 /* The chair, tucked in behind the worker. */
 .office-chair {
@@ -602,7 +722,7 @@ body[data-ds-dark-theme] {
 }
 .office-pod.waiting .office-chair { transform: translateX(-8px) translateY(4px); }
 
-/* ── The cubicle's header: the plate, then the desk's own controls ───────── */
+/* ── The desk's header: the plate, then its own controls ─────────────────── */
 
 .office-pod-head {
   position: relative;
@@ -637,7 +757,7 @@ body[data-ds-dark-theme] {
   min-width: 0;
   font-family: var(--px-font); font-size: var(--px-fs); line-height: 1;
 }
-/* The name tag: a small plate on the cubicle's wall in the floor's own idiom —
+/* The name tag: a small plate at the desk in the floor's own idiom —
    the same hard 2px frame and square corners as the office's wall sign — so the
    eye lands on *who* sits at the desk before the real name, the model or the
    activity line under it. */
@@ -1300,9 +1420,13 @@ body[data-ds-dark-theme] {
 @keyframes office-minute { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {
+  /* The handover is the one thing that must still read without motion: the walk
+     is skipped (client.js) and the receiving desk holds the ring instead. */
+  .office-pod.handover { animation: none !important; box-shadow: inset 0 0 0 3px var(--accent); }
   .office-pod.working .office-person,
   .office-pod.working .office-code i,
   .office-pod.arriving .office-person,
+  .office-courier-body,
   .office-empty,
   .office-lib-backdrop,
   .office-lib-panel,

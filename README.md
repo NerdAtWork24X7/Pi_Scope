@@ -122,19 +122,31 @@ The **Office** view turns your roster into a **pixel-art office floor**. It is d
 16-pixel tile grid — carpet, auto-tiled room walls, a walkway — with the sprite atlas and
 the typeface of [pixel-agents](https://github.com/pixel-agents-hq/pixel-agents) (MIT; see
 `apps/scope-server/plugins/office/assets/NOTICE.md`), and a `<canvas>` paints the world
-under the DOM that carries the desks. **Every team gets one shared room**, sized to its own
-team, with the same desk for everyone sitting side by side in rows that wrap to the room's
-width — each with **its own chair and its own screen**, so no two seats read alike. Floor
-that a small team leaves over is furnished rather than stretched: a plant, a coffee table,
-a bin. Agents that are **working** have their screen lit, their code lines running and their
-character typing (reading, when the tool they are on is a read); an orange dot and a chair
-pushed back mean **waiting**; a greyed desk is **stopped** or idle. The floor reads like a
-real plan: the **orchestrator** gets its own office at the top (marked ★), the **meeting
-room** sits to its right, and the **team rooms** follow in two columns either side of the
-walkway. Only the **active team** is staffed, so its desks are the ones that animate; the
-same subagent sitting on an inactive team stays dormant there, even while it works on the
-active one. Every room is labelled at its top-left, with its control at its top-right: the
-active team is **badged**, the others carry **activate**.
+under the DOM that carries the desks. **The walls belong to the team rooms** — the
+orchestrator's office, the meeting room and the ad-hoc desks sit on open floor — and each
+team room has a **doorway** in the wall that faces the walkway. **Every team gets one
+shared room**, sized to its own team, with the same desk for everyone sitting side by side
+in rows that wrap to the room's width — each with **its own chair and its own screen**, so
+no two seats read alike, and **nothing drawn between seats**: a desk is a mat on the team's
+floor, not a cubicle. Floor that a small team leaves over is furnished rather than
+stretched: a plant, a coffee table, a bin. Agents that are **working** have their screen
+lit, their code lines running and their character typing (reading, when the tool they are
+on is a read); an orange mat and a chair pushed back mean **waiting**; a greyed desk is
+**stopped** or idle. The floor reads like a real plan: the **orchestrator** gets its own
+office at the top (marked ★), the **meeting room** sits to its right, and the **team rooms**
+follow in two columns either side of the walkway. Only the **active team** is staffed, so
+its desks are the ones that animate; the same subagent sitting on an inactive team stays
+dormant there, even while it works on the active one. Every room is labelled at its
+top-left, with its control at its top-right: the active team is **badged**, the others
+carry **activate**.
+
+**Dispatching a subagent walks the task over.** When the orchestrator hands a teammate a
+job — a live subagent session spawned by its own run — the orchestrator gets up from its
+desk, walks out of its office and down the walkway, turns in through that room's doorway,
+holds the task up at the desk for a beat, and then walks back the way it came, leaving the
+receiving desk lit. The trip is driven by the real session list (the harness stamps the
+spawning session on the subagent's row), so the floor shows what is actually being
+dispatched, and nothing replays on a page load.
 
 Under each seated worker a desk prints the **model** it runs on and what it has spent so
 far — **tokens and cost** (`12.3k tok · $0.042`), refreshed from the server while it
@@ -146,9 +158,9 @@ run a different model on each team it sits on. Every per-member control follows 
 the desk's **off duty** toggle, its **name** and **fire** touch only the row of the team that
 desk sits in, so a member on several teams keeps its own model, label and duty on each.
 
-A cubicle's header carries its **name** as a name tag (a real id `file_reader` can read
+A desk's header carries its **name** as a name tag (a real id `file_reader` can read
 **Bob**, and the id stays beside it), then its own **off duty / on duty** control and a round
-**settings** gear. An off-duty agent keeps its cubicle with an empty desk and no status text
+**settings** gear. An off-duty agent keeps its desk with an empty chair and no status text
 beside the name: the desk itself says it — dimmed, dashed, chair empty, and the control
 offering the way back on duty. That popup gathers the whole
 agent in
@@ -196,7 +208,7 @@ chairs and red armchairs, potted plants and a carpeted floor. It keeps that warm
 look in the dark theme too, instead of inverting with the UI.
 
 Status comes from the same source as the rest of the UI (the session's turn lifecycle), and
-each cubicle labels what its agent is doing *right now* from the live event stream —
+each desk labels what its agent is doing *right now* from the live event stream —
 `→ bash`, `thinking…`, `writing…` — so you can watch a dispatch fan out across the floor.
 
 <p align="center">

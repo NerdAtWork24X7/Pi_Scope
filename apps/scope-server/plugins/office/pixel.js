@@ -316,8 +316,9 @@
   }
 
   /**
-   * Snapshot the DOM: where each room is (snapped to the tile grid) and what
-   * kind of room it is, plus the plan's own box.
+   * Snapshot the DOM: where each room is (snapped to the tile grid), what kind
+   * of room it is and which room it is (`data-room`, so a doorway can name the
+   * room it belongs to), plus the plan's own box.
    */
   function measure(planEl, roomStyle) {
     const plan = planEl.getBoundingClientRect();
@@ -334,6 +335,7 @@
       // Skip a room that is not laid out yet (a hidden view has no boxes).
       if (r.width < TILE * SCALE || r.height < TILE * SCALE) continue;
       rooms.push({
+        id: (el.dataset && el.dataset.room) || "",
         x: snap(r.left - plan.left),
         y: snap(r.top - plan.top),
         w: Math.max(TILE * SCALE, snap(r.width)),
@@ -345,17 +347,27 @@
   }
 
   /**
-   * Mark every wall tile: the left, right and south edge of each room. The top
-   * band of a room is deliberately left open — that is where the room's own
-   * header plate sits (see client.css), and leaving it un-walled is what makes
-   * the side pieces come out as end caps instead of running off the top.
+   * Mark every wall tile — and punch each team room's doorway.
+   *
+   * Only a TEAM's room is walled. The orchestrator's office, the meeting room
+   * and the ad-hoc desks sit on an open floor: the walls are what enclose a team,
+   * so the room an agent belongs to is read from the plan instead of from the
+   * roster. The top band of a room is deliberately left open — that is where the
+   * room's own header plate sits (see client.css), and leaving it un-walled is
+   * what makes the side pieces come out as end caps instead of running off the
+   * top.
+   *
+   * Each team room gets a DOOR: a two-tile opening in the wall that faces the
+   * center pathway (a room left of the pathway opens right, one on the right
+   * opens left). It is where the orchestrator walks in to hand a task over, so
+   * the doorways are returned for the walk to be aimed at the real opening.
    */
   function wallGrid(model) {
     const t = TILE * SCALE;
-    const cols = Math.ceil(model.w / t) + 1;
-    const rows = Math.ceil(model.h / t) + 1;
     const grid = new Set();
+    const doors = [];
     for (const r of model.rooms) {
+      if (r.style !== "team") continue;
       // The ring is snapped OUTWARD (floor on the near edges, ceil on the far
       // ones) so its inner edge is always at or outside the room's own box. The
       // DOM insets its content by exactly one tile (client.css), so the desks and
@@ -366,13 +378,29 @@
       const c1 = Math.ceil((r.x + r.w) / t) - 1;
       const r0 = Math.floor(r.y / t);
       const r1 = Math.ceil((r.y + r.h) / t) - 1;
+      // The doorway sits on the room's own middle, and never touches the south
+      // wall: a door in a corner would read as a hole in the room, not a way in.
+      const leftSide = (r.x + r.w / 2) < model.w / 2;
+      const doorCol = leftSide ? c1 : c0;
+      const doorRow = Math.min(r0 + ((r1 - r0) >> 1) - 1, Math.max(r0, r1 - 2));
+      const doorRows = [doorRow, doorRow + 1];
+      doors.push({
+        id: r.id || "",
+        side: leftSide ? "right" : "left",
+        col: doorCol,
+        rows: doorRows,
+        // The waypoint a walk-in aims at: the middle of the opening, in plan px.
+        x: (leftSide ? doorCol + 1 : doorCol) * t,
+        y: (doorRow + 1) * t,
+      });
       for (let y = r0; y <= r1; y++) {
+        if (doorRows.includes(y)) continue;
         grid.add(`${c0},${y}`);
         grid.add(`${c1},${y}`);
       }
       for (let x = c0; x <= c1; x++) grid.add(`${x},${r1}`);
     }
-    return { grid, cols, rows };
+    return { grid, doors };
   }
 
   function wallMask(grid, x, y) {
@@ -414,6 +442,10 @@
     const props = palette.props;
     if (!props || !props.length) return;
     const occupied = new Set();
+    // A doorway is floor, not a wall — never stand a plant in one.
+    for (const d of (model.doors || [])) {
+      for (const row of d.rows) occupied.add(`${d.col},${row}`);
+    }
     for (const p of model.pods) {
       const c0 = Math.floor(p.x / t);
       const c1 = Math.ceil((p.x + p.w) / t) - 1;
@@ -509,8 +541,12 @@
     // 4. The walls: one auto-tiled piece per wall tile. A piece is two tiles
     //    tall, and upstream draws it one tile above its cell (`offsetY =
     //    TILE - sprite.length`), so the ring's face reads as a wall seen from
-    //    above rather than a strip sitting on the floor.
-    const { grid } = wallGrid(model);
+    //    above rather than a strip sitting on the floor. Each team room's
+    //    doorway is a gap in that ring (see wallGrid).
+    const { grid, doors } = wallGrid(model);
+    // The walk-in route (client.js) reads the doorways off the model, so they
+    // ride along with the geometry the DOM just measured.
+    model.doors = doors;
     const wall = palette.wall;
     if (wall) {
       for (const key of grid) {
@@ -526,7 +562,15 @@
       }
     }
 
-    // 5. Furniture on the floor that is left over.
+    // 5. The doorway thresholds: the pieces are two tiles tall, so the wall art
+    //    of the cell below a skipped one still reaches up into the opening. The
+    //    doorway is painted back in after the walls, leaving a pale strip of
+    //    corridor floor where the door is.
+    if (corridor) {
+      for (const d of doors) tile(g, corridor, d.col * t, d.rows[0] * t, t, t * d.rows.length);
+    }
+
+    // 6. Furniture on the floor that is left over.
     dressFloor(g, model, palette, t);
   }
 

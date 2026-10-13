@@ -53,6 +53,22 @@ async function boot({ sessions = [], team, events, defs, office } = {}) {
   if (defs) mock.setAgentDefs(defs);
   if (events) for (const [sid, list] of Object.entries(events)) mock.setEvents(sid, list);
   context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  // Record the wall pieces the floor canvas paints: the 16×32 wall sheet is
+  // drawn two tiles tall at the tile it marks, so a recorded dst rect is exactly
+  // one wall tile of the ring (and a missing one is a doorway). Observing the
+  // draw calls is what makes "which rooms are walled" testable without a pixel
+  // diff.
+  await context.addInitScript(() => {
+    window.__officeWallDraws = [];
+    const proto = CanvasRenderingContext2D.prototype;
+    const orig = proto.drawImage;
+    proto.drawImage = function (img, ...args) {
+      if (args.length === 8 && img && img.width === 64 && img.height === 128) {
+        window.__officeWallDraws.push(args.slice(4));
+      }
+      return orig.apply(this, [img, ...args]);
+    };
+  });
   page = await context.newPage();
   pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(String(e)));
@@ -130,7 +146,7 @@ function fourTeams() {
 }
 
 describe("office view", () => {
-  test("each team gets a room, and every member gets a cubicle in it", async () => {
+  test("each team gets a room, and every member gets a desk in it", async () => {
     await boot({
       sessions: [
         makeSession({ session_id: SID, cwd: WS, agent_name: "builder", last_turn_event: "turn_start" }),
@@ -1052,18 +1068,18 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
-  test("each cubicle holds a desk, a screen, a chair and a seated agent", async () => {
+  test("each desk holds a desk, a screen, a chair and a seated agent", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
     });
     const box = await pod("builder").boundingBox();
-    assert.ok(box && box.width > 120 && box.height > 120, "the cubicle is a real plot, not a bare label");
+    assert.ok(box && box.width > 120 && box.height > 120, "the desk is a real plot, not a bare label");
 
-    // Furniture, each rendered inside the cubicle plot.
+    // Furniture, each rendered inside the desk's plot.
     for (const sel of [".office-station", ".office-desk", ".office-monitor", ".office-keyboard", ".office-chair", ".office-person"]) {
       assert.equal(await pod("builder").locator(sel).count(), 1, `${sel} is drawn once`);
     }
-    // The agent sits in the cubicle, in front of a screen on the desk.
+    // The agent sits at the desk, in front of a screen on it.
     const [person, monitor, chair] = await Promise.all([
       pod("builder").locator(".office-person").boundingBox(),
       pod("builder").locator(".office-monitor").boundingBox(),
@@ -1072,15 +1088,197 @@ describe("office view", () => {
     assert.ok(person.y > monitor.y, "the agent faces the screen from below (top-down)");
     assert.ok(chair.y >= monitor.y, "the chair sits behind the desk");
 
-    // The partition walls are the three visible borders of the cubicle.
-    const borders = await pod("builder").evaluate((el) => {
+    // No cubicle walls between teammates: a desk is a mat in the team's room, so
+    // nothing is drawn down either side of it (the room owns the walls).
+    const edges = await pod("builder").evaluate((el) => {
       const cs = getComputedStyle(el);
-      return { top: cs.borderTopWidth, left: cs.borderLeftWidth, right: cs.borderRightWidth, bottom: cs.borderBottomWidth };
+      return [cs.borderTopWidth, cs.borderRightWidth, cs.borderBottomWidth, cs.borderLeftWidth].map(parseFloat);
     });
-    assert.ok(parseFloat(borders.top) > 0 && parseFloat(borders.left) > 0 && parseFloat(borders.right) > 0, "three partition walls");
+    assert.deepEqual(edges, [0, 0, 0, 0], `a desk has no partition walls (${edges})`);
 
-    // The orchestrator gets the manager's cubicle, marked as such.
-    assert.ok(await pod("orchestrator").evaluate((el) => el.classList.contains("orch")), "orchestrator cubicle is marked");
+    // The orchestrator gets the manager's desk, marked as such.
+    assert.ok(await pod("orchestrator").evaluate((el) => el.classList.contains("orch")), "orchestrator desk is marked");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("the character sheet paints one person per desk, not two", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder", last_turn_event: "turn_start" })],
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+
+    // The sheet is 112×96 art (7 frames of 16×32 per row, three rows). Painting it
+    // at 2× in BOTH axes is what frames exactly one character in the 32×64 window:
+    // scaling only the width (the old 224×96) squashed the sprite to half height and
+    // let a second row — a second person — show through the window.
+    const sheet = await page.evaluate(async () => {
+      const el = document.querySelector('#office-pane .office-pod[data-key="builder"] .office-person');
+      const cs = getComputedStyle(el);
+      const url = cs.backgroundImage.replace(/^url\(["']?/, "").replace(/["']?\)$/, "");
+      const img = new Image();
+      const ok = await new Promise((res) => { img.onload = () => res(true); img.onerror = () => res(false); img.src = url; });
+      const [w, h] = cs.backgroundSize.split(" ").map(parseFloat);
+      const box = el.getBoundingClientRect();
+      return {
+        ok,
+        natural: ok ? [img.naturalWidth, img.naturalHeight] : null,
+        size: [w, h],
+        box: [Math.round(box.width), Math.round(box.height)],
+        // How many art pixels of one row the window shows: 32 is exactly one frame.
+        sourceRows: ok ? +(box.height / (h / img.naturalHeight)).toFixed(1) : -1,
+      };
+    });
+    assert.ok(sheet.ok, "the character sheet loaded");
+    assert.deepEqual(sheet.size, [sheet.natural[0] * 2, sheet.natural[1] * 2], `the sheet is painted at 2x its natural size (${sheet.size} vs ${sheet.natural})`);
+    assert.deepEqual(sheet.box, [32, 64], "the window is one character frame");
+    assert.equal(sheet.sourceRows, 32, `the window frames exactly one row of the sheet (${sheet.sourceRows} art px)`);
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("dispatching a subagent walks the orchestrator over with the task", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: "s-orch", cwd: WS, agent_name: "orchestrator", last_turn_event: "turn_start" })],
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
+    // The first pass only learns the floor: work that was already running when
+    // the view opened must not replay a parade of errands.
+    await sleep(1500);
+    assert.equal(await page.locator(".office-courier").count(), 0, "a session that predates the view walks nobody over");
+
+    // The dispatch: a fresh, live session for a teammate, spawned by the
+    // orchestrator's own run (the harness stamps the parent on the child). It is
+    // seeded on the mock too, so the next /sessions poll keeps it.
+    mock.setSessions([...mock.state.sessions, makeSession({
+      session_id: "s-builder", cwd: WS, agent_name: "builder",
+      model: "google/gemini-2.5-flash-lite", parent_session_id: "s-orch", last_turn_event: "turn_start",
+    })]);
+    await page.evaluate((sessions) => { window.__SCOPE_STATE.sessions = sessions; }, mock.state.sessions);
+
+    const probe = () => page.evaluate(() => {
+      const c = document.querySelector(".office-courier");
+      const desk = document.querySelector('#office-pane .office-pod[data-key="builder"]');
+      const room = document.querySelector('#office-pane .office-room[data-room="team:dev"]');
+      let inRoom = false;
+      if (c && room) {
+        const a = c.getBoundingClientRect(), b = room.getBoundingClientRect();
+        inRoom = a.left + a.width / 2 >= b.left && a.left + a.width / 2 <= b.right
+          && a.top + a.height / 2 >= b.top && a.top + a.height / 2 <= b.bottom;
+      }
+      return {
+        walking: !!c,
+        dir: c ? (c.className.match(/dir-(down|up|left|right)/) || [])[1] || "standing" : null,
+        inRoom,
+        handing: !!c && c.classList.contains("handing"),
+        handover: !!desk && desk.classList.contains("handover"),
+        away: !!document.querySelector("#office-pane .office-pod.on-errand"),
+      };
+    });
+
+    // The courier is a zero-sized anchor for the walker sprite, so it is waited
+    // for by presence rather than "visible"; the sprite itself must be on the
+    // floor, though — that is the part the user watches.
+    await page.waitForFunction(() => !!document.querySelector("#office-pane .office-courier"), null, { timeout: 5000 });
+    const sprite = page.locator("#office-pane .office-courier .office-courier-body");
+    assert.ok(await sprite.isVisible(), "the walking orchestrator is drawn, not a hidden anchor");
+    const [walkBox, planBox] = await Promise.all([sprite.boundingBox(), page.locator("#office-plan").boundingBox()]);
+    assert.ok(walkBox && walkBox.width > 0 && walkBox.height > 0, "the walker has a sprite box");
+    assert.ok(
+      walkBox.x >= planBox.x - 40 && walkBox.x + walkBox.width <= planBox.x + planBox.width + 40,
+      "the walker is on the office floor",
+    );
+
+    const seen = { dirs: new Set(), inRoom: false, handing: false, handover: false, away: false, done: false };
+    for (let i = 0; i < 60; i++) {
+      const s = await probe();
+      if (s.walking) { if (s.dir) seen.dirs.add(s.dir); if (s.inRoom) seen.inRoom = true; if (s.away) seen.away = true; }
+      if (s.handing) seen.handing = true;
+      if (s.handover) seen.handover = true;
+      if (!s.walking && (seen.handing || s.handover)) { seen.done = true; break; }
+      await sleep(200);
+    }
+    assert.ok(seen.dirs.size >= 2, `the errand walks more than one way (${[...seen.dirs].join(", ")})`);
+    assert.ok(seen.away, "the orchestrator's own seat empties while it is away");
+    assert.ok(seen.inRoom, "the walk really enters the subagent's room (through its doorway)");
+    assert.ok(seen.handing, "it holds the task up at the desk before letting go");
+    assert.ok(seen.handover, "the receiving desk is lit by the handover");
+    assert.ok(seen.done, "the courier is gone once the errand is over");
+    assert.equal(await page.locator(".office-courier").count(), 0, "nothing is left walking the floor");
+    assert.equal(await page.locator("#office-pane .office-pod.on-errand").count(), 0, "the orchestrator is back at its desk");
+    // The teammate is still the one working — the errand is decoration, not state.
+    assert.ok(await pod("builder").evaluate((el) => el.classList.contains("working")), "the dispatched desk is working");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("only the team rooms are walled, and each has a doorway onto the pathway", async () => {
+    await boot({ sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })] });
+    await page.waitForSelector('#office-pane .office-pod[data-key="builder"]');
+    await page.waitForSelector('#office-pane .office-room[data-room="team:dev"][data-door]');
+
+    // Every team room opens onto the center pathway; the open-plan rooms
+    // (the orchestrator's office, the meeting room) carry no doorway at all.
+    const doors = await page.evaluate(() => {
+      const out = {};
+      for (const el of document.querySelectorAll("#office-pane .office-room")) out[el.dataset.room] = el.dataset.door || null;
+      return out;
+    });
+    assert.equal(doors["team:dev"], "right", "the left team room opens toward the pathway");
+    assert.equal(doors["team:review"], "left", "the right team room opens toward the pathway");
+    assert.equal(doors.orchestrator, null, "the orchestrator's office is open plan");
+    assert.equal(doors.meeting, null, "the meeting room is open plan");
+
+    // …and the canvas really paints it that way: the wall pieces carry the ring
+    // (their dst is one tile above the cell they mark), with a two-tile opening
+    // in the wall that faces the pathway, and none around the open-plan rooms.
+    const painted = await page.evaluate(() => {
+      const plan = document.querySelector("#office-plan");
+      const pr = plan.getBoundingClientRect();
+      const T = 32;
+      const rooms = {};
+      for (const el of plan.querySelectorAll(".office-room")) {
+        const r = el.getBoundingClientRect();
+        rooms[el.dataset.room] = {
+          door: el.dataset.door || null,
+          c0: Math.floor((r.left - pr.left) / T), c1: Math.ceil((r.left - pr.left + r.width) / T) - 1,
+          r0: Math.floor((r.top - pr.top) / T), r1: Math.ceil((r.top - pr.top + r.height) / T) - 1,
+        };
+      }
+      // A 16×32 wall piece is drawn two tiles tall from the cell it marks, so its
+      // dst row + 1 is the cell row.
+      const walls = (window.__officeWallDraws || []).map(([dx, dy]) => [Math.round(dx / T), Math.round(dy / T) + 1]);
+      const interior = (b) => walls.filter(([c, r]) => c >= b.c0 && c <= b.c1 && r >= b.r0 && r <= b.r1).length;
+      // The wall that faces the pathway: the room's busiest wall column on its
+      // doorway side (ties break toward the pathway).
+      const facing = (b) => {
+        const near = walls.filter(([c, r]) => c >= b.c0 - 2 && c <= b.c1 + 2 && r >= b.r0 - 1 && r <= b.r1 + 1);
+        const byCol = new Map();
+        for (const [c, r] of near) {
+          if (!byCol.has(c)) byCol.set(c, []);
+          byCol.get(c).push(r);
+        }
+        const cols = [...byCol.entries()].sort((a, z) => z[1].length - a[1].length || (b.door === "right" ? z[0] - a[0] : a[0] - z[0]));
+        const pick = cols[0] || [null, []];
+        return { col: pick[0], rows: [...new Set(pick[1])].sort((a, z) => a - z) };
+      };
+      const gapsOf = (rows) => {
+        const out = [];
+        for (let i = 1; i < rows.length; i++) if (rows[i] - rows[i - 1] > 1) out.push(rows[i] - rows[i - 1] - 1);
+        return out;
+      };
+      const dev = facing(rooms["team:dev"]);
+      const review = facing(rooms["team:review"]);
+      return {
+        dev, review,
+        devGaps: gapsOf(dev.rows), reviewGaps: gapsOf(review.rows),
+        orchPieces: interior(rooms.orchestrator),
+        meetingPieces: interior(rooms.meeting),
+      };
+    });
+    for (const [team, wall, gaps] of [["dev", painted.dev, painted.devGaps], ["review", painted.review, painted.reviewGaps]]) {
+      assert.ok(wall.rows.length >= 5, `the ${team} room is walled (${wall.rows.length} pieces in column ${wall.col})`);
+      assert.deepEqual(gaps, [2], `${team}'s wall facing the pathway has one two-tile doorway (rows ${wall.rows.join(",")})`);
+    }
+    assert.equal(painted.orchPieces, 0, "the orchestrator's office is not walled");
+    assert.equal(painted.meetingPieces, 0, "the meeting room is not walled");
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
@@ -1151,10 +1349,10 @@ describe("office view", () => {
     const leave = await page.evaluate(() => {
       const el = document.querySelector('#office-pane .office-pod[data-key="critic"]');
       const cs = getComputedStyle(el);
-      return { opacity: Number(cs.opacity), border: cs.borderTopStyle };
+      return { opacity: Number(cs.opacity), outline: cs.outlineStyle };
     });
     assert.ok(leave.opacity < 1, `an off-duty desk is dimmed (${leave.opacity})`);
-    assert.equal(leave.border, "dashed", "an off-duty desk is dashed");
+    assert.equal(leave.outline, "dashed", "an off-duty desk is dashed");
     // The tooltip carries the same state (lower-case, like the other activities).
     assert.match(await pod("critic").getAttribute("title"), /off duty/i);
     assert.match(await counts(), /1\s*off duty/);

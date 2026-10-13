@@ -57,6 +57,7 @@ let ws4;   // harness flag wiring
 let ws5;   // the node panel (provider + model + message)
 let ws6;   // parallel vs sequential scheduling
 let ws7;   // reference files (a node's injected paths)
+let ws8;   // the reference browser + the messages sidebar
 let stubDir;    // fake `claude` / `gemini` binaries, prepended to PATH
 let claudeLog;  // argv the fake claude was invoked with
 let geminiLog;  // argv the fake gemini was invoked with
@@ -214,15 +215,18 @@ before(async () => {
   ws5 = path.join(tmpDir, "ws5");
   ws6 = path.join(tmpDir, "ws6");
   ws7 = path.join(tmpDir, "ws7");
-  for (const d of [ws, ws2, ws3, ws4, ws5, ws6, ws7]) fs.mkdirSync(d, { recursive: true });
+  ws8 = path.join(tmpDir, "ws8");
+  for (const d of [ws, ws2, ws3, ws4, ws5, ws6, ws7, ws8]) fs.mkdirSync(d, { recursive: true });
 
   // Reference files a node can be pointed at: a markdown file with a heading (so
   // it can be described without a note), a plain text file, and a folder.
-  fs.mkdirSync(path.join(ws7, "docs"), { recursive: true });
-  fs.writeFileSync(path.join(ws7, "docs", "design.md"),
-    "# Design notes\n\nThe API shape this step must follow.\n");
-  fs.writeFileSync(path.join(ws7, "notes.txt"), "Run the linter before committing.\nsecond line\n");
-  fs.mkdirSync(path.join(ws7, "src"), { recursive: true });
+  for (const w of [ws7, ws8]) {
+    fs.mkdirSync(path.join(w, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(w, "docs", "design.md"),
+      "# Design notes\n\nThe API shape this step must follow.\n");
+    fs.writeFileSync(path.join(w, "notes.txt"), "Run the linter before committing.\nsecond line\n");
+    fs.mkdirSync(path.join(w, "src"), { recursive: true });
+  }
 
   // One skill and one extension in the agent dir, so the harness catalogue has
   // real entries to report (the skill is a plain directory, the extension
@@ -410,6 +414,30 @@ describe("subagent workflow plugin (server)", () => {
     // it does not edit alone.
     assert.ok((await act("updateNode", { id: agent.id, config: { prompt: "{input}" } }, solo)).res.ok);
     assert.equal((await refsOf()).length, 1, "saving the node keeps its references");
+  });
+
+  test("lists the workspace's folders and files for the reference browser", async () => {
+    const root = (await api(`/${PLUGIN}/entries?cwd=${enc(ws8)}`)).data;
+    assert.equal(root.rel, "");
+    assert.equal(root.path, fs.realpathSync(ws8));
+    // Folders first: the browser walks down a tree, it does not hunt.
+    const dirs = root.entries.filter((e) => e.dir).map((e) => e.name);
+    assert.deepEqual(dirs, ["docs", "src"]);
+    assert.deepEqual(root.entries.filter((e) => !e.dir).map((e) => e.name), ["notes.txt"]);
+    assert.deepEqual(root.entries.map((e) => e.dir).slice(0, 2), [true, true]);
+    assert.ok(!root.entries.some((e) => e.name.startsWith(".")), "hidden entries are skipped");
+
+    // A subfolder is addressed relative to the workspace, and its entries carry
+    // the path the reference will be stored as.
+    const sub = (await api(`/${PLUGIN}/entries?cwd=${enc(ws8)}&path=docs`)).data;
+    assert.equal(sub.rel, "docs");
+    assert.deepEqual(sub.entries.map((e) => e.name), ["design.md"]);
+    assert.equal(sub.entries[0].rel, "docs/design.md");
+
+    // The browser stays inside the workspace, and says so for a path that is not
+    // there.
+    assert.equal((await api(`/${PLUGIN}/entries?cwd=${enc(ws8)}&path=../`)).res.status, 400);
+    assert.equal((await api(`/${PLUGIN}/entries?cwd=${enc(ws8)}&path=docs/ghost`)).res.status, 400);
   });
 
   test("injects a node's reference files into the message it sends", async () => {
@@ -1263,17 +1291,21 @@ describe("subagent workflow plugin (client)", () => {
       const r = dlg.getBoundingClientRect();
       return {
         position: cs.position, z: Number(cs.zIndex), scrim: cs.backgroundColor,
-        w: Math.round(r.width),
-        centered: Math.abs((r.left + r.right) / 2 - innerWidth / 2) <= 2,
+        w: Math.round(r.width), h: Math.round(r.height),
+        // The surface the popup covers: the pane it floats over, and the
+        // viewport the pane sits in (a scrollbar is all it may leave over).
+        vw: document.documentElement.clientWidth, vh: document.documentElement.clientHeight,
         canvas: Math.round(document.querySelector(".sw-canvas-scroll").getBoundingClientRect().width),
       };
     });
     assert.equal(geom.position, "fixed", "the popup floats over the pane, it is not a column in it");
     assert.ok(geom.z >= 1000, `it sits above the canvas (z=${geom.z})`);
     assert.notEqual(geom.scrim, "rgba(0, 0, 0, 0)", "with a scrim over the canvas");
-    assert.ok(geom.centered, "centred in the viewport");
-    assert.ok(geom.w >= 360, `and wide enough for the form (${geom.w}px)`);
-    assert.ok(geom.canvas > geom.w, `the canvas keeps the full width behind it (${geom.canvas}px)`);
+    // Full screen: a node's references, the whole model catalogue and the end
+    // node's final output all need the room, so the popup takes the viewport.
+    assert.ok(geom.w >= geom.vw - 20, `full screen, scrollbars aside (${geom.w} of ${geom.vw})`);
+    assert.ok(geom.h >= geom.vh - 20, `in both directions (${geom.h} of ${geom.vh})`);
+    assert.ok(geom.canvas > 0, `the canvas stays behind it (${geom.canvas}px)`);
 
     // Escape closes it, leaving the node's settings exactly as they were.
     await page.keyboard.press("Escape");
@@ -1281,7 +1313,7 @@ describe("subagent workflow plugin (client)", () => {
     assert.equal(await page.locator("#sw-modal-backdrop:visible").count(), 0);
     assert.deepEqual(await configOf(), agent.config, "closing is not saving");
 
-    // The ✕ in the head closes it too, and so does a click on the scrim.
+    // The ✕ in the head closes it too, and so does the actions row's Close.
     await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-f-harness");
     await page.click("#sw-close-x");
@@ -1289,7 +1321,7 @@ describe("subagent workflow plugin (client)", () => {
 
     await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-f-harness");
-    await page.mouse.click(6, 6); // a corner of the scrim, well clear of the popup
+    await page.click("#sw-close");
     await page.waitForFunction(() => !document.querySelector("#sw-modal .sw-dlg-body"));
 
     // Double-clicking the card is the same as pressing its gear — and an edit
@@ -1394,7 +1426,9 @@ describe("subagent workflow plugin (client)", () => {
     const { page, context, errors } = await openWorkflow(ws7);
     await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-refs");
-    assert.match(await page.textContent("#sw-refs-empty"), /No reference files yet/);
+    // A reference may be a file or a whole folder, so the empty state says
+    // “references” rather than promising only files.
+    assert.match(await page.textContent("#sw-refs-empty"), /No references yet/);
 
     // The user types a workspace-relative path and what the file is for.
     await page.fill("#sw-ref-path", "docs/design.md");
@@ -1847,6 +1881,189 @@ describe("subagent workflow plugin (client)", () => {
     await page.selectOption("#sw-history", "");
     await page.waitForFunction(() => /A1\[second\]/.test(document.querySelector("#sw-run-log")?.textContent || ""));
     assert.doesNotMatch(await page.textContent("#sw-run-status"), /past run/);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("the messages sidebar lists every agent, and one agent once its card is clicked", async () => {
+    const solo = path.join(tmpDir, "ws-msgs-ui");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildCustomGraph(solo);
+    const { page, context, errors } = await openWorkflow(solo);
+
+    // With nothing in focus every node that carries messages is listed, each in
+    // a section of its own.
+    const sections = await page.$$eval("#sw-msg-body .sw-msg-section[data-node]",
+      (els) => els.map((e) => e.dataset.node));
+    assert.deepEqual(sections.slice().sort(), [g.first.id, g.a2.id, g.a3.id, g.end.id].sort());
+    assert.match(await page.textContent("#sw-msg-sub"), /3 agents/);
+
+    await page.fill("#sw-task", "world");
+    await page.click("#sw-run");
+    await page.waitForFunction(() =>
+      document.querySelectorAll(".sw-node.sw-run-done").length >= 4, null, { timeout: 25_000 });
+    const body = await page.textContent("#sw-msg-body");
+    assert.match(body, /A1\[world\]/, "the first agent's own words");
+    assert.match(body, /A2\[A1\[world\]\]/);
+    assert.match(body, /A3\[A1\[world\]\]/);
+
+    // Clicking an agent's card focuses its messages — its own, and only its own.
+    await page.click(`.sw-node[data-id="${g.a2.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "a2");
+    assert.equal(await page.locator("#sw-msg-body .sw-msg-section[data-node]").count(), 1, "one agent in focus");
+    const focused = await page.textContent("#sw-msg-body");
+    assert.match(focused, /A2\[A1\[world\]\]/);
+    assert.doesNotMatch(focused, /A3\[A1\[world\]\]/, "another agent's messages are not in this view");
+    // It reads as a conversation: what the node was handed, then what it said.
+    assert.match(await page.textContent(".sw-msg-sent pre"), /\{input\}/);
+
+    // “All agents” puts every section back, and a section in the sidebar is a
+    // way to focus that agent too.
+    await page.click("#sw-msg-all");
+    await page.waitForFunction((n) =>
+      document.querySelectorAll("#sw-msg-body .sw-msg-section[data-node]").length === n, 4);
+    assert.match(await page.textContent("#sw-msg-body"), /A2\[A1\[world\]\]/);
+    await page.click(`#sw-msg-body .sw-msg-section[data-node="${g.a3.id}"] .sw-msg-sec-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "a3");
+    assert.match(await page.textContent("#sw-msg-body"), /A3\[A1\[world\]\]/);
+    assert.doesNotMatch(await page.textContent("#sw-msg-body"), /A2\[A1\[world\]\]/,
+      "and it replaces the all-agents view");
+
+    // It sits beside the canvas, not over it: the diagram keeps a workable
+    // width and the two never overlap.
+    const layout = await page.evaluate(() => {
+      const side = document.getElementById("sw-msg-side").getBoundingClientRect();
+      const canvas = document.querySelector(".sw-canvas-scroll").getBoundingClientRect();
+      return { sideW: Math.round(side.width), sideL: Math.round(side.left), canvasR: Math.round(canvas.right), canvasW: Math.round(canvas.width) };
+    });
+    assert.ok(layout.sideW >= 240, `the sidebar has room to read (${layout.sideW}px)`);
+    assert.ok(layout.sideL >= layout.canvasR, `and sits after the canvas (${layout.sideL} ≥ ${layout.canvasR})`);
+    assert.ok(layout.canvasW >= 700, `which keeps its own width (${layout.canvasW}px)`);
+
+    // The sidebar can be folded away, and says so in the headers.
+    await page.click("#sw-msg-toggle");
+    assert.equal(await page.locator("#sw-msg-side:visible").count(), 0);
+    await page.click("#sw-msg-toggle");
+    assert.equal(await page.locator("#sw-msg-side:visible").count(), 1);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("the end node's sidebar separates what each agent wired into it produced", async () => {
+    const solo = path.join(tmpDir, "ws-msgs-end");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildCustomGraph(solo);
+    assert.ok((await runApi("start", { task: "world" }, solo)).res.ok);
+    assert.equal((await waitRun(solo)).status, "done");
+
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.click(`.sw-node[data-id="${g.end.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "End");
+    // One section per input agent, each holding that agent's own output and
+    // never the other's…
+    // The seeded first → end connection is still wired, so all three agents
+    // that feed the end node get a section.
+    const inputs = await page.$$eval("#sw-msg-body .sw-msg-input", (els) => els.map((e) => e.dataset.input));
+    assert.deepEqual(inputs.slice().sort(), [g.first.id, g.a2.id, g.a3.id].sort());
+    const a2 = await page.textContent(`#sw-msg-body .sw-msg-input[data-input="${g.a2.id}"] pre`);
+    assert.match(a2, /A2\[A1\[world\]\]/);
+    assert.doesNotMatch(a2, /A3/, "the sibling branch is not mixed in");
+    const a3 = await page.textContent(`#sw-msg-body .sw-msg-input[data-input="${g.a3.id}"] pre`);
+    assert.match(a3, /A3\[A1\[world\]\]/);
+    assert.doesNotMatch(a3, /A2/);
+    // …and the joined output those sections add up to.
+    assert.match(await page.textContent("#sw-msg-body .sw-msg-final > .sw-msg-pre"),
+      /A2\[A1\[world\]\][\s\S]*A3\[A1\[world\]\]/);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("a waiting gate is approved from the sidebar, with its input agents laid out", async () => {
+    const solo = path.join(tmpDir, "ws-msgs-gate");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildApprovalGraph(solo);
+
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.fill("#sw-task", "hello");
+    await page.click("#sw-run");
+    // The gate's card carries the same request as the banner, in the sidebar.
+    await page.waitForSelector(".sw-msg-gate.waiting");
+    assert.match(await page.textContent(".sw-msg-gate .sw-msg-gate-msg"), /Please review: A1\[hello\]/);
+    assert.equal(await page.locator(".sw-msg-gate [data-approve]").count(), 1);
+    assert.equal(await page.locator(".sw-msg-gate [data-reject]").count(), 1);
+    // Clicking the card focuses the gate: what it received, per input agent.
+    await page.click(`#sw-msg-body .sw-msg-section[data-node="${g.gate.id}"] .sw-msg-gate-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "review");
+    const inputs = await page.$$eval("#sw-msg-body .sw-msg-input", (els) => els.map((e) => e.dataset.input));
+    assert.deepEqual(inputs, [g.first.id], "the agent feeding the gate");
+    assert.match(await page.textContent(`#sw-msg-body .sw-msg-input[data-input="${g.first.id}"] pre`), /A1\[hello\]/);
+
+    // Approving from here decides the run, exactly like the banner.
+    await page.fill(".sw-msg-gate .sw-msg-note", "ship it");
+    await page.click(".sw-msg-gate [data-approve]");
+    await page.waitForFunction((id) =>
+      document.querySelector(`.sw-node[data-id="${id}"]`)?.classList.contains("sw-run-done"), g.last.id, { timeout: 20_000 });
+    assert.equal(await page.locator(".sw-approvals.show").count(), 0, "the banner clears once decided");
+    assert.match(await page.textContent("#sw-run-log"), /review approved/);
+    // The sidebar shows the decision too, now that the gate is settled.
+    await page.waitForFunction(() => /approved/.test(document.querySelector(".sw-msg-gate")?.textContent || ""));
+    assert.equal((await waitRun(solo)).status, "done");
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("picks a file or a folder as a reference from the workspace browser", async () => {
+    const s = await snapshot(ws8);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const refsOf = async () => (await snapshot(ws8)).nodes.find((n) => n.id === agent.id).config.refs;
+
+    const { page, context, errors } = await openWorkflow(ws8);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-refs");
+    assert.match(await page.textContent("#sw-refs > span"), /Reference files & folders/);
+    assert.equal(await page.locator("#sw-ref-picker").count(), 1);
+    assert.ok(await page.locator("#sw-ref-picker").isHidden(), "closed until asked for");
+
+    // Browse: the workspace's folders and files, folders first.
+    await page.click("#sw-ref-browse");
+    await page.waitForSelector("#sw-ref-picker .sw-pick-row");
+    const rows = await page.$$eval("#sw-ref-picker .sw-pick-row",
+      (els) => els.map((e) => ({ name: e.querySelector(".sw-pick-name").textContent, dir: e.classList.contains("dir") })));
+    assert.deepEqual(rows, [{ name: "docs", dir: true }, { name: "src", dir: true }, { name: "notes.txt", dir: false }]);
+
+    // Clicking a file adds it as a reference, at its own path.
+    await page.click('#sw-ref-picker [data-pick-nav="docs"] .sw-pick-name');
+    await page.waitForFunction(() => document.querySelectorAll("#sw-ref-picker [data-pick-file]").length === 1);
+    assert.equal(await page.textContent("#sw-ref-picker .sw-pick-dir"), "docs");
+    await page.click('#sw-ref-picker [data-pick-file="docs/design.md"] .sw-pick-name');
+    await page.waitForFunction(() => document.querySelectorAll(".sw-ref-row").length === 1);
+    assert.deepEqual((await refsOf()).map((r) => r.path), [fs.realpathSync(path.join(ws8, "docs", "design.md"))]);
+
+    // A folder is a reference too: “Use” on the row stores it with its trailing
+    // separator, and the panel lists it as the folder it is.
+    await page.click("#sw-ref-browse");
+    await page.waitForSelector('#sw-ref-picker [data-pick-nav="src"] [data-pick-add]');
+    await page.click('#sw-ref-picker [data-pick-nav="src"] [data-pick-add]');
+    await page.waitForFunction(() => document.querySelectorAll(".sw-ref-row").length === 2);
+    const src = fs.realpathSync(path.join(ws8, "src"));
+    assert.deepEqual((await refsOf()).map((r) => r.path), [fs.realpathSync(path.join(ws8, "docs", "design.md")), `${src}/`]);
+    assert.equal(await page.$$eval(".sw-ref-icon", (els) => els.map((e) => e.textContent).join("")), "📄📁");
+    assert.equal(await page.textContent(".sw-ref-row:last-child .sw-ref-path"), "src/", "listed relative to the workspace, as a folder");
+
+    // “Use this folder” at the root takes the whole workspace.
+    await page.click("#sw-ref-browse");
+    await page.waitForSelector("#sw-ref-picker .sw-pick-bar");
+    await page.click('#sw-ref-picker .sw-pick-bar [data-pick-add]');
+    await page.waitForFunction(() => document.querySelectorAll(".sw-ref-row").length === 3);
+    assert.equal((await refsOf())[2].path, `${fs.realpathSync(ws8)}/`);
+
+    // Navigating up stays inside the workspace: the root has no way up.
+    await page.click("#sw-ref-browse");
+    await page.waitForSelector("#sw-ref-picker .sw-pick-bar");
+    assert.equal(await page.$eval("#sw-ref-picker .sw-pick-btn", (el) => el.disabled), true);
+    assert.equal(await page.textContent("#sw-ref-picker .sw-pick-dir"), "workspace root");
+    await page.click("#sw-ref-picker [data-pick-close]");
+    assert.ok(await page.locator("#sw-ref-picker").isHidden(), "the ✕ hides the browser");
     assert.deepEqual(errors, []);
     await context.close();
   });

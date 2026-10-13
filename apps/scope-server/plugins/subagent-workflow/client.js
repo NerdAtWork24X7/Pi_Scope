@@ -10,15 +10,26 @@
  * node's output into the run panel while the canvas badges each node
  * pending → running → done/error.
  *
+ * Beside the canvas sits the **messages sidebar** — what each agent actually
+ * said. With nothing selected every agent is listed in a section of its own;
+ * clicking an agent's card (or its section) focuses that one agent's messages,
+ * with the message it was handed above them. A waiting **approval** gate shows
+ * its card there too, carrying the same Approve / Reject as the banner, with
+ * what each agent wired into it produced in a section per agent; the **end**
+ * node does the same for the workflow's final output, one section per incoming
+ * agent followed by the joined result. It reads only — a node's settings are a
+ * popup, never a column.
+ *
  * A node is configured with exactly three things — its **provider** (the harness
  * it spawns), its **model**, and the **user message** it is given — and each
  * agent node wears its provider's mark on the canvas. A Pi node's Model field
  * offers every model this app can run, grouped by provider and valued
  * `<provider>/<id>` (what pi resolves); the **end** node shows the workflow's
  * final output once a run reaches it. An agent node can also carry **reference
- * files** — paths the user adds, each with a description — which are injected
- * ahead of its user message, so a step is pointed at the material it needs
- * instead of having it pasted into the message. Connections decide the
+ * files and folders** — paths the user types or picks from a browser of the
+ * workspace's own tree, each with a description — which are injected ahead of
+ * its user message, so a step is pointed at the material it needs instead of
+ * having it pasted into the message. Connections decide the
  * order of a run: everything wired in parallel off one node runs in parallel,
  * and a chain runs one node after another. Nodes can be cloned and the graph
  * exported/imported as JSON. An **approval** node pauses the run for a person: the banner above the
@@ -26,8 +37,10 @@
  * and Approve / Reject. The run panel also lists **past runs** (reopen one to
  * replay its log and node badges), and the toolbar's ⏱ button opens the same
  * kind of popup on the **triggers** — a schedule and an event watch that start
- * runs on their own. There is no settings sidebar: a node, a connection and the
- * triggers are all edited in that one modal, over the canvas.
+ * runs on their own. The settings popup takes the whole screen, because a node's
+ * references, the model catalogue and the end node's final output all need the
+ * room: a node, a connection and the triggers are all edited in that one modal,
+ * over the canvas.
  *
  * A **standalone plugin**: this bundle, its stylesheet (client.css) and its
  * server half (server.ts) all live in apps/scope-server/plugins/subagent-workflow/,
@@ -148,7 +161,20 @@
   }
 
   function adoptRun(next, full) {
+    const previousNodes = run && run.nodes ? run.nodes : null;
     run = next || null;
+    // An incremental poll carries no per-node output tail (only a full read
+    // sends it), so the last known one is carried over rather than dropped:
+    // otherwise an agent's output would vanish from the messages sidebar while
+    // the run is still streaming.
+    if (!full && previousNodes && run?.nodes) {
+      for (const [id, s] of Object.entries(run.nodes)) {
+        const prev = previousNodes[id];
+        if (prev && typeof prev.outputTail === "string" && typeof s.outputTail !== "string") {
+          s.outputTail = prev.outputTail;
+        }
+      }
+    }
     if (full) {
       logBuffer = next?.log ? [...next.log] : [];
       logSig = "";
@@ -234,6 +260,7 @@
     canvasW = 0; canvasH = 0;
     approvalSig = "";  // the approval banner is about to be rebuilt too
     historySig = "";    // …and so is the history picker
+    msgSig = "";        // …and the messages sidebar
     historyRun = null;  // a rebuilt pane starts on the live run
   }
 
@@ -832,7 +859,9 @@
     const refs = Array.isArray(n.config?.refs) ? n.config.refs : [];
     const rows = refs.map((r) => {
       const shown = refDisplayPath(r.path);
+      const dir = String(r.path || "").endsWith("/");
       return `<div class="sw-ref-row" data-ref="${escAttr(r.id)}">` +
+        `<span class="sw-ref-icon" title="${dir ? "folder" : "file"}">${dir ? "📁" : "📄"}</span>` +
         `<span class="sw-ref-path" title="${escAttr(r.path)}">${esc(shown)}</span>` +
         `<input class="set-input sw-ref-note" value="${escAttr(r.note || "")}" spellcheck="false" ` +
           `placeholder="description sent with the path" aria-label="Description of ${escAttr(shown)}">` +
@@ -840,18 +869,83 @@
           `title="Remove ${escAttr(shown)}">×</button></div>`;
     }).join("");
     return `<div class="sw-field sw-refs" id="sw-refs">` +
-        `<span>Reference files <em>(optional)</em></span>` +
+        `<span>Reference files &amp; folders <em>(optional)</em></span>` +
         (refs.length ? `<div class="sw-ref-list">${rows}</div>`
-                     : `<div class="sw-hint" id="sw-refs-empty">No reference files yet.</div>`) +
+                     : `<div class="sw-hint" id="sw-refs-empty">No references yet.</div>`) +
         `<div class="sw-ref-add">` +
           `<input class="set-input" id="sw-ref-path" spellcheck="false" autocomplete="off" ` +
-            `placeholder="docs/architecture.md — relative to the workspace">` +
+            `placeholder="docs/architecture.md or src/ — relative to the workspace">` +
           `<input class="set-input" id="sw-ref-note" spellcheck="false" autocomplete="off" ` +
             `placeholder="What it is (sent with the path)">` +
-          `<button class="btn-sm" id="sw-ref-add-btn" type="button" title="Add this file as a reference of this node">Add</button>` +
+          `<button class="btn-sm" id="sw-ref-add-btn" type="button" title="Add this file or folder as a reference of this node">Add</button>` +
+          `<button class="btn-sm" id="sw-ref-browse" type="button" title="Pick a file or folder from the workspace">Browse…</button>` +
         `</div>` +
-        `<div class="sw-hint">Each path is injected into this node's message with its description. Leave the description empty and the file's own first heading is used.</div>` +
+        // The browser renders into this box: the workspace's own folders and
+        // files, so a path is picked rather than remembered.
+        `<div class="sw-ref-picker" id="sw-ref-picker" hidden></div>` +
+        `<div class="sw-hint">Each reference — a file, or a whole folder — is injected into this node's message with its description. Leave the description empty and the file's own first heading is used (a folder reads as “folder”).</div>` +
       `</div>`;
+  }
+
+  /**
+   * Add a reference by path, whatever produced the path: the Add button under a
+   * typed one, or a row of the browser. The server resolves and canonicalises it
+   * either way, so what is stored is what the agent will be given.
+   */
+  async function addRefPath(n, p) {
+    if (!p) { S.toast?.("Give the reference a path", "err"); return; }
+    const note = dlgEl.querySelector("#sw-ref-note")?.value.trim() || "";
+    await run_(() => post("addRef", { nodeId: n.id, path: p, note }), "Reference added");
+  }
+
+  /**
+   * The reference browser: one workspace folder at a time, folders first. A file
+   * is added by clicking it, a folder by its own button — the browser shows both,
+   * because a reference can be either. Navigation stays inside the workspace: the
+   * server refuses anything above the root.
+   */
+  async function openRefPicker(n, rel) {
+    const box = dlgEl.querySelector("#sw-ref-picker");
+    if (!box) return;
+    box.hidden = false;
+    box.innerHTML = `<div class="sw-hint">Reading the workspace…</div>`;
+    let data;
+    try { data = await getJson("/subagent-workflow/entries", { path: rel || "" }); }
+    catch (err) {
+      box.innerHTML = `<div class="sw-hint sw-warn">⚠ ${esc(String(err.message || err))}</div>`;
+      return;
+    }
+    const here = data.rel || "";
+    const up = here ? here.split("/").slice(0, -1).join("/") : "";
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    const rows = entries.map((e) => {
+      const use = `<button class="btn-sm sw-pick-use" data-pick-add="${escAttr(e.dir ? `${e.rel}/` : e.rel)}" type="button" ` +
+        `title="Add this ${e.dir ? "folder" : "file"} as a reference">Use</button>`;
+      return `<div class="sw-pick-row${e.dir ? " dir" : ""}" data-pick-${e.dir ? "nav" : "file"}="${escAttr(e.rel)}">` +
+        `<span class="sw-pick-icon">${e.dir ? "📁" : "📄"}</span>` +
+        `<span class="sw-pick-name" title="${escAttr(e.rel)}">${esc(e.name)}</span>` + use + `</div>`;
+    }).join("");
+    box.innerHTML =
+      `<div class="sw-pick-bar">` +
+        `<button class="sw-pick-btn" data-pick-nav="${escAttr(up)}" type="button" title="Up one level"${here ? "" : " disabled"}>↑</button>` +
+        `<span class="sw-pick-dir" title="${escAttr(data.path || "")}">${esc(here || "workspace root")}</span>` +
+        `<button class="btn-sm" data-pick-add="${escAttr(here ? `${here}/` : ".")}" type="button" title="Add this folder as a reference">Use this folder</button>` +
+        `<button class="sw-pick-btn" data-pick-close="1" type="button" title="Close the browser">✕</button>` +
+      `</div>` +
+      `<div class="sw-pick-list">${rows || `<div class="sw-msg-none">This folder is empty.</div>`}</div>`;
+    box.querySelectorAll("[data-pick-add]").forEach((btn) => btn.addEventListener("click", (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      void addRefPath(n, btn.dataset.pickAdd || ".");
+    }));
+    box.querySelectorAll("[data-pick-nav]").forEach((row) => row.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      void openRefPicker(n, row.dataset.pickNav);
+    }));
+    box.querySelectorAll("[data-pick-file]").forEach((row) => row.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      void addRefPath(n, row.dataset.pickFile);
+    }));
+    box.querySelector("[data-pick-close]")?.addEventListener("click", (ev) => { ev.preventDefault(); box.hidden = true; box.innerHTML = ""; });
   }
 
   /** Wire the reference list: add, describe, remove. */
@@ -863,9 +957,10 @@
     const add = () => {
       const p = pathEl.value.trim();
       if (!p) { S.toast?.("Give the reference a path", "err"); pathEl.focus(); return; }
-      run_(() => post("addRef", { nodeId: n.id, path: p, note: noteEl.value.trim() }), "Reference added");
+      addRefPath(n, p);
     };
     wrap.querySelector("#sw-ref-add-btn").addEventListener("click", add);
+    wrap.querySelector("#sw-ref-browse").addEventListener("click", () => openRefPicker(n, ""));
     for (const el of [pathEl, noteEl]) {
       el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
     }
@@ -1196,6 +1291,7 @@
     }
     renderHistory();
     renderApprovals();
+    renderMessages();
     // Rewrite the log only when it changed, so the panel does not flicker.
     if (runLogEl) {
       const entries = historyRun ? (historyRun.log || []) : logBuffer;
@@ -1218,6 +1314,259 @@
   /** The approval gates currently holding the LIVE run, in graph order. */
   function waitingNodes() {
     return nodes().filter((n) => n.type === "approval" && run?.nodes?.[n.id]?.status === "waiting");
+  }
+
+  // ─── Messages sidebar ─────────────────────────────────────────────────────
+  //
+  // What each agent actually said, beside the canvas. With nothing selected it
+  // lists every agent in its own section; clicking an agent's card — or its
+  // section — focuses it on that one agent's messages. A human gate carries its
+  // Approve / Reject buttons here as well as in the banner, with what each of
+  // its input agents produced in a section of its own, and the end node shows
+  // every agent wired into it the same way, one section per agent. It is a
+  // reading surface only: a node's settings stay in their own popup.
+
+  let msgSideEl = null, msgBodyEl = null, msgTitleEl = null, msgSubEl = null, msgSig = "";
+  /** How many of one agent's lines a section shows (the newest ones). */
+  const MSG_LINES_MAX = 60;
+
+  /** The log lines the sidebar reads: the live run's buffer, or a reopened
+   *  run's stored log. */
+  function logEntries() { return historyRun ? (historyRun.log || []) : logBuffer; }
+
+  /** Every line one node produced, in order. */
+  function messagesFor(nodeId) {
+    const out = [];
+    for (const l of logEntries()) if (l.nodeId === nodeId) out.push(l);
+    return out;
+  }
+
+  /**
+   * What a node produced, as text: the run's own output tail when the server
+   * kept one, otherwise its streamed lines joined — so the same agent reads the
+   * same way whether the run is live or reopened.
+   */
+  function nodeOutputText(id) {
+    const tail = runNode(id)?.outputTail;
+    if (typeof tail === "string" && tail.trim()) return tail;
+    return messagesFor(id).filter((l) => l.stream !== "status").map((l) => l.text).join("\n");
+  }
+
+  /** The agents wired straight into a node — who fed it. */
+  function inputAgentsOf(nodeId) {
+    const seen = new Set();
+    const out = [];
+    for (const e of edges()) {
+      if (e.to !== nodeId) continue;
+      const n = nodeById(e.from);
+      if (!n || n.type !== "agent" || seen.has(n.id)) continue;
+      seen.add(n.id);
+      out.push(n);
+    }
+    return out;
+  }
+
+  /** The status badge a node wears on the canvas, repeated in the sidebar. */
+  function statusPill(nodeId) {
+    const rs = runNode(nodeId);
+    if (!rs?.status) return "";
+    const what = rs.bypassed ? "bypassed" : rs.status;
+    return `<span class="sw-badge sw-b-${escAttr(rs.status)}" title="${escAttr(what)}">${badgeGlyph(rs.status, rs.bypassed)}</span>`;
+  }
+
+  /** One line an agent sent, in the run-log's own ink. */
+  function msgLineHtml(l) {
+    const kind = l.stream === "stderr" ? "stderr" : l.stream === "status" ? "status" : "stdout";
+    const t = l.ts ? new Date(l.ts).toLocaleTimeString([], { hour12: false }) : "";
+    return `<div class="sw-msg-line sw-msg-${kind}">` +
+      (t ? `<span class="sw-msg-time">${esc(t)}</span>` : "") +
+      `<span class="sw-msg-text">${esc(l.text)}</span></div>`;
+  }
+
+  /** The user message a node was handed, ahead of its own words. */
+  function promptHtml(n) {
+    const p = String(n.config?.prompt || "").trim();
+    if (!p) return "";
+    return `<div class="sw-msg-sent"><span class="sw-msg-sent-tag">sent</span><pre>${esc(p)}</pre></div>`;
+  }
+
+  /**
+   * One agent's section: its mark, its name, and what it streamed. `opts.prompt`
+   * adds the message it was handed, so a focused agent reads as a conversation
+   * — what it was asked, then what it said.
+   */
+  function agentSectionHtml(n, opts) {
+    const o = opts || {};
+    const msgs = messagesFor(n.id);
+    const shown = msgs.length > MSG_LINES_MAX ? msgs.slice(-MSG_LINES_MAX) : msgs;
+    const more = msgs.length - shown.length;
+    let body;
+    if (shown.length) {
+      body = (more ? `<div class="sw-msg-more">… ${more} earlier line${more === 1 ? "" : "s"}</div>` : "") +
+        shown.map(msgLineHtml).join("");
+    } else {
+      const out = nodeOutputText(n.id);
+      const st = runNode(n.id)?.status;
+      body = out ? `<pre class="sw-msg-pre">${esc(out)}</pre>`
+        : `<div class="sw-msg-none">${st ? `Nothing captured — ${esc(st)}.` : "Nothing from this agent yet."}</div>`;
+    }
+    return `<div class="sw-msg-section" data-node="${escAttr(n.id)}" title="Focus ${escAttr(n.name)}">` +
+        `<div class="sw-msg-sec-head">` +
+          harnessIcon(n.config?.harness, providerLabel(n.config?.harness)) +
+          `<span class="sw-msg-sec-name">${esc(n.name)}</span>` +
+          `<span class="sw-msg-sec-tag">${esc(n.config?.model || providerLabel(n.config?.harness))}</span>` +
+          statusPill(n.id) +
+        `</div>` +
+        (o.prompt ? promptHtml(n) : "") +
+        `<div class="sw-msg-lines">${body}</div>` +
+      `</div>`;
+  }
+
+  /**
+   * What one agent produced, as a section keyed to it. This is the shape an
+   * approval gate and the end node read their input in: one section per agent,
+   * never a single undifferentiated blob.
+   */
+  function agentOutputHtml(n) {
+    const out = nodeOutputText(n.id);
+    return `<div class="sw-msg-section sw-msg-input" data-input="${escAttr(n.id)}">` +
+        `<div class="sw-msg-sec-head">` +
+          harnessIcon(n.config?.harness, providerLabel(n.config?.harness)) +
+          `<span class="sw-msg-sec-name">${esc(n.name)}</span>` +
+          `<span class="sw-msg-sec-tag">input agent</span>` +
+          statusPill(n.id) +
+        `</div>` +
+        (out ? `<pre class="sw-msg-pre">${esc(out)}</pre>`
+             : `<div class="sw-msg-none">Nothing from ${esc(n.name)} yet.</div>`) +
+      `</div>`;
+  }
+
+  /**
+   * A human gate's card: the message the reviewer is asked to read, what its
+   * input agents produced (wired in below it by the caller), and — while the
+   * gate is the one holding the run — the note box and the two buttons. The
+   * banner above the log makes the same decision; this is the same call.
+   */
+  function gateCardHtml(n, waiting) {
+    const rs = runNode(n.id);
+    const msg = rs?.approval?.message || n.config?.message || n.config?.description || "";
+    const d = rs?.decision;
+    return `<div class="sw-msg-gate${waiting ? " waiting" : ""}" data-gate="${escAttr(n.id)}" title="Focus ${escAttr(n.name)}">` +
+        `<div class="sw-msg-gate-head">` +
+          `<span class="sw-approval-glyph">✋</span>` +
+          `<span class="sw-msg-gate-name">${esc(n.name)}</span>` +
+          (waiting ? `<span class="sw-msg-gate-tag">needs a decision</span>` : statusPill(n.id)) +
+        `</div>` +
+        (msg ? `<pre class="sw-msg-gate-msg">${esc(msg)}</pre>` : `<div class="sw-msg-none">This gate has no message.</div>`) +
+        (waiting
+          ? `<div class="sw-msg-gate-actions">` +
+              `<input class="set-input sw-msg-note" placeholder="Optional note for the run log…" aria-label="Approval note">` +
+              `<button class="btn-sm sw-primary" data-approve="${escAttr(n.id)}" type="button">✓ Approve</button>` +
+              `<button class="btn-sm sw-danger" data-reject="${escAttr(n.id)}" type="button">✕ Reject</button>` +
+            `</div>`
+          : d ? `<div class="sw-msg-gate-tag">${d.approve ? "✓ approved" : "✖ rejected"}${d.note ? ` — ${esc(d.note)}` : ""}</div>` : "") +
+      `</div>`;
+  }
+
+  /**
+   * The end node's answer, split into a section per agent wired into it, then
+   * the joined output those sections add up to.
+   */
+  function endOutputHtml(end) {
+    const inputs = inputAgentsOf(end.id);
+    const joined = nodeOutputText(end.id).trim();
+    return `<div class="sw-msg-section sw-msg-final" data-node="${escAttr(end.id)}" title="Focus ${escAttr(end.name)}">` +
+        `<div class="sw-msg-sec-head"><span class="sw-node-glyph">■</span>` +
+          `<span class="sw-msg-sec-name">${esc(end.name)}</span>` +
+          `<span class="sw-msg-sec-tag">final output</span>` +
+          statusPill(end.id) +
+        `</div>` +
+        (inputs.length
+          ? inputs.map(agentOutputHtml).join("")
+          : `<div class="sw-msg-none">Wire an agent into this node and what it produces lands here.</div>`) +
+        `<div class="sw-msg-group">Joined output</div>` +
+        `<pre class="sw-msg-pre">${esc(joined || "—")}</pre>` +
+      `</div>`;
+  }
+
+  /** The sidebar with one node in focus: exactly what that node is about. */
+  function focusedHtml(n, waiting) {
+    if (n.type === "agent") {
+      const err = runNode(n.id)?.error;
+      return agentSectionHtml(n, { prompt: true }) + (err ? `<div class="sw-msg-err">${esc(err)}</div>` : "");
+    }
+    if (n.type === "approval") {
+      const inputs = inputAgentsOf(n.id);
+      return gateCardHtml(n, waiting.includes(n.id)) +
+        `<div class="sw-msg-group">Input from</div>` +
+        (inputs.length ? inputs.map(agentOutputHtml).join("")
+                       : `<div class="sw-msg-none">Nothing is wired into this gate.</div>`);
+    }
+    if (n.type === "end") return endOutputHtml(n);
+    return `<div class="sw-msg-section">` +
+        `<div class="sw-msg-sec-head"><span class="sw-node-glyph">▶</span>` +
+          `<span class="sw-msg-sec-name">${esc(n.name)}</span>` +
+          `<span class="sw-msg-sec-tag">start</span></div>` +
+        `<pre class="sw-msg-pre">${esc(viewRun()?.task || n.config?.defaultTask || "—")}</pre></div>`;
+  }
+
+  /** The sidebar with nothing in focus: every agent, then any gate, then the end. */
+  function allMessagesHtml(waiting) {
+    const parts = [];
+    const agents = nodes().filter((n) => n.type === "agent");
+    if (!agents.length) parts.push(`<div class="sw-msg-none">Add an agent node — every message it sends shows up here.</div>`);
+    for (const n of agents) parts.push(agentSectionHtml(n));
+    for (const g of nodes().filter((n) => n.type === "approval")) {
+      // A waiting gate (or one that has been decided) gets a card — wrapped in a
+      // section so that clicking it focuses the gate, exactly like an agent.
+      if (waiting.includes(g.id) || runNode(g.id)?.decision) {
+        parts.push(`<div class="sw-msg-section sw-msg-gate-wrap" data-node="${escAttr(g.id)}" ` +
+          `title="Focus ${escAttr(g.name)}">${gateCardHtml(g, waiting.includes(g.id))}</div>`);
+      }
+    }
+    const end = nodes().find((n) => n.type === "end");
+    if (end) parts.push(endOutputHtml(end));
+    return parts.join("");
+  }
+
+  /**
+   * Repaint the sidebar. Rebuilt only when the reading really changed (a new
+   * line, a new focus, a gate that started or stopped waiting), so a live tick
+   * never churns it — and a note typed into a gate card is carried over.
+   */
+  function renderMessages() {
+    if (!msgBodyEl || !msgTitleEl) return;
+    // Folded away, the panel costs nothing: its signature stays unset, so
+    // showing it again repaints it from scratch.
+    if (msgSideEl?.closest(".sw-main")?.classList.contains("no-msgs")) return;
+    const waiting = !historyRun && run?.status === "running" ? waitingNodes().map((n) => n.id) : [];
+    const focus = selected && selected.kind === "node" ? nodeById(selected.id) : null;
+    const entries = logEntries();
+    const last = entries.length ? entries[entries.length - 1].seq : 0;
+    const sig = `${historyRun ? historyRun.id : "live"}|${focus ? focus.id : "all"}|${entries.length}|${last}|${waiting.join(",")}`;
+    if (sig === msgSig) return;
+    msgSig = sig;
+    const notes = new Map();
+    for (const card of msgBodyEl.querySelectorAll(".sw-msg-gate")) {
+      notes.set(card.dataset.gate, card.querySelector(".sw-msg-note")?.value ?? "");
+    }
+    msgTitleEl.textContent = focus ? focus.name : "Messages";
+    msgSubEl.textContent = focus
+      ? `${focus.type === "agent" ? providerLabel(focus.config?.harness) : focus.type} · messages`
+      : `${nodes().filter((n) => n.type === "agent").length} agents · every message`;
+    msgBodyEl.innerHTML = focus ? focusedHtml(focus, waiting) : allMessagesHtml(waiting);
+    for (const card of msgBodyEl.querySelectorAll(".sw-msg-gate")) {
+      const note = notes.get(card.dataset.gate);
+      const box = card.querySelector(".sw-msg-note");
+      if (note && box) box.value = note;
+    }
+    msgSideEl?.classList.toggle("has-focus", !!focus);
+  }
+
+  /** The selection moved: repaint the canvas highlights and the sidebar. */
+  function selectionChanged() {
+    msgSig = "";
+    renderMessages();
   }
 
   // ─── Run history ──────────────────────────────────────────────────────────
@@ -1311,7 +1660,9 @@
   }
 
   async function decideApproval(card, nodeId, approve) {
-    const note = card?.querySelector(".sw-approval-note")?.value ?? "";
+    // The same decision is offered twice — the banner above the log and the
+    // gate's card in the messages sidebar — so either note box answers.
+    const note = card?.querySelector(".sw-approval-note, .sw-msg-note")?.value ?? "";
     try {
       // The response is a full run, so replace the accumulated buffer rather
       // than concatenating it onto itself.
@@ -1367,6 +1718,7 @@
           `<button class="btn-sm" id="sw-add-start" type="button" title="Add the start node">+ Start</button>` +
           `<button class="btn-sm" id="sw-add-end" type="button" title="Add the end node">+ End</button>` +
           `<button class="btn-sm" id="sw-triggers" type="button" title="Start this workflow on a schedule or an observed event">⏱ Triggers</button>` +
+          `<button class="btn-sm" id="sw-msg-toggle" type="button" title="Show or hide the messages sidebar">💬 Messages</button>` +
           `<button class="btn-sm" id="sw-export" type="button" title="Download this workflow as JSON">⬇ Export</button>` +
           `<button class="btn-sm" id="sw-import" type="button" title="Load a workflow JSON file">⬆ Import</button>` +
           `<input type="file" id="sw-import-file" accept="application/json,.json" style="display:none">` +
@@ -1389,6 +1741,16 @@
               `<div class="sw-edge-btns" id="sw-edge-btns"></div>` +
             `</div>` +
           `</div>` +
+          // What each agent actually said, beside the canvas. Reading, not
+          // configuring: a node's settings stay in their own popup.
+          `<aside class="sw-msg-side" id="sw-msg-side" aria-label="Agent messages">` +
+            `<div class="sw-msg-head">` +
+              `<span class="sw-msg-title" id="sw-msg-title">Messages</span>` +
+              `<span class="sw-msg-sub" id="sw-msg-sub"></span>` +
+              `<button class="btn-sm sw-msg-all" id="sw-msg-all" type="button" title="Show every agent again">All agents</button>` +
+            `</div>` +
+            `<div class="sw-msg-body" id="sw-msg-body"></div>` +
+          `</aside>` +
         `</div>` +
         `<section class="sw-run-panel">` +
           `<div class="sw-run-head"><span class="sw-run-title">Run log</span>` +
@@ -1423,6 +1785,43 @@
     edgeBtnsEl = pane.querySelector("#sw-edge-btns");
     modalEl = pane.querySelector("#sw-modal-backdrop");
     dlgEl = pane.querySelector("#sw-modal");
+    msgSideEl = pane.querySelector("#sw-msg-side");
+    msgBodyEl = pane.querySelector("#sw-msg-body");
+    msgTitleEl = pane.querySelector("#sw-msg-title");
+    msgSubEl = pane.querySelector("#sw-msg-sub");
+
+    // The messages sidebar can be folded away, and remembers it (per browser,
+    // like the app's other panel toggles).
+    const mainEl = pane.querySelector(".sw-main");
+    let msgsOn = true;
+    try { msgsOn = localStorage.getItem("scope-sw-msgs") !== "0"; } catch { /* private mode */ }
+    mainEl.classList.toggle("no-msgs", !msgsOn);
+    pane.querySelector("#sw-msg-toggle").addEventListener("click", () => {
+      const hidden = mainEl.classList.toggle("no-msgs");
+      try { localStorage.setItem("scope-sw-msgs", hidden ? "0" : "1"); } catch { /* private mode */ }
+      msgSig = "";
+      renderMessages();
+    });
+    pane.querySelector("#sw-msg-all").addEventListener("click", () => {
+      selected = null;
+      renderNodes();
+      selectionChanged();
+    });
+    // Clicks inside the sidebar: the gate's own approve/reject, and focusing an
+    // agent by clicking its section (the same as clicking its card).
+    msgBodyEl.addEventListener("click", (e) => {
+      const ap = e.target.closest?.("[data-approve]");
+      if (ap) { e.preventDefault(); decideApproval(ap.closest(".sw-msg-gate"), ap.dataset.approve, true); return; }
+      const rj = e.target.closest?.("[data-reject]");
+      if (rj) { e.preventDefault(); decideApproval(rj.closest(".sw-msg-gate"), rj.dataset.reject, false); return; }
+      const sec = e.target.closest?.(".sw-msg-section[data-node]");
+      if (!sec) return;
+      selected = { kind: "node", id: sec.dataset.node };
+      renderNodes();
+      nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(sec.dataset.node)}"]`)
+        ?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+      selectionChanged();
+    });
 
     nameInput.addEventListener("change", () => run_(() => post("setWorkflowName", { name: nameInput.value.trim() || "My Workflow" }), "Renamed"));
     pane.querySelector("#sw-add-agent").addEventListener("click", () => addNode("agent"));
@@ -1458,6 +1857,7 @@
         e.preventDefault(); e.stopPropagation();
         selected = { kind: "node", id: gear.dataset.config };
         renderNodes();
+        selectionChanged();
         openDialog({ kind: "node", id: gear.dataset.config });
         return;
       }
@@ -1474,6 +1874,8 @@
         if (selected?.kind !== "node" || selected.id !== id) {
           selected = { kind: "node", id };
           renderNodes();
+          // Clicking an agent is how its messages are asked for.
+          selectionChanged();
         }
         // If that rebuild did happen, the element this event came from is now
         // detached: a drag writing to it would move nothing on screen while the
@@ -1482,7 +1884,7 @@
         startDrag(nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(id)}"]`) || nodeEl, e);
         return;
       }
-      if (selected) { selected = null; renderNodes(); }
+      if (selected) { selected = null; renderNodes(); selectionChanged(); }
     });
 
     // Double-clicking a node is the same as pressing its gear.
@@ -1491,6 +1893,7 @@
       if (!nodeEl) return;
       selected = { kind: "node", id: nodeEl.dataset.id };
       renderNodes();
+      selectionChanged();
       openDialog({ kind: "node", id: nodeEl.dataset.id });
     });
 
@@ -1513,6 +1916,7 @@
       if (!path) return;
       selected = { kind: "edge", id: path.dataset.edge };
       renderEdges();
+      selectionChanged();
       openDialog({ kind: "edge", id: path.dataset.edge });
     });
 

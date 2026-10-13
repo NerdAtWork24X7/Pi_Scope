@@ -2695,6 +2695,11 @@
       border-style: dashed;
     }
 
+    .dsw.impact {
+      border-color: var(--red);
+      border-width: 2.5px;
+    }
+
     .diagram-hint {
       position: absolute;
       right: 10px;
