@@ -4,7 +4,7 @@
  * A canvas for wiring **coding-agent harnesses** into a fan-out DAG. Each agent
  * node runs one harness — Claude Code, Codex CLI, Gemini CLI, opencode, Aider,
  * Cursor Agent, the app's own Pi runner, or a custom shell command — configured
- * in the inspector on the right. Drag from a node's output port onto another
+ * in a popup opened from the **gear on the node itself**. Drag from a node's output port onto another
  * node's input port to connect them; a run walks the graph from the **start**
  * node to the **end** node, server-side and in the background, streaming every
  * node's output into the run panel while the canvas badges each node
@@ -24,9 +24,10 @@
  * exported/imported as JSON. An **approval** node pauses the run for a person: the banner above the
  * run log lists every gate that is waiting, with the gate's message, a note box
  * and Approve / Reject. The run panel also lists **past runs** (reopen one to
- * replay its log and node badges) and, with nothing selected, the inspector
- * holds the **triggers** — a schedule and an event watch that start runs on
- * their own.
+ * replay its log and node badges), and the toolbar's ⏱ button opens the same
+ * kind of popup on the **triggers** — a schedule and an event watch that start
+ * runs on their own. There is no settings sidebar: a node, a connection and the
+ * triggers are all edited in that one modal, over the canvas.
  *
  * A **standalone plugin**: this bundle, its stylesheet (client.css) and its
  * server half (server.ts) all live in apps/scope-server/plugins/subagent-workflow/,
@@ -86,7 +87,7 @@
 
   let pane = null;
   let canvasEl = null, nodesEl = null, svgEl = null, edgePathsEl = null, tmpPathEl = null, edgeBtnsEl = null;
-  let inspectorEl = null, statusEl = null, nameInput = null, taskInput = null;
+  let dlgEl = null, modalEl = null, statusEl = null, nameInput = null, taskInput = null;
   let runStatusEl = null, runLogEl = null, runSummaryEl = null, runBtn = null, stopBtn = null;
   let approvalsEl = null, approvalSig = "";
   let historyEl = null, historySig = "";
@@ -101,6 +102,13 @@
   let harnesses = [];
   let cwd = "";
   let selected = null;
+  /**
+   * The settings popup: what it is open on — `{ kind: "node", id }`,
+   * `{ kind: "edge", id }` or `{ kind: "triggers" }` — or null while closed.
+   * Node settings used to live in a sidebar next to the canvas; they are a modal
+   * now, opened from the gear on the node itself.
+   */
+  let dlg = null;
   let drag = null;
   let link = null;
   let loadError = null;
@@ -194,15 +202,15 @@
   }
 
   /**
-   * Refresh the harness list. The list only feeds the inspector's dropdown, so
-   * this re-renders the inspector rather than repainting the canvas — repainting
+   * Refresh the harness list. The list only feeds the settings popup's dropdown,
+   * so this re-renders the popup rather than repainting the canvas — repainting
    * on every harness fetch made opening the view (and the ↻ button) paint the
    * whole node + edge DOM twice.
    */
   async function loadHarnesses() {
     try { harnesses = (await getJson("/subagent-workflow/harnesses")).harnesses || []; }
     catch { harnesses = []; }
-    renderInspector();
+    renderDialog();
   }
 
   function syncPolling() {
@@ -240,7 +248,7 @@
     renderNodes();
     resizeCanvas();
     renderEdges();
-    renderInspector();
+    renderDialog();
     syncFinalOutput();
     renderRun();
   }
@@ -248,7 +256,7 @@
   /**
    * A live-run tick repaints only what a run changes: each node's status badge
    * and the run panel. It deliberately does NOT rebuild the node DOM, the edge
-   * SVG or the inspector — that would churn every poll and drop any settings
+   * SVG or the open popup — that would churn every poll and drop any settings
    * the user is mid-edit on.
    */
   function paintRun() {
@@ -357,9 +365,9 @@
 
   /**
    * Refresh the two live views of the final output: the end node's card and the
-   * inspector when it is open on that node. Runs on every paint and every live
-   * tick, because the output only appears once the run has settled there — and
-   * the inspector's copy is left alone when nothing changed, so a selection the
+   * settings popup when it is open on that node. Runs on every paint and every
+   * live tick, because the output only appears once the run has settled there —
+   * and the popup's copy is left alone when nothing changed, so a selection the
    * user is making mid-run survives the next tick.
    */
   function syncFinalOutput() {
@@ -373,8 +381,8 @@
       card.textContent = preview || "Workflow exit";
       card.title = text ? text.slice(0, 600) : "";
     }
-    const box = inspectorEl.querySelector("#sw-final-body");
-    if (!box || selected?.kind !== "node" || selected.id !== nodeId) return;
+    const box = dlgEl?.querySelector("#sw-final-body");
+    if (!box || dlg?.kind !== "node" || dlg.id !== nodeId) return;
     if (box.dataset.text === text) return;
     box.dataset.text = text;
     box.innerHTML = finalOutputHtml();
@@ -419,15 +427,21 @@
       const outPort = n.type !== "end" ? `<span class="sw-port sw-port-out" data-port="out" title="Drag to connect to another node"></span>` : "";
       // The head shows the provider the node runs — the mark of the harness it
       // spawns — so a canvas of mixed agents is readable without opening the
-      // inspector. The mark carries the provider's name as its tooltip.
+      // node's settings. The mark carries the provider's name as its tooltip.
       const glyph = n.type === "agent"
         ? harnessIcon(n.config?.harness, providerLabel(n.config?.harness))
         : `<span class="sw-node-glyph">${n.type === "start" ? "▶" : n.type === "end" ? "■" : "✋"}</span>`;
+      // The gear is how a node is configured: there is no settings sidebar, so a
+      // node's settings open over the canvas from its own head (or on a
+      // double-click of the card).
+      const gear = `<button class="sw-node-config" data-config="${escAttr(n.id)}" type="button" ` +
+        `title="Settings for ${escAttr(n.name)}" aria-label="Settings for ${escAttr(n.name)}">⚙</button>`;
       return `<div class="${cls}" data-id="${escAttr(n.id)}" style="left:${n.x}px;top:${n.y}px">` +
         `<div class="sw-node-head">` +
           glyph +
           `<span class="sw-node-name" title="${escAttr(n.name)}">${esc(n.name)}</span>` +
           badge +
+          gear +
           `<button class="sw-node-del" data-del="${escAttr(n.id)}" title="Delete node" type="button">✕</button>` +
         `</div>` +
         `<div class="sw-node-body">${nodeSummary(n)}</div>` +
@@ -548,28 +562,46 @@
   }
   function hideTmpPath() { tmpPathEl.style.display = "none"; }
 
-  // ─── Inspector (node settings) ────────────────────────────────────────────
+  // ─── The settings popup ───────────────────────────────────────────────────
+  //
+  // One modal carries all three settings surfaces: a node (opened from the gear
+  // on its card, or with a double-click), a connection, and the workflow-level
+  // triggers (from the toolbar). The canvas keeps the full width, and the popup
+  // is the only place a setting is edited.
 
-  function renderInspector() {
-    if (!inspectorEl) return;
-    if (selected && selected.kind === "edge") return renderEdgeInspector();
-    if (selected && selected.kind === "node") {
-      const n = nodeById(selected.id);
-      if (n) return renderNodeInspector(n);
-    }
-    inspectorEl.innerHTML =
-      `<div class="sw-insp-empty">` +
-        `<div class="sw-insp-title">Node settings</div>` +
-        `<p>Select a node to configure the coding harness it runs.</p>` +
-        `<p class="sw-muted">Drag from a node's <b>right port</b> onto another node's left port to wire the workflow.</p>` +
-        (loadError ? `<button class="btn-sm" id="sw-retry" type="button">↻ Retry</button>` : "") +
-        renderTriggersForm() +
-      `</div>`;
-    inspectorEl.querySelector("#sw-retry")?.addEventListener("click", refresh);
-    wireTriggersForm();
+  /** The frame every popup shares: head, scrolling body, actions row. */
+  function dialogHtml(head, body, actions) {
+    return `<div class="sw-dlg-head">${head}` +
+        `<button class="sw-dlg-x" id="sw-close-x" type="button" title="Close" aria-label="Close">✕</button></div>` +
+      `<div class="sw-dlg-body">${body}</div>` +
+      `<div class="sw-dlg-actions">${actions}<button class="btn-sm sw-dlg-close" id="sw-close" type="button">Close</button></div>`;
   }
 
-  // ─── Triggers (workflow-level, shown when nothing is selected) ────────────
+  /** Open the popup on `{ kind, id }`, or close it with nothing. */
+  function openDialog(next) {
+    dlg = next || null;
+    if (!modalEl || !dlgEl) return;
+    modalEl.hidden = !dlg;
+    document.removeEventListener("keydown", dialogKeys);
+    if (!dlg) { dlgEl.innerHTML = ""; return; }
+    document.addEventListener("keydown", dialogKeys);
+    renderDialog();
+  }
+  function closeDialog() { openDialog(null); }
+  /** Escape closes the popup, like every other overlay in the app. */
+  function dialogKeys(e) { if (e.key === "Escape") closeDialog(); }
+
+  /** (Re)build the open popup. A closed popup costs nothing. */
+  function renderDialog() {
+    if (!dlgEl || !dlg) return;
+    if (dlg.kind === "edge") return renderEdgeDialog();
+    if (dlg.kind === "triggers") return renderTriggersDialog();
+    const n = nodeById(dlg.id);
+    if (!n) return closeDialog();
+    return renderNodeDialog(n);
+  }
+
+  // ─── Triggers (workflow-level) ────────────────────────────────────────────
 
   function triggerSummary(t) {
     if (!t || !t.armed) return "No trigger armed — runs start when you press ▶ Run.";
@@ -581,12 +613,24 @@
     return `Armed — ${bits.join(", ")}.${next} A run only starts while this workflow is idle.`;
   }
 
-  function renderTriggersForm() {
+  function renderTriggersDialog() {
+    const t = triggers || {};
+    const sch = t.schedule || { mode: "off", everySeconds: 300, at: "09:00" };
+    const ev = t.event || { enabled: false, types: [] };
+    dlgEl.innerHTML = dialogHtml(
+      `<span class="sw-dlg-glyph">⏱</span><span class="sw-dlg-title">Workflow triggers</span>`,
+      triggersFormHtml(),
+      `<button class="btn-sm sw-primary" id="sw-tr-save" type="button">Save triggers</button>`,
+    );
+    wireTriggersForm();
+  }
+
+  /** The trigger form's fields — schedule, event watch and the run's task. */
+  function triggersFormHtml() {
     const t = triggers || {};
     const sch = t.schedule || { mode: "off", everySeconds: 300, at: "09:00" };
     const ev = t.event || { enabled: false, types: [] };
     return `<div class="sw-triggers">` +
-      `<div class="sw-insp-title">Workflow triggers</div>` +
       `<p class="sw-muted">Start this workflow on a schedule or when an event arrives, not only from ▶ Run.</p>` +
       `<label class="sw-field"><span>Schedule</span>` +
         `<select class="set-select" id="sw-tr-mode">` +
@@ -606,38 +650,38 @@
       `<label class="sw-field"><span>Task <em>(optional)</em></span>` +
         `<input class="set-input" id="sw-tr-task" value="${escAttr(t.task || "")}" placeholder="the start node's default task">` +
         `<div class="sw-hint">${esc(triggerSummary(t))}</div></label>` +
-      `<div class="sw-insp-actions"><button class="btn-sm sw-primary" id="sw-tr-save" type="button">Save triggers</button></div>` +
     `</div>`;
   }
 
   function wireTriggersForm() {
-    const mode = inspectorEl.querySelector("#sw-tr-mode");
+    const mode = dlgEl.querySelector("#sw-tr-mode");
     if (!mode) return;
     const sync = () => {
-      inspectorEl.querySelector("#sw-tr-interval").style.display = mode.value === "interval" ? "" : "none";
-      inspectorEl.querySelector("#sw-tr-daily").style.display = mode.value === "daily" ? "" : "none";
+      dlgEl.querySelector("#sw-tr-interval").style.display = mode.value === "interval" ? "" : "none";
+      dlgEl.querySelector("#sw-tr-daily").style.display = mode.value === "daily" ? "" : "none";
     };
     mode.addEventListener("change", sync);
     sync();
-    inspectorEl.querySelector("#sw-tr-save").addEventListener("click", saveTriggers);
+    dlgEl.querySelector("#sw-tr-save").addEventListener("click", saveTriggers);
   }
 
   async function saveTriggers() {
-    const types = (inspectorEl.querySelector("#sw-tr-types")?.value || "")
+    const types = (dlgEl.querySelector("#sw-tr-types")?.value || "")
       .split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
     const payload = {
       schedule: {
-        mode: inspectorEl.querySelector("#sw-tr-mode")?.value || "off",
-        everySeconds: Number(inspectorEl.querySelector("#sw-tr-every")?.value || 0) || 300,
-        at: inspectorEl.querySelector("#sw-tr-at")?.value.trim() || "09:00",
+        mode: dlgEl.querySelector("#sw-tr-mode")?.value || "off",
+        everySeconds: Number(dlgEl.querySelector("#sw-tr-every")?.value || 0) || 300,
+        at: dlgEl.querySelector("#sw-tr-at")?.value.trim() || "09:00",
       },
-      event: { enabled: !!inspectorEl.querySelector("#sw-tr-event")?.checked, types },
-      task: inspectorEl.querySelector("#sw-tr-task")?.value ?? "",
+      event: { enabled: !!dlgEl.querySelector("#sw-tr-event")?.checked, types },
+      task: dlgEl.querySelector("#sw-tr-task")?.value ?? "",
     };
     try {
       const { res, data } = await S.api("/subagent-workflow/triggers", {}, Object.assign({ cwd }, payload));
       if (!res.ok || data?.error) throw new Error(data?.error || `HTTP ${res.status}`);
       triggers = data.triggers;
+      renderTriggersDialog();
       paint();
       syncPolling();
       S.toast?.(data.triggers?.armed ? "Triggers armed" : "Triggers saved");
@@ -747,20 +791,20 @@
       `<div class="sw-hint">${hint}${meta.modelFlag ? ` Passed as <code>${esc(meta.modelFlag)}</code>.` : ""}</div>` + warn + `</label>`;
   }
 
-  /** The model the inspector is showing: the select's value, or the free-text
+  /** The model the form is showing: the select's value, or the free-text
    *  box when the provider has no list / "Custom…" is chosen. */
   function readModelField() {
-    const el = inspectorEl.querySelector("#sw-f-model");
+    const el = dlgEl.querySelector("#sw-f-model");
     if (!el) return "";
     if (el.tagName !== "SELECT") return el.value.trim();
     if (el.value !== MODEL_CUSTOM) return el.value;
-    return inspectorEl.querySelector("#sw-f-model-custom")?.value.trim() || "";
+    return dlgEl.querySelector("#sw-f-model-custom")?.value.trim() || "";
   }
   /** Wire "Custom…" on the model select to its free-text box. */
   function bindModelField() {
-    const sel = inspectorEl.querySelector("#sw-f-model");
+    const sel = dlgEl.querySelector("#sw-f-model");
     if (!sel || sel.tagName !== "SELECT") return;
-    const custom = inspectorEl.querySelector("#sw-f-model-custom");
+    const custom = dlgEl.querySelector("#sw-f-model-custom");
     if (!custom) return;
     sel.addEventListener("change", () => {
       custom.style.display = sel.value === MODEL_CUSTOM ? "" : "none";
@@ -812,7 +856,7 @@
 
   /** Wire the reference list: add, describe, remove. */
   function wireRefs(n) {
-    const wrap = inspectorEl.querySelector("#sw-refs");
+    const wrap = dlgEl.querySelector("#sw-refs");
     if (!wrap) return;
     const pathEl = wrap.querySelector("#sw-ref-path");
     const noteEl = wrap.querySelector("#sw-ref-note");
@@ -838,7 +882,7 @@
     }
   }
 
-  function renderNodeInspector(n) {
+  function renderNodeDialog(n) {
     const title = n.type === "agent" ? "Agent node"
       : n.type === "approval" ? "Approval node"
       : n.type === "start" ? "Start node" : "End node";
@@ -878,51 +922,49 @@
       fields = `<div id="sw-final-body">${finalOutputHtml()}</div>`;
     }
 
-    inspectorEl.innerHTML =
-      `<div class="sw-insp-head">` +
-        (n.type === "agent"
-          ? harnessIcon(n.config?.harness, providerLabel(n.config?.harness))
-          : `<span class="sw-insp-glyph sw-t-${n.type}">${n.type === "start" ? "▶" : n.type === "end" ? "■" : "✋"}</span>`) +
-        // The name is the node's label on the canvas, so it stays editable — it
-        // is not one of the node's three settings, just what it is called.
-        `<input class="set-input sw-insp-name" id="sw-f-name" value="${escAttr(n.name)}" maxlength="60" aria-label="Node name" placeholder="node name">` +
-        `<span class="sw-insp-kind">${title.replace(" node", "")}</span></div>` +
-      `<div class="sw-insp-body">${fields}</div>` +
-      `<div class="sw-insp-actions">` +
-        `<button class="btn-sm sw-primary" id="sw-save" type="button">Save node</button>` +
-        (n.type !== "start" && n.type !== "end" ? `<button class="btn-sm" id="sw-duplicate" type="button" title="Clone this node, keeping its settings">Duplicate</button>` : "") +
-        `<button class="btn-sm sw-danger" id="sw-delete" type="button">Delete</button>` +
-      `</div>`;
+    dlgEl.innerHTML = dialogHtml(
+      (n.type === "agent"
+        ? harnessIcon(n.config?.harness, providerLabel(n.config?.harness))
+        : `<span class="sw-dlg-glyph sw-t-${n.type}">${n.type === "start" ? "▶" : n.type === "end" ? "■" : "✋"}</span>`) +
+      // The name is the node's label on the canvas, so it stays editable — it is
+      // not one of the node's three settings, just what it is called.
+      `<input class="set-input sw-dlg-name" id="sw-f-name" value="${escAttr(n.name)}" maxlength="60" aria-label="Node name" placeholder="node name">` +
+      `<span class="sw-dlg-kind">${title.replace(" node", "")}</span>`,
+      fields,
+      `<button class="btn-sm sw-primary" id="sw-save" type="button">Save node</button>` +
+      (n.type !== "start" && n.type !== "end" ? `<button class="btn-sm" id="sw-duplicate" type="button" title="Clone this node, keeping its settings">Duplicate</button>` : "") +
+      `<button class="btn-sm sw-danger" id="sw-delete" type="button">Delete</button>`,
+    );
 
-    inspectorEl.querySelector("#sw-save").addEventListener("click", () => saveNode(n));
-    inspectorEl.querySelector("#sw-delete").addEventListener("click", () => removeNode(n.id));
-    inspectorEl.querySelector("#sw-duplicate")?.addEventListener("click", () => duplicateNode(n.id));
+    dlgEl.querySelector("#sw-save").addEventListener("click", () => saveNode(n));
+    dlgEl.querySelector("#sw-delete").addEventListener("click", () => removeNode(n.id));
+    dlgEl.querySelector("#sw-duplicate")?.addEventListener("click", () => duplicateNode(n.id));
     bindModelField();
     wireRefs(n);
-    const harnessSel = inspectorEl.querySelector("#sw-f-harness");
+    const harnessSel = dlgEl.querySelector("#sw-f-harness");
     if (harnessSel) {
       const syncCustom = () => {
         const custom = harnessSel.value === "custom";
         // `display: none` is the stylesheet default, so showing it has to name
         // the display the field uses (a column).
-        inspectorEl.querySelector("#sw-custom-wrap").style.display = custom ? "flex" : "none";
+        dlgEl.querySelector("#sw-custom-wrap").style.display = custom ? "flex" : "none";
         const meta = harnessMeta(harnessSel.value);
-        const hint = inspectorEl.querySelector("#sw-harness-hint");
+        const hint = dlgEl.querySelector("#sw-harness-hint");
         hint.textContent = meta && meta.available === false
           ? `⚠ ${meta.bin || meta.label} was not found on PATH — the node will fail until it is installed.`
           : meta ? `Runs: ${meta.bin ? `${meta.bin}` : "the app's Pi runner"}` : "";
         hint.className = meta && meta.available === false ? "sw-hint sw-warn" : "sw-hint";
         // The head + the field label show the provider's mark, so switching
         // harness updates both without re-rendering the form.
-        setHarnessIcon(inspectorEl.querySelector("#sw-harness-icon"), harnessSel.value, providerLabel(harnessSel.value));
-        setHarnessIcon(inspectorEl.querySelector(".sw-insp-head .sw-hicon"), harnessSel.value, providerLabel(harnessSel.value));
+        setHarnessIcon(dlgEl.querySelector("#sw-harness-icon"), harnessSel.value, providerLabel(harnessSel.value));
+        setHarnessIcon(dlgEl.querySelector(".sw-dlg-head .sw-hicon"), harnessSel.value, providerLabel(harnessSel.value));
       };
       // The model list belongs to the provider, so switching it rewrites just
       // that block — carrying over what the user has typed but not saved —
       // instead of the whole form, which would throw away an unsaved message.
       harnessSel.addEventListener("change", () => {
         const model = readModelField();
-        inspectorEl.querySelector("#sw-model-wrap").innerHTML = modelFieldHtml(harnessSel.value, model);
+        dlgEl.querySelector("#sw-model-wrap").innerHTML = modelFieldHtml(harnessSel.value, model);
         bindModelField();
         syncCustom();
       });
@@ -930,16 +972,17 @@
     }
   }
 
-  function renderEdgeInspector() {
-    const e = edges().find((x) => x.id === selected.id);
-    if (!e) { selected = null; return renderInspector(); }
+  function renderEdgeDialog() {
+    const e = edges().find((x) => x.id === dlg.id);
+    if (!e) { selected = null; return closeDialog(); }
     const from = nodeById(e.from), to = nodeById(e.to);
-    inspectorEl.innerHTML =
-      `<div class="sw-insp-head"><span class="sw-insp-glyph">⇢</span><span class="sw-insp-title">Connection</span></div>` +
-      `<div class="sw-insp-body"><p class="sw-conn-label"><b>${esc(from?.name || e.from)}</b> → <b>${esc(to?.name || e.to)}</b></p>` +
-        `<p class="sw-muted">The source node's output is passed to the target as <code>{input}</code>.</p></div>` +
-      `<div class="sw-insp-actions"><button class="btn-sm sw-danger" id="sw-del-edge" type="button">Delete connection</button></div>`;
-    inspectorEl.querySelector("#sw-del-edge").addEventListener("click", () => removeEdge(e.id));
+    dlgEl.innerHTML = dialogHtml(
+      `<span class="sw-dlg-glyph">⇢</span><span class="sw-dlg-title">Connection</span>`,
+      `<p class="sw-conn-label"><b>${esc(from?.name || e.from)}</b> → <b>${esc(to?.name || e.to)}</b></p>` +
+        `<p class="sw-muted">The source node's output is passed to the target as <code>{input}</code>.</p>`,
+      `<button class="btn-sm sw-danger" id="sw-del-edge" type="button">Delete connection</button>`,
+    );
+    dlgEl.querySelector("#sw-del-edge").addEventListener("click", () => removeEdge(e.id));
   }
 
   /**
@@ -948,18 +991,18 @@
    * longer edits survives an edit instead of being silently dropped.
    */
   async function saveNode(n) {
-    const name = inspectorEl.querySelector("#sw-f-name")?.value.trim() || "";
+    const name = dlgEl.querySelector("#sw-f-name")?.value.trim() || "";
     if (!name) { S.toast?.("A node needs a name", "err"); return; }
     const stored = nodeById(n.id)?.config || {};
     const read = (sel, fallback) => {
-      const el = inspectorEl.querySelector(sel);
+      const el = dlgEl.querySelector(sel);
       return el ? el.value : fallback;
     };
     let config;
     if (n.type === "agent") {
       config = {
         ...stored,
-        harness: inspectorEl.querySelector("#sw-f-harness")?.value || "claude",
+        harness: dlgEl.querySelector("#sw-f-harness")?.value || "claude",
         model: readModelField(),
         prompt: read("#sw-f-prompt", stored.prompt || ""),
         // Only rendered while the provider is a custom command; otherwise the
@@ -1092,7 +1135,7 @@
     applyDrag(); // flush the last pointer position before committing
     drag = null;
     if (d.moved) run_(() => post("moveNode", { id: d.id, x: nodeById(d.id)?.x ?? d.x, y: nodeById(d.id)?.y ?? d.y }));
-    else renderInspector();
+    else renderDialog();
     if (dirty) paint();
   }
   function startLink(fromId) {
@@ -1323,6 +1366,7 @@
           `<button class="btn-sm" id="sw-add-approval" type="button" title="Add a human approval gate">+ Approval</button>` +
           `<button class="btn-sm" id="sw-add-start" type="button" title="Add the start node">+ Start</button>` +
           `<button class="btn-sm" id="sw-add-end" type="button" title="Add the end node">+ End</button>` +
+          `<button class="btn-sm" id="sw-triggers" type="button" title="Start this workflow on a schedule or an observed event">⏱ Triggers</button>` +
           `<button class="btn-sm" id="sw-export" type="button" title="Download this workflow as JSON">⬇ Export</button>` +
           `<button class="btn-sm" id="sw-import" type="button" title="Load a workflow JSON file">⬆ Import</button>` +
           `<input type="file" id="sw-import-file" accept="application/json,.json" style="display:none">` +
@@ -1345,7 +1389,6 @@
               `<div class="sw-edge-btns" id="sw-edge-btns"></div>` +
             `</div>` +
           `</div>` +
-          `<aside class="sw-inspector" id="sw-inspector"></aside>` +
         `</div>` +
         `<section class="sw-run-panel">` +
           `<div class="sw-run-head"><span class="sw-run-title">Run log</span>` +
@@ -1355,6 +1398,11 @@
           `<div class="sw-approvals" id="sw-approvals"></div>` +
           `<div class="sw-run-log" id="sw-run-log"></div>` +
         `</section>` +
+      `</div>` +
+      // The settings popup: a node's settings, a connection, or the workflow's
+      // triggers. Fixed-positioned, so it covers the pane (and the canvas) whole.
+      `<div class="sw-modal-backdrop" id="sw-modal-backdrop" hidden>` +
+        `<div class="sw-modal" id="sw-modal" role="dialog" aria-modal="true" aria-label="Node settings"></div>` +
       `</div>`;
 
     nameInput = pane.querySelector("#sw-name");
@@ -1373,7 +1421,8 @@
     edgePathsEl = pane.querySelector("#sw-edge-paths");
     tmpPathEl = pane.querySelector("#sw-tmp");
     edgeBtnsEl = pane.querySelector("#sw-edge-btns");
-    inspectorEl = pane.querySelector("#sw-inspector");
+    modalEl = pane.querySelector("#sw-modal-backdrop");
+    dlgEl = pane.querySelector("#sw-modal");
 
     nameInput.addEventListener("change", () => run_(() => post("setWorkflowName", { name: nameInput.value.trim() || "My Workflow" }), "Renamed"));
     pane.querySelector("#sw-add-agent").addEventListener("click", () => addNode("agent"));
@@ -1384,6 +1433,7 @@
     const importFile = pane.querySelector("#sw-import-file");
     pane.querySelector("#sw-import").addEventListener("click", () => importFile.click());
     importFile.addEventListener("change", importWorkflow);
+    pane.querySelector("#sw-triggers").addEventListener("click", () => openDialog({ kind: "triggers" }));
     pane.querySelector("#sw-refresh").addEventListener("click", () => { refresh(); loadHarnesses(); });
     runBtn.addEventListener("click", startRun);
     stopBtn.addEventListener("click", stopRun);
@@ -1400,27 +1450,54 @@
       if (port) { e.preventDefault(); e.stopPropagation(); startLink(port.closest(".sw-node").dataset.id); return; }
       const del = e.target.closest?.(".sw-node-del");
       if (del) { e.preventDefault(); e.stopPropagation(); removeNode(del.dataset.del); return; }
+      // The gear on a node's card is how its settings are reached — the only
+      // way in now that there is no sidebar. Selecting the node first keeps the
+      // canvas highlight in step with the popup.
+      const gear = e.target.closest?.(".sw-node-config");
+      if (gear) {
+        e.preventDefault(); e.stopPropagation();
+        selected = { kind: "node", id: gear.dataset.config };
+        renderNodes();
+        openDialog({ kind: "node", id: gear.dataset.config });
+        return;
+      }
       const edgeDel = e.target.closest?.(".sw-edge-del");
       if (edgeDel) { e.preventDefault(); e.stopPropagation(); removeEdge(edgeDel.dataset.edge); return; }
       const nodeEl = e.target.closest?.(".sw-node");
       if (nodeEl) {
         e.preventDefault();
         const id = nodeEl.dataset.id;
-        selected = { kind: "node", id };
-        renderNodes(); renderInspector();
-        // renderNodes() rebuilds `nodesEl.innerHTML`, so the element this event
-        // came from is now detached: a drag that kept writing to it would move
-        // nothing on screen while the model (and therefore the edge routing)
-        // moved underneath. Hand the drag the node that is actually rendered.
+        // Rebuild the node DOM only when the selection really changed. A
+        // rebuild detaches the element the pointer is on, which would leave a
+        // double-click (the second way into a node's settings) with no element
+        // to bubble from — and it is wasted work on every click.
+        if (selected?.kind !== "node" || selected.id !== id) {
+          selected = { kind: "node", id };
+          renderNodes();
+        }
+        // If that rebuild did happen, the element this event came from is now
+        // detached: a drag writing to it would move nothing on screen while the
+        // model (and therefore the edge routing) moved underneath. Hand the drag
+        // the node that is actually rendered.
         startDrag(nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(id)}"]`) || nodeEl, e);
         return;
       }
-      if (selected) { selected = null; renderNodes(); renderInspector(); }
+      if (selected) { selected = null; renderNodes(); }
     });
 
-    // Copying the workflow's final output: delegated, because the block is
-    // rewritten as the output grows (and for a reopened past run).
-    inspectorEl.addEventListener("click", (e) => {
+    // Double-clicking a node is the same as pressing its gear.
+    canvasEl.addEventListener("dblclick", (e) => {
+      const nodeEl = e.target.closest?.(".sw-node");
+      if (!nodeEl) return;
+      selected = { kind: "node", id: nodeEl.dataset.id };
+      renderNodes();
+      openDialog({ kind: "node", id: nodeEl.dataset.id });
+    });
+
+    // Closing or copying from inside the popup: delegated, because its contents
+    // are rewritten as the output grows (and for a reopened past run).
+    dlgEl.addEventListener("click", (e) => {
+      if (e.target.closest?.("#sw-close, #sw-close-x")) { e.preventDefault(); closeDialog(); return; }
       if (!e.target.closest?.("#sw-final-copy")) return;
       const text = finalOutput().text;
       if (!text) return;
@@ -1428,12 +1505,15 @@
         .then(() => S.toast?.("Final output copied"))
         .catch(() => S.toast?.("Could not copy the final output", "err"));
     });
+    // A click on the scrim (never on the popup itself) closes it.
+    modalEl.addEventListener("mousedown", (e) => { if (e.target === modalEl) closeDialog(); });
 
     edgePathsEl.addEventListener("click", (e) => {
       const path = e.target.closest?.(".sw-edge");
       if (!path) return;
       selected = { kind: "edge", id: path.dataset.edge };
-      renderEdges(); renderInspector();
+      renderEdges();
+      openDialog({ kind: "edge", id: path.dataset.edge });
     });
 
     canvasEl.addEventListener("keydown", (e) => {
@@ -1475,7 +1555,7 @@
         historySig = "";
         cwd = S.currentCwd?.() || "";
         // `refresh()` paints when the graph arrives; the harness list only feeds
-        // the inspector, so it does not trigger a second canvas paint.
+        // the settings popup, so it does not trigger a second canvas paint.
         void loadHarnesses();
         refresh();
       },

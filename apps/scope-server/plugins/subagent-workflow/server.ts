@@ -48,7 +48,7 @@
  * ── Triggers ───────────────────────────────────────────────────────────────
  * A workflow can start itself: an interval / daily **schedule** and a watch on
  * the live **event** stream, both stored with the workflow and armed from the
- * inspector. A trigger only starts a run while the workspace is idle — a busy
+ * settings popup. A trigger only starts a run while the workspace is idle — a busy
  * workflow skips the occurrence instead of queueing one up.
  *
  * ── Human-in-the-loop ──────────────────────────────────────────────────────
@@ -74,7 +74,7 @@
  * the joined output of its upstream nodes and `{task}` is the run's task. An
  * agent node runs once its parents have settled (`join: all`, the default, or
  * `join: first`); a node's `fanout` setting decides whether its children run in
- * parallel or one after another. Neither is edited from the inspector any more,
+ * parallel or one after another. Neither is edited from the settings popup any more,
  * so with the defaults the *wiring* decides the order: everything hanging off a
  * node together runs together, and a chain runs one node after another. Output flows along the edges; `end` finishes
  * the run. A failing node aborts the run unless the node opted into
@@ -155,7 +155,7 @@ const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * `custom` is a shell command the user supplies.
  *
  * `models` is the dropdown the node's Model field offers — a curated list of the
- * aliases/ids that CLI documents, NOT a hard limit: the inspector keeps a
+ * aliases/ids that CLI documents, NOT a hard limit: the Model field keeps a
  * "Custom…" entry for anything newer. `pi` leaves it empty here because the app
  * already knows the real catalogue, which `harnessList()` fills in from the
  * host's model registry (`api.kit.modelsMeta`) as `<provider>/<id>` keys.
@@ -164,7 +164,7 @@ const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * that harness:
  *   { flag, style: "csv" }     → `flag a,b,c`        (one argument)
  *   { flag, style: "repeat" }  → `flag a flag b`     (one per value)
- *   null                       → the harness has no such flag; the inspector
+ *   null                       → the harness has no such flag; a selection form
  *                                says so instead of pretending the toggle does
  *                                something. Every selection is also exported as
  *                                `SW_SKILLS` / `SW_TOOLS` / `SW_EXTENSIONS` for
@@ -498,10 +498,10 @@ function normaliseAgentConfig(raw: any) {
 /**
  * The arguments a harness needs to honour a node's capability selection.
  *
- * Values are passed exactly as the sidebar lists them (skill directory names,
+ * Values are passed exactly as a selection lists them (skill directory names,
  * tool names, extension ids); `pi` resolves them to real paths in `runPiHarness`
  * because its flags take files, not names. A capability the harness has no flag
- * for contributes nothing — the inspector marks those rows as unsupported.
+ * for contributes nothing — the caller marks those rows as unsupported.
  */
 function capabilityArgs(spec: any, caps: { skills?: string[]; tools?: string[]; extensions?: string[] }): string[] {
   const out: string[] = [];

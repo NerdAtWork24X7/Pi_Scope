@@ -9,7 +9,7 @@
 //   • the harness registry and availability,
 //   • a full custom-command DAG run, with output flowing along the edges,
 //   • stopping a long run,
-//   • the canvas, the harness inspector and a run started from the UI.
+//   • the canvas, a node's settings popup and a run started from the UI.
 //
 //   node --test apps/scope-server/test/subagent-workflow.e2e.test.mjs
 
@@ -224,8 +224,8 @@ before(async () => {
   fs.writeFileSync(path.join(ws7, "notes.txt"), "Run the linter before committing.\nsecond line\n");
   fs.mkdirSync(path.join(ws7, "src"), { recursive: true });
 
-  // One skill and one extension in the agent dir, so the node sidebar has real
-  // catalogue entries to toggle (the skill is a plain directory, the extension
+  // One skill and one extension in the agent dir, so the harness catalogue has
+  // real entries to report (the skill is a plain directory, the extension
   // is a settings.json entry like the Settings page writes).
   fs.mkdirSync(path.join(agentDir, "skills", "demo-skill"), { recursive: true });
   fs.writeFileSync(path.join(agentDir, "skills", "demo-skill", "SKILL.md"),
@@ -345,7 +345,7 @@ describe("subagent workflow plugin (server)", () => {
     assert.deepEqual(by.pi.models, PI_MODELS, "Pi offers the app's catalogue, provider-qualified");
     assert.equal(by.pi.models.some((m) => !m.includes("/")), false, "no bare ids are offered");
 
-    // A harness with no such flag says so, so the sidebar can mark the rows.
+    // A harness with no such flag says so, so a settings form can mark the rows.
     assert.deepEqual(by.codex.capabilities, { skills: null, tools: null, extensions: null });
   });
 
@@ -1229,11 +1229,86 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
-  test("configures a node's harness in the inspector and saves it", async () => {
+  test("a node's gear opens its settings popup over the canvas — and Escape closes it", async () => {
+    const solo = path.join(tmpDir, "ws-gear");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const configOf = async () => (await snapshot(solo)).nodes.find((n) => n.id === agent.id).config;
+
+    const { page, context, errors } = await openWorkflow(solo);
+    // No settings sidebar any more: every node carries a gear instead, and the
+    // diagram keeps the whole width it used to share.
+    assert.equal(await page.locator("#subagent-workflow-pane .sw-inspector").count(), 0);
+    assert.equal(await page.locator(".sw-node .sw-node-config").count(), s.nodes.length, "one gear per node");
+    assert.equal(await page.locator(`.sw-node[data-id="${agent.id}"] .sw-node-config`).count(), 1);
+    // Closed means nothing rendered, and nothing clickable through it.
+    assert.equal(await page.locator("#sw-modal .sw-dlg-body").count(), 0);
+    assert.equal(await page.locator("#sw-modal-backdrop:visible").count(), 0);
+
+    // Selecting a node is a drag, not an edit: a plain click on the card must
+    // not throw a form over it.
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-name`);
+    await page.waitForTimeout(250);
+    assert.equal(await page.locator("#sw-modal .sw-dlg-body").count(), 0, "selecting is not configuring");
+    assert.equal(await page.locator(`.sw-node[data-id="${agent.id}"].sel`).count(), 1, "the node reads as selected");
+
+    // The gear is.
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-f-harness");
+    const geom = await page.evaluate(() => {
+      const back = document.getElementById("sw-modal-backdrop");
+      const dlg = document.getElementById("sw-modal");
+      const cs = getComputedStyle(back);
+      const r = dlg.getBoundingClientRect();
+      return {
+        position: cs.position, z: Number(cs.zIndex), scrim: cs.backgroundColor,
+        w: Math.round(r.width),
+        centered: Math.abs((r.left + r.right) / 2 - innerWidth / 2) <= 2,
+        canvas: Math.round(document.querySelector(".sw-canvas-scroll").getBoundingClientRect().width),
+      };
+    });
+    assert.equal(geom.position, "fixed", "the popup floats over the pane, it is not a column in it");
+    assert.ok(geom.z >= 1000, `it sits above the canvas (z=${geom.z})`);
+    assert.notEqual(geom.scrim, "rgba(0, 0, 0, 0)", "with a scrim over the canvas");
+    assert.ok(geom.centered, "centred in the viewport");
+    assert.ok(geom.w >= 360, `and wide enough for the form (${geom.w}px)`);
+    assert.ok(geom.canvas > geom.w, `the canvas keeps the full width behind it (${geom.canvas}px)`);
+
+    // Escape closes it, leaving the node's settings exactly as they were.
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("#sw-modal .sw-dlg-body"));
+    assert.equal(await page.locator("#sw-modal-backdrop:visible").count(), 0);
+    assert.deepEqual(await configOf(), agent.config, "closing is not saving");
+
+    // The ✕ in the head closes it too, and so does a click on the scrim.
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-f-harness");
+    await page.click("#sw-close-x");
+    await page.waitForFunction(() => !document.querySelector("#sw-modal .sw-dlg-body"));
+
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-f-harness");
+    await page.mouse.click(6, 6); // a corner of the scrim, well clear of the popup
+    await page.waitForFunction(() => !document.querySelector("#sw-modal .sw-dlg-body"));
+
+    // Double-clicking the card is the same as pressing its gear — and an edit
+    // made in the popup is saved like any other.
+    await page.dblclick(`.sw-node[data-id="${agent.id}"] .sw-node-body`);
+    await page.waitForSelector("#sw-f-prompt");
+    await page.fill("#sw-f-prompt", "check {input}");
+    await page.click("#sw-save");
+    await page.waitForTimeout(400);
+    assert.equal((await configOf()).prompt, "check {input}");
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("configures a node's harness in its settings popup and saves it", async () => {
     const { page, context, errors } = await openWorkflow(ws);
     const s = await snapshot(ws);
     const agent = s.nodes.find((n) => n.type === "agent");
-    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-name`);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-f-harness");
     assert.ok((await page.$$eval("#sw-f-harness option", (o) => o.map((e) => e.value))).includes("gemini"));
     await page.fill("#sw-f-name", "planner");
@@ -1273,7 +1348,7 @@ describe("subagent workflow plugin (client)", () => {
     } }, solo)).res.ok);
 
     const { page, context, errors } = await openWorkflow(solo);
-    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-name`);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-f-model");
     // The catalogue rides along with the harness list.
     await page.waitForFunction((n) => document.querySelectorAll("#sw-f-model option").length >= n, PI_MODELS.length + 2);
@@ -1283,13 +1358,17 @@ describe("subagent workflow plugin (client)", () => {
     await page.waitForTimeout(400);
     assert.equal(await stored(), "tokenharbor/grok-4", "saving writes the qualified id");
 
-    // Two providers ship this one: it is kept as typed and says why.
+    // Two providers ship this one: it is kept as typed and says why. The
+    // settings popup covers the toolbar, so close it to reach ↻ and open the
+    // node again — a reload inside the popup would be a different test.
     assert.ok((await act("updateNode", { id: agent.id, config: { harness: "pi", model: "mimo-v2.6-flash" } }, solo)).res.ok);
+    await page.click("#sw-close");
     await page.click("#sw-refresh");
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForFunction(() => document.querySelector("#sw-f-model")?.value === "__custom__");
     assert.equal(await page.$eval("#sw-f-model-custom", (el) => el.value), "mimo-v2.6-flash",
       "the ambiguous value stays in the free-text box");
-    const warn = await page.textContent(".sw-insp-body .sw-hint.sw-warn");
+    const warn = await page.textContent(".sw-dlg-body .sw-hint.sw-warn");
     assert.match(warn, /offered by 2 providers/);
     assert.match(warn, /tokenharbor\/mimo-v2\.6-flash/);
     assert.match(warn, /xiaomi\/mimo-v2\.6-flash/);
@@ -1313,7 +1392,7 @@ describe("subagent workflow plugin (client)", () => {
     const design = fs.realpathSync(path.join(ws7, "docs", "design.md"));
 
     const { page, context, errors } = await openWorkflow(ws7);
-    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-name`);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-refs");
     assert.match(await page.textContent("#sw-refs-empty"), /No reference files yet/);
 
@@ -1371,7 +1450,7 @@ describe("subagent workflow plugin (client)", () => {
     const endCard = await page.textContent(".sw-node.sw-t-end .sw-node-final");
     assert.match(endCard, /A2\[A1\[world\]\]/);
     assert.match(endCard, /A3\[A1\[world\]\]/);
-    await page.click(".sw-node.sw-t-end .sw-node-name");
+    await page.click(".sw-node.sw-t-end .sw-node-config");
     await page.waitForSelector("#sw-final-body .sw-final-pre");
     const final = await page.textContent("#sw-final-body .sw-final-pre");
     assert.match(final, /A2\[A1\[world\]\]/);
@@ -1399,7 +1478,7 @@ describe("subagent workflow plugin (client)", () => {
     } }, ws5)).res.ok);
 
     const { page, context, errors } = await openWorkflow(ws5);
-    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-name`);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-f-harness");
 
     // Pi's dropdown is the app's whole model catalogue, every value carrying its
@@ -1427,7 +1506,7 @@ describe("subagent workflow plugin (client)", () => {
     // The panel is three settings (plus the node's name) and the reference list.
     // Every control the inspector used to carry is gone, so nothing hidden can
     // be edited — and the seeded reference is listed without being re-resolved.
-    const visibleFields = () => page.$$eval(".sw-insp-body .sw-field > span", (els) =>
+    const visibleFields = () => page.$$eval(".sw-dlg-body .sw-field > span", (els) =>
       els.filter((e) => e.offsetParent !== null)
         .map((e) => (e.textContent || "").trim().toLowerCase().split(" ")[0]));
     const labels = await visibleFields();
@@ -1450,7 +1529,7 @@ describe("subagent workflow plugin (client)", () => {
     ]) {
       assert.equal(await page.locator(gone).count(), 0, `${gone} is no longer in the panel`);
     }
-    assert.equal(await page.locator(".sw-insp-body .sw-check").count(), 0, "and no bypass checkbox");
+    assert.equal(await page.locator(".sw-dlg-body .sw-check").count(), 0, "and no bypass checkbox");
 
     // Editing the message keeps every stored setting the panel does not show.
     await page.fill("#sw-f-prompt", "Review {input}");
@@ -1585,7 +1664,7 @@ describe("subagent workflow plugin (client)", () => {
 
   // ── Provider marks, run guards, portability ────────────────────────────
 
-  test("wears the selected provider's mark on the node and in the inspector", async () => {
+  test("wears the selected provider's mark on the node and in its settings popup", async () => {
     const solo = path.join(tmpDir, "ws-mark");
     fs.mkdirSync(solo, { recursive: true });
     const seeded = await snapshot(solo);
@@ -1617,15 +1696,15 @@ describe("subagent workflow plugin (client)", () => {
     assert.equal(mark.radius, "6px", "on the control radius");
     assert.notEqual(mark.bg, "rgba(0, 0, 0, 0)", "with a tinted background");
 
-    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-name`);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-f-harness");
     assert.equal(await page.locator('#sw-harness-icon[data-harness="claude"]').count(), 1);
 
-    // Switching harness repaints the field label, the inspector head and — once
+    // Switching harness repaints the field label, the popup head and — once
     // saved — the node itself.
     await page.selectOption("#sw-f-harness", "gemini");
     assert.equal(await page.locator('#sw-harness-icon[data-harness="gemini"]').count(), 1);
-    assert.equal(await page.locator('.sw-insp-head .sw-hicon[data-harness="gemini"]').count(), 1);
+    assert.equal(await page.locator('.sw-dlg-head .sw-hicon[data-harness="gemini"]').count(), 1);
     await page.click("#sw-save");
     await page.waitForFunction((id) =>
       document.querySelector(`.sw-node[data-id="${id}"] .sw-hicon`)?.dataset.harness === "gemini", agent.id);
@@ -1646,7 +1725,7 @@ describe("subagent workflow plugin (client)", () => {
     assert.ok(off.res.ok, off.data?.error);
 
     const { page, context, errors } = await openWorkflow(solo);
-    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-name`);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-f-prompt");
     assert.equal(await page.locator("#sw-f-enabled").count(), 0, "the panel has no switch");
     assert.equal(await page.locator(`.sw-node[data-id="${agent.id}"].sw-off`).count(), 1, "the canvas marks it off");
@@ -1760,7 +1839,7 @@ describe("subagent workflow plugin (client)", () => {
     // A reopened record carries the workflow's final output as well — both on
     // the end node's card and, in full, in its panel.
     assert.match(await page.textContent(".sw-node.sw-t-end .sw-node-final"), /A2\[A1\[first\]\]/);
-    await page.click(".sw-node.sw-t-end .sw-node-name");
+    await page.click(".sw-node.sw-t-end .sw-node-config");
     await page.waitForSelector("#sw-final-body .sw-final-pre");
     assert.match(await page.textContent("#sw-final-body .sw-final-pre"), /A3\[A1\[first\]\]/);
 
@@ -1772,13 +1851,16 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
-  test("arms and disarms a trigger from the inspector", async () => {
+  test("arms and disarms a trigger from the toolbar's triggers popup", async () => {
     const solo = path.join(tmpDir, "ws-trigger-ui");
     fs.mkdirSync(solo, { recursive: true });
     await snapshot(solo);
 
     const { page, context, errors } = await openWorkflow(solo);
-    // The workflow-level form lives in the inspector's empty state.
+    // The workflow-level form is the third thing the settings popup carries,
+    // opened from ⏱ in the toolbar (a node's gear is the other way in).
+    assert.equal(await page.locator("#sw-tr-save").count(), 0, "closed until asked for");
+    await page.click("#sw-triggers");
     await page.waitForSelector("#sw-tr-save");
     assert.doesNotMatch(await page.textContent("#sw-status"), /trigger armed/);
     // Its checkbox line is still laid out on its own row: the node panel dropped

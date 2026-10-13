@@ -3,7 +3,7 @@
  *
  * Loaded by client.js from this plugin's directory (the host serves it over
  * /plugins/file/subagent-workflow/), so the canvas, its nodes, ports, edges,
- * the harness inspector and the live run panel all live with the plugin. Every
+ * the settings popup and the live run panel all live with the plugin. Every
  * colour comes from the app's theme variables (--text, --muted, --accent,
  * --green, --red, --orange, --border, --surface…), so light, dark and the
  * DeepSeek palettes all work without a second copy.
@@ -103,6 +103,23 @@
 .sw-node.sw-t-start .sw-node-glyph { color: var(--green); }
 .sw-node.sw-t-end .sw-node-glyph { color: var(--red); }
 .sw-node-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The gear on a node's head. Node settings live in a popup now, so this is the
+   way in — unlike the delete ✕ it stays visible, because it is the node's main
+   action and has to be discoverable without hovering first. */
+.sw-node-config {
+  flex: 0 0 auto; width: 20px; height: 20px; padding: 0;
+  display: grid; place-items: center; border-radius: var(--r-control);
+  font-family: inherit; font-size: 12px; line-height: 1;
+  color: var(--muted); background: transparent; border: 1px solid transparent;
+  cursor: pointer; transition: color .12s ease, background .12s ease, border-color .12s ease;
+}
+.sw-node:hover .sw-node-config { color: var(--text); }
+.sw-node-config:hover {
+  color: var(--accent); background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.sw-node-config:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; color: var(--accent); }
+
 .sw-node-del {
   width: 18px; height: 18px; padding: 0; flex: 0 0 auto;
   display: grid; place-items: center; border-radius: var(--r-control);
@@ -124,19 +141,8 @@
 }
 .sw-node-final.has-output { color: var(--green); }
 
-/* The provider's mark: on an agent node's head and in the inspector. */
+/* The provider's mark: on an agent node's head and in its settings popup. */
 .sw-hicon { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: 0 0 auto; color: var(--accent); }
-
-/* The inspector's head: the provider mark (or a node-type glyph), the node's
-   name as an inline title, and a small type readout. */
-.sw-insp-name {
-  flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600;
-  padding: 5px 8px; background: var(--surface); border-color: var(--border);
-}
-.sw-insp-kind {
-  flex: 0 0 auto; font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
-  text-transform: uppercase; color: var(--muted);
-}
 .sw-hicon svg { display: block; }
 
 /* A node switched off (or gated out) reads as inert on the canvas. */
@@ -179,27 +185,74 @@
 .sw-node.sw-t-start .sw-port-out { border-color: var(--green); }
 .sw-node.sw-t-end .sw-port-in { border-color: var(--red); }
 
-/* ── Inspector (node settings) ──────────────────────────────────────────── */
+/* ── Node settings popup ────────────────────────────────────────────────── */
+/*
+ * Node settings used to sit in a sidebar beside the canvas. They are a modal
+ * now, opened from the gear on the node itself (or a double-click on the card),
+ * so the canvas keeps the whole width and a node is edited where it is. One
+ * modal carries all three settings surfaces: a node, a connection, and the
+ * workflow-level triggers from the toolbar.
+ */
 
-.sw-inspector {
-  flex: 0 0 340px; width: 340px; min-height: 0; overflow: auto;
-  padding: 16px; background: var(--surface-2); border-left: 1px solid var(--border);
+.sw-modal-backdrop {
+  position: fixed; inset: 0; z-index: 1200;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .5);
 }
-.sw-insp-empty { color: var(--muted); font-size: 13px; }
-.sw-insp-title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
-.sw-insp-empty p { margin: 6px 0; line-height: 1.5; }
+/* A closed popup is marked with `hidden`; the author `display: flex` above would
+   otherwise beat the user agent's rule for [hidden] and it would never hide. */
+.sw-modal-backdrop[hidden] { display: none; }
+
+.sw-modal {
+  display: flex; flex-direction: column;
+  width: min(560px, 100%); max-height: 100%;
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--r-panel); box-shadow: var(--shadow-panel);
+  animation: sw-dlg-in .16s var(--ease-out) both;
+}
+@keyframes sw-dlg-in { from { opacity: 0; transform: translateY(8px) scale(.99); } }
+@media (prefers-reduced-motion: reduce) { .sw-modal { animation: none; } }
+
+.sw-dlg-head { display: flex; align-items: center; gap: 9px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.sw-dlg-head .sw-hicon { width: 22px; height: 22px; border-radius: var(--r-control); background: var(--accent-soft); }
+.sw-dlg-glyph {
+  width: 22px; height: 22px; flex: 0 0 auto; display: grid; place-items: center;
+  border-radius: var(--r-control); font-size: 11px; color: var(--accent); background: var(--accent-soft);
+}
+.sw-dlg-glyph.sw-t-approval { color: var(--orange); background: color-mix(in srgb, var(--orange) 15%, transparent); }
+.sw-dlg-title { font-size: 14px; font-weight: 600; color: var(--text); }
+/* The node's name is its label on the canvas, so it is edited in the head. */
+.sw-dlg-name {
+  flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600;
+  padding: 5px 8px; background: var(--surface-2); border-color: var(--border);
+}
+.sw-dlg-kind {
+  flex: 0 0 auto; font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted);
+}
+.sw-dlg-x {
+  flex: 0 0 auto; width: 24px; height: 24px; padding: 0;
+  display: grid; place-items: center; border-radius: var(--r-control);
+  font-family: inherit; font-size: 12px; line-height: 1;
+  color: var(--muted); background: transparent; border: 1px solid transparent;
+  cursor: pointer; transition: color .12s ease, background .12s ease, border-color .12s ease;
+}
+.sw-dlg-x:hover { color: var(--text); background: var(--surface-3); border-color: var(--border); }
+
+.sw-dlg-body { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; padding: 14px; overflow: auto; min-height: 0; }
+.sw-dlg-body p { margin: 0; }
+.sw-dlg-actions { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border); }
+/* The destructive action sits apart, on the left; save and close stay together. */
+.sw-dlg-actions .sw-danger { margin-right: auto; }
+
 .sw-muted { color: var(--muted); font-size: 12.5px; }
 .sw-hint { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
 .sw-hint.sw-warn { color: var(--orange); }
 .sw-hint code, .sw-sub code { font-size: 10.5px; }
 
-.sw-insp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.sw-insp-glyph { width: 22px; height: 22px; flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--r-control); font-size: 11px; color: var(--accent); background: var(--accent-soft); }
-.sw-insp-glyph.sw-t-approval { color: var(--orange); background: color-mix(in srgb, var(--orange) 15%, transparent); }
-.sw-insp-head .sw-hicon { width: 22px; height: 22px; border-radius: var(--r-control); background: var(--accent-soft); }
 .sw-field-label { display: inline-flex; align-items: center; gap: 6px; }
 .sw-field-label .sw-hicon { width: 14px; height: 14px; }
-.sw-insp-body { display: flex; flex-direction: column; gap: 12px; }
 
 .sw-field { display: flex; flex-direction: column; gap: 5px; }
 .sw-field > span { font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
@@ -211,20 +264,14 @@
 .sw-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text); cursor: pointer; }
 .sw-check-line { padding-bottom: 6px; white-space: nowrap; }
 
-.sw-insp-actions { display: flex; gap: 8px; margin-top: 16px; }
-.sw-insp-actions .btn-sm { flex: 1; }
 .sw-primary { color: var(--text); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .sw-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, var(--surface-2)); }
 .sw-danger { color: color-mix(in srgb, var(--red) 70%, var(--text)); background: color-mix(in srgb, var(--red) 10%, var(--surface-2)); border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border)); }
 .sw-danger:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--red) 20%, var(--surface-2)); border-color: var(--red); }
 .sw-conn-label { font-size: 13.5px; margin: 0 0 8px; }
 
-/* Workflow-level triggers, shown when no node is selected. */
-.sw-triggers {
-  display: flex; flex-direction: column; gap: 12px;
-  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border);
-}
-.sw-triggers .sw-insp-title { margin-bottom: 0; }
+/* Workflow-level triggers, opened from the toolbar's ⏱ button. */
+.sw-triggers { display: flex; flex-direction: column; gap: 12px; }
 .sw-triggers p { margin: 0; line-height: 1.5; }
 
 /* ── Approval banner (human-in-the-loop) ─────────────────────────────────── */
@@ -275,7 +322,7 @@
 .sw-log-stderr .sw-log-text { color: var(--red); }
 .sw-log-tool .sw-log-text { color: var(--orange); }
 
-/* ── The end node's final output (inspector) ────────────────────────────── */
+/* ── The end node's final output (in its settings popup) ────────────────── */
 
 .sw-final-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
 .sw-final-title { font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
