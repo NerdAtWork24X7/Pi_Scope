@@ -121,7 +121,4 @@ than edit the core.
 
 ## License
 
-[MIT](LICENSE). Pi Scope is an actively extended, locally-focused fork of
-[disler/pi-agent-observability](https://github.com/disler/pi-agent-observability). Bundled
-fonts (Clash Grotesk, Satoshi — ITF Free Font License; MesloLGS Nerd Font Mono) and the Office
-sprite assets are attributed in the files that ship them.
+[MIT](LICENSE).
