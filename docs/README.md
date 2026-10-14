@@ -1,0 +1,53 @@
+# docs/
+
+The Pi Scope website and setup guide, plus the demo screenshots and video the repo ships.
+Plain HTML, CSS and a little vanilla JS — **no build step, no framework, no CDN** — so the
+folder is served exactly as it sits in git.
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `index.html` | The showcase: hero pipeline diagram, feature tour, screenshots, comparison, install, FAQ |
+| `guide.html` | The full setup guide: prerequisites, every install path, phone access, environment variables |
+| `assets/style.css` | The whole design system — the same "Amber Terminal Noir" tokens the app uses |
+| `assets/app.js` | Theme toggle, scroll reveal, copy buttons on code blocks |
+| `assets/fonts/` | Clash Grotesk + Satoshi, self-hosted (ITF Free Font License, see `ITF-FFL.txt`) |
+| `shots/` | Screenshots used by the site and the README — captured from a live instance |
+| `video/` | The MP4 feature walkthroughs |
+| `seed-demo.mjs` | Seeds a realistic demo session (a coder adding dark mode, its tester subagent, and a second project with a failing command) |
+| `make-showcase-video.mjs` | The script that builds the showcase video from the screenshots |
+
+## Editing the site
+
+It is just HTML. Open the files, change the words, commit. To preview locally:
+
+```bash
+python3 -m http.server 8000 --directory docs
+# → http://127.0.0.1:8000/
+```
+
+Two rules keep it consistent with the app:
+
+- **Colour and geometry come from the CSS custom properties** at the top of `assets/style.css`.
+  They mirror `apps/scope-server/public/styles.css` — near-black surfaces, hairline borders,
+  one rationed amber accent, and a light theme that is the same system on warm paper. Don't
+  hardcode hex values in the HTML.
+- **No external requests.** Fonts are self-hosted and there is no analytics, no CDN and no
+  third-party script, matching the project's local-first promise.
+
+## Publishing
+
+The site is published with **GitHub Pages straight from this folder** — no workflow, no
+build, no `gh-pages` branch. A maintainer enables it once:
+
+1. Repo **Settings → Pages**
+2. **Source:** *Deploy from a branch*
+3. **Branch:** `main` · **Folder:** `/docs` → **Save**
+
+It is then live at <https://nerdatwork24x7.github.io/Pi_Scope/> within a minute or so of the
+next push. `.nojekyll` is present so Jekyll is skipped and the files are served as-is.
+
+Because Pages serves this folder as the site root, links from the HTML to files *outside*
+`docs/` (the server README, the plugin guide, the extension README, `LICENSE`) are written as
+absolute `github.com/.../blob/main/...` URLs. Keep that convention when adding a link.

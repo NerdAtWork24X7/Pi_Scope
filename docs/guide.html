@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Docs — Pi Scope</title>
+<meta name="description" content="Setup guide for Pi Scope: prerequisites, install options for Linux, macOS and Windows, attaching an agent, phone access, environment variables and the plugin system." />
+<meta name="color-scheme" content="dark light" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23F5C400'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%230A0A0A' stroke-width='2.5'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="wordmark" href="./"><span class="mark">Pi</span>&nbsp;<span class="mark-alt">Scope</span></a>
+    <span class="nav-desc">setup guide</span>
+    <nav class="nav-links">
+      <span class="nav-status"><i class="dot amber"></i> docs</span>
+      <a href="./">Showcase</a>
+      <a href="#install" class="hide-sm">Install</a>
+      <a href="https://github.com/NerdAtWork24X7/Pi_Scope" class="hide-sm">GitHub ↗</a>
+      <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme">☀</button>
+    </nav>
+  </div>
+</header>
+
+<div class="page-head grid-tex">
+  <div class="wrap">
+    <p class="eyebrow">documentation</p>
+    <h1 class="display-md">Set up Pi Scope.</h1>
+    <p>
+      Everything you need to run the server, feed it an agent, and find the exact
+      command, flag or environment variable you came for. For what the app looks like
+      and what it does, see the <a href="./">showcase</a>.
+    </p>
+  </div>
+</div>
+
+<div class="wrap doc-layout">
+
+  <!-- ── Contents ───────────────────────────────────────────────────────── -->
+  <aside class="toc">
+    <h5>On this page</h5>
+    <ul>
+      <li><a href="#prerequisites">Prerequisites</a></li>
+      <li>
+        <a href="#install">Install &amp; run</a>
+        <ul>
+          <li><a href="#appimage">AppImage</a></li>
+          <li><a href="#one-command">One command</a></li>
+          <li><a href="#windows">Windows</a></li>
+          <li><a href="#source">From source</a></li>
+          <li><a href="#launcher">Launcher flags</a></li>
+          <li><a href="#demo">Demo data</a></li>
+        </ul>
+      </li>
+      <li><a href="#agent">Attach an agent</a></li>
+      <li><a href="#phone">Use it from your phone</a></li>
+      <li><a href="#snapshots">Screenshots &amp; video</a></li>
+      <li><a href="#environment">Environment variables</a></li>
+      <li><a href="#tips">Tips &amp; FAQ</a></li>
+      <li><a href="#contributing">For AI agents &amp; contributors</a></li>
+      <li><a href="#license">License &amp; assets</a></li>
+    </ul>
+  </aside>
+
+  <!-- ── Prose ──────────────────────────────────────────────────────────── -->
+  <main class="doc">
+
+    <h2 id="prerequisites">Prerequisites</h2>
+    <p class="lead">
+      Pi Scope is two pieces: a <strong>server + dashboard</strong> you open, and a
+      <strong><code>pi</code> extension</strong> that feeds it agent telemetry. Here is
+      exactly what each path needs.
+    </p>
+
+    <div class="table-scroll" style="margin: 22px 0 26px">
+      <table>
+        <thead>
+          <tr><th scope="col">Path</th><th scope="col">What you need</th><th scope="col">Install anything?</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Linux desktop (AppImage)</th><td style="text-align:left">A Linux desktop, x86_64</td><td>No — Node 24 is bundled inside</td></tr>
+          <tr><th scope="row">Windows</th><td style="text-align:left">Windows 10/11 + Node.js 24+</td><td>Yes — the one-liner below</td></tr>
+          <tr><th scope="row">From source (developers)</th><td style="text-align:left">Node.js 24+</td><td>Yes — the one-liner below</td></tr>
+          <tr><th scope="row">Feed it agent data</th><td style="text-align:left">The <code>pi</code> coding agent — bundled</td><td>No — Pi Scope ships its own <code>pi</code></td></tr>
+          <tr><th scope="row">Any other tool</th><td style="text-align:left">Anything that can <code>POST /events</code></td><td>A ~10 line script</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      <strong>Node 24+</strong> is the only real requirement — Pi Scope uses
+      <code>node:sqlite</code>, which ships inside Node 24, so there are zero native build
+      steps in the default path. Linux, macOS and Windows all run the same server, dashboard
+      and desktop window; <code>Start.sh</code> (Linux/macOS) and <code>Start.ps1</code>
+      (Windows) are the same entry point in each platform's language.
+    </p>
+
+    <h2 id="install">Install &amp; run</h2>
+    <p>Get the server running first, then point an agent at it.</p>
+
+    <h3 id="appimage">Zero-install AppImage (Linux, easiest)</h3>
+    <pre><code>chmod +x Pi-Scope-1.0.0.AppImage
+./Pi-Scope-1.0.0.AppImage</code></pre>
+    <ul>
+      <li>Data (SQLite DB + per-run auth token) lives in <code>~/.pi-scope/</code> — it survives
+        relaunch and never writes into the read-only AppImage mount.</li>
+      <li>Closing the window stops the server. If one is already listening on the port, the
+        AppImage reuses it instead of starting a second.</li>
+      <li>Build it yourself: <code>./build-release.sh</code> →
+        <code>apps/scope-desktop/dist/Pi-Scope-&lt;version&gt;.AppImage</code>.</li>
+    </ul>
+
+    <h3 id="one-command">One command (the whole stack)</h3>
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.sh | sh
+cd Pi_Scope &amp;&amp; ./Start.sh                # desktop app (Electron window)</code></pre>
+    <p>
+      The one-liner downloads the app (no <code>git</code> needed), checks for Node 24+ and
+      installs the dependencies. <code>install.sh --help</code> lists its options
+      (<code>--dir</code>, <code>--ref</code>, <code>--no-deps</code>); running it from a
+      checkout installs that checkout in place. Prefer git:
+    </p>
+    <pre><code>git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope &amp;&amp; cd Pi_Scope
+./Start.sh                               # desktop app (Electron window)</code></pre>
+
+    <h3 id="windows">Windows (one command)</h3>
+    <pre><code>irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.ps1 | iex
+cd Pi_Scope
+.\Start.ps1                              # desktop app (Electron window)</code></pre>
+    <p>
+      Two conveniences: <code>Start.cmd</code> is the same launcher for a double-click (it
+      bypasses the PowerShell execution policy for that launch only), and
+      <code>install.ps1</code> can be run as a file when you want to pass arguments
+      (<code>-Dir</code>, <code>-Ref</code>, <code>-NoDeps</code>).
+    </p>
+
+    <h4>What is Windows-aware (and what is not)</h4>
+    <ul>
+      <li><strong>The server, Chat, the Office and the Workflow run the same way.</strong> A
+        harness on PATH (<code>claude</code>, <code>codex</code>, <code>gemini</code>, …) is a
+        <code>.cmd</code> shim there, which Windows will not run directly — Pi Scope starts
+        those through <code>cmd.exe</code> with every argument escaped, and stops a node by
+        taking its whole process tree down. A Workflow node set to <em>Custom command</em> runs
+        through <code>cmd.exe</code> too, so its variables are
+        <code>%SW_PROMPT%</code>-style instead of <code>$SW_PROMPT</code>.</li>
+      <li><strong>The bundled <code>pi</code></strong> is installed as <code>pi.cmd</code>, and
+        Chat spawns the agent's Node entry directly, so no global <code>pi</code> install is
+        involved.</li>
+      <li><strong>Terminal</strong> opens <strong>Git Bash</strong> when it is installed,
+        otherwise PowerShell (<code>pwsh</code>, then Windows PowerShell) or
+        <code>cmd.exe</code>. The Terminal's <em>live cwd</em> is read from <code>/proc</code>
+        on Linux and <code>lsof</code> on macOS; Windows has neither, so the pane keeps the
+        directory it was opened in and the workspace rail's "follow this directory" injection is
+        skipped.</li>
+      <li><strong>API keys exported from a shell profile</strong> (<code>~/.bashrc</code>,
+        <code>~/.zshrc</code>) are a POSIX-shell convention: on Windows set them on
+        <strong>Settings → API keys</strong> (or in <code>scope.env</code>).</li>
+      <li><strong>Packaging:</strong> <code>build-release.sh</code> builds the Linux AppImage. A
+        Windows package is <code>electron-builder</code>'s job — the target is configured in
+        <code>apps/scope-desktop/electron-builder.yml</code>, so run
+        <code>npx electron-builder --win</code> from <code>apps/scope-desktop</code>
+        <strong>on Windows</strong>, with the server bundle present in
+        <code>apps/scope-desktop/server-bundle</code>.</li>
+    </ul>
+
+    <h3 id="source">From the git repo (developers)</h3>
+    <pre><code>git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope &amp;&amp; cd Pi_Scope
+apps/scope-desktop/run.sh                # requires Node.js 24+</code></pre>
+    <p>
+      Open the URL it prints (<code>http://127.0.0.1:43190/?token=&lt;uuid&gt;</code>) and you
+      are looking at a live (empty) dashboard. <code>npm run dev</code> adds
+      <code>--watch</code>; the DB defaults to <code>db/scope.db</code>. Override with
+      <code>SCOPE_PORT</code>, <code>SCOPE_HOST</code>, <code>SCOPE_DB_PATH</code> or
+      <code>SCOPE_AUTH_TOKEN</code>.
+    </p>
+
+    <h3 id="launcher">Launcher flags</h3>
+    <p>
+      <code>Start.sh</code> is the single entry point for every mode — it picks a sane Node
+      (nvm-aware), boots the server and the app together, and on Ctrl-C stops only the server it
+      started. The one exception to "no setup": in desktop mode it runs
+      <code>npm install</code> <em>once</em>, on first run only, to get Electron. The server is
+      started <strong>at most once</strong>: if one is already healthy on the target port, its
+      token is adopted instead of a second instance being spawned, and a server orphaned by a
+      <code>kill -9</code> is reaped on the next run.
+    </p>
+    <pre><code>./Start.sh                              # desktop app (Electron window, default)
+./Start.sh --web                        # headless server + open the WebUI in a browser
+./Start.sh --server                     # headless server only, stays in the foreground
+./Start.sh --dev                        # server with --watch
+./Start.sh --keep-server                # leave the server up after the script exits
+./Start.sh --port 8080 --host 0.0.0.0   # override the defaults
+./Start.sh --db /path/to/scope.db --token my-token</code></pre>
+    <p><code>Start.ps1</code> is the same, in PowerShell:</p>
+    <pre><code>.\Start.ps1 -Web                         # headless server + open the WebUI in a browser
+.\Start.ps1 -Server                      # headless server only
+.\Start.ps1 -Dev                         # server with --watch
+.\Start.ps1 -KeepServer                  # leave the server up after the script exits
+.\Start.ps1 -Port 8080 -BindHost 0.0.0.0 # override the defaults
+.\stop.ps1                               # stop a running server</code></pre>
+    <p>
+      Per-machine defaults can live in <code>apps/scope-desktop/scope.env</code> (see
+      <code>scope.env.example</code>); real environment variables always win. This matters for
+      the desktop icon, which inherits no shell environment.
+    </p>
+
+    <h3 id="demo">Take a test drive (no agent needed)</h3>
+    <p>
+      Want to see it before wiring up an agent? Seed the dashboard with a realistic demo
+      session — a coder adding dark mode, its tester subagent, and a second project with a
+      failed command:
+    </p>
+    <pre><code># server running? then:
+node docs/seed-demo.mjs</code></pre>
+    <p>Instantly populated — click around every view. Re-running is safe (events are idempotent).</p>
+
+    <h2 id="agent">Attach a real agent</h2>
+    <p>
+      The dashboard comes alive when a <code>pi</code> agent feeds it. This extension hooks the
+      agent lifecycle and streams telemetry, <strong>auto-discovering the server's auth
+      token</strong>.
+    </p>
+    <p>
+      <strong>Pi Scope bundles its own <code>pi</code> coding agent.</strong> The Chat view, the
+      git-commit-message generator and the in-browser Terminal all launch that bundled copy —
+      with the Pi Scope extension force-loaded — so there is nothing to install and a separate
+      global <code>pi</code> is never used. The bundled agent lives in
+      <code>apps/scope-desktop/pi-bundle</code> (packaged as <code>resources/pi</code> inside the
+      AppImage); point elsewhere with <code>SCOPE_PI_BIN</code>.
+    </p>
+    <p>
+      The bundled agent also keeps its <strong>own agent dir</strong>
+      (<code>~/.pi-scope/agent</code>, see <code>SCOPE_AGENT_DIR</code>). Its settings, API keys,
+      model store, sessions and extensions live there, so it never reads or writes your global pi
+      agent dir — the two installations do not interfere, and a <code>pi-scope.ts</code> listed in
+      your global config can't collide with the force-loaded copy.
+    </p>
+    <p>
+      The steps below are only for a <code>pi</code> you installed yourself and run outside Pi
+      Scope (for example in your own terminal). That agent runs as normal — nothing to learn, no
+      new commands.
+    </p>
+
+    <h4>One session</h4>
+    <pre><code>pi -e /path/to/Pi_Scope/extension/pi-scope.ts</code></pre>
+    <h4>Every session — add it to your agent config</h4>
+    <pre><code>// your pi agent dir's settings.json
+{
+  "extensions": [
+    "/absolute/path/to/Pi_Scope/extension/pi-scope.ts"
+  ]
+}</code></pre>
+    <p>
+      Or copy <code>extension/pi-scope.ts</code> into your pi agent dir's
+      <code>extensions/</code> folder and list it as <code>"+extensions/pi-scope.ts"</code>.
+    </p>
+    <p>
+      The extension finds the token from <code>tmp/scope_token</code> (dev) or
+      <code>~/.pi-scope/scope_token</code> (AppImage), so you usually set nothing else. Point it
+      elsewhere with <code>--obs-server-url</code> or <code>OBS_SERVER_URL</code> (default
+      <code>http://127.0.0.1:43190</code>). Full flag and event reference:
+      <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/extension/README.md">extension/README.md</a>.
+    </p>
+
+    <div class="callout">
+      <h4>Any tool can feed it</h4>
+      <p>Just POST JSON events to <code>/events</code>:</p>
+      <pre style="margin: 12px 0 0"><code>{ "event_id": "evt-1", "session_id": "sess-1", "seq": 0,
+  "ts": "2026-09-07T12:00:00.000Z", "type": "user_message",
+  "payload": { "text": "hi agent" } }</code></pre>
+    </div>
+
+    <h2 id="phone">Use it from your phone</h2>
+    <p>
+      Pi Scope can bind every interface so a phone on the same Wi-Fi can open the
+      <strong>Chat</strong> view live, alongside the desktop.
+    </p>
+
+    <h4>1. Bind to the LAN</h4>
+    <pre><code>cp apps/scope-desktop/scope.env.example apps/scope-desktop/scope.env
+# then uncomment:  SCOPE_HOST=0.0.0.0</code></pre>
+    <p>
+      <code>scope.env</code> is read at launch, so this works from the desktop icon too. Real
+      environment variables still win, so <code>SCOPE_HOST=0.0.0.0 ./run.sh</code> overrides the
+      file. Running from source instead of the launcher?
+      <code>SCOPE_HOST=0.0.0.0 npm start</code> in <code>apps/scope-server</code> works the same
+      way, and the boot banner prints the phone URL.
+    </p>
+
+    <h4>2. Scan the QR</h4>
+    <p>
+      Start Pi Scope and click the phone icon in the header. A QR appears — point your phone's
+      camera at it and Pi Scope opens <strong>in a mobile layout</strong>, not a shrunk copy of
+      the desktop screen. The QR already carries this run's auth token, so bookmark it rather
+      than sharing it. If the machine has more than one network interface (Wi-Fi, ethernet,
+      docker), pick the address the phone can actually reach.
+    </p>
+
+    <h4>What the mobile layout is</h4>
+    <ul>
+      <li>A ☰ drawer of workspaces and sessions, with their live / waiting / stopped state.</li>
+      <li>The selected session's transcript — recorded messages plus the live stream as pi works.</li>
+      <li>A composer that sends prompts straight to pi; a question pi asks appears as an
+        answerable card, and <strong>Stop</strong> aborts the run.</li>
+      <li><strong>New session</strong> (the ＋ in the header) opens a sheet to pick the workspace,
+        model, agent team and mode; the first message spawns pi with exactly those settings.</li>
+      <li>A ✕ on each drawer row deletes that session, killing the pi subprocess behind it first.
+        It asks for confirmation — the delete cannot be undone.</li>
+      <li>The desktop views (Terminal, Files, Git, Checkpoints, Office) are deliberately absent,
+        and the phone does not download them: it loads <code>mobile.html</code> +
+        <code>mobile.js</code> + <code>mobile.css</code>, not the desktop bundle.</li>
+    </ul>
+    <p>The layout is chosen at the document, three ways:</p>
+    <div class="table-scroll" style="margin: 18px 0 22px">
+      <table>
+        <thead><tr><th scope="col">How you open it</th><th scope="col">What you get</th></tr></thead>
+        <tbody>
+          <tr><th scope="row"><code>/m?token=…</code> (the QR)</th><td style="text-align:left">The mobile layout, always</td></tr>
+          <tr><th scope="row"><code>/?token=…</code> on a phone</th><td style="text-align:left">The mobile layout (User-Agent / Client Hint)</td></tr>
+          <tr><th scope="row"><code>/?token=…&amp;ui=desktop</code></th><td style="text-align:left">The desktop UI, even on a phone</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      The 🖥 button in the mobile header opens the same session in the desktop layout;
+      <code>ui=mobile</code> does the reverse, so neither is a one-way door.
+    </p>
+
+    <div class="callout warn">
+      <p>
+        <strong>This exposes a shell.</strong> With <code>SCOPE_HOST=0.0.0.0</code> anyone on
+        that network who knows the token can drive your agents. The mobile layout is smaller than
+        the desktop UI, not harmless: prompts run real commands on this host, it can retarget a
+        project's team/mode, and it can delete sessions — and the desktop layout (reachable with
+        <code>ui=desktop</code>) adds <strong>Terminal</strong>, a real shell, plus file edits and
+        git operations. Only do this on a network you trust. The token is minted randomly at boot;
+        pin <code>SCOPE_AUTH_TOKEN</code> in <code>scope.env</code> if you want a stable URL.
+      </p>
+    </div>
+
+    <h2 id="snapshots">Screenshots &amp; video</h2>
+    <p>
+      The images on the <a href="./">showcase</a> were captured from a live instance. The video
+      walkthroughs are MP4s in the repo:
+    </p>
+    <ul>
+      <li><a href="video/Pi-Scope-5.0.0-features_1.mp4">Pi-Scope-5.0.0-features_1.mp4</a></li>
+      <li><a href="video/Pi-Scope-5.0.0-features_2.mp4">Pi-Scope-5.0.0-features_2.mp4</a></li>
+      <li><a href="video/Pi-Scope-5.0.0-features_3.mp4">Pi-Scope-5.0.0-features_3.mp4</a></li>
+      <li><a href="video/Pi-Scope-showcase.mp4">Pi-Scope-showcase.mp4</a></li>
+    </ul>
+
+    <h2 id="environment">Server environment variables</h2>
+    <div class="table-scroll" style="margin: 20px 0 24px">
+      <table>
+        <thead><tr><th scope="col">Var</th><th scope="col">Default</th><th scope="col">Description</th></tr></thead>
+        <tbody>
+          <tr><th scope="row"><code>SCOPE_PORT</code></th><td style="text-align:left"><code>43190</code></td><td style="text-align:left">HTTP port</td></tr>
+          <tr><th scope="row"><code>SCOPE_HOST</code></th><td style="text-align:left"><code>127.0.0.1</code></td><td style="text-align:left">Bind address. <code>0.0.0.0</code> also serves your LAN</td></tr>
+          <tr><th scope="row"><code>SCOPE_DB_PATH</code></th><td style="text-align:left"><code>db/scope.db</code></td><td style="text-align:left">SQLite database path</td></tr>
+          <tr><th scope="row"><code>SCOPE_AUTH_TOKEN</code></th><td style="text-align:left">random UUID</td><td style="text-align:left">Bearer token for auth</td></tr>
+          <tr><th scope="row"><code>SCOPE_FILE_ROOT</code></th><td style="text-align:left">project root</td><td style="text-align:left">Comma-separated allowed roots for <code>/files/*</code> and <code>/checkpoints/*</code></td></tr>
+          <tr><th scope="row"><code>SCOPE_AGENT_DIR</code></th><td style="text-align:left"><code>~/.pi-scope/agent</code></td><td style="text-align:left">Pi Scope's <strong>own</strong> pi agent dir (settings, API keys, model store, sessions). The bundled <code>pi</code> is pinned here via <code>PI_CODING_AGENT_DIR</code>, so it never touches the global pi agent dir</td></tr>
+          <tr><th scope="row"><code>SCOPE_SETTINGS_JSON</code></th><td style="text-align:left"><code>&lt;agentDir&gt;/settings.json</code></td><td style="text-align:left">Override the pi settings file the agent-team sidebar reads/writes</td></tr>
+          <tr><th scope="row"><code>SCOPE_SKILLS_DIR</code></th><td style="text-align:left"><code>&lt;agentDir&gt;/skills</code></td><td style="text-align:left">Override the skills directory scanned for the agent-team sidebar</td></tr>
+          <tr><th scope="row"><code>SCOPE_PLUGINS_DIR</code></th><td style="text-align:left"><code>~/.pi-scope/plugins</code></td><td style="text-align:left">Where user plugins live. Enable/disable state is in <code>plugins.json</code> and every plugin's own settings live in <code>.data/&lt;id&gt;.json</code> (<code>api.store</code>). A user plugin with a built-in's <code>id</code> overrides it, which is how one is swapped or upgraded</td></tr>
+          <tr><th scope="row"><code>SCOPE_BUILTIN_PLUGINS_DIR</code></th><td style="text-align:left">beside the server module</td><td style="text-align:left">Override where the built-in feature plugins are discovered (the packaged build ships them in <code>server-bundle/plugins</code>)</td></tr>
+          <tr><th scope="row"><code>SCOPE_EXTRA_PATH</code></th><td style="text-align:left">—</td><td style="text-align:left">Colon-separated extra dirs prepended to <code>PATH</code> for chat-spawned <code>pi</code> subprocesses (e.g. a non-standard venv: <code>SCOPE_EXTRA_PATH=/path/to/.venv/bin</code>)</td></tr>
+          <tr><th scope="row"><code>SCOPE_PI_BIN</code></th><td style="text-align:left">bundled <code>pi</code></td><td style="text-align:left">Override the <code>pi</code> executable Pi Scope launches for Chat, commit messages and subagents</td></tr>
+          <tr><th scope="row"><code>SCOPE_PI_BUNDLE_DIR</code></th><td style="text-align:left">auto-detected</td><td style="text-align:left">Where the bundled <code>pi</code> lives (<code>apps/scope-desktop/pi-bundle</code> in dev, <code>resources/pi</code> packaged)</td></tr>
+          <tr><th scope="row"><code>SCOPE_PI_REGISTRY</code></th><td style="text-align:left"><code>https://registry.npmjs.org</code></td><td style="text-align:left">npm registry used by Settings → Update to look for a newer bundled <code>pi</code></td></tr>
+          <tr><th scope="row"><code>SCOPE_NPM_BIN</code></th><td style="text-align:left"><code>npm</code></td><td style="text-align:left"><code>npm</code> executable Settings → Update runs</td></tr>
+          <tr><th scope="row"><code>SCOPE_MODEL_CATALOG</code></th><td style="text-align:left"><code>on</code></td><td style="text-align:left">Set to <code>off</code> to stop the app refreshing pi's model catalogs while it is open. Pi Scope runs <code>pi</code> with <code>PI_OFFLINE=1</code>, so pi no longer refreshes them by itself in-app — Settings → Models → Model update still refreshes them on demand</td></tr>
+          <tr><th scope="row"><code>SCOPE_MODELS_STORE</code></th><td style="text-align:left"><code>&lt;agentDir&gt;/models-store.json</code></td><td style="text-align:left">Override pi's model store path (read for pricing/context windows)</td></tr>
+          <tr><th scope="row"><code>SCOPE_MODEL_UPDATE_CACHE</code></th><td style="text-align:left"><code>&lt;agentDir&gt;/model-update-cache.json</code></td><td style="text-align:left">Override the pi-updater release cache path</td></tr>
+          <tr><th scope="row"><code>SCOPE_MODELS_DEV_URL</code></th><td style="text-align:left"><code>https://models.dev/api.json</code></td><td style="text-align:left">Catalog the release cache is refreshed from (point at a mirror for air-gapped installs)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Chat-spawned <code>pi</code> subprocesses also get the workspace venv bin dirs prepended to
+      <code>PATH</code>, and <code>PLAYWRIGHT_BROWSERS_PATH</code> restored from the user's shell
+      rc files (or Playwright's default cache dirs) when the server env lacks it — so
+      <code>web-fetch</code> finds its Chromium browser even when the server was launched from a
+      GUI session that never sourced the shell rc.
+    </p>
+    <p>
+      The full HTTP API — all endpoints, auth rules and the SSE stream — is documented in
+      <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/apps/scope-server/README.md">apps/scope-server/README.md</a>.
+    </p>
+
+    <h2 id="tips">Tips &amp; FAQ</h2>
+    <ul>
+      <li><strong>UI state lives in the URL hash</strong> — view, filters and selected session are
+        all saved there, so you can bookmark or share a view. The auth token stays in the
+        <code>?token=</code> query string, never the hash.</li>
+      <li><strong>Sessions auto-refresh</strong> (every 10s) <strong>and stream live over
+        SSE</strong> — new agents and events appear without reloading. The top-bar dot turns green
+        when the feed is connected.</li>
+      <li><strong>The terminal is shared state.</strong> The Files, Checkpoints and Git panes
+        follow the terminal's working directory — or set it manually in the Terminal pane's cwd
+        box.</li>
+      <li><strong>One rail, every view.</strong> The Workspaces rail on the left is the same
+        component in every view: pick a workspace and it becomes the shared working directory,
+        fold subagent groups open or closed, open a session straight into Single or Trajectory, or
+        delete it from the rail.</li>
+      <li><strong>Where's my data?</strong> A single SQLite file (<code>db/scope.db</code> in dev,
+        or <code>~/.pi-scope/</code> packaged), chmod <code>0600</code>. Delete sessions from the
+        sidebar — or <code>DELETE /sessions</code> for everything.</li>
+      <li><strong>What's captured?</strong> Session start/end, every user/assistant message,
+        thinking blocks, tool calls + results (with exit codes), LLM request args + system prompt,
+        model changes, compactions and branch navigation.</li>
+    </ul>
+
+    <h2 id="contributing">For AI agents &amp; contributors</h2>
+    <p>
+      This repository is structured so an AI coding agent can onboard quickly. The server API,
+      environment variables and full endpoint list live in
+      <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/apps/scope-server/README.md">apps/scope-server/README.md</a>;
+      the telemetry extension and its flags are documented in
+      <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/extension/README.md">extension/README.md</a>.
+    </p>
+    <p>
+      Every feature is a plugin, so the fastest way to change Pi Scope's behaviour is usually to
+      write one rather than edit the core. Start with
+      <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/apps/scope-server/plugins/README.md">apps/scope-server/plugins/README.md</a>
+      — it covers manifests, the <code>api.route</code> / <code>api.onEvent</code> /
+      <code>api.store</code> / <code>api.log</code> API, client bundles and where state is
+      persisted — and copy the working example in
+      <a href="https://github.com/NerdAtWork24X7/Pi_Scope/tree/main/examples/plugins/hello-insights">examples/plugins/hello-insights/</a>.
+    </p>
+    <ul>
+      <li><strong>Demo data:</strong>
+        <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/docs/seed-demo.mjs">docs/seed-demo.mjs</a>
+        — the script that created the screenshots on the showcase page.</li>
+      <li><strong>UI:</strong> vanilla JS, zero frameworks — <code>apps/scope-server/public/</code>.
+        Views are plugins: <code>plugins.js</code> is the client host/registry,
+        <code>plugins-builtin.js</code> registers the shipped views, and <code>app.js</code>
+        <code>setView()</code> is registry-driven — it knows no view by name. <strong>Office</strong>
+        is the standalone one: its client bundle, stylesheet and server module all live in
+        <code>apps/scope-server/plugins/office/</code>, loaded from its manifest like any
+        third-party plugin's.</li>
+      <li><strong>Plugins:</strong> <code>apps/scope-server/plugins.ts</code> is the server host
+        (discovery, enable/disable, route gating, event hooks, per-plugin storage);
+        <code>apps/scope-server/plugins/</code> holds the built-in feature manifests.</li>
+      <li><strong>Server:</strong> single-file Node HTTP + SSE + SQLite —
+        <code>apps/scope-server/server.ts</code>.</li>
+      <li><strong>This site:</strong> <code>docs/</code> — plain HTML/CSS/JS, no build step, no
+        CDN. It is published with GitHub Pages.</li>
+    </ul>
+
+    <h2 id="license">License &amp; bundled assets</h2>
+    <p>
+      See <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/LICENSE">LICENSE</a>.
+      Pi Scope is an extended fork of
+      <a href="https://github.com/disler/pi-agent-observability">disler/pi-agent-observability</a>.
+    </p>
+    <p>
+      Bundled third-party assets: the mobile layout's
+      <a href="https://www.fontshare.com/fonts/clash-grotesk">Clash Grotesk</a> and
+      <a href="https://www.fontshare.com/fonts/satoshi">Satoshi</a> webfonts (ITF Free Font
+      License — full text in
+      <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/apps/scope-server/public/fonts/ITF-FFL.txt">apps/scope-server/public/fonts/ITF-FFL.txt</a>)
+      and the terminal's MesloLGS Nerd Font Mono. This site self-hosts the same two webfonts
+      from <code>assets/fonts/</code> rather than linking a font CDN.
+    </p>
+
+    <hr />
+    <p>
+      ← Back to the <a href="./">showcase</a>, or read the
+      <a href="https://github.com/NerdAtWork24X7/Pi_Scope#readme">README on GitHub</a>.
+    </p>
+  </main>
+</div>
+
+<footer class="footer">
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <a class="wordmark" href="./"><span class="mark">Pi</span>&nbsp;<span class="mark-alt">Scope</span></a>
+        <p class="tagline">Local-first observability and control for AI coding agents. Watch it live, replay it later, step in when it matters.</p>
+      </div>
+      <div>
+        <h5>Product</h5>
+        <ul>
+          <li><a href="index.html#features">Features</a></li>
+          <li><a href="index.html#tour">Screenshots</a></li>
+          <li><a href="index.html#why">Comparison</a></li>
+          <li><a href="index.html#install">Install</a></li>
+          <li><a href="index.html#faq">FAQ</a></li>
+        </ul>
+      </div>
+      <div>
+        <h5>Project</h5>
+        <ul>
+          <li><a href="https://github.com/NerdAtWork24X7/Pi_Scope">GitHub</a></li>
+          <li><a href="https://github.com/NerdAtWork24X7/Pi_Scope/releases">Releases</a></li>
+          <li><a href="https://github.com/NerdAtWork24X7/Pi_Scope/issues">Issues</a></li>
+          <li><a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/LICENSE">License</a></li>
+          <li><a href="https://github.com/disler/pi-agent-observability">Upstream fork</a></li>
+        </ul>
+      </div>
+      <div>
+        <h5>Docs</h5>
+        <ul>
+          <li><a href="#prerequisites">Prerequisites</a></li>
+          <li><a href="#environment">Environment variables</a></li>
+          <li><a href="#phone">Use it from your phone</a></li>
+          <li><a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/apps/scope-server/README.md">HTTP API</a></li>
+          <li><a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/apps/scope-server/plugins/README.md">Write a plugin</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="base">
+      <span>© 2026 Pi Scope · MIT licensed · not affiliated with the upstream project</span>
+      <span>built on vanilla JS · SSE · node:sqlite</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

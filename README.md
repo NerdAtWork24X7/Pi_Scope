@@ -1,7 +1,5 @@
-# 🔭 Pi Scope
-
 <p align="center">
-  <img src="docs/shots/logo.png" alt="Pi Scope" width="360" />
+  <img src="docs/shots/logo.png" alt="Pi Scope" width="340" />
 </p>
 
 <p align="center">
@@ -9,721 +7,121 @@
 </p>
 
 <p align="center">
-  <a href="#-the-pitch"><b>Why it's different</b></a> ·
-  <a href="#-feature-tour"><b>Feature tour</b></a> ·
-  <a href="#-prerequisites"><b>Prerequisites</b></a> ·
-  <a href="#-quick-start"><b>Quick start</b></a> ·
-  <a href="#-tips--faq"><b>Tips & FAQ</b></a>
+  <a href="https://nerdatwork24x7.github.io/Pi_Scope/"><b>Website</b></a> ·
+  <a href="https://nerdatwork24x7.github.io/Pi_Scope/guide.html"><b>Docs</b></a> ·
+  <a href="docs/shots/office-dark.png"><b>Screenshots</b></a> ·
+  <a href="https://github.com/NerdAtWork24X7/Pi_Scope/releases"><b>Releases</b></a>
 </p>
 
 ---
 
-## 🌟 The pitch
+Pi Scope is a **local-first control room for AI coding agents**. It streams everything your
+agent does — every message, tool call, shell command and file edit — into a browser dashboard
+you can watch **live** over SSE, or **replay** later like a movie of your agent's brain.
 
-Every AI coding agent you've ever run has a secret life. It reads your files, edits your
-code, runs your tests, hits your APIs — and then it's gone, leaving behind only a wall of
-terminal text you probably scrolled past.
+It runs on *your* machine, needs no account, and uploads nothing. And unlike a terminal log,
+it lets you **act**: open a real shell, edit the agent's diffs, snapshot your work with git
+checkpoints, and run a full git client — from the same screen.
 
-**Pi Scope is a control room for that.** It streams *everything* your agent does — every
-message, tool call, shell command, and file edit — into a gorgeous browser dashboard you
-can watch **live** (over SSE, no refresh needed) or **replay** later like a movie of your
-agent's brain.
+<p align="center">
+  <img src="docs/shots/office-dark.png" alt="The Office view — your agent team as a pixel-art floor" width="880" />
+</p>
 
-Unlike cloud LLM tracers (LangSmith, Langfuse, Helicone…), Pi Scope is **private by
-default**: it runs on *your* machine, needs no account, and uploads nothing. Unlike a plain
-terminal log, it lets you **act**: open a real shell, diff and edit files, snapshot your
-work with git checkpoints, and run a full git client — all from the same screen.
+### What makes it different
 
-> Pi Scope observes the [`pi`](https://github.com/disler/pi-agent-observability) coding
-> agent through a small extension, but **any** tool that POSTs events to its `/events`
-> endpoint can feed it. This project is an actively extended, locally-focused fork of
-> [disler/pi-agent-observability](https://github.com/disler/pi-agent-observability).
-
-### Why it's different — in one table
-
-| Capability | Pi Scope | Cloud LLM tracers | Plain terminal / chat logs |
+| | Pi Scope | Cloud LLM tracers | Terminal / chat logs |
 |---|:---:|:---:|:---:|
-| Runs locally, no account | ✅ | ❌ (cloud / SaaS) | ✅ |
-| Privacy — nothing leaves your machine | ✅ | ❌ (data uploaded) | ✅ |
+| Runs locally, nothing uploads | ✅ | ❌ | ✅ |
 | Live watching of agent actions | ✅ | ⚠️ traces only | ⚠️ scrolling text |
 | Replay past sessions | ✅ | ✅ | ❌ |
-| **Control surface** (shell, file edit, git) | ✅ | ❌ | ⚠️ manual, separate |
-| Coding-agent awareness (tool calls, cwd, context %) | ✅ | ⚠️ LLM-centric | ❌ |
+| Control surface (shell, diffs, git) | ✅ | ❌ | ⚠️ manual, elsewhere |
+| Coding-agent aware (tool calls, cwd, context %) | ✅ | ⚠️ LLM-centric | ❌ |
 | Exact LLM request args captured | ✅ | ⚠️ varies | ❌ |
-| Zero-install (AppImage w/ bundled Node) | ✅ | n/a | n/a |
-| Open source | ✅ | ⚠️ varies | ✅ |
+| Zero-install AppImage with bundled Node | ✅ | n/a | n/a |
 
-**Who it's for:** developers and teams running autonomous coding agents who want to *see
-what the agent is doing, understand why, and step in* — without shipping their code or
-prompts to a third-party cloud.
+Ten views ship by default — **Chat, Single, Office, Trajectory, Terminal, Review,
+Checkpoints, Git, Settings, Plugins** — and each one is a plugin you can disable or replace.
+See the [feature tour](https://nerdatwork24x7.github.io/Pi_Scope/#tour) for screenshots of all
+of them.
 
----
+## Quick start
 
-## 📸 Feature tour
-
-> Every screenshot below is **real** — taken from a live Pi Scope dashboard with an actual
-> agent session. No mockups, no magic. Captured in **dark theme** 🌙 — light is one click
-> away (the ☀/🌙 toggle in the header); **Chat** and **Single** below show both.
->
-> 🎬 Prefer video? Watch the feature tour: [Part 1](docs/video/Pi-Scope-5.0.0-features_1.mp4) ·
-> [Part 2](docs/video/Pi-Scope-5.0.0-features_2.mp4) · [Part 3](docs/video/Pi-Scope-5.0.0-features_3.mp4) ·
-> [Full showcase](docs/video/Pi-Scope-showcase.mp4)
-
-### 💬 Chat — talk to your agent like it's a teammate
-
-The **Chat** view is your agent's front door. Add workspaces, watch sessions stream in, and
-open any run as a full conversation. The right-hand **Agent Team** rail mirrors your
-`teams.yaml` — see every agent on the team, toggle skills, and dispatch work without ever
-touching the terminal. Pick a model and thinking level, hit **Steer** to interrupt a live
-run with a new instruction, or open any session in the full timeline.
-
-Chat never loses a turn: the agent runs on the server, so reloading the page (or switching
-views and coming back) restores the conversation exactly as it was — **working** badge,
-animated run pill and **Stop** included — and re-attaches to the live stream where the
-previous page stopped reading. A `pi` you started **in your own terminal** shows up here
-too: its messages, its working state and its errors stream in from the events its extension
-posts, with a small *terminal* chip where Stop would be (that run is stopped in your
-terminal, where it lives).
-
-<p align="center">
-  <img src="docs/shots/chat.png" alt="Chat view (light)" width="880" />
-</p>
-
-<p align="center">
-  <img src="docs/shots/chat-dark.png" alt="Chat view (dark)" width="880" />
-</p>
-
-*Light and dark, your choice — same session, one click apart.*
-
-### ⏱ Single — the complete, forensic timeline
-
-The **Single** view is the heart of Pi Scope: a live, time-ordered feed of *every* event —
-user messages, assistant replies, thinking blocks, tool calls, tool results, errors,
-compactions, model switches. Click any row to expand its full JSON payload.
-
-Up top, a stats bar shows cost, tokens in/out, cache reads/writes, throughput (~TPS),
-prefill time, and a **context-usage bar** (`40.3k / 64k — 37% remaining`). The **system
-prompt** button opens the *exact* request sent to the model — temperature, `max_tokens`,
-thinking budget, tools, the whole thing.
-
-<p align="center">
-  <img src="docs/shots/single.png" alt="Single timeline (light)" width="880" />
-</p>
-
-<p align="center">
-  <img src="docs/shots/single-dark.png" alt="Single timeline (dark)" width="880" />
-</p>
-
-*Light and dark, your choice — same session, one click apart.*
-
-### 🏢 Office — watch your agent team work
-
-The **Office** view turns your roster into a **pixel-art office floor**. It is drawn on a
-16-pixel tile grid — carpet, auto-tiled room walls, a walkway — with the sprite atlas and
-the typeface of [pixel-agents](https://github.com/pixel-agents-hq/pixel-agents) (MIT; see
-`apps/scope-server/plugins/office/assets/NOTICE.md`), and a `<canvas>` paints the world
-under the DOM that carries the desks. **The walls belong to the team rooms** — the
-orchestrator's office, the meeting room and the ad-hoc desks sit on open floor — and each
-team room has a **doorway** in the wall that faces the walkway. **Every team gets one
-shared room**, sized to its own team, with the same desk for everyone sitting side by side
-in rows that wrap to the room's width — each with **its own chair and its own screen**, so
-no two seats read alike, and **nothing drawn between seats**: a desk is a mat on the team's
-floor, not a cubicle. Floor that a small team leaves over is furnished rather than
-stretched: a plant, a coffee table, a bin. Agents that are **working** have their screen
-lit, their code lines running and their character typing (reading, when the tool they are
-on is a read); an orange mat and a chair pushed back mean **waiting**; a greyed desk is
-**stopped** or idle. The floor reads like a real plan: the **orchestrator** gets its own
-office at the top (marked ★), the **meeting room** sits to its right, and the **team rooms**
-follow in two columns either side of the walkway. Only the **active team** is staffed, so
-its desks are the ones that animate; the same subagent sitting on an inactive team stays
-dormant there, even while it works on the active one. Every room is labelled at its
-top-left, with its control at its top-right: the active team is **badged**, the others
-carry **activate**.
-
-**Dispatching a subagent walks the task over.** When the orchestrator hands a teammate a
-job — a live subagent session spawned by its own run — the orchestrator gets up from its
-desk, walks out of its office and down the walkway, turns in through that room's doorway,
-holds the task up at the desk for a beat, and then walks back the way it came, leaving the
-receiving desk lit. The trip is driven by the real session list (the harness stamps the
-spawning session on the subagent's row), so the floor shows what is actually being
-dispatched, and nothing replays on a page load.
-
-Under each seated worker a desk prints the **model** it runs on and what it has spent so
-far — **tokens and cost** (`12.3k tok · $0.042`), refreshed from the server while it
-works. The model control lists every known model, grouped one group per provider, like the
-Settings page: the **orchestrator**'s writes the app's default model in `settings.json` (the
-same "default model" the Settings page shows, and the model every queued task is dispatched
-on), while a **subagent**'s writes its own `teams.yaml` row — per team, so the same agent can
-run a different model on each team it sits on. Every per-member control follows the same rule:
-the desk's **off duty** toggle, its **name** and **fire** touch only the row of the team that
-desk sits in, so a member on several teams keeps its own model, label and duty on each.
-
-A desk's header carries its **name** as a name tag (a real id `file_reader` can read
-**Bob**, and the id stays beside it), then its own **off duty / on duty** control and a round
-**settings** gear. An off-duty agent keeps its desk with an empty chair and no status text
-beside the name: the desk itself says it — dimmed, dashed, chair empty, and the control
-offering the way back on duty. That popup gathers the whole
-agent in
-one place: its **model**, its **name** (the display label), **duty**, **markdown** (its whole
-`agents/*.md` definition, frontmatter + prompt, in a full-screen editor), the **skills**,
-**tools** and **extensions** it is enabled for (the orchestrator's own allowlists, or — for a
-subagent — the `skills:` and `tools:` its `agents/<name>.md` pins, editable right there), and
-**fire** — or, on
-the orchestrator's desk, **hire**: a roomy form that adds a subagent to the team you pick,
-with a display name, a model and a fresh `agents/<name>.md` to grow from. Its Definition
-field starts from a default template that follows the name you type, and the file it
-writes ends with the **Reference files** section described below. The orchestrator's office
-also carries a **teams** control — a manager listing every team, where you add a new one
-(which becomes active) or remove a team you no longer need. The **office's own name** hangs
-on the north wall between the window and the clock — click it to call this workspace
-whatever you like.
-
-The **meeting room** hangs the **Kanban board**, drawn as a small sign with a count per
-column, its run state, and what the orchestrator is on right now. Click it for the full-screen
-board: **Todo → Planned → In Progress → Done**. **＋ New task** opens a roomy popup — a
-title and a big brief field, not a cramped inline box — and the task lands in Todo; move it
-along with the arrow on its row. The runner starts **paused**: press **▶ Run** in the board
-header to work the queue. Planned tasks are then handed to the orchestrator one at a time,
-in order, each as its own chat turn, and every task lands in **Done** when its run finishes.
-Press **⏸ Pause** to stop: the task in progress is aborted and returns to Planned, and
-nothing new starts until you press Run again. A task whose run cannot settle goes back to
-Planned and waits for you to move it again, so a broken run can never spin. The board — its
-queue and the runner's paused/running state — is kept by the Office plugin itself, per
-workspace, in its own store (`~/.pi-scope/plugins/.data/office.json`), and read and written
-over the plugin's own `/office` routes.
-
-The **meeting room** also holds the workspace's **reference library**, drawn as a **shelf
-of books** with a badge for how many references it holds. Click it for a full-screen panel
-where each reference is a row: its path, an optional note, and the **agent it is for**
-(the whole team, the orchestrator, or one subagent); rows are reassigned and removed there,
-and new files or folders are added the same way. The library is injected as a reference
-block at the start of every **new conversation**, grouped by the agent each path belongs
-to, so the orchestrator and the subagents it dispatches know what to read — and a
-subagent hired from the settings popup starts with a **Reference files** section in its fresh
-`agents/<name>.md`, filled from whatever is assigned to it. The library lives in the
-project's own `.pi/settings/agent-team-config.json`, so it travels with the workspace.
-
-The room is *drawn* rather than themed: windows along the outer wall, wooden desks, swivel
-chairs and red armchairs, potted plants and a carpeted floor. It keeps that warm, sunlit
-look in the dark theme too, instead of inverting with the UI.
-
-Status comes from the same source as the rest of the UI (the session's turn lifecycle), and
-each desk labels what its agent is doing *right now* from the live event stream —
-`→ bash`, `thinking…`, `writing…` — so you can watch a dispatch fan out across the floor.
-
-<p align="center">
-  <img src="docs/shots/office-dark.png" alt="Office view — a pixel-art floor of shared team rooms, with each desk's model and token/cost totals" width="880" />
-  <img src="docs/shots/office-kanban-dark.png" alt="Kanban board — Todo, Planned, In Progress, Done" width="880" />
-  <img src="docs/shots/office-library-dark.png" alt="Reference library — full-screen manager" width="880" />
-  <img src="docs/shots/office-hire-dark.png" alt="A desk's settings — model, name, duty, definition, skills, tools, extensions, hire/fire" width="880" />
-</p>
-
-### 🧭 Trajectory — where did the time go?
-
-The **Trajectory** view folds events into **turns** and shows a ledger of Message and Tool
-rows with per-record time, cost, and in/out token columns. A visual overview strip at the
-top projects each record's start and duration — spot the slow tool call at a glance. Click
-any row to open the **Record Inspector** with full Input / Output / Thinking / Timing and
-raw JSON.
-
-<p align="center">
-  <img src="docs/shots/trajectory-dark.png" alt="Trajectory view" width="880" />
-</p>
-
-### 💻 Terminal — a real shell in your browser
-
-No more alt-tabbing to SSH. Pi Scope embeds a **real bash shell on the agent's host** (over
-WebSocket, via xterm.js). Run commands, poke around, or — with **Herdr** — mirror your
-terminal multiplexer. The shell's working directory is shared with the Files and
-Checkpoints panes and follows you as you `cd`.
-
-<p align="center">
-  <img src="docs/shots/terminal-dark.png" alt="Terminal" width="880" />
-</p>
-
-### 📝 Review — read and fix every change
-
-The **Review (Files)** pane scans the working tree and shows a **side-by-side diff** of any
-modified file: git HEAD (OLD) on the left, working tree (NEW) on the right. Additions are
-green, removals are red — and the right pane is **editable**, so you can fix an agent's
-change in place and save it straight to disk.
-
-<p align="center">
-  <img src="docs/shots/review-dark.png" alt="Review / Files diff" width="880" />
-</p>
-
-### 📌 Checkpoints — a save button for your agent
-
-Before letting an agent go wild, drop a **git-backed checkpoint**. Label a moment, restore
-it later with one click, or merge it into a branch. It's `git commit-tree` under the hood —
-instant, safe, and reversible.
-
-<p align="center">
-  <img src="docs/shots/checkpoints-dark.png" alt="Checkpoints" width="880" />
-</p>
-
-### 🌿 Git — a full git client, no terminal needed
-
-Stage, unstage, discard, commit (with amend), push, pull, fetch — plus **History** with a
-commit-lane graph, **Branches**, **Stashes**, **Remotes**, and **Submodules**. Click any
-commit to see its detail and diff. Cherry-pick, revert, rebase, or reset from the graph's
-context menu. Stuck on a message? **✨ generate** drafts one from the pending diff (staged, or
-the working tree when nothing is staged) — pick the model and edit the instruction template in
-**Settings → Models**; both default to the agent's model and a Conventional Commits prompt. The
-draft runs server-side, so switching views or reloading the page (the Chat tab always reloads)
-does not lose it: come back to Git and the message is there.
-
-<p align="center">
-  <img src="docs/shots/git-dark.png" alt="Git history" width="880" />
-</p>
-
-<p align="center">
-  <img src="docs/shots/git-branches-dark.png" alt="Git branches" width="880" />
-</p>
-
-<p align="center">
-  <img src="docs/shots/git-changes-dark.png" alt="Git changes" width="880" />
-</p>
-
-### ⚙️ Settings — the whole agent, configured from the browser
-
-Manage your **Agent** defaults, **Teams**, **Models** (with the cost catalog), **Extensions**,
-**API keys**, and **Plugins** — mirroring your `pi` config, editable from the UI. Two
-tabs manage the bundled agent itself: **Auth** is a browser form of `pi`'s `/login` (provider list
-read live from `pi`, OAuth and API-key sign-in), and **Update** installs a newer `pi` when npm has one.
-
-The **SubAgent** tab lists every `agents/*.md` definition as a collapsible card named after the
-subagent, with its own **skills** and **tools** pickers: the chips write that file's
-`skills:` / `tools:` keys — the two allowlists the agent-team extension reads when it spawns that
-subagent — while **Edit** opens the whole file (frontmatter + prompt) for everything else. Below
-the definitions sits an **Orchestrator** card for the main agent itself: its **Skills** chips toggle
-which installed skills it is offered (`orchestratorSkills`) and its **Tools** chips toggle which
-catalogue tools it uses (off adds the name to `skipOrchestratorTools`). `agent-team-config.json`
-holds no subagent skills or tools — the definition files are the single source of truth for those.
-
-<p align="center">
-  <img src="docs/shots/settings-dark.png" alt="Settings" width="880" />
-</p>
-
-### 🧩 Plugins — every feature, and yours too
-
-Every header view — **Chat, Terminal, Review, Checkpoints, Git, Single, Office, Trajectory** — is a
-**plugin**. Enable or disable any of them from **Settings → Plugins**: the view disappears and,
-server-side, the routes that feature owns are refused. You can add your own plugin by dropping a
-folder with a `plugin.json` (plus an optional `server.js` / `client.js`) into
-`~/.pi-scope/plugins/`: it gets a header button and view, its own HTTP routes on the server, a hook
-on every ingested event, and its own persistent JSON state. See
-[`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md) and the working
-example in [`examples/plugins/hello-insights/`](examples/plugins/hello-insights/).
-
----
-
-## 🚀 Prerequisites
-
-Pi Scope is two pieces: a **server + dashboard** you open, and a **`pi` extension** that
-feeds it agent telemetry. Here's exactly what you need:
-
-| Path | What you need | Install anything? |
-|---|---|---|
-| 🖥️ **AppImage** (Linux end users) | A Linux desktop (x86_64) | ❌ Nothing — Node 24 is bundled inside |
-| 🪟 **Windows** | Windows 10/11 + **Node.js 24+** | The one-liner below (Node first: `winget install OpenJS.NodeJS.LTS`) |
-| 💻 **From source** (developers) | **Node.js 24+** (for built-in `node:sqlite`) | The one-liner below |
-| 🤖 **Feed it agent data** | The [`pi`](https://github.com/disler/pi-agent-observability) coding agent — **bundled** | ❌ Nothing — Pi Scope ships its own `pi` |
-| 🌐 **Any other tool** | Anything that can `POST /events` | A ~10 line script |
-
-**Node 24+** is the only real requirement — Pi Scope uses `node:sqlite`, which ships inside
-Node 24, so there are zero native build steps in the default path. Linux, macOS and
-**Windows** all run the same server, dashboard and desktop window; `Start.sh` (Linux/macOS)
-and `Start.ps1` (Windows) are the same entry point in each platform's language.
-
----
-
-## ▶️ Quick start
-
-Get the server running first, then point an agent at it.
-
-### 🥧 Option A — Zero-install AppImage (easiest)
+**Linux — zero install.** Node 24 is bundled inside:
 
 ```bash
-chmod +x Pi-Scope-1.0.0.AppImage
-./Pi-Scope-1.0.0.AppImage
+chmod +x Pi-Scope-1.0.0.AppImage && ./Pi-Scope-1.0.0.AppImage
 ```
 
-- Data (SQLite DB + per-run auth token) lives in `~/.pi-scope/` — it survives
-  relaunch and never writes into the read-only AppImage mount.
-- Closing the window stops the server. If one is already listening on the port, the AppImage
-  reuses it instead of starting a second.
-- Build it yourself: `./build-release.sh` → `apps/scope-desktop/dist/Pi-Scope-<version>.AppImage`.
-
-### 🚀 Option B — One command (the whole stack)
+**Linux & macOS — one command:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.sh | sh
-cd Pi_Scope && ./Start.sh                # desktop app (Electron window)
+cd Pi_Scope && ./Start.sh          # desktop app; --web for a headless server
 ```
 
-The one-liner downloads the app (no `git` needed), checks for Node 24+ and installs the
-dependencies. `install.sh --help` lists its options (`--dir`, `--ref`, `--no-deps`); running
-it from a checkout installs that checkout in place. Prefer git:
-
-```bash
-git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
-./Start.sh                               # desktop app (Electron window)
-```
-
-`Start.sh` is the single entry point for every mode — it picks a sane Node (nvm-aware),
-boots the server and the app together, and on Ctrl-C stops only the server it started. The
-one exception to "no setup": in desktop mode it runs `npm install` **once**, on first run
-only, to get Electron.
-
-```bash
-./Start.sh                              # desktop app (Electron window, default)
-./Start.sh --web                        # headless server + open the WebUI in a browser
-./Start.sh --server                     # headless server only, stays in the foreground
-./Start.sh --dev                        # server with --watch
-./Start.sh --keep-server                # leave the server up after the script exits
-./Start.sh --port 8080 --host 0.0.0.0   # override the defaults
-./Start.sh --db /path/to/scope.db --token my-token
-```
-
-The server is started **at most once**: if one is already healthy on the target port, its
-token is adopted instead of a second instance being spawned, and a server orphaned by a
-`kill -9` is reaped on the next run. Per-machine defaults can live in
-`apps/scope-desktop/scope.env` (see `scope.env.example`); real environment variables always
-win.
-
-### 🪟 Option B2 — Windows (one command)
+**Windows:**
 
 ```powershell
 irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.ps1 | iex
-cd Pi_Scope
-.\Start.ps1                              # desktop app (Electron window)
+cd Pi_Scope; .\Start.ps1
 ```
 
-`.\Start.ps1` is `Start.sh` for Windows — same modes, same flags, same
-`apps/scope-desktop/scope.env` file, same "start the server at most once" rule:
-
-```powershell
-.\Start.ps1                              # desktop app (Electron window, default)
-.\Start.ps1 -Web                         # headless server + open the WebUI in a browser
-.\Start.ps1 -Server                      # headless server only, stays in the foreground
-.\Start.ps1 -Dev                         # server with --watch
-.\Start.ps1 -KeepServer                  # leave the server up after the script exits
-.\Start.ps1 -Port 8080 -BindHost 0.0.0.0 # override the defaults
-.\Start.ps1 -DbPath C:\path\scope.db -Token my-token
-.\stop.ps1                               # stop a running server
-```
-
-Two conveniences: **`Start.cmd`** is the same launcher for a double-click (it bypasses the
-PowerShell execution policy for that launch only), and `install.ps1` can be run as a file
-when you want to pass arguments (`-Dir`, `-Ref`, `-NoDeps`).
-
-**What is Windows-aware** (and what is not):
-
-- **The server, Chat, the Office and the Workflow run the same way.** A harness on PATH
-  (`claude`, `codex`, `gemini`, …) is a `.cmd` shim there, which Windows will not run
-  directly — Pi Scope starts those through `cmd.exe` with every argument escaped, and stops
-  a node by taking its whole process tree down. A Workflow node set to **Custom command**
-  runs through `cmd.exe` too, so its variables are `%SW_PROMPT%`-style instead of
-  `$SW_PROMPT` (the node's settings popup spells out which).
-- **The bundled `pi`** is installed as `pi.cmd`, and Chat spawns the agent's Node entry
-  directly, so no global `pi` install is involved.
-- **Terminal** opens **Git Bash** when it is installed (so the POSIX commands an agent is
-  told about work), otherwise PowerShell (`pwsh`, then Windows PowerShell) or `cmd.exe`. The
-  Terminal's *live cwd* — what makes Files / Git / Checkpoints follow the shell — is read
-  from `/proc` on Linux and `lsof` on macOS; Windows has neither, so the pane there keeps
-  the directory it was opened in (the cwd box still moves it), and the workspace rail's
-  "follow this directory" injection is skipped because it writes POSIX syntax (`cd --`).
-- **API keys exported from a shell profile** (`~/.bashrc`, `~/.zshrc`) are a POSIX-shell
-  convention: on Windows set them on **Settings → API keys** (or in `scope.env`), which
-  lands them in the same place the server reads at boot.
-- **Packaging**: `build-release.sh` builds the Linux AppImage. A Windows package is
-  `electron-builder`'s job — the target is configured in
-  `apps/scope-desktop/electron-builder.yml`, so run `npm install` and then
-  `npx electron-builder --win` from `apps/scope-desktop` **on Windows**, with the server
-  bundle present in `apps/scope-desktop/server-bundle`.
-
-### 🏃 Option C — Run from the git repo (developers)
+**From source** (Node 24+):
 
 ```bash
 git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
-apps/scope-desktop/run.sh                # requires Node.js 24+
+./Start.sh --dev
 ```
 
-Open the URL it prints (`http://127.0.0.1:43190/?token=<uuid>`), and you're looking at a
-live (empty) dashboard. `npm run dev` adds `--watch`; the DB defaults to `db/scope.db`.
-Override with `SCOPE_PORT`, `SCOPE_HOST`, `SCOPE_DB_PATH`, or `SCOPE_AUTH_TOKEN`.
-
-### 🧪 Option D — Take a test drive (no agent needed)
-
-Want to see it *before* wiring up an agent? Seed the dashboard with a realistic demo
-session (a coder adding dark mode, its tester subagent, and a second project with a failed
-command):
+Want to see it before wiring up an agent? With the server running, seed a realistic demo
+session:
 
 ```bash
-# server running? (Option A, B or C) then:
 node docs/seed-demo.mjs
 ```
 
-Instantly populated — click around every view. Re-running is safe (events are idempotent).
+The dashboard comes alive when a `pi` agent feeds it — and Pi Scope **bundles its own**. Chat,
+the commit-message generator and the in-browser terminal all launch that copy with the Pi Scope
+extension force-loaded, in its own agent dir (`~/.pi-scope/agent`), so nothing to install and no
+interference with a global `pi`. Any other tool can feed it too: just `POST` events to
+`/events`.
 
-### 🔌 Option E — Attach a real agent
+## Documentation
 
-The dashboard comes alive when a `pi` agent feeds it. This extension hooks the agent
-lifecycle and streams telemetry, **auto-discovering the server's auth token**.
+The detail lives in the docs, not here — this file is the front door.
 
-**Pi Scope bundles its own `pi` coding agent.** The Chat view, the git-commit-message
-generator, and the in-browser Terminal all launch that bundled copy — with the Pi Scope
-extension force-loaded — so there is nothing to install and a separate global `pi` is
-never used. The bundled agent lives in `apps/scope-desktop/pi-bundle` (packaged as
-`resources/pi` inside the AppImage); point elsewhere with `SCOPE_PI_BIN`.
-
-The bundled agent also keeps its **own agent dir** (`~/.pi-scope/agent`, see
-`SCOPE_AGENT_DIR`). Its settings, API keys, model store, sessions and extensions live
-there, so it never reads or writes your global pi agent dir — the two installations do
-not interfere, and a `pi-scope.ts` listed in your global config can't collide with the
-force-loaded copy.
-
-The steps below are only for a `pi` you installed yourself and run outside Pi Scope
-(e.g. in your own terminal). That agent runs as normal — nothing to learn, no new
-commands:
-
-<p align="center">
-  <img src="docs/shots/pi.png" alt="The pi coding agent running in a terminal" width="880" />
-</p>
-
-*That's the agent side. Everything it does — every message, tool call, shell command and
-file edit — shows up in the Pi Scope dashboard in real time.*
-
-**One session:**
-
-```bash
-pi -e /path/to/Pi_Scope/extension/pi-scope.ts
-```
-
-**Every session** — add it to your agent config:
-
-```json
-// your pi agent dir's settings.json
-{
-  "extensions": [
-    "/absolute/path/to/Pi_Scope/extension/pi-scope.ts"
-  ]
-}
-```
-
-(Or copy `extension/pi-scope.ts` into your pi agent dir's `extensions/` folder and list it as
-`"+extensions/pi-scope.ts"`.)
-
-The extension finds the token from `tmp/scope_token` (dev) or
-`~/.pi-scope/scope_token` (AppImage), so you usually set nothing else. Point it
-elsewhere with `--obs-server-url` or `OBS_SERVER_URL` (default `http://127.0.0.1:43190`).
-Full flag/env and event reference: [`extension/README.md`](extension/README.md).
-
-> **Any tool can feed it.** Just `POST` JSON events to `/events`:
->
-> ```json
-> { "event_id": "evt-1", "session_id": "sess-1", "seq": 0,
->   "ts": "2026-09-07T12:00:00.000Z", "type": "user_message",
->   "payload": { "text": "hi agent" } }
-> ```
-
----
-
-## 🧠 Tips & FAQ
-
-- **UI state lives in the URL hash** — view, filters, and selected session are all saved
-  there, so you can bookmark or share a view. The auth token stays in the `?token=` query
-  string, never the hash.
-- **Sessions auto-refresh** (every 10s) **and stream live over SSE** — new agents and
-  events appear without reloading. The top-bar dot turns green when the feed is connected.
-- **The terminal is shared state.** The Files, Checkpoints, and Git panes follow the
-  terminal's working directory — or set it manually in the Terminal pane's cwd box.
-- **One rail, every view.** The **Workspaces rail** on the left is the same component in
-  every view: pick a workspace and it becomes the shared working directory (Terminal `cd`s
-  there, Review/Git/Checkpoints re-scan it), fold subagent groups open or closed, open a
-  session straight into Single or Trajectory, or delete it from the rail.
-- **Where's my data?** A single SQLite file (`db/scope.db` in dev, or
-  `~/.pi-scope/` packaged), chmod `0600`. Delete sessions from the sidebar —
-  or `DELETE /sessions` for everything.
-- **What's captured?** Session start/end, every user/assistant message, thinking blocks,
-  tool calls + results (with exit codes), LLM request args + system prompt, model changes,
-  compactions, and branch navigation.
-
-
-### 📱 Use it from your phone
-
-Pi Scope can bind every interface so a phone on the same Wi-Fi can open the **Chat** view
-live, alongside the desktop.
-
-**1. Bind to the LAN.** Copy the settings template and turn the bind on:
-
-```bash
-cp apps/scope-desktop/scope.env.example apps/scope-desktop/scope.env
-# then uncomment:  SCOPE_HOST=0.0.0.0
-```
-
-`scope.env` is read at launch, so this works from the desktop icon too (which inherits no
-shell environment). Real environment variables still win, so `SCOPE_HOST=0.0.0.0 ./run.sh`
-overrides the file.
-
-**2. Start Pi Scope and click the phone icon** in the header. A QR appears — point your
-phone's camera at it and Pi Scope opens **in a mobile layout**, not a shrunk copy of the
-desktop screen. The QR already carries this run's auth token, so bookmark it rather than
-sharing it. If the machine has more than one network interface (wifi, ethernet, docker),
-pick the address the phone can actually reach.
-
-**The mobile layout** is a small, purpose-built phone app: a ☰ drawer of workspaces and
-sessions (with their live/waiting/stopped state), the selected session's transcript —
-recorded messages plus the live stream as pi works — and a composer that sends prompts
-straight to pi. A question pi asks appears as an answerable card, and **Stop** aborts the
-run. The desktop views (Terminal, Files, Git, Checkpoints, Office) are deliberately absent,
-and the phone does not download them: it loads `mobile.html` + `mobile.js` + `mobile.css`,
-not the desktop bundle.
-
-**Starting a conversation from the phone.** The ＋ in the header (or **New session** in the
-drawer) opens a sheet where you pick the **workspace**, the **model**, the **agent team** and
-the **mode**; the first message then spawns pi in that directory with exactly those settings,
-like the desktop's new chat. Workspaces come from your project config plus any workspace the
-phone has seen, and a new directory can be added by typing its path. Team and mode are
-per-project settings that pi reads when the agent starts, so they are written just before the
-first message spawns it (and they are the same settings the desktop switcher writes).
-
-The chip under the composer names the model the next message will run with — tap it to switch
-models on the open chat (applies in place when pi is already running). pi records the
-conversation as usual, and the phone binds to that row once it appears, so reopening it later
-continues the same session rather than starting a second one.
-
-**Deleting a session.** Each row in the drawer has a ✕ beside it for the same destructive
-action the desktop rail offers: it kills the pi subprocess behind the conversation and then
-deletes the session and its recorded events from the database. It asks for confirmation
-first (the delete cannot be undone), and deleting the session you are reading returns the
-phone to its start state.
-
-**The look.** The phone layout is one deliberate visual system — call it *Amber Terminal
-Noir*: a near-black engineering-console field (#0A0A0A) with a hairline blueprint texture
-under every panel, a strict three-step grayscale for text, and a single rationed amber
-accent (#F5C400) that means "signal" — a highlighted word, the one primary button, a live
-status dot — never a background. Structure comes from typography and 1px rules rather than
-card chrome: messages and session rows are unfilled ghost rows, while panels (#121212,
-12px, hairline + deep shadow) are reserved for floating surfaces. Type does the work:
-Clash Grotesk for display and labels, Satoshi for prose, and the system monospace only for
-readouts and the command input. The light theme keeps the same structure with an amber
-darkened to stay legible as text.
-
-**Fitting the screen.** The layout is sized for a thumb, not a monitor: the reading baseline is
-14px/1.5 (the system's own body-sm), rows and controls are compact, and `text-size-adjust` is
-pinned so no mobile browser inflates the type on its own. Width is decided by the *input
-device*, not just the viewport. On a mouse-driven window — the desktop preview via `ui=mobile`
-— the phone layout keeps a 430px column centered in the window rather than stretching across
-it. Anything with a touch pointer stays full-bleed: an Android phone in Desktop-site mode
-reports a 980px viewport and an unfolded foldable ~673px, and neither should be squeezed into
-a strip with gutters on the device's own screen.
-
-Both web faces are **self-hosted** (`public/fonts/*.woff2`, ~90 KB total) under the ITF Free
-Font License — deliberately not linked from a font CDN, because the phone reaches this
-server over a LAN that may have no internet route. See
-[`public/fonts/NOTICE.md`](apps/scope-server/public/fonts/NOTICE.md).
-
-The layout is chosen at the document, three ways:
-
-| How you open it | What you get |
+| Where | What's in it |
 |---|---|
-| `http://<lan-ip>:<port>/m?token=…` (the QR) | The mobile layout, always (list, chat, and new sessions) |
-| `http://<lan-ip>:<port>/?token=…` on a phone | The mobile layout (User-Agent / Client Hint) |
-| `http://<lan-ip>:<port>/?token=…&ui=desktop` | The desktop UI, even on a phone |
+| 🌐 **[Website](https://nerdatwork24x7.github.io/Pi_Scope/)** | Feature tour, real screenshots, comparison, install options |
+| 📘 **[Setup guide](https://nerdatwork24x7.github.io/Pi_Scope/guide.html)** | Prerequisites, every install path, phone access, all environment variables |
+| 🛠️ [`apps/scope-server/README.md`](apps/scope-server/README.md) | The HTTP API: endpoints, auth rules, the SSE stream |
+| 🔌 [`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md) | Write a plugin: manifests, routes, event hooks, storage |
+| 🤖 [`extension/README.md`](extension/README.md) | Telemetry extension flags, env vars and the event reference |
+| 🧪 [`docs/seed-demo.mjs`](docs/seed-demo.mjs) | The script that creates the demo session behind the screenshots |
+| 📁 [`docs/README.md`](docs/README.md) | How the docs site itself is laid out and published |
 
-The 🖥 button in the mobile header opens the same session in the desktop layout; `ui=mobile`
-does the reverse, so neither is a one-way door.
+**Want to know what's actually captured?** Session start/end, every user and assistant message,
+thinking blocks, tool calls and results with exit codes, the LLM request arguments and system
+prompt, model changes, compactions and branch navigation.
 
-> ⚠️ **This exposes a shell.** With `SCOPE_HOST=0.0.0.0` anyone on that network who knows
-> the token can drive your agents. The mobile layout is smaller than the desktop UI, not
-> harmless: prompts run real commands on this host, it can retarget a project's team/mode,
-> and it can delete sessions, and the desktop layout (reachable with
-> `ui=desktop`) adds **Terminal**, a real shell, plus file edits and git operations. Only do
-> this on a network you trust. The token is minted randomly at boot; pin `SCOPE_AUTH_TOKEN`
-in `scope.env` if you want a stable URL.
+**Where does it live?** One SQLite file — `db/scope.db` in development, `~/.pi-scope/` when
+packaged — created mode `0600`. Delete a session from the sidebar, or `DELETE /sessions` for
+everything.
 
-Running from source instead of the launcher? `SCOPE_HOST=0.0.0.0 npm start` in
-`apps/scope-server` works the same way; the boot banner prints the phone URL.
+## Repository layout
 
----
+- **`apps/scope-server/`** — the server, dashboard and built-in feature plugins
+- **`apps/scope-desktop/`** — the Electron shell, launcher and bundled `pi`
+- **`extension/`** — the `pi` extension that streams telemetry
+- **`docs/`** — the published docs site (plain HTML/CSS/JS, no build step) and its screenshots
+- **`examples/plugins/`** — an installable example plugin
 
-### 🌐 Server environment variables
+Every feature is a plugin, so the fastest way to change Pi Scope is usually to write one rather
+than edit the core.
 
-| Var | Default | Description |
-|-----|---------|-------------|
-| `SCOPE_PORT` | `43190` | HTTP port |
-| `SCOPE_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` also serves your LAN — see [Use it from your phone](#-use-it-from-your-phone) |
-| `SCOPE_DB_PATH` | `db/scope.db` | SQLite database path |
-| `SCOPE_AUTH_TOKEN` | random UUID | Bearer token for auth |
-| `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
-| `SCOPE_AGENT_DIR` | `~/.pi-scope/agent` | Pi Scope's **own** pi agent dir (settings, API keys, model store, sessions). The bundled `pi` is pinned here via `PI_CODING_AGENT_DIR`, so it never touches the global pi agent dir. |
-| `SCOPE_SETTINGS_JSON` | `<agentDir>/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
-| `SCOPE_SKILLS_DIR` | `<agentDir>/skills` | Override the skills directory scanned for the agent-team sidebar |
-| `SCOPE_PLUGINS_DIR` | `~/.pi-scope/plugins` | Where user plugins live. Enable/disable state is in `plugins.json` and **every plugin's own settings live in `.data/<id>.json`** (`api.store`) — a feature's settings belong to the plugin that owns the feature, not to pi's `settings.json`. A user plugin with a built-in's `id` overrides it, which is how one is swapped or upgraded |
-| `SCOPE_BUILTIN_PLUGINS_DIR` | beside the server module | Override where the built-in feature plugins are discovered (the packaged build ships them in `server-bundle/plugins`) |
-| `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. a non-standard venv: `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
-| `SCOPE_PI_BIN` | bundled `pi` | Override the `pi` executable Pi Scope launches for Chat, commit messages and subagents. Set it to use a different `pi` than the bundled one (or to stub it in tests). |
-| `SCOPE_PI_BUNDLE_DIR` | auto-detected | Where the bundled `pi` lives (`apps/scope-desktop/pi-bundle` in dev, `resources/pi` packaged). Set by the packaged launcher; only override for an out-of-tree bundle. |
-| `SCOPE_PI_REGISTRY` | `https://registry.npmjs.org` | npm registry used by Settings → Update to look for a newer bundled `pi` (point at a mirror for air-gapped installs) |
-| `SCOPE_NPM_BIN` | `npm` | `npm` executable Settings → Update runs to install a newer bundled `pi` |
-| `SCOPE_MODEL_CATALOG` | `on` | Set to `off` to stop the app refreshing pi's model catalogs (`models-store.json` + `model-update-cache.json`) while it is open. Pi Scope runs `pi` with `PI_OFFLINE=1`, so pi no longer refreshes them by itself in-app — Settings → Models → Model update still refreshes them on demand |
-| `SCOPE_MODELS_STORE` | `<agentDir>/models-store.json` | Override pi's model store path (read for pricing/context windows) |
-| `SCOPE_MODEL_UPDATE_CACHE` | `<agentDir>/model-update-cache.json` | Override the pi-updater release cache path |
-| `SCOPE_MODELS_DEV_URL` | `https://models.dev/api.json` | Catalog the release cache is refreshed from (point at a mirror for air-gapped installs) |
+## License
 
-Chat-spawned `pi` subprocesses also get the workspace venv bin dirs prepended to
-`PATH`, and `PLAYWRIGHT_BROWSERS_PATH` restored from the user's shell rc files
-(or Playwright's default cache dirs) when the server env lacks it — so
-`web-fetch` finds its Chromium browser even when the server was launched from a
-GUI session that never sourced the shell rc.
-
-The full HTTP API (all endpoints, auth rules, and the SSE stream) is documented in
-[`apps/scope-server/README.md`](apps/scope-server/README.md).
-
----
-
-## 🤝 For AI agents & contributors
-
-This repository is structured so an AI coding agent can onboard quickly. The server API,
-environment variables, and full endpoint list live in
-[`apps/scope-server/README.md`](apps/scope-server/README.md); the telemetry extension and its flags are
-documented in [`extension/README.md`](extension/README.md).
-
-Every feature is a plugin, so the fastest way to change Pi Scope's behaviour is usually to
-write one rather than edit the core. Start with
-[`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md) — it covers
-manifests, the `api.route` / `api.onEvent` / `api.store` / `api.log` API, client bundles, and
-where state is persisted — and copy the working example in
-[`examples/plugins/hello-insights/`](examples/plugins/hello-insights/).
-
-- **Demo data:** [`docs/seed-demo.mjs`](docs/seed-demo.mjs) — the script that created the
-  screenshots above.
-- **UI:** vanilla-JS, zero frameworks — `apps/scope-server/public/`. Views are plugins:
-  `plugins.js` is the client host/registry, `plugins-builtin.js` registers the shipped views
-  (`single`, `trajectory`, `chat`, `terminal`, `files`, `checkpoints`, `git`, `settings`), and
-  `app.js` `setView()` is registry-driven — it knows no view by name. **Office** is the
-  standalone one: its client bundle, stylesheet and server module all live in
-  `apps/scope-server/plugins/office/`, and the host loads them from its manifest like any
-  third-party plugin's — so `cp -r apps/scope-server/plugins/office ~/.pi-scope/plugins/`
-  installs a user copy that overrides the built-in one.
-- **Plugins:** `apps/scope-server/plugins.ts` is the server host (discovery, enable/disable,
-  route gating, event hooks, per-plugin storage); `apps/scope-server/plugins/` holds the built-in
-  feature manifests; `examples/plugins/` has an installable example. Docs:
-  [`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md).
-- **Server:** single-file Node HTTP + SSE + SQLite — `apps/scope-server/server.ts`.
-
----
-
-## 📜 License
-
-See [`LICENSE`](LICENSE). Pi Scope is an extended fork of
-[disler/pi-agent-observability](https://github.com/disler/pi-agent-observability).
-
-Bundled third-party assets: the mobile layout's [Clash Grotesk](https://www.fontshare.com/fonts/clash-grotesk)
-and [Satoshi](https://www.fontshare.com/fonts/satoshi) webfonts (ITF Free Font License —
-full text in [`apps/scope-server/public/fonts/ITF-FFL.txt`](apps/scope-server/public/fonts/ITF-FFL.txt))
-and the terminal's MesloLGS Nerd Font Mono.
-
----
+[MIT](LICENSE). Pi Scope is an actively extended, locally-focused fork of
+[disler/pi-agent-observability](https://github.com/disler/pi-agent-observability). Bundled
+fonts (Clash Grotesk, Satoshi — ITF Free Font License; MesloLGS Nerd Font Mono) and the Office
+sprite assets are attributed in the files that ship them.
