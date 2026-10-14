@@ -3211,7 +3211,7 @@ async function handle(req: Request): Promise<Response> {
       }
       return jsonResponse(await startLogin(String(body?.providerId || ""), String(body?.type || "")));
     } catch (err: any) {
-      console.error("POST /auth/login failed:", err);
+      console.error("POST /auth/login failed.");
       return jsonResponse({ error: "request failed" }, 400);
     }
   }
