@@ -39,8 +39,8 @@ checkpoints, and run a full git client — from the same screen.
 | Exact LLM request args captured | ✅ | ⚠️ varies | ❌ |
 | Zero-install AppImage with bundled Node | ✅ | n/a | n/a |
 
-Ten views ship by default — **Chat, Single, Office, Trajectory, Terminal, Review,
-Checkpoints, Git, Settings, Plugins** — and each one is a plugin you can disable or replace.
+Nine views ship by default — **Chat, Single, Office, Trajectory, Workflow, Terminal, Review,
+Checkpoints, Git** — plus **Settings**, and every view is a plugin you can disable or replace.
 See the [feature tour](https://nerdatwork24x7.github.io/Pi_Scope/#tour) for screenshots of all
 of them.
 
