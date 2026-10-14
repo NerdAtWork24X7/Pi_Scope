@@ -1713,7 +1713,7 @@ export function activate(api: any): void {
       const s = run.nodes[nodeId];
       if (run.status !== "running" || !node || !s || s.status !== "waiting") return false;
       // Keep the message the reviewer actually read — the rendered text the
-      // banner and the sidebar showed, `{input}`/`{task}` already interpolated —
+      // gate's sidebar card showed, `{input}`/`{task}` already interpolated —
       // so a decided gate still shows what was reviewed. Recomputing it would be
       // the same text, but falling back to the stored template would replace the
       // material with a literal `{input}` the moment the gate is approved.
@@ -2144,7 +2144,10 @@ export function activate(api: any): void {
     const workspace = workspaceOf(body?.cwd);
     const action = String(body?.action ?? "");
     if (action === "start") {
-      const task = multiline(body.task).slice(0, PROMPT_MAX);
+      // There is no run-level task box any more: an explicit task (a trigger, or
+      // an API client) still wins, and otherwise the run's material is the start
+      // node's own default task — each node's message is its real prompt.
+      const task = multiline(body.task).slice(0, PROMPT_MAX) || startNodeTask(workspace);
       try {
         const run = await startRun(workspace, task);
         return jsonResponse({ workspace, run: publicRun(run) });

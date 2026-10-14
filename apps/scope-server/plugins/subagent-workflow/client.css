@@ -31,7 +31,6 @@
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
 }
-.sw-task { flex: 1 1 auto; min-width: 0; padding: 7px 11px; font-size: 13px; }
 .sw-run-status { flex: 0 0 auto; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sw-rs-running { color: var(--accent); }
 .sw-rs-done { color: var(--green); }
@@ -315,7 +314,7 @@
 .sw-msg-sent-tag { flex: 0 0 auto; padding-top: 2px; font-size: 9.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
 .sw-msg-sent pre { flex: 1 1 auto; min-width: 0; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: monospace, var(--emoji); font-size: 11px; line-height: 1.5; color: var(--muted); }
 
-/* A human gate, in the sidebar: the same two buttons as the banner above the log. */
+/* A human gate, in the sidebar: the one place its decision is made. */
 .sw-msg-gate {
   display: flex; flex-direction: column; gap: 7px; padding: 8px 9px;
   background: color-mix(in srgb, var(--orange) 8%, var(--surface-2));
@@ -326,6 +325,7 @@
 .sw-msg-gate-wrap { padding: 0; background: transparent; border: 0; }
 .sw-msg-gate-wrap:hover .sw-msg-gate { border-color: color-mix(in srgb, var(--orange) 60%, var(--border)); }
 .sw-msg-gate-head { display: flex; align-items: center; gap: 6px; }
+.sw-approval-glyph { font-size: 13px; line-height: 1; }
 .sw-msg-gate-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
 .sw-msg-gate-tag { flex: 1 1 auto; font-size: 10.5px; color: var(--muted); text-align: right; }
 .sw-msg-gate.waiting .sw-msg-gate-tag { color: var(--orange); font-weight: 600; }
@@ -471,29 +471,6 @@
 /* Workflow-level triggers, opened from the toolbar's ⏱ button. */
 .sw-triggers { display: flex; flex-direction: column; gap: 12px; }
 .sw-triggers p { margin: 0; line-height: 1.5; }
-
-/* ── Approval banner (human-in-the-loop) ─────────────────────────────────── */
-
-.sw-approvals { display: none; }
-.sw-approvals.show {
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 10px 14px; max-height: 40%; overflow: auto;
-  background: color-mix(in srgb, var(--orange) 8%, var(--surface));
-  border-bottom: 1px solid color-mix(in srgb, var(--orange) 35%, var(--border));
-}
-.sw-approval { display: flex; flex-direction: column; gap: 7px; }
-.sw-approval + .sw-approval { border-top: 1px solid var(--border); padding-top: 8px; }
-.sw-approval-head { display: flex; align-items: center; gap: 7px; }
-.sw-approval-glyph { font-size: 13px; line-height: 1; }
-.sw-approval-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
-.sw-approval-msg {
-  margin: 0; max-height: 8em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
-  font-family: monospace, var(--emoji); font-size: 11.5px; line-height: 1.5; color: var(--text);
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-control); padding: 7px 9px;
-}
-.sw-approval-actions { display: flex; gap: 8px; align-items: center; }
-.sw-approval-note { flex: 1 1 auto; min-width: 0; }
-.sw-approval-actions .btn-sm { flex: 0 0 auto; }
 
 /* ── Run panel ──────────────────────────────────────────────────────────── */
 

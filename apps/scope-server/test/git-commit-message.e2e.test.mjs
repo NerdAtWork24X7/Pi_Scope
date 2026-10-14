@@ -134,6 +134,11 @@ before(async () => {
       SCOPE_AGENT_DIR: path.join(tmpDir, "agent"),
       SCOPE_SETTINGS_JSON: path.join(tmpDir, "agent", "settings.json"),
       SCOPE_FILE_ROOT: `${repoDir},${cleanRepoDir},${adoptRepoDir}`,
+      // The background model-catalog refresh also runs SCOPE_PI_BIN, which would
+      // land in STUB_RUNS_LOG and break the "exactly one pi ran" accounting the
+      // draft job tests do. Disable it (as the other suites do) so the stub is
+      // only ever invoked by the feature under test.
+      SCOPE_MODEL_CATALOG: "off",
       SCOPE_PI_BIN: stub,
       STUB_ARGV_LOG: argvLog,
       STUB_RUNS_LOG: runsLog,

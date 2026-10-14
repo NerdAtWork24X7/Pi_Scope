@@ -228,16 +228,17 @@ function shimBody(cli: string, extension: string | null): string {
 
 /**
  * Keep any copy of the extension inside the agent dir in step with the one the
- * shim force-loads.
+ * launcher force-loads.
  *
  * pi discovers every file under `<agentDir>/extensions/` *in addition to* the
- * paths listed in settings.json. A copy left behind by an older build is not
- * byte-identical to the force-loaded file, so the duplicate-detection inside the
- * extension (which compares real paths and only stands down for a *different*
- * file than the forced one) can't recognise it: both copies register the same
- * CLI flags, pi reports `Flag "--obs-server-url" conflicts with …` and exits
- * before the first prompt — which is what a plain `pi-scope.ts` sitting in the
- * agent dir does to every process Pi Scope spawns.
+ * paths listed in settings.json, so such a copy is loaded alongside the
+ * force-loaded one. Two things keep that from being fatal: the launcher names
+ * its own copy in PI_SCOPE_FORCE_EXTENSION (see `resolve`), and the extension
+ * stands down when it is a *different* file than the one named there. A copy
+ * from an older build predates both, so it registers the same CLI flags as the
+ * force-loaded copy, pi reports `Flag "--obs-server-url" conflicts with …` and
+ * exits before the first prompt — which is what a plain `pi-scope.ts` sitting in
+ * the agent dir does to every process Pi Scope spawns.
  *
  * Refreshing on every boot (like the shim itself) means the copy can never go
  * stale. A copy that isn't there is left alone: the shim is the delivery path,
@@ -251,8 +252,8 @@ function syncAgentDirExtension(extension: string): void {
     if (fs.readFileSync(target, "utf8") === want) return;
     fs.writeFileSync(target, want);
     console.log(
-      `  Pi bundle: refreshed the stale copy at ${target} — pi discovers it as well as the ` +
-      `force-loaded one, and a mismatch makes them collide on shared flags`,
+      `  Pi bundle: refreshed the stale copy at ${target} — it predates the guard that ` +
+      `keeps a discovered copy from colliding with the force-loaded one on shared flags`,
     );
   } catch {
     // Absent (normal), or unreadable/unwritable — never fatal: the force-loaded
@@ -292,6 +293,17 @@ function resolve(): PiBundleInfo {
     // Chat's resolver prefers SCOPE_PI_BIN; set it so every code path (and the
     // child env it builds) agrees on the bundled agent.
     process.env.SCOPE_PI_BIN = bin;
+    // Name the force-loaded copy as authoritative in THIS process too, exactly
+    // as the shim does for processes that go through PATH. `launch` below is
+    // node + the CLI entry, so it bypasses the shim entirely — and without the
+    // marker a copy pi discovers on its own (e.g. `~/…/agent/extensions/
+    // pi-scope.ts`) registers the very same CLI flags as the `--extension`
+    // copy, which pi reports as `Flag "--o-name" conflicts with …` and turns
+    // into a hard exit before the first prompt. That is what broke the
+    // git-commit-message generator (and would break Chat wherever it can't
+    // spawn through the user's shell): both spawn `launch` with the env
+    // `chatChildEnv` builds from this one.
+    if (extension) process.env.PI_SCOPE_FORCE_EXTENSION = extension;
     // Spawned directly it is a Node CLI, not a shim: no shell, no `.cmd`. The
     // extension flag is passed exactly as the shim would.
     const launch = { file: process.execPath, args: [cli, ...(extension ? ["--extension", extension] : [])] };

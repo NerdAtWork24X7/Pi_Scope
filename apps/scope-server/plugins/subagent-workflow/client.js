@@ -14,8 +14,8 @@
  * said. With nothing selected every agent is listed in a section of its own;
  * clicking an agent's card (or its section) focuses that one agent's messages,
  * with the message it was handed above them. A waiting **approval** gate shows
- * its card there too, carrying the same Approve / Reject as the banner, with
- * what each agent wired into it produced in a section per agent; the **end**
+ * its card there too — the one place a gate is decided — with what each node
+ * wired into it produced in a section of its final result; the **end**
  * node does the same for the workflow's final output, one section per incoming
  * agent followed by the joined result. It reads only — a node's settings are a
  * popup, never a column.
@@ -33,9 +33,9 @@
  * of having it pasted into the message. Connections decide the
  * order of a run: everything wired in parallel off one node runs in parallel,
  * and a chain runs one node after another. Nodes can be cloned and the graph
- * exported/imported as JSON. An **approval** node pauses the run for a person: the banner above the
- * run log lists every gate that is waiting, with the gate's message, a note box
- * and Approve / Reject. The run panel also lists **past runs** (reopen one to
+ * exported/imported as JSON. An **approval** node pauses the run for a person:
+ * the waiting gate shows up in the messages sidebar with its message, a note box
+ * and Approve / Reject (there is no separate approval banner). The run panel also lists **past runs** (reopen one to
  * replay its log and node badges), and the toolbar's ⏱ button opens the same
  * kind of popup on the **triggers** — a schedule and an event watch that start
  * runs on their own. The settings popup is a panel 80% of the window wide and
@@ -103,9 +103,8 @@
   let pane = null;
   let canvasEl = null, nodesEl = null, svgEl = null, edgePathsEl = null, tmpPathEl = null, edgeBtnsEl = null;
   let canvasScrollEl = null;   // the scroller holding the canvas (zoom + grid owner)
-  let dlgEl = null, modalEl = null, statusEl = null, nameInput = null, taskInput = null;
+  let dlgEl = null, modalEl = null, statusEl = null, nameInput = null;
   let runStatusEl = null, runLogEl = null, runSummaryEl = null, runBtn = null, stopBtn = null;
-  let approvalsEl = null, approvalSig = "";
   let historyEl = null, historySig = "";
 
   let wf = null;
@@ -267,14 +266,17 @@
     if (watchTimer) { clearInterval(watchTimer); watchTimer = null; }
   }
 
-  /** Forget the routed-edge elements: the pane's DOM is being rebuilt. */
+  /** Forget the routed-edge elements and drop their DOM, so the canvas can be
+   *  rebuilt from scratch (a reload, or `build()` replacing the pane). Without
+   *  dropping the old paths too, `layoutEdges` would create a second set of
+   *  elements for the same edges and the wiring would double up. */
   function resetCanvasState() {
+    for (const item of edgeEls.values()) { item.path.remove(); item.btn.remove(); }
     edgeEls.clear();
     boxCache.clear();
     canvasW = 0; canvasH = 0;
-    approvalSig = "";  // the approval banner is about to be rebuilt too
-    historySig = "";    // …and so is the history picker
-    msgSig = "";        // …and the messages sidebar
+    historySig = "";    // the history picker is about to be rebuilt
+    msgSig = "";        // …and so is the messages sidebar
     historyRun = null;  // a rebuilt pane starts on the live run
   }
 
@@ -1198,7 +1200,7 @@
       fields =
         `<label class="sw-field"><span>User message</span>` +
           `<textarea class="set-input sw-textarea" id="sw-f-message" rows="5" spellcheck="false" placeholder="Approve the plan above before it is implemented.">${esc(c.message || "")}</textarea>` +
-          `<div class="sw-hint">Shown in the approval banner while the run is paused. <code>{input}</code> = upstream output, <code>{task}</code> = the run task.</div></label>`;
+          `<div class="sw-hint">Shown on the gate's card in the messages sidebar while the run waits. <code>{input}</code> = the final output of the nodes wired in, <code>{task}</code> = the run task.</div></label>`;
     } else if (n.type === "loop") {
       const c = n.config || {};
       const count = Math.max(1, Math.round(Number(c.count) || 1));
@@ -1220,9 +1222,9 @@
           `<code>{iterations}</code> and <code>{loop}</code> in its message (and <code>$SW_ITERATION</code> in a command).</div></label>`;
     } else if (n.type === "start") {
       fields =
-        `<label class="sw-field"><span>User message <em>(default task)</em></span>` +
+        `<label class="sw-field"><span>User message <em>(run task)</em></span>` +
           `<textarea class="set-input sw-textarea" id="sw-f-task" rows="4" spellcheck="false" placeholder="What should this workflow do?">${esc(n.config?.defaultTask || "")}</textarea>` +
-          `<div class="sw-hint">Prefills the run bar. Every node wired off the start runs in parallel.</div></label>`;
+          `<div class="sw-hint">The run's task: every node can read it as <code>{task}</code> (and a command as <code>${esc(customVar("SW_TASK"))}</code>). Every node wired off the start runs in parallel.</div></label>`;
     } else {
       // The end node shows the workflow's final output (see finalOutputHtml).
       fields = `<div id="sw-final-body">${finalOutputHtml()}</div>`;
@@ -1561,7 +1563,6 @@
       runSummaryEl.textContent = shown ? `${shown.log?.length || 0} log lines` : "";
     }
     renderHistory();
-    renderApprovals();
     renderMessages();
     // Rewrite the log only when it changed, so the panel does not flicker.
     if (runLogEl) {
@@ -1592,10 +1593,11 @@
   // What each agent actually said, beside the canvas. With nothing selected it
   // lists every agent in its own section; clicking an agent's card — or its
   // section — focuses it on that one agent's messages. A human gate carries its
-  // Approve / Reject buttons here as well as in the banner, with what each of
-  // its input agents produced in a section of its own, and the end node shows
-  // every agent wired into it the same way, one section per agent. It is a
-  // reading surface only: a node's settings stay in their own popup.
+  // Approve / Reject buttons — the only place a gate is decided — with what each
+  // of its input nodes produced in a section of its own (a node's *final*
+  // result, never an intermediate pass), and the end node shows every agent
+  // wired into it the same way, one section per agent. It is a reading surface
+  // only: a node's settings stay in their own popup.
 
   let msgSideEl = null, msgBodyEl = null, msgTitleEl = null, msgSubEl = null, msgSig = "";
   /** How many of one agent's lines a section shows (the newest ones). */
@@ -1635,6 +1637,32 @@
       out.push(n);
     }
     return out;
+  }
+
+  /**
+   * Every node wired straight into `nodeId`, whatever its kind. A gate is fed by
+   * an agent or by a **loop's Exit** — and in both cases what the gate reviews is
+   * that node's *final result*, so the input list must not skip a loop just
+   * because it is not an agent.
+   */
+  function inputNodesOf(nodeId) {
+    const seen = new Set();
+    const out = [];
+    for (const e of edges()) {
+      if (e.to !== nodeId) continue;
+      const n = nodeById(e.from);
+      if (!n || n.type === "start" || seen.has(n.id)) continue;
+      seen.add(n.id);
+      out.push(n);
+    }
+    return out;
+  }
+
+  /** A node's **final result** — the output the server kept for it — never the
+   *  stream it passed through on the way (that is the node's own section). */
+  function nodeFinalText(id) {
+    const tail = runNode(id)?.outputTail;
+    return typeof tail === "string" ? tail.trim() : "";
   }
 
   /** The status badge a node wears on the canvas, repeated in the sidebar. */
@@ -1713,32 +1741,37 @@
   }
 
   /**
-   * What an approval gate reads from one agent wired into it: the message it was
-   * handed, then its final result — the two things a review needs, and nothing
-   * of the stream in between (that is what the agent's own section is for).
+   * What an approval gate reads from one node wired into it: the message an
+   * agent was handed, then its **final result** — the two things a review needs,
+   * and nothing of the stream in between (that is the node's own section). A
+   * loop wired in shows the finished loop (its last pass), which is what the
+   * gate's `{input}` is too, so the reviewer reads exactly what will be approved.
    */
-  function agentBriefHtml(n) {
-    const out = nodeOutputText(n.id).trim();
+  function inputBriefHtml(n) {
+    const out = nodeFinalText(n.id);
     const st = runNode(n.id)?.status;
+    const icon = n.type === "agent"
+      ? harnessIcon(n.config?.harness, providerLabel(n.config?.harness))
+      : `<span class="sw-node-glyph">${nodeGlyph(n.type)}</span>`;
+    const tag = n.type === "agent" ? "input agent" : `input ${n.type}`;
     return `<div class="sw-msg-section sw-msg-input" data-input="${escAttr(n.id)}">` +
-        `<div class="sw-msg-sec-head">` +
-          harnessIcon(n.config?.harness, providerLabel(n.config?.harness)) +
+        `<div class="sw-msg-sec-head">` + icon +
           `<span class="sw-msg-sec-name">${esc(n.name)}</span>` +
-          `<span class="sw-msg-sec-tag">input agent</span>` +
+          `<span class="sw-msg-sec-tag">${esc(tag)}</span>` +
           statusPill(n.id) +
         `</div>` +
-        promptHtml(n) +
+        (n.type === "agent" ? promptHtml(n) : "") +
         `<div class="sw-msg-group">Final result</div>` +
         (out ? `<pre class="sw-msg-pre">${esc(out)}</pre>`
-             : `<div class="sw-msg-none">${st ? `Nothing captured — ${esc(st)}.` : "Nothing from this agent yet."}</div>`) +
+             : `<div class="sw-msg-none">${st ? `Nothing captured — ${esc(st)}.` : "Nothing from this node yet."}</div>`) +
       `</div>`;
   }
 
   /**
    * A human gate's card: the message the reviewer is asked to read, what its
-   * input agents produced (wired in below it by the caller), and — while the
-   * gate is the one holding the run — the note box and the two buttons. The
-   * banner above the log makes the same decision; this is the same call.
+   * input nodes produced (wired in below it by the caller), and — while the
+   * gate is the one holding the run — the note box and the two buttons. This is
+   * the single place a gate is decided.
    */
   function gateCardHtml(n, waiting) {
     const rs = runNode(n.id);
@@ -1792,10 +1825,10 @@
       return agentSectionHtml(n, { prompt: true }) + (err ? `<div class="sw-msg-err">${esc(err)}</div>` : "");
     }
     if (n.type === "approval") {
-      const inputs = inputAgentsOf(n.id);
+      const inputs = inputNodesOf(n.id);
       return gateCardHtml(n, waiting.includes(n.id)) +
         `<div class="sw-msg-group">Input from</div>` +
-        (inputs.length ? inputs.map(agentBriefHtml).join("")
+        (inputs.length ? inputs.map(inputBriefHtml).join("")
                        : `<div class="sw-msg-none">Nothing is wired into this gate.</div>`);
     }
     if (n.type === "end") return endOutputHtml(n);
@@ -1819,10 +1852,10 @@
       // and its final result, never its raw stream (the agent has a section of
       // its own above for that).
       if (waiting.includes(g.id) || runNode(g.id)?.decision) {
-        const inputs = inputAgentsOf(g.id);
+        const inputs = inputNodesOf(g.id);
         parts.push(`<div class="sw-msg-section sw-msg-gate-wrap" data-node="${escAttr(g.id)}" ` +
           `title="Focus ${escAttr(g.name)}">${gateCardHtml(g, waiting.includes(g.id))}` +
-          `${inputs.map(agentBriefHtml).join("")}</div>`);
+          `${inputs.map(inputBriefHtml).join("")}</div>`);
       }
     }
     const end = nodes().find((n) => n.type === "end");
@@ -2000,52 +2033,22 @@
   }
 
   /**
-   * The approval banner. Rebuilt only when the set of waiting gates changes, so a
-   * poll tick never steals focus from a note the reviewer is typing.
+   * The ↻ button: re-read the workflow from the server and rebuild the canvas
+   * from it — the nodes, and every connection re-routed between them. Resetting
+   * the canvas state first is what guarantees a rewire: the routed-edge elements
+   * are dropped so `layoutEdges` redraws each connection against the reloaded
+   * boxes instead of leaving a stale path behind.
    */
-  function renderApprovals() {
-    if (!approvalsEl) return;
-    // A past run has nothing to decide; hide the banner while it is on screen.
-    if (historyRun) {
-      if (approvalSig !== "") { approvalSig = ""; approvalsEl.classList.remove("show"); approvalsEl.innerHTML = ""; }
-      return;
-    }
-    const waiting = waitingNodes();
-    const sig = waiting.map((n) => `${n.id}:${runNode(n.id)?.approval?.requestedAt || 0}`).join(",");
-    if (sig === approvalSig) return;
-    approvalSig = sig;
-    if (!waiting.length) {
-      approvalsEl.classList.remove("show");
-      approvalsEl.innerHTML = "";
-      return;
-    }
-    approvalsEl.classList.add("show");
-    approvalsEl.innerHTML = waiting.map((n) => {
-      const rs = runNode(n.id);
-      const msg = rs?.approval?.message || rs?.decision?.message || n.config?.message || n.config?.description || "";
-      return `<div class="sw-approval" data-node="${escAttr(n.id)}">` +
-        `<div class="sw-approval-head"><span class="sw-approval-glyph">✋</span>` +
-          `<span class="sw-approval-title">${esc(n.name)} needs a decision</span></div>` +
-        (msg ? `<pre class="sw-approval-msg">${esc(msg)}</pre>`
-             : `<div class="sw-muted">This gate has no message.</div>`) +
-        `<div class="sw-approval-actions">` +
-          `<input class="set-input sw-approval-note" placeholder="Optional note for the run log…">` +
-          `<button class="btn-sm sw-primary" data-approve="${escAttr(n.id)}" type="button">✓ Approve</button>` +
-          `<button class="btn-sm sw-danger" data-reject="${escAttr(n.id)}" type="button">✕ Reject</button>` +
-        `</div></div>`;
-    }).join("");
-    for (const btn of approvalsEl.querySelectorAll("[data-approve]")) {
-      btn.addEventListener("click", () => decideApproval(btn.closest(".sw-approval"), btn.dataset.approve, true));
-    }
-    for (const btn of approvalsEl.querySelectorAll("[data-reject]")) {
-      btn.addEventListener("click", () => decideApproval(btn.closest(".sw-approval"), btn.dataset.reject, false));
-    }
+  function reloadWorkflow() {
+    resetCanvasState();
+    refresh();
+    loadHarnesses();
   }
 
   async function decideApproval(card, nodeId, approve) {
-    // The same decision is offered twice — the banner above the log and the
-    // gate's card in the messages sidebar — so either note box answers.
-    const note = card?.querySelector(".sw-approval-note, .sw-msg-note")?.value ?? "";
+    // A gate is decided from its card in the messages sidebar (there is no
+    // separate banner any more), so the note box there is the one that answers.
+    const note = card?.querySelector(".sw-msg-note")?.value ?? "";
     try {
       // The response is a full run, so replace the accumulated buffer rather
       // than concatenating it onto itself.
@@ -2061,9 +2064,11 @@
   }
 
   async function startRun() {
-    const task = taskInput?.value ?? "";
+    // There is no run-level task box: each node carries its own message, and the
+    // run's task is the start node's default task (the server reads it when no
+    // task is sent).
     try {
-      const data = await postRun("start", { task });
+      const data = await postRun("start", {});
       historyRun = null; // a new run takes the canvas back to the live view
       historySig = "";
       adoptRun(data.run, true);
@@ -2110,7 +2115,6 @@
         `</div>` +
       `</div>` +
       `<div class="sw-runbar">` +
-        `<input class="set-input sw-task" id="sw-task" placeholder="Task / initial prompt for this run…" aria-label="Run task">` +
         `<button class="btn-sm sw-primary" id="sw-run" type="button">▶ Run</button>` +
         `<button class="btn-sm sw-danger" id="sw-stop" type="button" disabled>■ Stop</button>` +
         `<span class="sw-run-status" id="sw-run-status"></span>` +
@@ -2153,7 +2157,6 @@
             `<select class="set-select sw-history-select" id="sw-history" title="Reopen a past run"><option value="">Latest run</option></select>` +
             `<span class="sw-run-summary" id="sw-run-summary"></span>` +
             `<button class="sw-run-toggle" id="sw-run-toggle" type="button">▾</button></div>` +
-          `<div class="sw-approvals" id="sw-approvals"></div>` +
           `<div class="sw-run-log" id="sw-run-log"></div>` +
         `</section>` +
       `</div>` +
@@ -2165,12 +2168,10 @@
 
     nameInput = pane.querySelector("#sw-name");
     statusEl = pane.querySelector("#sw-status");
-    taskInput = pane.querySelector("#sw-task");
     runStatusEl = pane.querySelector("#sw-run-status");
     runLogEl = pane.querySelector("#sw-run-log");
     runSummaryEl = pane.querySelector("#sw-run-summary");
     historyEl = pane.querySelector("#sw-history");
-    approvalsEl = pane.querySelector("#sw-approvals");
     runBtn = pane.querySelector("#sw-run");
     stopBtn = pane.querySelector("#sw-stop");
     canvasEl = pane.querySelector("#sw-canvas");
@@ -2233,11 +2234,10 @@
     pane.querySelector("#sw-import").addEventListener("click", () => importFile.click());
     importFile.addEventListener("change", importWorkflow);
     pane.querySelector("#sw-triggers").addEventListener("click", () => openDialog({ kind: "triggers" }));
-    pane.querySelector("#sw-refresh").addEventListener("click", () => { refresh(); loadHarnesses(); });
+    pane.querySelector("#sw-refresh").addEventListener("click", reloadWorkflow);
     runBtn.addEventListener("click", startRun);
     stopBtn.addEventListener("click", stopRun);
     historyEl.addEventListener("change", () => selectHistory(historyEl.value));
-    taskInput.addEventListener("keydown", (e) => { if (e.key === "Enter") startRun(); });
     pane.querySelector("#sw-run-toggle").addEventListener("click", (e) => {
       const panel = pane.querySelector(".sw-run-panel");
       const collapsed = panel.classList.toggle("collapsed");

@@ -2041,9 +2041,12 @@ describe("subagent workflow plugin (client)", () => {
   });
 
   test("runs the workflow from the UI and shows live node status and log", async () => {
-    await buildCustomGraph(ws3);
+    const g = await buildCustomGraph(ws3);
+    // There is no run-level task box: the start node's own message is the run's
+    // task, read by every node as `{task}`.
+    assert.ok((await act("updateNode", { id: g.start.id, config: { defaultTask: "world" } }, ws3)).res.ok);
     const { page, context, errors } = await openWorkflow(ws3);
-    await page.fill("#sw-task", "world");
+    assert.equal(await page.locator("#sw-task").count(), 0, "the run bar has no task box");
     await page.click("#sw-run");
     // Every node settles and its badge is drawn on the canvas.
     await page.waitForFunction(() =>
@@ -2392,36 +2395,97 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
-  test("pauses on an approval gate and resumes when the banner approves it", async () => {
+  test("pauses on a gate and resumes when the gate's sidebar card approves it", async () => {
     const solo = path.join(tmpDir, "ws-approve-ui");
     fs.mkdirSync(solo, { recursive: true });
     const g = await buildApprovalGraph(solo);
+    await act("updateNode", { id: g.start.id, config: { defaultTask: "hello" } }, solo);
 
     const { page, context, errors } = await openWorkflow(solo);
+    // The run panel carries no task box and no separate approval banner: a gate
+    // is decided from its own card in the messages sidebar.
+    assert.equal(await page.locator("#sw-task").count(), 0, "no run-level task box");
+    assert.equal(await page.locator(".sw-approvals").count(), 0, "no approval banner above the log");
     // The gate is on the canvas with its own mark and no provider icon.
     assert.equal(await page.locator(`.sw-node.sw-t-approval[data-id="${g.gate.id}"] .sw-node-glyph`).count(), 1);
     assert.equal(await page.locator(`.sw-node[data-id="${g.gate.id}"] .sw-hicon`).count(), 0);
 
-    await page.fill("#sw-task", "hello");
     await page.click("#sw-run");
-    await page.waitForSelector(".sw-approvals.show .sw-approval");
-    assert.match(await page.textContent(".sw-approval-msg"), /Please review: A1\[hello\]/);
+    await page.waitForSelector(".sw-msg-gate.waiting");
+    assert.match(await page.textContent(".sw-msg-gate .sw-msg-gate-msg"), /Please review: A1\[hello\]/);
     assert.match(await page.textContent("#sw-run-status"), /waiting for approval/);
-    assert.equal(await page.locator(".sw-approvals .sw-approval").count(), 1);
+    assert.equal(await page.locator(".sw-msg-gate").count(), 1);
     // The canvas badges the waiting gate and leaves the downstream node alone.
     await page.waitForSelector(`.sw-node[data-id="${g.gate.id}"].sw-run-waiting`);
     assert.equal(await page.locator(`.sw-node[data-id="${g.last.id}"].sw-run-done`).count(), 0);
 
-    await page.fill(".sw-approval-note", "ship it");
-    await page.click(".sw-approval [data-approve]");
+    await page.fill(".sw-msg-gate .sw-msg-note", "ship it");
+    await page.click(".sw-msg-gate [data-approve]");
     await page.waitForFunction((id) =>
       document.querySelector(`.sw-node[data-id="${id}"]`)?.classList.contains("sw-run-done"), g.last.id, { timeout: 20_000 });
-    assert.equal(await page.locator(".sw-approvals.show").count(), 0, "the banner clears once decided");
     assert.match(await page.textContent("#sw-run-log"), /review approved/);
     const finished = await waitRun(solo);
     assert.equal(finished.status, "done");
     assert.deepEqual(errors, []);
     await context.close();
+  });
+
+  test("a gate on a loop's Exit reviews the finished loop, not an intermediate pass", async () => {
+    const solo = path.join(tmpDir, "ws-gate-loop");
+    fs.mkdirSync(solo, { recursive: true });
+    // The reporter's shape: start → rob → pop, loop.repeat → rob, and the loop's
+    // Exit → gate → end. The gate is fed the finished loop (pop's last pass), and
+    // its sidebar card must show exactly that.
+    const s = await snapshot(solo);
+    const start = s.nodes.find((n) => n.type === "start");
+    const end = s.nodes.find((n) => n.type === "end");
+    const rob = s.nodes.find((n) => n.type === "agent");
+    assert.ok((await act("updateNode", { id: start.id, config: { defaultTask: "seed" } }, solo)).res.ok);
+    assert.ok((await act("updateNode", { id: rob.id, name: "rob", config: {
+      harness: "custom", command: echoQuery("R"), prompt: "{input}",
+    } }, solo)).res.ok);
+    const pop = (await act("addNode", { type: "agent", x: 420, y: 120 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: pop.id, name: "pop", config: {
+      harness: "custom", command: echoPassQuery("P"), prompt: "{input}",
+    } }, solo)).res.ok);
+    const loop = (await act("addNode", { type: "loop", x: 620, y: 120 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: loop.id, name: "loop", config: { count: 3 } }, solo)).res.ok);
+    const gate = (await act("addNode", { type: "approval", x: 820, y: 120 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: gate.id, name: "review", config: {
+      message: "Approve: {input}",
+    } }, solo)).res.ok);
+    for (const e of s.edges) await act("removeEdge", { id: e.id }, solo);
+    for (const [from, to, port] of [
+      [start.id, rob.id], [rob.id, pop.id], [pop.id, loop.id],
+      [loop.id, rob.id, "repeat"], [loop.id, gate.id], [gate.id, end.id],
+    ]) {
+      const r = await act("addEdge", port ? { from, to, port } : { from, to }, solo);
+      assert.ok(r.res.ok, r.data?.error);
+    }
+
+    assert.ok((await runApi("start", {}, solo)).res.ok);
+    const waiting = await waitNode(solo, gate.id, "waiting");
+    // What the gate reviews is the finished loop — its last pass alone, which is
+    // pop's final result — never the loop's seed or an earlier pass.
+    const loopOut = waiting.nodes[loop.id].outputTail.trim();
+    assert.equal(loopOut, waiting.nodes[pop.id].outputTail.trim(), "the loop carries pop's final pass");
+    assert.equal(waiting.nodes[gate.id].approval.message, `Approve: ${loopOut}`);
+    assert.match(loopOut, /^P3\[/, "the third (last) pass, not an earlier one");
+
+    // The sidebar reads the gate's input as the loop it is, showing the loop's
+    // final result — not an intermediate pass, and not its raw stream.
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.waitForSelector(".sw-msg-gate.waiting");
+    await page.click(`#sw-msg-body .sw-msg-section[data-node="${gate.id}"] .sw-msg-gate-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "review");
+    const inputs = await page.$$eval("#sw-msg-body .sw-msg-input", (els) => els.map((e) => e.dataset.input));
+    assert.deepEqual(inputs, [loop.id], "the loop is the gate's one input");
+    const brief = page.locator(`#sw-msg-body .sw-msg-input[data-input="${loop.id}"]`);
+    assert.match(await brief.locator(".sw-msg-pre").textContent(), /^P3\[/, "the loop's final result");
+    assert.equal(await brief.locator(".sw-msg-lines").count(), 0, "no intermediate stream in the gate brief");
+    assert.deepEqual(errors, []);
+    await context.close();
+    await runApi("stop", {}, solo);
   });
 
   test("reopens a past run from the picker after a reload", async () => {
@@ -2463,6 +2527,7 @@ describe("subagent workflow plugin (client)", () => {
     const solo = path.join(tmpDir, "ws-msgs-ui");
     fs.mkdirSync(solo, { recursive: true });
     const g = await buildCustomGraph(solo);
+    await act("updateNode", { id: g.start.id, config: { defaultTask: "world" } }, solo);
     const { page, context, errors } = await openWorkflow(solo);
 
     // With nothing in focus every node that carries messages is listed, each in
@@ -2472,7 +2537,6 @@ describe("subagent workflow plugin (client)", () => {
     assert.deepEqual(sections.slice().sort(), [g.first.id, g.a2.id, g.a3.id, g.end.id].sort());
     assert.match(await page.textContent("#sw-msg-sub"), /3 agents/);
 
-    await page.fill("#sw-task", "world");
     await page.click("#sw-run");
     await page.waitForFunction(() =>
       document.querySelectorAll(".sw-node.sw-run-done").length >= 4, null, { timeout: 25_000 });
@@ -2676,9 +2740,9 @@ describe("subagent workflow plugin (client)", () => {
     const solo = path.join(tmpDir, "ws-msgs-gate");
     fs.mkdirSync(solo, { recursive: true });
     const g = await buildApprovalGraph(solo);
+    await act("updateNode", { id: g.start.id, config: { defaultTask: "hello" } }, solo);
 
     const { page, context, errors } = await openWorkflow(solo);
-    await page.fill("#sw-task", "hello");
     await page.click("#sw-run");
     // The gate's card carries the same request as the banner, in the sidebar.
     await page.waitForSelector(".sw-msg-gate.waiting");
@@ -2708,7 +2772,7 @@ describe("subagent workflow plugin (client)", () => {
     await page.click(".sw-msg-gate [data-approve]");
     await page.waitForFunction((id) =>
       document.querySelector(`.sw-node[data-id="${id}"]`)?.classList.contains("sw-run-done"), g.last.id, { timeout: 20_000 });
-    assert.equal(await page.locator(".sw-approvals.show").count(), 0, "the banner clears once decided");
+    assert.equal(await page.locator(".sw-approvals").count(), 0, "there is no separate approval banner");
     assert.match(await page.textContent("#sw-run-log"), /review approved/);
     // The sidebar shows the decision too, now that the gate is settled.
     await page.waitForFunction(() => /approved/.test(document.querySelector(".sw-msg-gate")?.textContent || ""));
@@ -2923,6 +2987,46 @@ describe("subagent workflow plugin (client)", () => {
     await page.click("#sw-tr-save");
     await page.waitForFunction(() => !/trigger armed/.test(document.querySelector("#sw-status")?.textContent || ""));
     assert.equal((await api(`/${PLUGIN}/triggers?cwd=${enc(solo)}`)).data.triggers.armed, false);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("the ↻ reload re-reads the graph and re-wires every connection", async () => {
+    const solo = path.join(tmpDir, "ws-reload-ui");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildFeedbackGraph(solo, { count: 2 });
+    const { page, context, errors } = await openWorkflow(solo);
+
+    // The loop's feedback edge is drawn from its Repeat (left) port, dashed.
+    const fb = (await snapshot(solo)).edges.find((e) => e.from === g.loop.id && e.to === g.step.id);
+    assert.equal(fb?.port, "repeat");
+    assert.equal(await page.locator(`#subagent-workflow-pane path.sw-edge[data-edge="${fb.id}"].sw-edge-repeat`).count(), 1);
+
+    // The graph changed elsewhere: one connection dropped, another drawn, and
+    // the step wired to the loop moved. Reload must redraw all of it.
+    const s0 = await snapshot(solo);
+    const dropped = s0.edges.find((e) => e.from === g.loop.id && e.to === g.end.id);
+    assert.ok((await act("removeEdge", { id: dropped.id }, solo)).res.ok);
+    const added = await act("addEdge", { from: g.start.id, to: g.step.id }, solo);
+    assert.ok(added.res.ok, added.data?.error);
+    assert.ok((await act("moveNode", { id: g.step.id, x: 1100, y: 700 }, solo)).res.ok);
+
+    await page.click("#sw-refresh");
+    const want = await snapshot(solo);
+    await page.waitForFunction((n) =>
+      document.querySelectorAll("#subagent-workflow-pane path.sw-edge").length === n, want.edges.length);
+    // The moved node is re-placed…
+    await page.waitForFunction((id) =>
+      document.querySelector(`.sw-node[data-id="${id}"]`)?.style.left === "1100px", g.step.id, { timeout: 5000 });
+    // …the SVG matches the reloaded graph exactly…
+    const ids = await page.$$eval("#subagent-workflow-pane path.sw-edge", (els) => els.map((e) => e.dataset.edge));
+    assert.equal(ids.length, want.edges.length, "every connection is drawn exactly once");
+    assert.ok(!ids.includes(dropped.id), "the dropped connection is gone");
+    const newEdge = want.edges.find((e) => e.from === g.start.id && e.to === g.step.id);
+    assert.ok(ids.includes(newEdge.id), "the new connection is drawn");
+    // …and the repeat edge follows the step it re-runs.
+    const d = await page.$eval(`#subagent-workflow-pane path.sw-edge[data-edge="${fb.id}"]`, (p) => p.getAttribute("d"));
+    assert.match(d, /1100/, `the feedback edge re-routed to the moved step (${d})`);
     assert.deepEqual(errors, []);
     await context.close();
   });

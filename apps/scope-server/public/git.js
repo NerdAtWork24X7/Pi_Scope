@@ -398,6 +398,11 @@
   let genFails = 0; // consecutive unreadable snapshots (server unreachable)
   let genApplied = null; // job id whose outcome this page has already applied
   let genBaseline = ""; // box content when the draft was requested
+  // Bumped every time this page starts a draft. An adoption snapshot read
+  // *before* a click describes the state the click has already moved past, so it
+  // must not be allowed to clear the busy button the click just set — and a
+  // stale "idle" would otherwise look like "nothing is generating".
+  let genEpoch = 0;
 
   function setGenBusy(on) {
     if (!btnGenMsg) return;
@@ -485,6 +490,7 @@
   // the files itself.
   async function generateMessage() {
     const cwd = selectedCwd(); if (!cwd) return;
+    genEpoch++;
     genBaseline = commitMsg.value;
     setGenBusy(true);
     setStatus("generating a commit message…");
@@ -517,10 +523,15 @@
   // hidden. Called on every show of the Git view.
   async function adoptCommitJob() {
     const cwd = selectedCwd(); if (!cwd) return;
+    const epoch = genEpoch;
     const job = await fetchCommitJob(cwd);
     // A draft belongs to the repo it was started for: if the workspace moved on
     // while this snapshot was in flight, it says nothing about the box on screen.
     if (cwd !== selectedCwd()) return;
+    // …and neither does a snapshot read before the user clicked ✨ generate on
+    // this page: the request it carries is older than the generation already in
+    // flight, so applying its (idle) verdict would drop the busy button.
+    if (epoch !== genEpoch) return;
     // The busy button means exactly "a draft is running for this repo" — that
     // invariant is what heals the button after a reload (or any lost request).
     if (!job || job.status === "idle") { setGenBusy(false); return; }
