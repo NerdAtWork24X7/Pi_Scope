@@ -107,6 +107,60 @@ function setupDemoProjects() {
   log("scratch projects ready:", PROJECT);
 }
 
+/**
+ * Seed a readable Subagent Workflow graph for the Workflow view, through the
+ * plugin's own API — the same actions its canvas sends (see
+ * plugins/subagent-workflow/server.ts). Only harnesses this machine can really
+ * run are offered, so the shot never advertises a CLI that is not installed.
+ */
+async function seedWorkflow(token) {
+  const call = async (path, init) => {
+    const res = await fetch(`${BASE}${path}`, {
+      ...init,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    });
+    if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`);
+    return res.json();
+  };
+  const enc = encodeURIComponent(PROJECT);
+  const act = (body) => call("/subagent-workflow", { method: "POST", body: JSON.stringify({ cwd: PROJECT, ...body }) });
+
+  const { harnesses } = await call("/subagent-workflow/harnesses");
+  const usable = harnesses.filter((h) => h.available);
+  const runner = usable.find((h) => h.id === "pi") ?? usable[0];
+  const model = (runner?.models ?? [])[0] ?? "";
+  log("workflow: harness", runner?.id, model ? `model ${model}` : "(no model catalogue)");
+
+  await act({ action: "setWorkflowName", name: "Model Selector CI" });
+
+  const snap = await call(`/subagent-workflow?cwd=${enc}`);
+  const start = snap.nodes.find((n) => n.type === "start");
+  const end = snap.nodes.find((n) => n.type === "end");
+  const planner = snap.nodes.find((n) => n.type === "agent");
+  start.defaultTask ??= "Add pagination to the model selector API";
+
+  const agent = (name, prompt) => ({ harness: runner.id, model, prompt });
+  await act({ action: "updateNode", id: planner.id, name: "planner", config: agent("planner", "Read the task and write a short implementation plan.") });
+  await act({ action: "moveNode", id: planner.id, x: 380, y: 210 });
+
+  const builder = (await act({ action: "addNode", type: "agent", x: 700, y: 90 })).nodes.at(-1);
+  await act({ action: "updateNode", id: builder.id, name: "builder", config: agent("builder", "Implement the plan: limit/offset plus a total count.") });
+  const tester = (await act({ action: "addNode", type: "agent", x: 700, y: 330 })).nodes.at(-1);
+  await act({ action: "updateNode", id: tester.id, name: "tester", config: agent("tester", "Cover the new endpoint and report failures.") });
+
+  const gate = (await act({ action: "addNode", type: "approval", x: 990, y: 210 })).nodes.at(-1);
+  await act({ action: "updateNode", id: gate.id, name: "review", config: { description: "Human gate", message: "Review the plan and the diff before it is committed." } });
+
+  for (const e of snap.edges) await act({ action: "removeEdge", id: e.id });
+  for (const [from, to] of [
+    [start.id, planner.id], [planner.id, builder.id], [planner.id, tester.id],
+    [builder.id, gate.id], [tester.id, gate.id], [gate.id, end.id],
+  ]) await act({ action: "addEdge", from, to });
+
+  const after = await call(`/subagent-workflow?cwd=${enc}`);
+  log(`workflow: ${after.nodes.length} nodes, ${after.edges.length} edges, run "${after.name}"`);
+}
+
 // ─── Real server + seeded demo ──────────────────────────────────────────────
 async function startServer() {
   for (const f of [DB, `${DB}-shm`, `${DB}-wal`]) rmSync(f, { force: true });
@@ -364,6 +418,17 @@ async function captureRealViews(token) {
     await shotBoth("checkpoints", "#checkpoints-list .checkpoint-item");
   }
 
+  // ── Workflow ────────────────────────────────────────────────────────────
+  if (want("workflow")) {
+    await openView("subagent-workflow");
+    await selectWorkspace("workflow");
+    if (!(await waitFor("#sw-canvas .sw-node", 15000, "workflow"))) fail("workflow", "no nodes on the canvas");
+    const nodes = await page.$$eval("#sw-canvas .sw-node", (e) => e.length);
+    if (nodes < 6) fail("workflow", `expected the seeded graph, saw ${nodes} nodes`);
+    await hold(1200);
+    await shotBoth("workflow", "#sw-canvas .sw-node");
+  }
+
   // ── Settings ────────────────────────────────────────────────────────────
   if (want("settings")) {
     await openView("settings", null);
@@ -581,7 +646,8 @@ mkdirSync(OUT, { recursive: true });
 setupDemoProjects();
 const { server, token } = await startServer();
 try {
-  const realViews = ["chat", "single", "trajectory", "terminal", "review", "checkpoints", "git", "settings"];
+  const realViews = ["chat", "single", "trajectory", "terminal", "review", "checkpoints", "git", "workflow", "settings"];
+  if (want("workflow")) await seedWorkflow(token);
   if (realViews.some(want)) await captureRealViews(token);
   if (want("office")) await captureOffice();
 } finally {

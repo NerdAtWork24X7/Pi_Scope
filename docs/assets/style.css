@@ -685,9 +685,9 @@ h1, h2, h3, h4, .display {
 .log-prompt .ps1 { color: var(--green); }
 .log-prompt .cmd { color: var(--text); }
 
-/* ── Feature tiles: uniform 5-up grid, icon glyph + label + one line ────── */
+/* ── Feature tiles: uniform 4-up grid, icon glyph + label + one line ────── */
 
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(196px, 1fr)); gap: 20px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 20px; }
 .tile {
   background: var(--surface);
   border: 1px solid var(--border);
