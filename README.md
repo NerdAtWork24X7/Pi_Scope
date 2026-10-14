@@ -325,13 +325,16 @@ feeds it agent telemetry. Here's exactly what you need:
 
 | Path | What you need | Install anything? |
 |---|---|---|
-| 🖥️ **AppImage** (end users) | A Linux desktop (x86_64) | ❌ Nothing — Node 24 is bundled inside |
-| 💻 **From source** (developers) | **Node.js 24+** (for built-in `node:sqlite`) | `npm install` (only for the terminal) |
+| 🖥️ **AppImage** (Linux end users) | A Linux desktop (x86_64) | ❌ Nothing — Node 24 is bundled inside |
+| 🪟 **Windows** | Windows 10/11 + **Node.js 24+** | The one-liner below (Node first: `winget install OpenJS.NodeJS.LTS`) |
+| 💻 **From source** (developers) | **Node.js 24+** (for built-in `node:sqlite`) | The one-liner below |
 | 🤖 **Feed it agent data** | The [`pi`](https://github.com/disler/pi-agent-observability) coding agent — **bundled** | ❌ Nothing — Pi Scope ships its own `pi` |
 | 🌐 **Any other tool** | Anything that can `POST /events` | A ~10 line script |
 
 **Node 24+** is the only real requirement — Pi Scope uses `node:sqlite`, which ships inside
-Node 24, so there are zero native build steps in the default path.
+Node 24, so there are zero native build steps in the default path. Linux, macOS and
+**Windows** all run the same server, dashboard and desktop window; `Start.sh` (Linux/macOS)
+and `Start.ps1` (Windows) are the same entry point in each platform's language.
 
 ---
 
@@ -353,6 +356,15 @@ chmod +x Pi-Scope-1.0.0.AppImage
 - Build it yourself: `./build-release.sh` → `apps/scope-desktop/dist/Pi-Scope-<version>.AppImage`.
 
 ### 🚀 Option B — One command (the whole stack)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.sh | sh
+cd Pi_Scope && ./Start.sh                # desktop app (Electron window)
+```
+
+The one-liner downloads the app (no `git` needed), checks for Node 24+ and installs the
+dependencies. `install.sh --help` lists its options (`--dir`, `--ref`, `--no-deps`); running
+it from a checkout installs that checkout in place. Prefer git:
 
 ```bash
 git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
@@ -379,6 +391,57 @@ token is adopted instead of a second instance being spawned, and a server orphan
 `kill -9` is reaped on the next run. Per-machine defaults can live in
 `apps/scope-desktop/scope.env` (see `scope.env.example`); real environment variables always
 win.
+
+### 🪟 Option B2 — Windows (one command)
+
+```powershell
+irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.ps1 | iex
+cd Pi_Scope
+.\Start.ps1                              # desktop app (Electron window)
+```
+
+`.\Start.ps1` is `Start.sh` for Windows — same modes, same flags, same
+`apps/scope-desktop/scope.env` file, same "start the server at most once" rule:
+
+```powershell
+.\Start.ps1                              # desktop app (Electron window, default)
+.\Start.ps1 -Web                         # headless server + open the WebUI in a browser
+.\Start.ps1 -Server                      # headless server only, stays in the foreground
+.\Start.ps1 -Dev                         # server with --watch
+.\Start.ps1 -KeepServer                  # leave the server up after the script exits
+.\Start.ps1 -Port 8080 -BindHost 0.0.0.0 # override the defaults
+.\Start.ps1 -DbPath C:\path\scope.db -Token my-token
+.\stop.ps1                               # stop a running server
+```
+
+Two conveniences: **`Start.cmd`** is the same launcher for a double-click (it bypasses the
+PowerShell execution policy for that launch only), and `install.ps1` can be run as a file
+when you want to pass arguments (`-Dir`, `-Ref`, `-NoDeps`).
+
+**What is Windows-aware** (and what is not):
+
+- **The server, Chat, the Office and the Workflow run the same way.** A harness on PATH
+  (`claude`, `codex`, `gemini`, …) is a `.cmd` shim there, which Windows will not run
+  directly — Pi Scope starts those through `cmd.exe` with every argument escaped, and stops
+  a node by taking its whole process tree down. A Workflow node set to **Custom command**
+  runs through `cmd.exe` too, so its variables are `%SW_PROMPT%`-style instead of
+  `$SW_PROMPT` (the node's settings popup spells out which).
+- **The bundled `pi`** is installed as `pi.cmd`, and Chat spawns the agent's Node entry
+  directly, so no global `pi` install is involved.
+- **Terminal** opens **Git Bash** when it is installed (so the POSIX commands an agent is
+  told about work), otherwise PowerShell (`pwsh`, then Windows PowerShell) or `cmd.exe`. The
+  Terminal's *live cwd* — what makes Files / Git / Checkpoints follow the shell — is read
+  from `/proc` on Linux and `lsof` on macOS; Windows has neither, so the pane there keeps
+  the directory it was opened in (the cwd box still moves it), and the workspace rail's
+  "follow this directory" injection is skipped because it writes POSIX syntax (`cd --`).
+- **API keys exported from a shell profile** (`~/.bashrc`, `~/.zshrc`) are a POSIX-shell
+  convention: on Windows set them on **Settings → API keys** (or in `scope.env`), which
+  lands them in the same place the server reads at boot.
+- **Packaging**: `build-release.sh` builds the Linux AppImage. A Windows package is
+  `electron-builder`'s job — the target is configured in
+  `apps/scope-desktop/electron-builder.yml`, so run `npm install` and then
+  `npx electron-builder --win` from `apps/scope-desktop` **on Windows**, with the server
+  bundle present in `apps/scope-desktop/server-bundle`.
 
 ### 🏃 Option C — Run from the git repo (developers)
 

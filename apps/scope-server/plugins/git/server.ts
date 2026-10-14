@@ -132,7 +132,10 @@ export function activate(api: any): void {
     if (!d.out.trim()) {
       const tracked = gitTry(absCwd, ["ls-files", "--error-unmatch", "--", file]);
       if (!tracked.ok) {
-        const ni = gitTry(absCwd, ["diff", "--no-index", "--no-color", "--unified=3", "--", "/dev/null", file]);
+        // `--no-index` needs an empty side to diff against: /dev/null on POSIX,
+        // NUL on Windows (git.exe there does not know /dev/null).
+        const empty = process.platform === "win32" ? "NUL" : "/dev/null";
+        const ni = gitTry(absCwd, ["diff", "--no-index", "--no-color", "--unified=3", "--", empty, file]);
         return jsonResponse({ cwd: absCwd, file, cached: false, untracked: true, diff: ni.out });
       }
     }

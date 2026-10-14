@@ -355,6 +355,29 @@ For plugins that *run* an agent, two more members matter:
   providers ship the same name (pi then fails the run with `Model "x" is
   ambiguous across providers`).
 
+For plugins that **run another program** (the Workflow's harness nodes), the kit
+carries the platform's launch rules, so a plugin never has to hand-roll them — and
+never has to import `shared/shell.ts`, which a packaged install would not resolve:
+
+* `resolveExecutable(name)` — name → absolute path, searching `$PATH`, the
+  platform's system bin dirs and `SCOPE_SYSTEM_BIN_DIRS`, honouring `PATHEXT` on
+  Windows (so `claude` finds `claude.cmd`). Returns `null` when it is not there.
+* `spawnCli(file, args, options)` — spawn it. On POSIX this is `spawn`; on Windows
+  a `.cmd`/`.bat` shim (or a bare name that resolves to one) is run through
+  `cmd.exe` with every argument quoted and caret-escaped, because Node refuses to
+  spawn one directly and its own `shell: true` would not escape the arguments.
+  Give it the absolute path from `resolveExecutable`.
+* `planSpawn(file, args)` — the same decision without spawning, when you need to
+  inspect or log what will run.
+* `shellCommandPlan(command)` — how to run a *shell one-liner*: `$SHELL -c` on
+  POSIX, the command processor with `/d /s /c` on Windows (where a user's
+  command therefore uses `%VAR%`, not `$VAR`). Say so in the UI.
+* `killTree(child, signal)` — stop a process **and its children**. A Windows
+  harness is a grandchild of the `cmd.exe` `spawnCli` started, so signalling the
+  child alone would leave the agent running; this uses `taskkill /T /F` there.
+* `isWindows()` — the last resort, for the handful of places that must branch
+  anyway (a variable syntax in a hint, a path separator).
+
 `readSettingsJson()` is pi's `settings.json` — read-only, for the keys pi itself
 owns (`defaultModel`, `theme`, `editorPaddingX`, …). It is **not** where a
 plugin's own settings go.

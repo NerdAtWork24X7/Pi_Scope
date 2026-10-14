@@ -42,7 +42,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
+import type { spawn } from "node:child_process";
+import { spawnCli } from "../../shared/shell.ts";
 import { AGENT_DIR } from "./agent-dir.ts";
 import { PI_BIN, PI_BUNDLE } from "./pi-bundle.ts";
 
@@ -264,7 +265,9 @@ function refreshStore(): Promise<PartResult> {
     };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(command.bin, command.args, { env, stdio: ["ignore", "pipe", "pipe"] });
+      // A bundled refresh is node + the CLI entry (a real image on Windows too);
+      // a global/override `pi` may be a `.cmd`, which needs the shell wrapper.
+      child = spawnCli(command.bin, command.args, { env, stdio: ["ignore", "pipe", "pipe"] });
     } catch (err: any) {
       resolve({ refreshed: false, error: `could not run ${command.bin}: ${err?.message ?? err}` });
       return;

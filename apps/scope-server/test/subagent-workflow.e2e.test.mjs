@@ -45,6 +45,20 @@ const PI_MODELS = [
 const enc = encodeURIComponent;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The runner tags the message it hands a node — `<user query>…</user query>`,
+ * then a `<reference files/folder>` block — so a custom command's `$SW_PROMPT`
+ * carries those tags. The graph/loop/retry fixtures below assert the *resolved
+ * query* a node was handed, so they read it back out of the tag; the tag format
+ * itself is covered by the reference-injection test. `QUERY` is the shell
+ * command substitution that prints just that query.
+ */
+const QUERY = `$(printf '%s' "$SW_PROMPT" | sed '1d; /^<\\/user query>$/,$d')`;
+/** A custom harness that prints `label[<the query it was handed>]`. */
+const echoQuery = (label) => `printf '${label}[%s]' "${QUERY}"`;
+/** `label<i>[…]`, with the loop's pass counter in front. */
+const echoPassQuery = (label) => `printf '${label}%s[%s]' "$SW_ITERATION" "${QUERY}"`;
+
 let browser;
 let child;
 let base;
@@ -133,7 +147,7 @@ async function buildCustomGraph(w) {
   const end = s.nodes.find((n) => n.type === "end");
 
   const upd = await act("updateNode", { id: first.id, name: "first", config: {
-    harness: "custom", command: `printf 'A1[%s]' "$SW_PROMPT"`, prompt: "{task}",
+    harness: "custom", command: echoQuery("A1"), prompt: "{task}",
   } }, w);
   assert.ok(upd.res.ok, upd.data?.error);
 
@@ -141,7 +155,7 @@ async function buildCustomGraph(w) {
   const a3 = (await act("addNode", { type: "agent", x: 420, y: 620 }, w)).data.nodes.at(-1);
   for (const [node, label] of [[a2, "A2"], [a3, "A3"]]) {
     const u = await act("updateNode", { id: node.id, name: label.toLowerCase(), config: {
-      harness: "custom", command: `printf '${label}[%s]' "$SW_PROMPT"`, prompt: "{input}",
+      harness: "custom", command: echoQuery(label), prompt: "{input}",
     } }, w);
     assert.ok(u.res.ok, u.data?.error);
   }
@@ -160,7 +174,7 @@ async function buildApprovalGraph(w) {
   const first = s.nodes.find((n) => n.type === "agent");
   const end = s.nodes.find((n) => n.type === "end");
   assert.ok((await act("updateNode", { id: first.id, name: "first", config: {
-    harness: "custom", command: `printf 'A1[%s]' "$SW_PROMPT"`, prompt: "{task}",
+    harness: "custom", command: echoQuery("A1"), prompt: "{task}",
   } }, w)).res.ok);
 
   const gate = (await act("addNode", { type: "approval", x: 420, y: 200 }, w)).data.nodes.at(-1);
@@ -169,7 +183,7 @@ async function buildApprovalGraph(w) {
   } }, w)).res.ok);
   const last = (await act("addNode", { type: "agent", x: 620, y: 200 }, w)).data.nodes.at(-1);
   assert.ok((await act("updateNode", { id: last.id, name: "last", config: {
-    harness: "custom", command: `printf 'L[%s]' "$SW_PROMPT"`, prompt: "{input}",
+    harness: "custom", command: echoQuery("L"), prompt: "{input}",
   } }, w)).res.ok);
 
   for (const e of s.edges) await act("removeEdge", { id: e.id }, w);
@@ -191,19 +205,19 @@ async function buildLoopGraph(w, { count = 3, bodyPrompt = "{input}|{iteration}/
   const first = s.nodes.find((n) => n.type === "agent");
   const end = s.nodes.find((n) => n.type === "end");
   assert.ok((await act("updateNode", { id: first.id, name: "first", config: {
-    harness: "custom", command: `printf 'A1[%s]' "$SW_PROMPT"`, prompt: "{task}",
+    harness: "custom", command: echoQuery("A1"), prompt: "{task}",
   } }, w)).res.ok);
 
   const loop = (await act("addNode", { type: "loop", x: 420, y: 120 }, w)).data.nodes.at(-1);
   assert.ok((await act("updateNode", { id: loop.id, name: "loop", config: { count } }, w)).res.ok);
   const body = (await act("addNode", { type: "agent", x: 640, y: 120 }, w)).data.nodes.at(-1);
   assert.ok((await act("updateNode", { id: body.id, name: "body", config: {
-    harness: "custom", command: `printf 'B[%s]' "$SW_PROMPT"`, prompt: bodyPrompt,
+    harness: "custom", command: echoQuery("B"), prompt: bodyPrompt,
   } }, w)).res.ok);
   // A sibling branch off the start: not dominated by the loop.
   const side = (await act("addNode", { type: "agent", x: 420, y: 480 }, w)).data.nodes.at(-1);
   assert.ok((await act("updateNode", { id: side.id, name: "side", config: {
-    harness: "custom", command: `printf 'S[%s]' "$SW_PROMPT"`, prompt: "{task}",
+    harness: "custom", command: echoQuery("S"), prompt: "{task}",
   } }, w)).res.ok);
 
   for (const e of s.edges) await act("removeEdge", { id: e.id }, w);
@@ -232,7 +246,7 @@ async function buildFeedbackGraph(w, { count = 3, back = false } = {}) {
   assert.ok((await act("updateNode", { id: loop.id, name: "refine", config: { count } }, w)).res.ok);
   const step = (await act("addNode", { type: "agent", x: 620, y: 120 }, w)).data.nodes.at(-1);
   assert.ok((await act("updateNode", { id: step.id, name: "step", config: {
-    harness: "custom", command: `printf 'B%s[%s]' "$SW_ITERATION" "$SW_PROMPT"`, prompt: "{input}",
+    harness: "custom", command: echoPassQuery("B"), prompt: "{input}",
   } }, w)).res.ok);
   for (const e of s.edges) await act("removeEdge", { id: e.id }, w);
   const wire = async (from, to, port) => {
@@ -531,14 +545,17 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal(run.nodes[agent.id].status, "done", JSON.stringify(run.log));
     const out = run.nodes[agent.id].outputTail;
     const prompt = out.split("\n--REFS--\n")[0];
-    // Both paths are injected, each with a description: the user's note, or the
-    // file's own first heading when they wrote none.
-    assert.ok(prompt.startsWith("[Reference files — added by the user for this step]"), prompt.slice(0, 200));
+    // The message is tagged: the user's own query in <user query>, then both
+    // reference paths in <reference files/folder>, each with a description —
+    // the user's note, or the file's own first heading when they wrote none.
+    assert.match(prompt, /^<user query>\n[\s\S]*\n<\/user query>/, prompt.slice(0, 200));
+    assert.ok(prompt.includes("review the API"), prompt.slice(0, 200));
+    assert.match(prompt, /<reference files\/folder>\n[\s\S]*\n<\/reference files\/folder>$/, prompt.slice(0, 400));
     assert.ok(prompt.includes(`${rules} — house rules`), prompt.slice(0, 400));
     assert.ok(prompt.includes(`${plan} — The plan`), prompt.slice(0, 400));
     assert.match(prompt, /not instructions/);
-    // …ahead of the user's own message, which still ends the text sent.
-    assert.match(prompt.trimEnd(), /review the API$/);
+    // …in that order: the query tag comes before the reference tag.
+    assert.ok(prompt.indexOf("<user query>") < prompt.indexOf("<reference files/folder>"));
     // A custom command gets the paths on their own as well, via $SW_REFS.
     assert.ok(out.split("\n--REFS--\n")[1].includes(rules), "$SW_REFS carries the paths");
 
@@ -627,12 +644,16 @@ describe("subagent workflow plugin (server)", () => {
     // …while the sibling branch off the start, which the loop does not own, ran once.
     assert.equal(ownLines(g.side.id).length, 1, "a node outside the loop is not repeated");
 
-    // The loop's own output is only assembled at the end: what reached it, then
-    // every pass, so the node after it reads the whole loop.
+    // The loop's own output is its **last** pass's result — the finished work of
+    // the step it repeats — never the seed plus a log of every pass, so the node
+    // after it reads the answer.
     const out = run.nodes[g.loop.id].outputTail;
-    assert.match(out, /^A1\[world\]/, "what reached the loop comes first");
-    for (const i of [1, 2, 3]) assert.ok(out.includes(`|${i}/3]`), `the loop kept pass ${i}`);
-    assert.equal((run.nodes[g.end.id].outputTail.match(/\|3\/3\]/g) || []).length, 1, "the end node saw the last pass");
+    assert.equal(out.trim(), "B[A1[world]|3/3]", "the loop carries the last pass, and only it");
+    // The end node is fed by the body step, and reads that same finished loop,
+    // exactly as if the loop's Exit had been wired to it.
+    const end = run.nodes[g.end.id].outputTail;
+    assert.ok(end.startsWith(out.trim()), `the end node reads the finished loop (${end})`);
+    assert.ok(!/\|1\/3\]|\|2\/3\]/.test(end), "no earlier pass leaks through the loop");
   });
 
   test("a switched-off loop runs its section exactly once", async () => {
@@ -679,10 +700,12 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal(bodyLines.filter((l) => /\|2\/2\]/.test(l.text)).length, 2, "and inner pass 2 in both");
     assert.equal(run.nodes[inner.id].iterations, 2);
     assert.equal(run.nodes[g.loop.id].iterations, 2);
-    // The outer loop folds ONE entry per outer pass — the inner loop's own
-    // output is rebuilt per outer pass, never carried over stale.
+    // The outer loop's output is its last pass's result: the inner loop's
+    // finished output from the final outer pass, rebuilt each pass and never
+    // carried over stale or accumulated.
     const outerOut = run.nodes[g.loop.id].outputTail;
-    assert.equal((outerOut.match(/B\[/g) || []).length, 2, `one entry per outer pass (${outerOut})`);
+    assert.equal((outerOut.match(/B\[/g) || []).length, 1, `only the finished inner result (${outerOut})`);
+    assert.match(outerOut, /\|2\/2\]$/, "the inner loop's last pass is what the outer loop hands on");
   });
 
   test("a node failing inside a loop stops the run at that pass", async () => {
@@ -840,12 +863,11 @@ describe("subagent workflow plugin (server)", () => {
     // → B3[B2[B1[seed]]]. The chain is the whole point: the step never sees the
     // original seed again after its first pass.
     assert.equal(run.nodes[g.step.id].outputTail, "B3[B2[B1[seed]]]");
-    // The loop's own output is the whole loop — the seed, then every pass — so a
-    // node after it reads the finished result.
+    // The loop's own output is its last pass's result — the finished work of the
+    // step wired to its Repeat output — not the seed plus every pass.
     const out = run.nodes[g.loop.id].outputTail;
-    assert.match(out, /^seed/);
-    assert.ok(out.includes("B1[seed]"), "the first pass is kept");
-    assert.ok(out.trim().endsWith("B3[B2[B1[seed]]]"), "the last pass is the answer");
+    assert.equal(out.trim(), "B3[B2[B1[seed]]]", "the loop carries the last pass alone");
+    assert.ok(!out.includes("\n---\n"), "the passes are not accumulated");
     assert.match(run.nodes[g.end.id].outputTail, /B3\[B2\[B1\[seed\]\]\]/);
   });
 
@@ -860,7 +882,7 @@ describe("subagent workflow plugin (server)", () => {
     const agent = s.nodes.find((n) => n.type === "agent");
     const end = s.nodes.find((n) => n.type === "end");
     assert.ok((await act("updateNode", { id: agent.id, name: "step", config: {
-      harness: "custom", command: `printf 'B%s[%s]' "$SW_ITERATION" "$SW_PROMPT"`, prompt: "{input}",
+      harness: "custom", command: echoPassQuery("B"), prompt: "{input}",
     } }, solo)).res.ok);
     const loop = (await act("addNode", { type: "loop", x: 600, y: 200 }, solo)).data.nodes.at(-1);
     assert.ok((await act("updateNode", { id: loop.id, name: "refine", config: { count: 3 } }, solo)).res.ok);
@@ -892,6 +914,82 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal(run.status, "done", "the loop does not wait for the step it re-runs");
     assert.equal(run.nodes[g.step.id].outputTail, "B2[B1[seed]]");
     assert.match(run.nodes[g.end.id].outputTail, /B2\[B1\[seed\]\]/);
+  });
+
+  test("a step after the loop's Exit waits for the finished loop, not its seed", async () => {
+    // The reported shape: start → first → loop, loop.repeat → body, and an
+    // ordinary step off the loop's **Exit** → end. The exit-side step reads the
+    // loop's own output — the finished last pass — so it must wait for the loop
+    // to settle. The bug was that it started the moment the loop did and only
+    // ever saw the material that reached the loop (`A1[seed]`).
+    const solo = path.join(tmpDir, "ws-loop-exit");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const start = s.nodes.find((n) => n.type === "start");
+    const first = s.nodes.find((n) => n.type === "agent");
+    const end = s.nodes.find((n) => n.type === "end");
+    assert.ok((await act("updateNode", { id: first.id, name: "first", config: {
+      harness: "custom", command: echoQuery("A1"), prompt: "{task}",
+    } }, solo)).res.ok);
+    const loop = (await act("addNode", { type: "loop", x: 420, y: 120 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: loop.id, name: "refine", config: { count: 3 } }, solo)).res.ok);
+    const body = (await act("addNode", { type: "agent", x: 620, y: 60 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: body.id, name: "body", config: {
+      harness: "custom", command: echoPassQuery("B"), prompt: "{input}",
+    } }, solo)).res.ok);
+    const post = (await act("addNode", { type: "agent", x: 620, y: 340 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: post.id, name: "post", config: {
+      harness: "custom", command: echoQuery("P"), prompt: "{input}",
+    } }, solo)).res.ok);
+    for (const e of s.edges) await act("removeEdge", { id: e.id }, solo);
+    for (const [from, to, port] of [
+      [start.id, first.id], [first.id, loop.id], [loop.id, body.id, "repeat"],
+      [loop.id, post.id], [post.id, end.id],
+    ]) {
+      const r = await act("addEdge", port ? { from, to, port } : { from, to }, solo);
+      assert.ok(r.res.ok, r.data?.error);
+    }
+    assert.ok((await runApi("start", { task: "seed" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done");
+    const out = run.nodes[post.id].outputTail;
+    assert.equal(out.trim(), "P[B3[B2[B1[A1[seed]]]]]", "the exit-side step saw the finished loop, not its seed");
+    assert.match(run.nodes[end.id].outputTail, /B3\[B2\[B1\[A1\[seed\]\]\]\]/);
+  });
+
+  test("the end node reads the finished loop when the last body step feeds it directly", async () => {
+    // The reported shape: start → first → loop, loop.repeat → body, and the body
+    // step wired straight into the end node — no separate Exit connection. The
+    // end must carry the finished loop (the last pass's result), exactly as if
+    // the loop's Exit had been wired to it, rather than the seed or an earlier
+    // pass.
+    const solo = path.join(tmpDir, "ws-loop-body-end");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const start = s.nodes.find((n) => n.type === "start");
+    const first = s.nodes.find((n) => n.type === "agent");
+    const end = s.nodes.find((n) => n.type === "end");
+    assert.ok((await act("updateNode", { id: first.id, name: "first", config: {
+      harness: "custom", command: echoQuery("A1"), prompt: "{task}",
+    } }, solo)).res.ok);
+    const loop = (await act("addNode", { type: "loop", x: 420, y: 120 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: loop.id, name: "refine", config: { count: 3 } }, solo)).res.ok);
+    const body = (await act("addNode", { type: "agent", x: 620, y: 120 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: body.id, name: "body", config: {
+      harness: "custom", command: echoPassQuery("B"), prompt: "{input}",
+    } }, solo)).res.ok);
+    for (const e of s.edges) await act("removeEdge", { id: e.id }, solo);
+    for (const [from, to, port] of [
+      [start.id, first.id], [first.id, loop.id], [loop.id, body.id, "repeat"], [body.id, end.id],
+    ]) {
+      const r = await act("addEdge", port ? { from, to, port } : { from, to }, solo);
+      assert.ok(r.res.ok, r.data?.error);
+    }
+    assert.ok((await runApi("start", { task: "seed" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done");
+    const out = run.nodes[end.id].outputTail;
+    assert.equal(out.trim(), "B3[B2[B1[A1[seed]]]]", "the end node reads the loop's finished pass alone");
   });
 
   test("a loop with nothing to repeat passes through instead of burning the pass budget", async () => {
@@ -1000,10 +1098,10 @@ describe("subagent workflow plugin (server)", () => {
       assert.ok(u.res.ok, u.data?.error);
       return id;
     };
-    const a = await mk("a", 340, 180, "sleep 0.6; printf 'A[%s]' \"$SW_PROMPT\"", "{task}");
-    const b = await mk("b", 340, 420, "sleep 0.6; printf 'B[%s]' \"$SW_PROMPT\"", "{task}");
-    const c = await mk("c", 640, 300, "printf 'C[%s]' \"$SW_PROMPT\"", "{input}");
-    const d = await mk("d", 880, 300, "printf 'D[%s]' \"$SW_PROMPT\"", "{input}");
+    const a = await mk("a", 340, 180, "sleep 0.6; " + echoQuery("A"), "{task}");
+    const b = await mk("b", 340, 420, "sleep 0.6; " + echoQuery("B"), "{task}");
+    const c = await mk("c", 640, 300, echoQuery("C"), "{input}");
+    const d = await mk("d", 880, 300, echoQuery("D"), "{input}");
 
     // Two roots off the start, three branches into the end: both are allowed.
     // (The seed already wires start → the seeded agent and that agent → end.)
@@ -1239,7 +1337,7 @@ describe("subagent workflow plugin (server)", () => {
     // Fails the first two invocations, then succeeds — the run must still pass.
     try { fs.unlinkSync(path.join(solo, "retry-count")); } catch { /* none yet */ }
     const flaky = 'c=$(cat retry-count 2>/dev/null || echo 0); c=$((c+1)); echo $c > retry-count; ' +
-      'if [ $c -lt 3 ]; then echo "boom $c" >&2; exit 1; fi; printf "OK[%s]" "$SW_PROMPT"';
+      'if [ $c -lt 3 ]; then echo "boom $c" >&2; exit 1; fi; printf "OK[%s]" "' + QUERY + '"';
     assert.ok((await act("updateNode", { id: g.a3.id, config: {
       harness: "custom", command: flaky, prompt: "{input}", retries: 3, retryDelaySec: 0,
     } }, solo)).res.ok);
@@ -1324,6 +1422,25 @@ describe("subagent workflow plugin (server)", () => {
     assert.match(run.nodes[g.last.id].outputTail, /^L\[A1\[hello\]/);
     assert.ok(run.nodes[g.last.id].outputTail.includes("Human review: looks good"));
     assert.ok(run.log.some((l) => /review approved/.test(l.text)));
+  });
+
+  test("a settled node's final result reaches an incremental run poll", async () => {
+    // The incremental poll (the page's per-tick read) leaves out a running
+    // node's tail on purpose, but a *settled* node's final result has to ride
+    // along: the messages sidebar reads it as a waiting gate's input — and as
+    // the end node's answer — before the whole run finishes, rather than waiting
+    // for the next full read.
+    const solo = path.join(tmpDir, "ws-gate-brief-tail");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildApprovalGraph(solo);
+    assert.ok((await runApi("start", { task: "hello" }, solo)).res.ok);
+    const waiting = await waitNode(solo, g.gate.id, "waiting");
+    // Poll incrementally, exactly the way the open page does mid-run.
+    const poll = (await api(`/${PLUGIN}/run?cwd=${enc(solo)}&since=${waiting.seq}`)).data.run;
+    const first = poll.nodes[g.first.id];
+    assert.equal(first.status, "done");
+    assert.equal(first.outputTail, "A1[hello]", "the settled agent's final result is in the incremental payload");
+    assert.equal(poll.log.some((l) => l.seq <= waiting.seq), false, "and it really is the incremental shape");
   });
 
   test("rejecting a gate fails the run and skips the downstream", async () => {
@@ -1713,16 +1830,23 @@ describe("subagent workflow plugin (client)", () => {
         // The surface the popup covers: the pane it floats over, and the
         // viewport the pane sits in (a scrollbar is all it may leave over).
         vw: document.documentElement.clientWidth, vh: document.documentElement.clientHeight,
+        // What the panel may be 80% *of*: the scrim's own width, less the
+        // padding that is the gap around the panel.
+        avail: Math.round(back.getBoundingClientRect().width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)),
+        availH: Math.round(back.getBoundingClientRect().height - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)),
         canvas: Math.round(document.querySelector(".sw-canvas-scroll").getBoundingClientRect().width),
       };
     });
     assert.equal(geom.position, "fixed", "the popup floats over the pane, it is not a column in it");
     assert.ok(geom.z >= 1000, `it sits above the canvas (z=${geom.z})`);
     assert.notEqual(geom.scrim, "rgba(0, 0, 0, 0)", "with a scrim over the canvas");
-    // Full screen: a node's references, the whole model catalogue and the end
-    // node's final output all need the room, so the popup takes the viewport.
-    assert.ok(geom.w >= geom.vw - 20, `full screen, scrollbars aside (${geom.w} of ${geom.vw})`);
-    assert.ok(geom.h >= geom.vh - 20, `in both directions (${geom.h} of ${geom.vh})`);
+    // A wide panel, not the whole screen: a node's references, the whole model
+    // catalogue and the end node's final output all need the room, and 80% of
+    // the window is what gives it to them while leaving the canvas it belongs to
+    // visible down either side of the scrim. (A hair under 80% if the entry
+    // animation is still running: `rect` reflects a live transform.)
+    assert.ok(Math.abs(geom.w / geom.avail - 0.8) < 0.02, `80% of the window wide (${geom.w} of ${geom.avail})`);
+    assert.ok(geom.h / geom.availH > 0.98, `full height, inset by the scrim's padding (${geom.h} of ${geom.availH})`);
     assert.ok(geom.canvas > 0, `the canvas stays behind it (${geom.canvas}px)`);
 
     // Escape closes it, leaving the node's settings exactly as they were.

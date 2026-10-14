@@ -20,7 +20,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
+import { spawnCli } from "../../shared/shell.ts";
 import { PI_BUNDLE } from "./pi-bundle.ts";
 
 /** The npm package Pi Scope bundles. */
@@ -181,7 +181,9 @@ function run(bin: string, args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     let out = "";
     let settled = false;
-    const proc = spawn(bin, args, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    // `spawnCli`, not `spawn`: on Windows `npm` is `npm.cmd`, which Node refuses
+    // to spawn directly (and `SCOPE_NPM_BIN` usually points straight at one).
+    const proc = spawnCli(bin, args, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;

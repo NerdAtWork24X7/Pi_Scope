@@ -14,7 +14,9 @@ import net from "node:net";
 import { execFileSync } from "node:child_process";
 import pty from "node-pty";
 import { WebSocketServer, WebSocket } from "ws";
-import { shellQuote, resolveExecutable } from "../../shared/shell.ts";
+import {
+  shellQuote, resolveExecutable, interactiveShellCandidates, supportsPosixCommandSyntax,
+} from "../../shared/shell.ts";
 
 interface TerminalConfig {
   port: number;
@@ -142,8 +144,12 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
     const reqUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const shellParam = reqUrl.searchParams.get("shell");
     const selectedShell = shellParam === "herdr" ? "herdr" : "bash";
-    const shellName = shellParam === "herdr" ? "herdr" : (process.env.SHELL || "bash");
+    const shellName = shellParam === "herdr" ? "herdr" : defaultShellName();
     const shell = resolveShellPath(shellName);
+    // The `cd` injection from the workspace rail is POSIX syntax (`cd -- <path>`);
+    // PowerShell and cmd would take it as nonsense, so it is skipped there (and
+    // the client is told why, exactly as it is while another program owns the PTY).
+    const posixSyntax = selectedShell !== "herdr" && supportsPosixCommandSyntax(shell);
     if (CWD_DEBUG) console.log("[terminal] spawning shell:", shellName, "->", shell);
     let term: ReturnType<typeof pty.spawn>;
     try {
@@ -248,7 +254,7 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
             // pager, an editor, …), and never into Herdr (its panes drive the
             // cwd). Ctrl-U clears any half-typed line first so the injected
             // command can't concatenate with the user's pending input.
-            if (selectedShell !== "herdr" && shellAtPrompt(term.pid)) {
+            if (posixSyntax && shellAtPrompt(term.pid)) {
               term.write("\x15cd -- " + shellQuote(ctrl.cwd) + "\r");
             } else if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({
@@ -277,9 +283,36 @@ function resolveShellPath(name: string): string {
   return resolveExecutable(name) ?? name;
 }
 
+// Which shell the Terminal opens for the UI's "Bash" selection.
+//
+// POSIX: the user's own $SHELL (so their rc files are sourced and the prompt is
+// theirs), else bash. Windows: Git Bash when it is installed — the same shell a
+// Windows developer expects from "Bash", so the commands an agent is told about
+// work — then PowerShell (pwsh, then the Windows PowerShell 5.1 that ships with
+// Windows), then cmd.exe. Every candidate goes through resolveExecutable, which
+// honours PATHEXT on Windows.
+//
+// Note what Windows does NOT get, in either case: the live cwd follows (`/proc`
+// and lsof do not exist there) and the workspace rail's `cd` injection (see
+// `posixSyntax` — it writes POSIX syntax, and `shellAtPrompt` needs `ps`). The
+// pane keeps the directory it was opened in, which the cwd box still moves.
+function defaultShellName(): string {
+  if (process.platform !== "win32") return process.env.SHELL || "bash";
+  for (const name of interactiveShellCandidates(process.platform)) {
+    if (name === "cmd") return "cmd.exe";
+    if (resolveExecutable(name)) return name;
+  }
+  return "cmd.exe";
+}
+
 // Resolve the PTY shell's current working directory so the UI can keep the
 // shared session directory in sync with wherever the terminal actually is.
+//
+// Linux reads /proc, macOS asks lsof. Windows has neither, so the Terminal there
+// simply keeps the directory it was opened in (the UI's cwd box still moves the
+// shell — pushing a cwd *into* the server is the part Windows does not do).
 function getShellCwd(pid: number): string | null {
+  if (process.platform === "win32") return null;
   try {
     if (process.platform === "linux") return fs.realpathSync(`/proc/${pid}/cwd`);
     if (process.platform === "darwin") {
@@ -301,6 +334,10 @@ function getShellCwd(pid: number): string | null {
 // equals the shell's own pgid the shell itself is the foreground process.
 // Unknown / unsupported platforms fail closed (return false → never inject).
 function shellAtPrompt(pid: number): boolean {
+  // Windows: no `ps`/`tpgid`, so this fails closed (no injection) rather than
+  // guessing. See `posixSyntax` in the connection handler — a PowerShell or cmd
+  // PTY is skipped before it gets here anyway.
+  if (process.platform === "win32") return false;
   try {
     const out = execFileSync("ps", ["-o", "tpgid=", "-o", "pgid=", "-p", String(pid)], {
       encoding: "utf8",

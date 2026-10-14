@@ -23,13 +23,32 @@
     if (d) d.className = "live-dot " + (live ? "green" : "red");
   }
 
+  // What the "Bash" chooser is called here. The wire value stays "bash" — it
+  // means "the platform's own shell" — but on Windows that shell is Git Bash when
+  // it is installed and PowerShell (or cmd.exe) otherwise, so the button is
+  // relabelled from the server's own platform report rather than pretending.
+  let shellLabel = "Bash";
+  (async function labelForPlatform() {
+    try {
+      const res = await fetch(window.apiUrl("/health", {}), { headers: window.authHeaders() });
+      const data = await res.json();
+      if (data?.platform !== "win32") return;
+      shellLabel = "Shell";
+      const btn = document.getElementById("btn-bash");
+      if (btn) {
+        btn.textContent = "Shell";
+        btn.title = "Open a terminal — Git Bash when installed, otherwise PowerShell or cmd";
+      }
+    } catch { /* keep the POSIX label */ }
+  })();
+
   function shellPromptEl() {
     let el = document.getElementById("terminal-shell-prompt");
     if (!el && container) {
       el = document.createElement("div");
       el.id = "terminal-shell-prompt";
       el.style.cssText = "display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--muted);font-family:monospace;gap:10px;";
-      el.innerHTML = '<span id="terminal-prompt-title" style="font-size:15px;">Select a terminal to start</span><span id="terminal-prompt-sub" style="font-size:13px;">Click Bash or Herdr above</span>';
+      el.innerHTML = '<span id="terminal-prompt-title" style="font-size:15px;">Select a terminal to start</span><span id="terminal-prompt-sub" style="font-size:13px;">Click ' + shellLabel + ' or Herdr above</span>';
       container.appendChild(el);
     }
     return el;
@@ -39,7 +58,7 @@
     if (el) el.style.display = "flex";
     if (container) container.style.background = "var(--glass-bg)";
     const sub = document.getElementById("terminal-prompt-sub");
-    if (sub) sub.textContent = error || "Click Bash or Herdr above";
+    if (sub) sub.textContent = error || ("Click " + shellLabel + " or Herdr above");
   }
   function hideShellPrompt() {
     const el = document.getElementById("terminal-shell-prompt");

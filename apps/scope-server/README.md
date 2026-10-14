@@ -116,7 +116,7 @@ address the token is required anyway (see the LAN notes in the root README).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Health check + version + uptime + totals (no auth) |
+| GET | `/health` | Health check + version + platform + uptime + totals (no auth) |
 | POST | `/shutdown` | Graceful server shutdown (loopback-trusted) |
 | GET | `/` | Scope UI (no auth) |
 | POST | `/events` | Ingest single event or array (loopback-trusted) |

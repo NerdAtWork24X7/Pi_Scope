@@ -9722,10 +9722,12 @@ select, textarea { border-radius: var(--r-control); }
 
    Two variants are deliberate, not drift:
 
-     · floating panel — centred and capped by width/height (every dialog);
+     · floating panel — centred and capped by width/height (every dialog,
+       including the workflow's settings panel, which is 80% of the window wide
+       so the canvas it was opened over stays in view);
      · full bleed — fills the viewport, square, no shadow, no border (the
-       workflow settings modal and the markdown editor: reading surfaces rather
-       than dialogs, so they get the whole screen on purpose).
+       markdown editor: a reading surface rather than a dialog, so it gets the
+       whole screen on purpose).
 
    Appended last, so equal-specificity rules win over the legacy blocks above.
    The two plugin sheets (office, subagent-workflow) mirror the plugin-owned

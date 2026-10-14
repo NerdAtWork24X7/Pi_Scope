@@ -31,3 +31,12 @@ linux:
   icon: server-bundle/icon.png
   artifactName: Pi-Scope-${version}.AppImage
   executableName: pi-scope
+# Windows: an NSIS installer, built ON Windows (`npx electron-builder --win`
+# from this directory, with server-bundle/ populated) so node-pty and the
+# portable Node in node-portable/ match the host. after-pack.cjs is a no-op
+# there — the SUID-sandbox wrapper it writes is a Linux thing only.
+win:
+  target:
+    - nsis
+  icon: server-bundle/icon.png
+  artifactName: Pi-Scope-Setup-${version}.exe

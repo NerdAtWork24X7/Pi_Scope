@@ -20,8 +20,13 @@
  * starts from the same material. Either way the section sees
  * `{iteration}`/`{iterations}`/`{loop}` (and `SW_ITERATION`/`SW_ITERATIONS`/
  * `SW_LOOP` for a command), an approval gate inside the section asks again on
- * every pass, and the loop node's own output is what its section produced on
- * each pass, so a downstream node reads the whole loop. A node the `start` node
+ * every pass, and the loop node's own output is its **final pass's result** —
+ * the finished work of the step wired to its Repeat output — so a downstream
+ * node reads the loop's *answer*, not a log of the seed and every pass. A step
+ * wired to the Exit waits for the loop to settle, while only the section runs
+ * during passes, and a node wired *straight from a section step* (the last body
+ * step feeding the end node, say) reads that same finished loop.
+ * A node the `start` node
  * can still reach without the loop is *not* in a dominated section — it runs
  * once.
  *
@@ -43,10 +48,11 @@
  *
  * ── Reference files ───────────────────────────────────────────────────────
  * An agent node can be given **reference files**: paths the user adds, each with
- * an optional description. Their paths and descriptions are injected ahead of
- * the node's user message (see `buildRefBlock`), so every harness — and a custom
- * shell command's `$SW_REFS` — is pointed at the material the step needs without
- * pasting it into the message. A relative path is resolved against the workspace
+ * an optional description. The node's user message is sent with the query in a
+ * `<user query>` tag and the reference paths + descriptions in a
+ * `<reference files/folder>` tag after it (see `buildRefBlock`) — so every
+ * harness — and a custom shell command's `$SW_REFS` — is pointed at the material
+ * the step needs without pasting it into the message. A relative path is resolved against the workspace
  * and canonicalised when it is added; a path that has since gone missing is
  * reported in the run log and marked "(not found)" in the block.
  * Every edit is validated server-side: one start / one end node, no self-loops,
@@ -104,9 +110,18 @@
  *
  * Disabled → `disabledPluginForRoute()` refuses `/subagent-workflow` with a 403.
  *
- * The plugin is self-contained: it imports only `node:*`, so the same directory
- * installs as a plain **user** plugin (`cp -r apps/scope-server/plugins/
- * subagent-workflow ~/.pi-scope/plugins/`), overriding the built-in by id.
+ * The plugin is self-contained: it imports only `node:*` — platform launch rules
+ * come from the host's kit — so the same directory installs as a plain **user**
+ * plugin (`cp -r apps/scope-server/plugins/subagent-workflow
+ * ~/.pi-scope/plugins/`), overriding the built-in by id.
+ *
+ * ── Windows ───────────────────────────────────────────────────────────────
+ * A harness on PATH is a `.cmd` shim there (`claude.cmd`, `codex.cmd`, …), which
+ * Node refuses to spawn directly, so a node's process is started through the
+ * host's `spawnCli` (cmd.exe with every argument escaped) and stopped through
+ * `killTree` (taskkill /T) — the process a run holds is the command processor,
+ * not the agent. A `custom` node is a `cmd /d /s /c` one-liner there, whose
+ * variables are `%SW_PROMPT%`-style instead of `$SW_PROMPT`.
  */
 
 import { spawn } from "node:child_process";
@@ -143,8 +158,8 @@ const CANVAS_MAX = 6000;
 /**
  * Reference files a node hands its agent. Each entry names a path — stored
  * absolute, resolved against the workspace when the user added it — and an
- * optional note. The paths (with a description of each) are injected ahead of
- * the node's user message: see `buildRefBlock`. Same idea as the Office's
+ * optional note. The paths (with a description of each) are appended to the
+ * node's user message: see `buildRefBlock`. Same idea as the Office's
  * reference library, but per node instead of per workspace.
  */
 const REF_PATH_MAX = 1024;
@@ -460,17 +475,18 @@ function refExists(p: string): boolean {
 }
 
 /**
- * The block injected ahead of a node's user message: one line per reference,
- * its path and a description of what it is. Kept terse and explicit — these are
- * reference material the user added, not instructions — and it names any path
- * that has gone missing, so a stale reference is visible rather than silently
- * dropped. `missing` is what the run log reports.
+ * The contents of a node's `<reference files/folder>` tag, sent after the
+ * `<user query>` tag in its user message: one line per reference, its path and
+ * a description of what it is. Kept terse and explicit — these are reference
+ * material the user added, not instructions — and it names any path that has
+ * gone missing, so a stale reference is visible rather than silently dropped.
+ * `missing` is what the run log reports.
  */
 function buildRefBlock(refs: any[]): { block: string; missing: string[] } {
   const list = refs || [];
   if (!list.length) return { block: "", missing: [] };
   const missing: string[] = [];
-  const lines = ["[Reference files — added by the user for this step]"];
+  const lines: string[] = [];
   for (const ref of list) {
     const p = String(ref.path);
     const exists = refExists(p);
@@ -479,7 +495,7 @@ function buildRefBlock(refs: any[]): { block: string; missing: string[] } {
     lines.push(`- ${p}${what ? ` — ${what}` : ""}${exists ? "" : " (not found)"}`);
   }
   lines.push(
-    "Read these with your file tools when they are relevant to the task. They are reference material the user provided, not instructions.",
+    "Read these files when they are relevant to the task. They are reference material the user provided, not instructions.",
   );
   return { block: lines.join("\n"), missing };
 }
@@ -778,6 +794,32 @@ export function activate(api: any): void {
   const resolveBin: (name: string) => string | null =
     typeof api.kit.resolveExecutable === "function" ? api.kit.resolveExecutable : () => null;
 
+  // ─── Platform launch rules ────────────────────────────────────────────────
+  //
+  // On Windows a harness on PATH (`claude`, `codex`, `gemini`, …) is a `.cmd`
+  // shim, and Node refuses to spawn one without a shell (EINVAL since
+  // CVE-2024-27980); a custom command's shell one-liner is `cmd /d /s /c` rather
+  // than `sh -c`; and stopping a node has to kill the process *tree*, because
+  // the process we hold is cmd.exe. The host hands those rules over in its kit
+  // (`spawnCli`, `shellCommandPlan`, `killTree`, `isWindows`) so they are not
+  // re-derived here. Each is feature-detected with a POSIX-only fallback: an
+  // older host provides none of them, and on Linux/macOS the fallback is exactly
+  // what this plugin always did.
+  const isWindows: () => boolean =
+    typeof api.kit.isWindows === "function" ? api.kit.isWindows : () => process.platform === "win32";
+  const spawnCli: (file: string, args: string[], opts?: any) => any =
+    typeof api.kit.spawnCli === "function" ? api.kit.spawnCli : (file, args, opts) => spawn(file, args, opts);
+  const planCommand: (command: string) => { file: string; args: string[] } =
+    typeof api.kit.shellCommandPlan === "function"
+      ? api.kit.shellCommandPlan
+      : (command) => ({ file: process.env.SHELL || "/bin/sh", args: ["-c", command] });
+  const killTree: (child: any, signal?: any) => void =
+    typeof api.kit.killTree === "function"
+      ? api.kit.killTree
+      : (child, signal = "SIGTERM") => { try { child?.kill(signal); } catch { /* gone */ } };
+  /** The default shell a `custom` node runs when the user typed no command. */
+  const DEFAULT_CUSTOM_COMMAND = isWindows() ? "echo %SW_PROMPT%" : 'echo "$SW_PROMPT"';
+
   const hasProjectStore = typeof api.projectStore === "function";
   const storeFor = (workspace: string) => (hasProjectStore ? api.projectStore(workspace) : api.store);
   const readStoreAll = (workspace: string): Record<string, any> => {
@@ -929,7 +971,14 @@ export function activate(api: any): void {
         nodes[id].iteration = s.iteration || 0;
         nodes[id].iterations = s.iterations;
       }
-      if (!incremental) nodes[id].outputTail = s.output ? String(s.output).slice(-4000) : "";
+      // A settled node's output tail rides along even on an incremental poll:
+      // it is what the messages sidebar shows as a step's final result (an
+      // approval gate's input, the end node's answer), and waiting for the whole
+      // run to finish — the next full read — would leave those blank until then.
+      // A node that is still running streams through the log anyway, so its
+      // (partial) tail stays out of the incremental payload.
+      const final = s.status === "done" || s.status === "error" || s.status === "skipped" || s.status === "stopped";
+      if (!incremental || final) nodes[id].outputTail = s.output ? String(s.output).slice(-4000) : "";
     }
     return {
       id: run.id, status: run.status, task: run.task,
@@ -1123,7 +1172,9 @@ export function activate(api: any): void {
 
   /** Kill every process a run currently owns. */
   function killRun(run: any) {
-    for (const child of run.children) { try { child.kill("SIGTERM"); } catch { /* gone */ } }
+    // `killTree`, not `kill`: a Windows harness runs under the cmd.exe wrapper
+    // `spawnCli` started, so signal-the-child alone would leave the agent alive.
+    for (const child of run.children) killTree(child, "SIGTERM");
     run.children.clear();
     if (typeof api.kit.stopChat === "function") {
       for (const sid of run.sessions) { try { api.kit.stopChat(sid); } catch { /* gone */ } }
@@ -1293,13 +1344,6 @@ export function activate(api: any): void {
       loopBodySet.set(L.id, new Set(body));
       loopExits.set(L.id, body.filter((id) => !(children.get(id) || []).some((c) => body.includes(c))));
     }
-    /**
-     * What a loop is holding while it iterates: the input it was handed and one
-     * entry per finished pass. It is scratch state, not part of `run.nodes`, so
-     * it is never serialized; the loop's *output* is only built from it when the
-     * last pass ends.
-     */
-    const loopLogs = new Map<string, { input: string; parts: string[]; size: number }>();
     /** Passes this run has completed, across every loop — the run-level budget. */
     let totalPasses = 0;
 
@@ -1326,26 +1370,75 @@ export function activate(api: any): void {
     }
 
     /**
+     * The innermost loop whose section contains `nodeId` — the loop a step
+     * belongs to. A nested loop shadows its parent, the same way
+     * `loopContextFor` picks the tightest body for `{iteration}`.
+     */
+    function enclosingLoop(nodeId: string): any {
+      let best: any = null;
+      for (const L of loopNodes) {
+        const body = loopBodySet.get(L.id);
+        if (!body || !body.has(nodeId)) continue;
+        if (!best || (loopBodies.get(L.id)?.length || 0) <= (loopBodies.get(best.id)?.length || 0)) best = L;
+      }
+      return best;
+    }
+
+    /**
      * Whose output `{input}` is assembled from — every incoming connection,
      * repeat edges included (they are how a pass receives the previous pass's
      * result). A feedback loop is the one node that ignores its own section:
      * the section is what it *produces*, not what it reads.
+     *
+     * A node reading from a loop's section reads the **loop**, not that step's
+     * raw output: the loop's own output is its final pass's result, so wiring
+     * the last body step straight into the end node carries the finished loop on
+     * just as the Exit output does — and, like the Exit, it waits for the loop
+     * to settle rather than reading a mid-run pass. A loop that was
+     * switched off never iterated, though: it is a plain wire whose input passes
+     * through, so the section's own output is read as-is.
      */
     function effectiveInputs(node: any): string[] {
       const ps = parents.get(node.id) || [];
       const body = loopBodySet.get(node.id);
-      if (!body || !body.size) return ps;
-      const outside = ps.filter((p) => !body.has(p));
-      return outside.length ? outside : ps;
+      const base = body && body.size && ps.some((p) => !body.has(p)) ? ps.filter((p) => !body.has(p)) : ps;
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const p of base) {
+        // A loop already carries its whole run in its own output, so it is never
+        // collapsed into a loop that encloses it.
+        const owner = byId.get(p)?.type === "loop" ? null : enclosingLoop(p);
+        const collapse = owner && !loopBodySet.get(owner.id)?.has(node.id) && run.nodes[owner.id]?.bypassed !== true;
+        const use = collapse ? owner.id : p;
+        if (seen.has(use)) continue;
+        seen.add(use);
+        out.push(use);
+      }
+      return out;
     }
 
     const settled = (id: string) => {
       const s = run.nodes[id].status;
       return s === "done" || s === "error" || s === "skipped" || s === "stopped";
     };
-    /** A loop that has begun satisfies its children, so its section can run while
-     *  the loop itself is still iterating (it never settles until the last pass). */
-    const provides = (id: string) => settled(id) || (byId.get(id)?.type === "loop" && run.nodes[id].status === "running");
+    /**
+     * Whether `parent` already satisfies the child waiting on it. A loop may
+     * satisfy the nodes of its **own section** as soon as it starts iterating —
+     * those are the steps it drives, so they must run while it is still looping
+     * (it never settles until the last pass). A node wired to the loop's
+     * **Exit** output, however, has to wait for the whole loop to settle: the
+     * loop's own output is only assembled once the last pass has run, so letting
+     * an exit-side step start early would feed it the loop's *input* instead of
+     * its result.
+     */
+    const provides = (id: string, child: any) => {
+      if (settled(id)) return true;
+      const parent = byId.get(id);
+      if (parent?.type === "loop" && run.nodes[id].status === "running") {
+        return loopBodySet.get(id)?.has(child.id) === true;
+      }
+      return false;
+    };
     /** True while any loop still has passes to run — nothing may finish yet. */
     const loopBusy = () => loopNodes.some((L: any) => run.nodes[L.id].status === "running");
     /** True once every node of a loop's section has settled: one pass is done. */
@@ -1385,8 +1478,10 @@ export function activate(api: any): void {
         s.passes = 0;
       }
     }
-    /** One pass's contribution to the loop node's own output: what its section
-     *  ended up producing, so a downstream node sees the whole loop. */
+    /** What one pass produced: the settled output of the loop section's terminal
+     *  nodes — the finished work of the step (or steps) the loop re-runs. It is
+     *  both what a feedback loop hands the next pass and, on the last pass, the
+     *  loop's own output. */
     function passOutput(loopId: string) {
       return (loopExits.get(loopId) || [])
         .map((id) => run.nodes[id].output)
@@ -1397,8 +1492,8 @@ export function activate(api: any): void {
       const ps = effectiveDeps(node);
       if (!ps.length) return false;
       const join = node.type === "agent" ? node.config.join : "all";
-      if (join === "first") return ps.some(provides);
-      return ps.every(provides);
+      if (join === "first") return ps.some((p) => provides(p, node));
+      return ps.every((p) => provides(p, node));
     };
     const gateFree = (node: any) => {
       for (const pid of effectiveDeps(node)) {
@@ -1467,17 +1562,8 @@ export function activate(api: any): void {
           const s = run.nodes[L.id];
           if (s.status !== "running" || !passDone(L.id)) continue;
           const body = loopBodies.get(L.id) || [];
-          const log = loopLogs.get(L.id);
-          if (log) {
-            const text = passOutput(L.id);
-            if (text) {
-              log.parts.push(text);
-              log.size += text.length;
-              // A long loop keeps its newest passes; the old ones fall off, the
-              // same way a node's own output is capped.
-              while (log.size > RUN_OUTPUT_MAX && log.parts.length > 1) log.size -= log.parts.shift()!.length;
-            }
-          }
+          // The pass that just finished: its section is settled and not re-armed
+          // yet, so its terminal nodes still hold this pass's result.
           // The run's whole loop budget, spent: stop with an error rather than
           // walking a product of counts (nested loops multiply).
           if (totalPasses >= MAX_LOOP_PASSES) {
@@ -1489,6 +1575,7 @@ export function activate(api: any): void {
             abortRun(run, "error", `run aborted: ${L.name} hit the loop ceiling (${MAX_LOOP_PASSES})`);
             return;
           }
+          const pass = passOutput(L.id);
           totalPasses++;
           if (s.iteration < s.iterations) {
             s.iteration++;
@@ -1496,21 +1583,18 @@ export function activate(api: any): void {
             // A feedback loop hands its section the result it just produced, so
             // each pass improves the last. A dominated-section loop keeps passing
             // the same material, exactly as before.
-            if (loopFeedback.has(L.id)) {
-              const latest = passOutput(L.id);
-              if (latest) s.output = latest.slice(0, RUN_OUTPUT_MAX);
-            }
+            if (loopFeedback.has(L.id) && pass) s.output = pass.slice(0, RUN_OUTPUT_MAX);
             rearmBody(body);
             logLine(run, L.id, "status", `↻ ${L.name} — pass ${s.iteration}/${s.iterations}`);
             saveRun(run);
           } else {
             s.status = "done";
             s.finishedAt = Date.now();
-            // Only now does the loop's own output become the whole loop: what
-            // reached it, then what each pass produced — so a node after the loop
-            // reads every iteration.
-            const parts = log ? [log.input, ...log.parts] : [];
-            s.output = parts.filter(Boolean).join("\n\n---\n\n").slice(-RUN_OUTPUT_MAX);
+            // The loop's own output is what its **last** pass produced — the
+            // finished work of the step wired to its Repeat output. It is never
+            // the seed plus a log of every pass, so a node after the loop (or on
+            // its Exit) reads the answer rather than the history.
+            s.output = pass.slice(0, RUN_OUTPUT_MAX);
             logLine(run, L.id, "status", `✔ ${L.name} — ${s.iterations} pass${s.iterations === 1 ? "" : "es"} done`);
             saveRun(run);
           }
@@ -1584,16 +1668,10 @@ export function activate(api: any): void {
             s.iterations = s.iterations > 0 ? s.iterations : clamp(Math.round(Number(node.config.count)), 1, MAX_LOOPS);
             s.iteration = 1;
             s.passes = s.passes || 0;
-            // The loop's output starts as what reached it; a feedback loop replaces
-            // it with each pass's result, and its own final output is only
-            // assembled once the last pass has run.
+            // Until its last pass settles, the loop carries what reached it: a
+            // feedback loop overwrites this with each pass's result as it goes,
+            // and the finished pass replaces it for good at the end.
             s.output = upstreamOutput(node).slice(0, RUN_OUTPUT_MAX);
-            // When the loop is fed by its own section (`start → agent → loop` with
-            // `loop.repeat → agent`) that section has already run, and that run IS
-            // pass 1 — so the pass it produces is the loop's whole input, and
-            // recording the seed as well would repeat the same text twice.
-            const bodySettled = body.every((b) => settled(b));
-            loopLogs.set(node.id, { input: bodySettled ? "" : s.output, parts: [], size: 0 });
             logLine(run, node.id, "status", loopFeedback.has(node.id)
               ? `🔁 ${node.name} — ${s.iterations} ${s.iterations === 1 ? "pass" : "passes"} over the step wired to its Repeat output`
               : `🔁 ${node.name} — ${s.iterations} ${s.iterations === 1 ? "pass" : "passes"} over ${body.length} node${body.length === 1 ? "" : "s"}`);
@@ -1701,15 +1779,27 @@ export function activate(api: any): void {
      */
     async function runNode(node: any) {
       const s = run.nodes[node.id];
-      // The node's user message, with its reference files (paths + a description
-      // of each) injected ahead of it — for every harness, since this is the
-      // prompt itself, not one CLI's flag.
+      // The node's user message leads in a `<user query>` tag, then its
+      // reference files (paths + a description of each) follow in a
+      // `<reference files/folder>` tag — the query first, then the material it
+      // points at. Every harness gets the same text, since this is the prompt
+      // itself, not one CLI's flag.
       const refs = buildRefBlock(node.config.refs);
       if (refs.missing.length) {
         logLine(run, node.id, "status", `⚠ reference file(s) not found: ${refs.missing.join(", ")}`);
       }
       const userMessage = resolvePrompt(node);
-      const prompt = refs.block ? `${refs.block}\n\n${userMessage}` : userMessage;
+      // The message is tagged so the model can tell the person's ask from the
+      // material it points at: the query in `<user query>`, then the reference
+      // files/folders in `<reference files/folder>` (only when there are any).
+      // An empty message stays empty — the tags are framing, so framing nothing
+      // would turn "this node has no prompt" into a run that spawns an agent to
+      // answer `<user query></user query>`; the Pi runner reports the emptiness
+      // instead ("the prompt is empty").
+      const queryTag = userMessage.trim() ? `<user query>\n${userMessage}\n</user query>` : "";
+      const prompt = refs.block
+        ? `${queryTag ? `${queryTag}\n\n` : ""}<reference files/folder>\n${refs.block}\n</reference files/folder>`
+        : queryTag;
       const cwd = resolveNodeCwd(node);
       const attempts = 1 + (Number.isFinite(node.config.retries) ? node.config.retries : 0);
       for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -1771,9 +1861,14 @@ export function activate(api: any): void {
         let cmd: string;
         let args: string[];
         if (node.config.harness === "custom") {
-          const template = node.config.command && node.config.command.trim() ? node.config.command : "echo \"$SW_PROMPT\"";
-          cmd = process.env.SHELL || "/bin/sh";
-          args = ["-c", template.replace(/\{prompt\}/g, prompt).replace(/\{task\}/g, run.task)];
+          // A custom node is a shell one-liner, so it runs through the platform's
+          // shell — `$SHELL -c` on POSIX, the command processor on Windows, where
+          // the node's variables are `%SW_PROMPT%`-style (see DEFAULT_CUSTOM_COMMAND
+          // and the hint in the node's settings popup).
+          const template = node.config.command && node.config.command.trim() ? node.config.command : DEFAULT_CUSTOM_COMMAND;
+          const plan = planCommand(template.replace(/\{prompt\}/g, prompt).replace(/\{task\}/g, run.task));
+          cmd = plan.file;
+          args = plan.args;
         } else {
           const spec = HARNESSES[node.config.harness] as any;
           if (!spec || !spec.bin) { resolve({ text: "", code: null, error: `unknown harness: ${node.config.harness}` }); return; }
@@ -1781,12 +1876,18 @@ export function activate(api: any): void {
           if (node.config.model && spec.modelFlag) args = [...args, spec.modelFlag, node.config.model];
           if (node.config.extraArgs) args = [...args, ...splitArgs(node.config.extraArgs)];
           args = [...args, ...capabilityArgs(spec, node.config)];
-          cmd = spec.bin;
+          // Launch the binary the host resolved to an absolute path, not the bare
+          // name: on Windows that is how a `claude.cmd`/`codex.cmd` is found at all
+          // (and on every platform it pins the one this node was validated against).
+          cmd = which(spec.bin, resolveBin) || spec.bin;
         }
 
         let child: any;
         try {
-          child = spawn(cmd, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+          // spawnCli owns the platform's launch rules: a `.cmd` shim is run
+          // through cmd.exe with every argument escaped, a real image is spawned
+          // directly, and POSIX is unchanged.
+          child = spawnCli(cmd, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
         } catch (err: any) {
           resolve({ text: "", code: null, error: `failed to spawn ${cmd}: ${err?.message ?? err}` });
           return;
@@ -1796,7 +1897,7 @@ export function activate(api: any): void {
         let errBuf = "";
         let timedOut = false;
         const timer = node.config.timeoutSec
-          ? setTimeout(() => { timedOut = true; try { child.kill("SIGKILL"); } catch { /* gone */ } }, node.config.timeoutSec * 1000)
+          ? setTimeout(() => { timedOut = true; killTree(child, "SIGKILL"); }, node.config.timeoutSec * 1000)
           : null;
 
         const consume = (stream: string) => (data: Buffer) => {
@@ -1989,7 +2090,11 @@ export function activate(api: any): void {
     return { workspace, run: rec };
   });
 
-  api.route("GET", "/subagent-workflow/harnesses", () => ({ harnesses: harnessList() }));
+  // `platform` rides along so the node's settings popup can say `$SW_PROMPT` or
+  // `%SW_PROMPT%` — a custom command is the one thing a user types per platform.
+  api.route("GET", "/subagent-workflow/harnesses", () => ({
+    harnesses: harnessList(), platform: process.platform,
+  }));
 
   /**
    * One folder of the workspace, for the reference browser: folders first, then

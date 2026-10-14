@@ -40,7 +40,9 @@ import { listAuthProviders, startLogin, getLogin, answerLogin, cancelLogin, logo
 import { keyEntries, maskSecret, setStoredKey, clearStoredKey, isValidKeyName, MAX_KEY_LENGTH, KNOWN_KEYS } from "./api-keys.ts";
 import { seedProviderEnvFromShell } from "./provider-env.ts";
 import { parseLLMRequestBody, parseLLMResponseBody, extractUserMsgPreview } from "../../shared/capture.ts";
-import { resolveExecutable } from "../../shared/shell.ts";
+import {
+  resolveExecutable, spawnCli, planSpawn, shellCommandPlan, killTree, isWindows,
+} from "../../shared/shell.ts";
 import { execFileSync, spawn } from "node:child_process";
 import * as crypto from "node:crypto";
 import { WebSocket } from "ws";
@@ -2623,6 +2625,10 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({
         ok: true,
         version: VERSION,
+        // Which OS hosts this server. The UI reads it to name things the way the
+        // platform does (the Terminal's shell button, which opens bash on
+        // Linux/macOS and PowerShell or cmd on Windows).
+        platform: process.platform,
         uptime_s: Math.round((Date.now() - startTime) / 1000),
         events_total: totals.events_total ?? 0,
         sessions_total: totals.sessions_total ?? 0,
@@ -4253,6 +4259,16 @@ const pluginKit = {
   // Executable resolution (PATH + platform bin dirs + SCOPE_SYSTEM_BIN_DIRS) for
   // a plugin that shells out to an external harness (the Workflow nodes).
   resolveExecutable,
+  // …and the platform's launch rules for that harness: a Windows `claude.cmd`
+  // cannot be spawned directly (EINVAL since CVE-2024-27980) and a shell
+  // one-liner is `cmd /d /s /c` rather than `sh -c`. `spawnCli` applies both, so
+  // a plugin never has to hand-roll cmd.exe escaping; `shellCommandPlan` is for
+  // a plugin that runs a user-typed command, and `killTree` takes a whole
+  // process tree down (taskkill /T on Windows, where a signal only reaches the
+  // cmd.exe wrapper). `isWindows` is for the last few places that must branch
+  // anyway. All five are feature-detected by plugins: an older host is
+  // POSIX-only and provides none of them.
+  spawnCli, planSpawn, shellCommandPlan, killTree, isWindows,
   // Chat run state, for plugins that own a background run (the Office queue):
   // a task's dispatch outlives the page that started it, so the plugin needs to
   // tell a still-running session from an orphan, and to stop it on Pause.

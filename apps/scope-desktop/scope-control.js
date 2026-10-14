@@ -92,7 +92,11 @@ function waitForHealth(healthUrl, { timeoutMs = 20000, intervalMs = 300 } = {}) 
   // compiled server bundle (node-pty/ws resolve from the app's node_modules).
   function serverLaunch() {
     if (app && app.isPackaged) {
-      const nodeBin = path.join(process.resourcesPath, "node", "bin", "node");
+      // The portable Node that ships inside the package: `bin/node` on
+      // Linux/macOS, a bare `node.exe` at the root on Windows.
+      const nodeBin = process.platform === "win32"
+        ? path.join(process.resourcesPath, "node", "node.exe")
+        : path.join(process.resourcesPath, "node", "bin", "node");
       const serverPath = path.join(__dirname, "server-bundle", "server.js");
       return { bin: nodeBin, args: [serverPath], cwd: __dirname };
     }
@@ -153,9 +157,16 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
 }
 
 function stopServer(proc) {
-  if (proc && !proc.killed) {
-    try { process.kill(-proc.pid, "SIGTERM"); } catch (_) { /* already gone */ }
+  if (!proc || proc.killed) return;
+  if (process.platform === "win32") {
+    // Windows has no process-group signals: take the tree down with taskkill
+    // (the server's spawned agents/terminals are children of it).
+    try {
+      require("node:child_process").spawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { stdio: "ignore" });
+    } catch (_) { /* already gone */ }
+    return;
   }
+  try { process.kill(-proc.pid, "SIGTERM"); } catch (_) { /* already gone */ }
 }
 
 module.exports = { config, waitForHealth, ensureServer, stopServer, SCOPE_DIR, PROJECT_ROOT };

@@ -27,9 +27,10 @@
  * `<provider>/<id>` (what pi resolves); the **end** node shows the workflow's
  * final output once a run reaches it. An agent node can also carry **reference
  * files and folders** — paths the user types or picks from a browser of the
- * workspace's own tree, each with a description — which are injected ahead of
- * its user message, so a step is pointed at the material it needs instead of
- * having it pasted into the message. Connections decide the
+ * workspace's own tree, each with a description — which ride in its user
+ * message: the query in a `<user query>` tag, then this material in a
+ * `<reference files/folder>` tag, so a step is pointed at what it needs instead
+ * of having it pasted into the message. Connections decide the
  * order of a run: everything wired in parallel off one node runs in parallel,
  * and a chain runs one node after another. Nodes can be cloned and the graph
  * exported/imported as JSON. An **approval** node pauses the run for a person: the banner above the
@@ -37,10 +38,11 @@
  * and Approve / Reject. The run panel also lists **past runs** (reopen one to
  * replay its log and node badges), and the toolbar's ⏱ button opens the same
  * kind of popup on the **triggers** — a schedule and an event watch that start
- * runs on their own. The settings popup takes the whole screen, because a node's
- * references, the model catalogue and the end node's final output all need the
- * room: a node, a connection and the triggers are all edited in that one modal,
- * over the canvas.
+ * runs on their own. The settings popup is a panel 80% of the window wide and
+ * full height, because a node's references, the model catalogue and the end
+ * node's final output all need the room while the canvas they belong to stays
+ * visible around it: a node, a connection and the triggers are all edited in
+ * that one modal, over the canvas.
  *
  * A **standalone plugin**: this bundle, its stylesheet (client.css) and its
  * server half (server.ts) all live in apps/scope-server/plugins/subagent-workflow/,
@@ -114,6 +116,10 @@
   /** This workspace's triggers (schedule + event watch), as the server sees them. */
   let triggers = null;
   let harnesses = [];
+  /** The server's OS (`"win32"` on Windows), as `/harnesses` reports it. It
+   *  decides only presentation: a custom command's variables are `%SW_PROMPT%`
+   *  there and `$SW_PROMPT` everywhere else (see customVar). */
+  let serverPlatform = "";
   let cwd = "";
   let selected = null;
   /**
@@ -235,10 +241,17 @@
    * whole node + edge DOM twice.
    */
   async function loadHarnesses() {
-    try { harnesses = (await getJson("/subagent-workflow/harnesses")).harnesses || []; }
-    catch { harnesses = []; }
+    try {
+      const data = await getJson("/subagent-workflow/harnesses");
+      harnesses = data.harnesses || [];
+      serverPlatform = data.platform || "";
+    } catch { harnesses = []; }
     renderDialog();
   }
+
+  /** A node variable as this server's shell spells it: `%SW_PROMPT%` on Windows,
+   *  `$SW_PROMPT` elsewhere. */
+  const customVar = (name) => (serverPlatform === "win32" ? `%${name}%` : `$${name}`);
 
   function syncPolling() {
     const running = run && run.status === "running";
@@ -761,10 +774,22 @@
   // triggers (from the toolbar). The canvas keeps the full width, and the popup
   // is the only place a setting is edited.
 
-  /** The frame every popup shares: head, scrolling body, actions row. */
-  function dialogHtml(head, body, actions) {
+  /** The popup's close control. Every popup has exactly one. */
+  function closeXHtml() {
+    return `<button class="sw-dlg-x" id="sw-close-x" type="button" title="Close" aria-label="Close">✕</button>`;
+  }
+
+  /**
+   * The frame every popup shares: head, scrolling body, actions row.
+   *
+   * `closeInHead` leaves the close control to the caller's own head markup
+   * instead of appending it. A node dialog asks for that: its head *is* its name
+   * field, so a button sitting next to it would eat into the content column and
+   * leave the field's right edge short of the settings below it.
+   */
+  function dialogHtml(head, body, actions, { closeInHead = false } = {}) {
     return `<div class="sw-dlg-head">${head}` +
-        `<button class="sw-dlg-x" id="sw-close-x" type="button" title="Close" aria-label="Close">✕</button></div>` +
+        (closeInHead ? "" : closeXHtml()) + `</div>` +
       `<div class="sw-dlg-body">${body}</div>` +
       `<div class="sw-dlg-actions">${actions}<button class="btn-sm sw-dlg-close" id="sw-close" type="button">Close</button></div>`;
   }
@@ -1164,8 +1189,9 @@
           `<textarea class="set-input sw-textarea" id="sw-f-prompt" rows="5" spellcheck="false" placeholder="{input}">${esc(c.prompt || "")}</textarea>` +
           `<div class="sw-hint"><code>{input}</code> = what the nodes before this one produced, <code>{task}</code> = the run task.</div></label>` +
         `<label class="sw-field sw-only-custom" id="sw-custom-wrap"><span>Command</span>` +
-          `<input class="set-input" id="sw-f-command" value="${escAttr(c.command || "")}" placeholder="my-agent -p &quot;$SW_PROMPT&quot;">` +
-          `<div class="sw-hint">What this provider runs. <code>$SW_PROMPT</code>, <code>$SW_TASK</code>, <code>$SW_NODE</code> and <code>$SW_REFS</code> are set for it.</div></label>` +
+          `<input class="set-input" id="sw-f-command" value="${escAttr(c.command || "")}" placeholder="my-agent -p &quot;${customVar("SW_PROMPT")}&quot;">` +
+          `<div class="sw-hint">What this provider runs. <code>${esc(customVar("SW_PROMPT"))}</code>, <code>${esc(customVar("SW_TASK"))}</code>, <code>${esc(customVar("SW_NODE"))}</code> and <code>${esc(customVar("SW_REFS"))}</code> are set for it.` +
+            (serverPlatform === "win32" ? ` Run through <code>cmd.exe</code>.` : ` Run through your shell.`) + `</div></label>` +
         refsFieldHtml(n);
     } else if (n.type === "approval") {
       const c = n.config || {};
@@ -1203,17 +1229,24 @@
     }
 
     dlgEl.innerHTML = dialogHtml(
-      (n.type === "agent"
-        ? harnessIcon(n.config?.harness, providerLabel(n.config?.harness))
-        : `<span class="sw-dlg-glyph sw-t-${n.type}">${nodeGlyph(n.type)}</span>`) +
-      // The name is the node's label on the canvas, so it stays editable — it is
-      // not one of the node's three settings, just what it is called.
-      `<input class="set-input sw-dlg-name" id="sw-f-name" value="${escAttr(n.name)}" maxlength="60" aria-label="Node name" placeholder="node name">` +
-      `<span class="sw-dlg-kind">${title.replace(" node", "")}</span>`,
+      // The node's identity, in one field-shaped box: its provider's mark, the
+      // name (the label it wears on the canvas), its kind and the popup's close
+      // control. The box *is* the head, so the head and the body share one
+      // column (--sw-col-x) and the name field lands on exactly the same left
+      // and right edges as the settings below it.
+      `<span class="sw-dlg-name-wrap">` +
+        (n.type === "agent"
+          ? harnessIcon(n.config?.harness, providerLabel(n.config?.harness))
+          : `<span class="sw-dlg-glyph sw-t-${n.type}">${nodeGlyph(n.type)}</span>`) +
+        `<input class="sw-dlg-name" id="sw-f-name" value="${escAttr(n.name)}" maxlength="60" aria-label="Node name" placeholder="node name">` +
+        `<span class="sw-dlg-kind">${title.replace(" node", "")}</span>` +
+        closeXHtml() +
+      `</span>`,
       fields,
       `<button class="btn-sm sw-primary" id="sw-save" type="button">Save node</button>` +
       (n.type !== "start" && n.type !== "end" ? `<button class="btn-sm" id="sw-duplicate" type="button" title="Clone this node, keeping its settings">Duplicate</button>` : "") +
       `<button class="btn-sm sw-danger" id="sw-delete" type="button">Delete</button>`,
+      { closeInHead: true },
     );
 
     dlgEl.querySelector("#sw-save").addEventListener("click", () => saveNode(n));

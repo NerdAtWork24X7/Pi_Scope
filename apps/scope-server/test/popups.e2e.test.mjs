@@ -1,8 +1,9 @@
 // End-to-end tests for the popup design system: every surface that covers the
 // app must wear the same chrome — one scrim, one panel (radius · hairline ·
-// shadow), one title ramp, one close button, one stacking ladder — with the two
-// full-bleed surfaces (the workflow settings modal and the markdown editor) as
-// the single, deliberate variant.
+// shadow), one title ramp, one close button, one stacking ladder — with the
+// markdown editor as the single, deliberate full-bleed variant. The workflow's
+// settings modal is an 80%-wide panel (so the canvas stays visible around it),
+// and the head, body and actions of that panel share one content column.
 //
 // A real server is booted with a git repo, so the popups under test are the real
 // ones (a dynamically built Git confirm, the Settings plugin popup, the agent
@@ -109,8 +110,8 @@ after(async () => {
 });
 
 /** Open a page on a view with the shared cwd restored, and no page errors. */
-async function openView(view) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+async function openView(view, contextOptions = {}) {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ...contextOptions });
   await context.addInitScript((cwd) => {
     try { localStorage.setItem("scope-cwd", cwd); } catch { /* private mode */ }
   }, repoDir);
@@ -237,8 +238,8 @@ describe("popup design system (superdesign-alpha)", () => {
     assert.deepEqual(errors, []);
   });
 
-  test("the two full-bleed surfaces are one deliberate variant, not drift", async () => {
-    // The markdown editor (Settings → SubAgent → Edit) is the app's other
+  test("the full-bleed editor, the 80% workflow panel, and the one column inside it", async () => {
+    // The markdown editor (Settings → SubAgent → Edit) is the app's one
     // full-bleed surface: square, borderless, shadowless, exactly viewport-sized.
     const { page, context, errors } = await openView("settings");
     await page.click('.settings-nav-item[data-sec="agent"]');
@@ -264,10 +265,14 @@ describe("popup design system (superdesign-alpha)", () => {
     assert.deepEqual(errors, []);
     await context.close();
 
-    // The workflow plugin's settings modal is the other full-bleed surface: the
-    // same scrim and ladder, square, borderless, shadowless, filling the screen
-    // — but the same title ramp as every floating popup.
-    const wf = await openView("subagent-workflow");
+    // The workflow plugin's settings modal is a floating PANEL, not a full-bleed
+    // surface: it is 80% of the window wide so the canvas it was opened over
+    // stays in view down either side of the scrim, and it wears the shared panel
+    // chrome — the same scrim, ladder and title ramp as every other popup.
+    //
+    // Reduced motion, so the panel's entry animation is off and the box measured
+    // below is the box the user ends up with (`rect` reflects a live transform).
+    const wf = await openView("subagent-workflow", { reducedMotion: "reduce" });
     await wf.page.waitForSelector("#subagent-workflow-pane .sw-node");
     await wf.page.click("#sw-triggers");
     await wf.page.waitForSelector(".sw-modal-backdrop:not([hidden]) .sw-dlg-title");
@@ -275,27 +280,50 @@ describe("popup design system (superdesign-alpha)", () => {
     const wfTokens = await tokenChrome(wf.page);
     assert.equal(wfChrome.scrim, wfTokens.scrim, "the workflow modal shares the scrim");
     assert.equal(wfChrome.z, wfTokens.z, "and the stacking order");
-    assert.equal(wfChrome.radius, "0px", "square: it is the viewport too");
-    assert.equal(wfChrome.shadow, "none", "no shadow");
-    assert.equal(wfChrome.borderWidth, "0px", "no border");
+    assert.equal(wfChrome.radius, wfTokens.radius, "the shared panel radius — it is a panel now");
+    assert.equal(wfChrome.border, wfTokens.border, "and the shared hairline");
+    assert.equal(wfChrome.shadow, wfTokens.shadow, "and the shared panel shadow");
     assert.equal(wfChrome.title.size, "15px", "and the shared title ramp");
     assert.equal(wfChrome.title.weight, "600");
     assert.equal(wfChrome.title.family, full.title.family, "the same display face as the editor");
-    const wfFills = await wf.page.evaluate(() => {
+    const wfBox = await wf.page.evaluate(() => {
       const r = document.querySelector(".sw-modal").getBoundingClientRect();
       const b = document.querySelector(".sw-modal-backdrop").getBoundingClientRect();
+      const bcs = getComputedStyle(document.querySelector(".sw-modal-backdrop"));
+      const pad = parseFloat(bcs.paddingLeft) + parseFloat(bcs.paddingRight);
+      const padV = parseFloat(bcs.paddingTop) + parseFloat(bcs.paddingBottom);
       const d = document.documentElement;
-      return { w: Math.round(r.width), h: Math.round(r.height), bw: Math.round(b.width), bh: Math.round(b.height), vw: d.clientWidth, vh: d.clientHeight };
+      return {
+        w: Math.round(r.width), h: Math.round(r.height),
+        bw: Math.round(b.width), bh: Math.round(b.height),
+        avail: Math.round(b.width - pad), availV: Math.round(b.height - padV),
+        vw: d.clientWidth, vh: d.clientHeight,
+      };
     });
-    assert.ok(Math.abs(wfFills.w - wfFills.bw) <= 20 && Math.abs(wfFills.h - wfFills.bh) <= 20, "the surface fills its scrim");
-    assert.ok(Math.abs(wfFills.bw - wfFills.vw) <= 20 && Math.abs(wfFills.bh - wfFills.vh) <= 20, "and the scrim is the viewport");
-    // A node's own settings reuse that exact panel.
+    assert.ok(Math.abs(wfBox.bw - wfBox.vw) <= 20 && Math.abs(wfBox.bh - wfBox.vh) <= 20, "the scrim is the viewport");
+    assert.ok(Math.abs(wfBox.w / wfBox.vw - 0.8) < 0.005, `the panel is 80% of the window wide (got ${wfBox.w} of ${wfBox.vw})`);
+    assert.ok(Math.abs(wfBox.h - wfBox.availV) <= 2, `and full height, inset by the scrim's padding (got ${wfBox.h}/${wfBox.availV})`);
+    // A node's own settings reuse that exact panel — and its name field sits on
+    // the same column as the settings below it (the head, body and actions row
+    // all pad by --sw-col-x), so it does not stretch out past them.
     await wf.page.keyboard.press("Escape");
     await wf.page.click("#subagent-workflow-pane .sw-node .sw-node-config");
     await wf.page.waitForSelector(".sw-modal-backdrop:not([hidden]) .sw-dlg-name");
     const nodeDlg = await chromeOf(wf.page, ".sw-modal-backdrop:not([hidden])", ".sw-modal", null);
-    assert.equal(nodeDlg.radius, "0px", "a node's settings open the same full-bleed panel");
+    assert.equal(nodeDlg.radius, wfTokens.radius, "a node's settings open the same panel");
     assert.equal(nodeDlg.scrim, wfTokens.scrim, "over the same scrim");
+    const align = await wf.page.evaluate(() => {
+      const box = document.querySelector(".sw-dlg-head .sw-dlg-name-wrap").getBoundingClientRect();
+      const field = document.querySelector(".sw-dlg-body .sw-field").getBoundingClientRect();
+      return {
+        boxLeft: Math.round(box.left), fieldLeft: Math.round(field.left),
+        boxRight: Math.round(box.right), fieldRight: Math.round(field.right),
+      };
+    });
+    assert.equal(align.boxLeft, align.fieldLeft, "the node's name field starts on the body's column");
+    // ...and ends on it: the close control is nested *inside* the name box, so
+    // the box — not a button parked beside it — is what spans the column.
+    assert.equal(align.boxRight, align.fieldRight, "and ends on it — not short of the fields below");
     assert.deepEqual(wf.errors, []);
     await wf.context.close();
   });

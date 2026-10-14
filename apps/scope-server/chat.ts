@@ -27,11 +27,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readStoredKeys } from "./api-keys.ts";
-import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable } from "../../shared/shell.ts";
+import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spawnCli } from "../../shared/shell.ts";
 // Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
 // PATH (force-loading the Pi Scope extension). Must be imported before PI_BIN is
 // used so chat subprocesses launch the bundled agent, not a global install.
-import { PI_BIN } from "./pi-bundle.ts";
+import { PI_BIN, PI_LAUNCH } from "./pi-bundle.ts";
 
 const ENCODER = new TextEncoder();
 
@@ -489,7 +489,9 @@ function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
   // which left the shim behind pnpm's global bin dir: subagents then ran the
   // global pi, rejected the Pi Scope extension's flags (`Unknown option:
   // --o-name`) and exited 1, surfacing as "<agent> failed to start".
-  if (PI_BIN.includes("/")) {
+  // `path.isAbsolute`, not a `/` test: a bundled shim on Windows is
+  // `C:\…\bin\pi.cmd`, which has no forward slash in it.
+  if (path.isAbsolute(PI_BIN)) {
     const dir = path.dirname(PI_BIN);
     const at = parts.indexOf(dir);
     if (at > 0) parts.splice(at, 1);
@@ -513,8 +515,16 @@ function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
 /** The user's interactive shell, used to spawn pi with the environment their
  *  terminal would have. Prefers $SHELL when it is bash/zsh (so the user's own
  *  shell rc is the one sourced), then bash, then zsh. Null when neither is
- *  installed — spawnChat then falls back to a direct spawn. */
+ *  installed — spawnChat then falls back to a direct spawn.
+ *
+ *  Windows always takes the direct spawn: there is no bash unless Git for
+ *  Windows is installed, and even then the `-ic` + fd-3 handshake below is a
+ *  POSIX-shell contract, while the binary it would have to run (the bundled
+ *  `pi.cmd` when Pi Scope owns a bundle) is a cmd.exe script. `chatChildEnv`
+ *  already patches the environment a GUI launch would be missing (stored API
+ *  keys, PATH, Playwright), so nothing is lost. */
 function resolveInteractiveShell(): string | null {
+  if (process.platform === "win32") return null;
   const candidates: string[] = [];
   const fromEnv = (process.env.SHELL || "").trim();
   if (fromEnv) candidates.push(fromEnv);
@@ -546,7 +556,7 @@ function chatPathPrefix(cwd: string): string {
   const child = String(chatChildEnv(cwd).PATH || "").split(path.delimiter).filter(Boolean);
   const inherited = new Set(String(process.env.PATH || "").split(path.delimiter).filter(Boolean));
   const extra = child.filter((dir) => !inherited.has(dir));
-  const piDir = PI_BIN.includes("/") ? path.dirname(PI_BIN) : "";
+  const piDir = path.isAbsolute(PI_BIN) ? path.dirname(PI_BIN) : "";
   const prefix: string[] = [];
   if (piDir) prefix.push(piDir);
   for (const dir of extra) if (dir !== piDir) prefix.push(dir);
@@ -623,7 +633,14 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
     // fd 3 is pi's stdout; fd 1 (shell/rc noise) was discarded, fd 2 is stderr.
     out = proc.stdio[3] as NodeJS.ReadableStream;
   } else {
-    proc = spawn(PI_BIN, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    // No POSIX shell to run this through (Windows, or a host without bash):
+    // launch the agent directly. `PI_LAUNCH` is node + the CLI entry when Pi
+    // Scope owns the bundle — a real image, so no `cmd.exe` and no argument
+    // escaping in the middle — and `spawnCli` handles a `.cmd` shim for the
+    // override/global sources that are somebody else's binary.
+    proc = spawnCli(PI_LAUNCH.file, [...PI_LAUNCH.args, ...args], {
+      cwd, env, stdio: ["pipe", "pipe", "pipe"],
+    });
     out = proc.stdout as NodeJS.ReadableStream;
   }
 
@@ -1086,7 +1103,11 @@ export async function generateCommitMessage(opts: {
 }): Promise<string> {
   const { cwd, model, prompt } = opts;
   const args = ["--print", "--no-session", "--model", model, prompt];
-  const proc = spawn(PI_BIN, args, { cwd, env: chatChildEnv(cwd), stdio: ["ignore", "pipe", "pipe"] });
+  // Same launch rule as Chat's direct path (see spawnChat): an owned bundle is
+  // node + CLI entry, anything else is a `.cmd`-aware spawn.
+  const proc = spawnCli(PI_LAUNCH.file, [...PI_LAUNCH.args, ...args], {
+    cwd, env: chatChildEnv(cwd), stdio: ["ignore", "pipe", "pipe"],
+  });
 
   let out = "";
   let err = "";

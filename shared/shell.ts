@@ -8,11 +8,19 @@
  * and stt.ts (GROQ_API_KEY for dictation) have to read those files the same
  * way, and both chat.ts and terminal.ts have to quote values for `sh -c`.
  * Those were three near-identical local copies; they live here now.
+ *
+ * The bottom of the file is the **platform layer**: how to launch a program on
+ * Windows, where `npm`, `pi` and every coding-agent CLI is a `.cmd` shim that
+ * CreateProcess cannot run directly, and where a shell one-liner is `cmd /c`
+ * rather than `sh -c`. Every helper there takes the platform as an optional
+ * argument so the win32 paths are unit-tested from Linux (see
+ * apps/scope-server/test/windows-compat.test.mjs).
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 
 /** Shell rc files an interactive terminal sources, in the order we check them. */
 export function shellRcFiles(): string[] {
@@ -178,4 +186,177 @@ export function resolveExecutable(name: string): string | null {
 /** Whether `name` resolves to an executable (see resolveExecutable). */
 export function hasExecutable(name: string): boolean {
   return resolveExecutable(name) !== null;
+}
+
+// ─── Platform layer (Windows-first) ─────────────────────────────────────────
+//
+// On Windows a `npm`, `pi`, `claude` or `codex` on PATH is almost never an
+// image CreateProcess can run: it is a `.cmd`/`.bat` shim that must be handed
+// to the command processor. Node has refused to spawn one without a shell since
+// CVE-2024-27980 (`EINVAL`), and Node's own `shell: true` joins argv into a
+// command line *without* escaping it — which is wrong the moment an argument is
+// a user's prompt. So the escaping lives here, once, with tests.
+
+/** True on Windows, or on the `platform` a caller passes in (for tests). */
+export function isWindows(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32";
+}
+
+/** This platform's command processor — `cmd.exe` on Windows. */
+export function windowsShell(): string {
+  return (process.env.ComSpec || process.env.COMSPEC || "cmd.exe").trim() || "cmd.exe";
+}
+
+/**
+ * The characters cmd.exe reads as syntax. Each is escaped with a caret, which
+ * is how a value survives cmd's own parsing as a literal. (The escaping rules
+ * are cmd's, from https://qntm.org/cmd — the same ones cross-spawn uses, so a
+ * shim behaves the same whichever way it is launched.)
+ */
+const CMD_META_RE = /([()\][%!^"`<>&|;, *?])/g;
+
+/** One *command* (a program path): escape its metacharacters, add no quotes. */
+function escapeCmdCommand(arg: string): string {
+  return String(arg).replace(CMD_META_RE, "^$1");
+}
+
+/**
+ * One *argument*: quote it for cmd, then escape what quoting cannot cover.
+ *
+ * A run of backslashes before a double quote is doubled (so the quote is not
+ * swallowed as an escape), the same at the end of the string (so the closing
+ * quote we add is not itself escaped), then the whole thing is wrapped in
+ * quotes and every cmd metacharacter — including the `%` that would otherwise
+ * expand a variable — is caret-escaped. `double` escapes them a second time,
+ * which a shim inside `node_modules/.bin` needs: cmd strips one level when it
+ * parses the command line, and the shim's inner cmd parses it again.
+ */
+function escapeCmdArgument(arg: string, double = false): string {
+  let s = String(arg);
+  s = s.replace(/(?=(\\+?)?)\1"/g, "$1$1\\\"");
+  s = s.replace(/(?=(\\+?)?)\1$/, "$1$1");
+  s = `"${s}"`;
+  s = s.replace(CMD_META_RE, "^$1");
+  if (double) s = s.replace(CMD_META_RE, "^$1");
+  return s;
+}
+
+/** A full cmd.exe command line for `file arg arg…`, each part escaped. */
+export function windowsCommandLine(file: string, args: string[], doubleEscapeMetaChars = false): string {
+  return [escapeCmdCommand(file), ...args.map((a) => escapeCmdArgument(String(a), doubleEscapeMetaChars))].join(" ");
+}
+
+/** How to launch something: the resolved file, its args, and spawn options. */
+export interface SpawnPlan {
+  file: string;
+  args: string[];
+  shell: boolean;
+  /** Set when `args` is already a finished command line (Windows + cmd.exe). */
+  windowsVerbatimArguments?: boolean;
+}
+
+/**
+ * How to really launch `file args…` on `platform`.
+ *
+ * POSIX (and any Windows target that is a genuine image — `.exe`/`.com`): spawn
+ * the file directly, exactly as before. A Windows `.cmd`/`.bat` shim, or a bare
+ * name that resolves to one, is run through cmd.exe with every argument escaped
+ * (see `windowsCommandLine`); `windowsVerbatimArguments` then tells Node to pass
+ * that line through untouched instead of quoting it a second time.
+ *
+ * `file` should be an absolute path where one is known (`resolveExecutable`
+ * returns one), so no shell is needed to find it.
+ */
+export function planSpawn(file: string, args: string[] = [], platform: NodeJS.Platform = process.platform): SpawnPlan {
+  const target = String(file || "");
+  const argv = args.map((a) => String(a));
+  if (!isWindows(platform)) return { file: target, args: argv, shell: false };
+  // A real executable needs no shell. `.exe`/`.com` is what CreateProcess runs;
+  // anything else (`.cmd`, `.bat`, or a bare `npm`) is script text.
+  if (/\.(exe|com)$/i.test(target)) return { file: target, args: argv, shell: false };
+  const double = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(target);
+  return {
+    file: windowsShell(),
+    args: ["/d", "/s", "/c", `"${windowsCommandLine(target, argv, double)}"`],
+    shell: false,
+    windowsVerbatimArguments: true,
+  };
+}
+
+/**
+ * Spawn `file args…`, handling the Windows shim case (see `planSpawn`). Every
+ * server spawn of a PATH program — pi, npm, a Workflow node's harness — goes
+ * through this so the .cmd rules live in one place.
+ */
+export function spawnCli(
+  file: string,
+  args: string[] = [],
+  options: SpawnOptions = {},
+  platform: NodeJS.Platform = process.platform,
+): ChildProcess {
+  const plan = planSpawn(file, args, platform);
+  return spawn(plan.file, plan.args, {
+    ...options,
+    shell: plan.shell,
+    windowsVerbatimArguments: plan.windowsVerbatimArguments,
+  });
+}
+
+/**
+ * How to run a shell one-liner — the portable `sh -c "…"`.
+ *
+ * POSIX: `$SHELL` (or `/bin/sh`) with `-c`, so the command runs in the user's
+ * own shell. Windows: the command processor with `/d /s /c`; a custom command
+ * written for POSIX needs `%SW_PROMPT%`-style variables there, which is why the
+ * Workflow's Custom-command hint says so.
+ */
+export function shellCommandPlan(command: string, platform: NodeJS.Platform = process.platform): { file: string; args: string[] } {
+  if (isWindows(platform)) return { file: windowsShell(), args: ["/d", "/s", "/c", String(command)] };
+  return { file: (process.env.SHELL || "/bin/sh").trim() || "/bin/sh", args: ["-c", String(command)] };
+}
+
+/**
+ * Shells the in-browser Terminal may open, best first. Git for Windows ships a
+ * real bash, and the Terminal's cwd sync and `cd` injection speak POSIX, so it
+ * is preferred when it is installed; PowerShell and `cmd` are the fallbacks
+ * every Windows machine has.
+ */
+export function interactiveShellCandidates(platform: NodeJS.Platform = process.platform): string[] {
+  if (isWindows(platform)) return ["bash", "pwsh", "powershell", "cmd"];
+  return ["bash", "zsh", "sh"];
+}
+
+/**
+ * Whether a resolved shell understands the POSIX syntax the Terminal uses to
+ * follow the workspace rail (`cd -- <path>`). False for PowerShell and `cmd`,
+ * where that injection is skipped instead of typing nonsense into the shell.
+ */
+export function supportsPosixCommandSyntax(shellPath: string): boolean {
+  // Split on both separators: the answer must not depend on which platform is
+  // asking (a Windows shell path is checked from Windows, but tests run here).
+  const base = String(shellPath || "").split(/[\\/]/).pop()!.toLowerCase().replace(/\.(exe|cmd|bat)$/, "");
+  return ["bash", "zsh", "sh", "dash", "ksh", "ash"].includes(base);
+}
+
+/**
+ * Stop a process **and everything it started**.
+ *
+ * POSIX: a signal to the process group leader we spawned. Windows has no
+ * signals and `child.kill()` only ends the direct child — a harness started
+ * through cmd.exe would leave its real work running — so the tree is taken down
+ * with `taskkill /T /F`, and `kill()` is still called as a backstop.
+ */
+export function killTree(
+  child: { pid?: number; kill: (signal?: NodeJS.Signals | number) => boolean } | null | undefined,
+  signal: NodeJS.Signals = "SIGTERM",
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (!child) return;
+  if (isWindows(platform)) {
+    const pid = Number(child.pid);
+    if (Number.isFinite(pid) && pid > 0) {
+      try { spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* already gone */ }
+    }
+  }
+  try { child.kill(signal); } catch { /* already gone */ }
 }

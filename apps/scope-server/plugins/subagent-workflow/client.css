@@ -341,17 +341,24 @@
 /*
  * Node settings used to sit in a sidebar beside the canvas. They are a modal
  * now, opened from the gear on the node itself (or a double-click on the card),
- * so a node is edited over the canvas it belongs to. The popup takes the whole
- * viewport: a node's references, its model catalogue and the end node's final
- * output all need the room, and a full-screen surface is what makes them
- * readable at a glance. One modal carries all three settings surfaces: a node, a
- * connection, and the workflow-level triggers from the toolbar.
+ * so a node is edited over the canvas it belongs to. The panel is **80% of the
+ * window wide** and full height: a node's references, its model catalogue and the
+ * end node's final output all need the room, while the scrim down either side
+ * keeps the canvas it belongs to in view. One modal carries all three settings
+ * surfaces: a node, a connection, and the workflow-level triggers from the
+ * toolbar.
+ *
+ * It is a *panel*, not a full-bleed surface: the shared popup chrome (radius ·
+ * hairline · shadow — see styles.css → superdesign-alpha — popups) applies. And
+ * it has **one content column**: `--sw-col-x` pads the head, the body and the
+ * actions row alike, so the node's name field in the head lines up with the
+ * fields below it rather than stretching out past them on a wide monitor.
  */
 
 .sw-modal-backdrop {
   position: fixed; inset: 0; z-index: var(--z-modal);
   display: flex; align-items: center; justify-content: center;
-  padding: 0;
+  padding: 16px;
   /* The app-wide popup scrim (see styles.css → superdesign-alpha — popups). */
   background: var(--scrim);
 }
@@ -359,18 +366,26 @@
    otherwise beat the user agent's rule for [hidden] and it would never hide. */
 .sw-modal-backdrop[hidden] { display: none; }
 
-/* The full-bleed variant of the popup chrome: a reading surface, not a dialog,
-   so it fills the viewport square and carries no border or shadow. */
+/* The panel: 80% of the window wide (clamped to the scrim's own box on a very
+   narrow window), full height — the backdrop's padding is the gap around it. */
 .sw-modal {
+  /* The one content column: 1080px centred, or the panel's own width when the
+     window is narrower. Percentages here resolve against the panel for every
+     child that uses it, so head, body and actions land on the same edge. */
+  --sw-col-x: max(16px, calc((100% - 1080px) / 2));
   display: flex; flex-direction: column;
-  width: 100%; height: 100%; max-width: none; max-height: none;
-  background: var(--surface); border: 0; border-radius: 0;
+  width: min(80vw, 100%); height: 100%; max-width: none; max-height: none;
+  background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--r-panel);
+  box-shadow: var(--shadow-panel);
+  /* Keep the head, the body and the actions row inside the rounded corners. */
+  overflow: hidden;
   animation: sw-dlg-in .16s var(--ease-out) both;
 }
 @keyframes sw-dlg-in { from { opacity: 0; transform: translateY(8px) scale(.99); } }
 @media (prefers-reduced-motion: reduce) { .sw-modal { animation: none; } }
 
-.sw-dlg-head { display: flex; align-items: center; gap: 9px; padding: 12px 16px; border-bottom: 1px solid var(--hairline); }
+.sw-dlg-head { display: flex; align-items: center; gap: 9px; padding: 12px var(--sw-col-x); border-bottom: 1px solid var(--hairline); }
 .sw-dlg-head .sw-hicon { width: 22px; height: 22px; border-radius: var(--r-control); background: var(--accent-soft); }
 .sw-dlg-glyph {
   width: 22px; height: 22px; flex: 0 0 auto; display: grid; place-items: center;
@@ -381,11 +396,29 @@
 .sw-dlg-glyph.sw-t-start { color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }
 .sw-dlg-glyph.sw-t-end { color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }
 .sw-dlg-title { font-family: var(--font-display); font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
-/* The node's name is its label on the canvas, so it is edited in the head. */
-.sw-dlg-name {
-  flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600;
-  padding: 5px 8px; background: var(--surface-2); border-color: var(--border);
+/* The node's name is its label on the canvas, so it is edited in the head — in
+   a field-shaped box that occupies the settings column exactly. The box is the
+   field (mark · name input · kind · close), and the head *is* that box, so what
+   lines up with `.sw-field` in the body is the box itself: the same left edge
+   and, because the close control sits inside it, the same right edge. */
+.sw-dlg-name-wrap {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
+  padding: 1px 5px 1px 6px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-control);
 }
+.sw-dlg-name-wrap:focus-within { border-color: var(--accent); }
+.sw-dlg-name-wrap .sw-hicon { width: 20px; height: 20px; }
+/* The frame's close control, nested in that box: a touch smaller, so it reads as
+   part of the field rather than as chrome floating over it. */
+.sw-dlg-name-wrap .sw-dlg-x { width: 24px; height: 24px; font-size: 12px; }
+/* A bare input inside that box: the box carries the chrome, this carries the
+   text, so the name reads as one field with its provider's mark on it. */
+.sw-dlg-name {
+  flex: 1 1 auto; min-width: 0; padding: 6px 0;
+  font-family: var(--font-body); font-size: 13.5px; font-weight: 600; color: var(--text);
+  background: transparent; border: 0; outline: none;
+}
+.sw-dlg-name::placeholder { color: var(--muted); font-weight: 400; }
 .sw-dlg-kind {
   flex: 0 0 auto; font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
   text-transform: uppercase; color: var(--muted);
@@ -400,11 +433,12 @@
 }
 .sw-dlg-x:hover { color: var(--text); background: var(--surface-3); border-color: var(--accent); }
 
-/* The popup is a whole screen now, so the form inside it is centred in a
-   readable column rather than stretched across a wide monitor. */
-.sw-dlg-body { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; padding: 16px max(16px, calc((100% - 1080px) / 2)); overflow: auto; min-height: 0; }
+/* The form inside the panel is centred in a readable column rather than
+   stretched across a wide monitor — the same column the head and the actions
+   row use (--sw-col-x), which is what keeps the name field aligned. */
+.sw-dlg-body { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; padding: 16px var(--sw-col-x); overflow: auto; min-height: 0; }
 .sw-dlg-body p { margin: 0; }
-.sw-dlg-actions { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--hairline); }
+.sw-dlg-actions { display: flex; align-items: center; gap: 8px; padding: 12px var(--sw-col-x); border-top: 1px solid var(--hairline); }
 /* The destructive action sits apart, on the left; save and close stay together. */
 .sw-dlg-actions .sw-danger { margin-right: auto; }
 
