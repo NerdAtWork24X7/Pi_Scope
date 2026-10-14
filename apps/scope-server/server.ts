@@ -3166,7 +3166,7 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ error: `unknown action: ${action}` }, 400);
     } catch (err: any) {
       console.error("POST /pi-update failed:", err);
-      return jsonResponse({ error: String(err?.message || err) }, 500);
+      return jsonResponse({ error: "internal server error" }, 500);
     }
   }
 
@@ -3181,7 +3181,7 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse(await listAuthProviders());
     } catch (err: any) {
       console.error("GET /auth/providers failed:", err);
-      return jsonResponse({ error: String(err?.message || err) }, 500);
+      return jsonResponse({ error: "internal server error" }, 500);
     }
   }
   if (pathname === "/auth/login" && method === "GET") {
@@ -3211,7 +3211,8 @@ async function handle(req: Request): Promise<Response> {
       }
       return jsonResponse(await startLogin(String(body?.providerId || ""), String(body?.type || "")));
     } catch (err: any) {
-      return jsonResponse({ error: String(err?.message || err) }, 400);
+      console.error("POST /auth/login failed.");
+      return jsonResponse({ error: "request failed" }, 400);
     }
   }
   if (pathname === "/auth/logout" && method === "POST") {
@@ -3223,7 +3224,8 @@ async function handle(req: Request): Promise<Response> {
       void loadRuntimeModels(true);
       return jsonResponse(await listAuthProviders());
     } catch (err: any) {
-      return jsonResponse({ error: String(err?.message || err) }, 400);
+      console.error("POST /auth/logout failed:", err);
+      return jsonResponse({ error: "request failed" }, 400);
     }
   }
 
