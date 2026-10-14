@@ -1146,12 +1146,43 @@
     if (isNew) {
       const list = workspaceList();
       const sel = S.ws || "";
-      el.wsList.innerHTML = list.length
-        ? list.map((w) => `<button class="m-opt${w === sel ? " on" : ""}" type="button" data-ws="${esc(w)}" aria-pressed="${w === sel}">` +
-            `<span class="m-opt-tick">${w === sel ? "✓" : ""}</span>` +
-            `<span class="m-opt-main"><span class="m-opt-name">${esc(tailPath(w))}</span>` +
-            `<span class="m-opt-path">${esc(w)}</span></span></button>`).join("")
-        : `<div class="m-note">No workspaces yet — type a path below to add one.</div>`;
+      el.wsList.textContent = "";
+      if (list.length) {
+        for (const w of list) {
+          const on = w === sel;
+          const btn = document.createElement("button");
+          btn.className = `m-opt${on ? " on" : ""}`;
+          btn.type = "button";
+          btn.dataset.ws = w;
+          btn.setAttribute("aria-pressed", String(on));
+
+          const tick = document.createElement("span");
+          tick.className = "m-opt-tick";
+          tick.textContent = on ? "✓" : "";
+
+          const main = document.createElement("span");
+          main.className = "m-opt-main";
+
+          const name = document.createElement("span");
+          name.className = "m-opt-name";
+          name.textContent = tailPath(w);
+
+          const path = document.createElement("span");
+          path.className = "m-opt-path";
+          path.textContent = w;
+
+          main.appendChild(name);
+          main.appendChild(path);
+          btn.appendChild(tick);
+          btn.appendChild(main);
+          el.wsList.appendChild(btn);
+        }
+      } else {
+        const note = document.createElement("div");
+        note.className = "m-note";
+        note.textContent = "No workspaces yet — type a path below to add one.";
+        el.wsList.appendChild(note);
+      }
     }
 
     if (isNew) {
