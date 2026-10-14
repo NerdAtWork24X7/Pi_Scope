@@ -281,9 +281,24 @@
   // Every row carries a mono lead label ("you" / "pi") — the design system's
   // eyebrow — and the prose itself stays in the body face.
   function userRow(text) {
-    return `<div class="m-msg m-user"><div class="m-bubble">` +
-      `<div class="m-ai-head m-user-head">you</div>` +
-      `<pre class="m-text">${esc(text || "")}</pre></div></div>`;
+    const msg = document.createElement("div");
+    msg.className = "m-msg m-user";
+
+    const bubble = document.createElement("div");
+    bubble.className = "m-bubble";
+
+    const head = document.createElement("div");
+    head.className = "m-ai-head m-user-head";
+    head.textContent = "you";
+
+    const pre = document.createElement("pre");
+    pre.className = "m-text";
+    pre.textContent = text || "";
+
+    bubble.appendChild(head);
+    bubble.appendChild(pre);
+    msg.appendChild(bubble);
+    return msg;
   }
 
   function assistantRow(p) {
@@ -912,9 +927,7 @@
     // first_msg) and by when the recording started, which is now.
     if (S.draft) { S.draft.prompt = S.draft.prompt || text; S.draft.at = Date.now(); }
 
-    const wrap = document.createElement("div");
-    wrap.innerHTML = userRow(text);
-    const userNode = wrap.firstElementChild;
+    const userNode = userRow(text);
     el.transcript.appendChild(userNode);
     S.temp.push(userNode);
     beginLiveTurn();
