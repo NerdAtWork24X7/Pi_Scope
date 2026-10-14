@@ -58,9 +58,9 @@ function setupScratchRepo() {
 
 // ─── 2. Server + seed ───────────────────────────────────────────────────────
 async function startServer() {
-  try { execSync("pkill -f 'apps/scope/server.ts' || true"); } catch {}
+  try { execSync("pkill -f 'apps/scope-server/server.ts' || true"); } catch {}
   rmSync(DB_PATH, { force: true });
-  const server = spawn("node", ["apps/scope/server.ts"], {
+  const server = spawn("node", ["apps/scope-server/server.ts"], {
     cwd: ROOT,
     env: { ...process.env, SCOPE_DB_PATH: DB_PATH },
     stdio: "ignore",
