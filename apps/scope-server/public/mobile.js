@@ -1174,9 +1174,21 @@
     const chosen = currentModel();
     const opts = modelList();
     if (chosen && !opts.includes(chosen)) opts.unshift(chosen);
-    el.modelSel.innerHTML = opts.length
-      ? opts.map((m) => `<option value="${esc(m)}"${m === chosen ? " selected" : ""}>${esc(S.models.includes(m) ? m : m + " · (session)")}</option>`).join("")
-      : `<option value="">no models enabled</option>`;
+    el.modelSel.replaceChildren();
+    if (opts.length) {
+      for (const m of opts) {
+        const opt = document.createElement("option");
+        opt.value = String(m ?? "");
+        opt.selected = (m === chosen);
+        opt.textContent = S.models.includes(m) ? m : m + " · (session)";
+        el.modelSel.appendChild(opt);
+      }
+    } else {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "no models enabled";
+      el.modelSel.appendChild(opt);
+    }
     el.modelSel.disabled = !opts.length;
   }
 
