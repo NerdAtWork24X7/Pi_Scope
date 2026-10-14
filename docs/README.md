@@ -17,7 +17,7 @@ folder is served exactly as it sits in git.
 | `video/` | The MP4 feature walkthroughs |
 | `capture-shots.mjs` | Regenerates `shots/` from the running app (see below) |
 | `seed-demo.mjs` | Seeds a realistic demo session (a coder adding dark mode, its tester subagent, and a second project with a failing command) |
-| `make-showcase-video.mjs` | The script that builds the showcase video from the screenshots |
+| `make-showcase-video.mjs` | Records the showcase video from the running app (see below) |
 
 ## Regenerating the screenshots
 
@@ -50,6 +50,34 @@ Two things worth knowing before changing it:
   which would empty the Review and Git `changes` shots taken after it.
 
 `logo.png` and `pi.png` are not generated: they are brand art and a shot of the agent CLI.
+
+## Regenerating the video
+
+`video/Pi-Scope-showcase.mp4` is recorded the same way the screenshots are — from the live
+app, never hand-made:
+
+```bash
+node docs/make-showcase-video.mjs
+```
+
+It boots the server on a fresh DB, seeds the demo inside its own scratch project
+(`tmp/video-demo/model-selector`), seeds a Workflow graph through the plugin's own API —
+offering only a harness this machine can actually run — then films all ten views with
+Playwright at 1600×900, with a caption overlay, and transcodes the capture to H.264
+(`ffmpeg-static`, or the ffmpeg bundled with the Playwright browsers). The raw webm is kept
+in `tmp/video/`.
+
+Like the screenshot script, it fails loudly rather than shipping a tour that shows nothing:
+every scene asserts the content it is about to film (message rows, a diff, terminal output,
+checkpoint rows) and the panes that display it are checked against the scratch project, so a
+take can never silently film this checkout. After the transcode it decodes the whole MP4 and
+samples one frame from the middle of every scene: a blank or single-tone frame exits
+non-zero.
+
+Two orderings matter: **each scene gets a real document load** of its view (the rail only
+renders at boot, and an in-place view switch leaves the panes on the first working
+directory), and **Checkpoints is filmed after Git** — creating one commits the scratch tree,
+which would empty the Git `changes` pane.
 
 ## Editing the site
 
