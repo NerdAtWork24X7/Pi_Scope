@@ -1236,12 +1236,46 @@
     renderSessions();
     renderHeader();
     refreshComposer();
-    el.transcript.innerHTML = `<div class="m-empty">` +
-      `<span class="m-empty-ic" aria-hidden="true">◈</span>` +
-      `<div class="m-hero-title">New <span class="m-hero-amber">session</span></div>` +
-      `<div class="m-stats"><span class="m-stat"><span class="m-stat-k">workspace</span>` +
-      `<span class="m-stat-v">${esc(tailPath(cwd))}</span></span></div>` +
-      `<p class="m-hero-body">Send a message to start it in that workspace.</p></div>`;
+    el.transcript.textContent = "";
+    const empty = document.createElement("div");
+    empty.className = "m-empty";
+
+    const ic = document.createElement("span");
+    ic.className = "m-empty-ic";
+    ic.setAttribute("aria-hidden", "true");
+    ic.textContent = "◈";
+
+    const title = document.createElement("div");
+    title.className = "m-hero-title";
+    title.append("New ");
+    const amber = document.createElement("span");
+    amber.className = "m-hero-amber";
+    amber.textContent = "session";
+    title.appendChild(amber);
+
+    const stats = document.createElement("div");
+    stats.className = "m-stats";
+    const stat = document.createElement("span");
+    stat.className = "m-stat";
+    const statK = document.createElement("span");
+    statK.className = "m-stat-k";
+    statK.textContent = "workspace";
+    const statV = document.createElement("span");
+    statV.className = "m-stat-v";
+    statV.textContent = tailPath(cwd);
+    stat.appendChild(statK);
+    stat.appendChild(statV);
+    stats.appendChild(stat);
+
+    const body = document.createElement("p");
+    body.className = "m-hero-body";
+    body.textContent = "Send a message to start it in that workspace.";
+
+    empty.appendChild(ic);
+    empty.appendChild(title);
+    empty.appendChild(stats);
+    empty.appendChild(body);
+    el.transcript.appendChild(empty);
     scrollToBottom(true);
     hint("new session · " + [model || "default model", S.activeTeam, S.mode].filter(Boolean).join(" · "), "");
     el.input.focus();
