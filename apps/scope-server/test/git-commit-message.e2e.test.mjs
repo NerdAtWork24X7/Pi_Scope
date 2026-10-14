@@ -210,6 +210,21 @@ describe("git commit message generation", () => {
     const argv = fs.readFileSync(argvLog, "utf8").split("\n");
     assert.ok(argv.includes("--print"), "ran pi non-interactively");
     assert.ok(argv.includes("--no-session"), "kept out of the session store");
+    // The run must not inherit pi's default (coding-assistant / orchestrator)
+    // system prompt: the whole answer lands verbatim in the commit box, so the
+    // prompt is replaced with one that asks for a commit message and nothing
+    // else — replaced, not appended to.
+    const spAt = argv.indexOf("--system-prompt");
+    assert.ok(spAt >= 0, "the default system prompt is replaced");
+    const systemPrompt = argv[spAt + 1] ?? "";
+    assert.match(systemPrompt, /commit message/i, "a commit-message system prompt is sent");
+    assert.ok(!/coding assistant/i.test(systemPrompt), "pi's coding-assistant prompt is not sent");
+    assert.ok(!argv.includes("--append-system-prompt"), "the default prompt is replaced, not extended");
+    // The orchestrator's rules also arrive as discovered instruction files
+    // (AGENTS.md/CLAUDE.md, including the agent dir's global one), so the run
+    // has to opt out of those too — otherwise they steer the message even with
+    // the default system prompt gone.
+    assert.ok(argv.includes("--no-context-files"), "AGENTS.md instructions are not injected");
     assert.ok(argv.includes("test/stub-model"), "used the configured model");
     assert.ok(argv.some((a) => a.includes("feature.js")), "prompt carried the changed path");
     // The custom template from Settings was substituted (marker + {{branch}}).

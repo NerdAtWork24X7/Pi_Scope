@@ -10,7 +10,7 @@
 
 // ─── Type helpers ───────────────────────────────────────────────────────────
 
-export interface ParsedRequest {
+interface ParsedRequest {
   system_prompt: string;
   messages: { role: string; content: any }[];
   tools: string[];
@@ -18,7 +18,7 @@ export interface ParsedRequest {
   args: Record<string, string>;
 }
 
-export interface ParsedResponse {
+interface ParsedResponse {
   text: string;
   thinking: string;
   tool_calls: { id: string; name: string; args: Record<string, any> }[];

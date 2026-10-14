@@ -51,12 +51,12 @@ import { PI_BIN, PI_BUNDLE } from "./pi-bundle.ts";
  *  relocated agent dir) can point it elsewhere — server.ts reads the same file. */
 export const MODELS_STORE_PATH = process.env.SCOPE_MODELS_STORE ?? path.join(AGENT_DIR, "models-store.json");
 /** The pi-updater extension's release cache. */
-export const MODEL_UPDATE_CACHE_PATH =
+const MODEL_UPDATE_CACHE_PATH =
   process.env.SCOPE_MODEL_UPDATE_CACHE ?? path.join(AGENT_DIR, "model-update-cache.json");
 
 /** How old a catalog may get before the app refreshes it. This is pi-updater's
  *  own interval, so a terminal pi and Pi Scope agree on what "current" means. */
-export const MODEL_CATALOG_TTL_MS = 4 * 60 * 60 * 1000;
+const MODEL_CATALOG_TTL_MS = 4 * 60 * 60 * 1000;
 
 /** How often the app re-checks (cheap stats) while it is open. */
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -294,7 +294,7 @@ function refreshStore(): Promise<PartResult> {
 
 // ─── Status + refresh ───────────────────────────────────────────────────────
 
-export interface ModelCatalogStatus {
+interface ModelCatalogStatus {
   /** Where pi's model store lives (the file the Settings cost catalog reads). */
   storePath: string;
   /** Where the release cache lives (pi-updater's file). */
@@ -378,10 +378,6 @@ export function modelCatalogStatus(): ModelCatalogStatus {
     lastCheckedAt,
     lastResult,
   };
-}
-
-export function isRefreshingCatalog(): boolean {
-  return inFlight !== null;
 }
 
 /**

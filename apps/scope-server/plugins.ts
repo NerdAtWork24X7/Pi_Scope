@@ -39,11 +39,11 @@ import { pathToFileURL } from "node:url";
  * (`server-bundle/plugins`, beside the bundled server.js — see build-release.sh).
  * `SCOPE_BUILTIN_PLUGINS_DIR` overrides it.
  */
-export const BUILTIN_DIR =
+const BUILTIN_DIR =
   process.env.SCOPE_BUILTIN_PLUGINS_DIR ?? path.join(import.meta.dirname, "plugins");
 
 /** User plugins. Override with SCOPE_PLUGINS_DIR (e.g. to keep them in-repo). */
-export const USER_DIR =
+const USER_DIR =
   process.env.SCOPE_PLUGINS_DIR ?? path.join(os.homedir(), ".pi-scope", "plugins");
 
 /** Where enable/disable choices are persisted. */
@@ -57,11 +57,11 @@ const STORE_DIR = path.join(USER_DIR, ".data");
  * project instead of mixing every project into one global file — see
  * `api.projectStore`.
  */
-export const PROJECT_DATA_REL = path.join(".pi-scope", "plugins", ".data");
+const PROJECT_DATA_REL = path.join(".pi-scope", "plugins", ".data");
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export interface PluginManifest {
+interface PluginManifest {
   id: string;
   name: string;
   description?: string;
@@ -88,7 +88,7 @@ export interface PluginManifest {
   ui?: Record<string, unknown>;
 }
 
-export interface PluginRecord {
+interface PluginRecord {
   id: string;
   name: string;
   description: string;
@@ -132,11 +132,11 @@ interface PluginRoute {
  *  bound to server-owned state such as the allowed file roots), so they are
  *  passed in rather than imported — that keeps a plugin from importing server.ts
  *  and hitting a partially-initialised module. */
-export interface PluginHost {
+interface PluginHost {
   kit?: Record<string, any>;
 }
 
-export interface PluginApi {
+interface PluginApi {
   id: string;
   dir: string;
   source: "builtin" | "user";
@@ -365,7 +365,7 @@ export function storeFor(id: string): PluginApi["store"] {
 const projectStores = new Map<string, PluginApi["store"]>();
 
 /** The project store file for a plugin: `<projectDir>/.pi-scope/plugins/.data/<id>.json`. */
-export function projectStoreFile(id: string, projectDir: string): string {
+function projectStoreFile(id: string, projectDir: string): string {
   return path.join(projectDir, PROJECT_DATA_REL, `${id}.json`);
 }
 
@@ -374,7 +374,7 @@ export function projectStoreFile(id: string, projectDir: string): string {
  * when `projectDir` is not an absolute, existing directory (e.g. the Office's
  * `"default"` sentinel), so a caller always gets a usable store.
  */
-export function projectStoreFor(id: string, projectDir: string): PluginApi["store"] {
+function projectStoreFor(id: string, projectDir: string): PluginApi["store"] {
   if (!projectDir || !path.isAbsolute(projectDir)) return storeFor(id);
   try {
     if (!fs.statSync(projectDir).isDirectory()) return storeFor(id);
@@ -529,15 +529,11 @@ function deactivate(id: string): void {
 
 // ─── Public API used by server.ts ───────────────────────────────────────────
 
-export function getRecord(id: string): PluginRecord | undefined {
-  return records.get(id);
-}
-
 export function isEnabled(id: string): boolean {
   return records.get(id)?.enabled === true;
 }
 
-export function listPlugins(): PluginRecord[] {
+function listPlugins(): PluginRecord[] {
   return [...records.values()].sort(comparePlugins);
 }
 

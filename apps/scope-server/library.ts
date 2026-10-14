@@ -20,11 +20,11 @@ import * as crypto from "node:crypto";
  * agent the reference is for — a subagent id, `orchestrator`, or "" for the
  * whole team — so the injected block can say who each path belongs to.
  */
-export type LibraryEntry = { id: string; path: string; note?: string; target?: string };
+type LibraryEntry = { id: string; path: string; note?: string; target?: string };
 
 /** Longest accepted path / note / target, and how many entries a library may hold. */
-export const LIBRARY_PATH_MAX = 1024;
-export const LIBRARY_NOTE_MAX = 200;
+const LIBRARY_PATH_MAX = 1024;
+const LIBRARY_NOTE_MAX = 200;
 export const LIBRARY_MAX_ENTRIES = 50;
 
 /** A target is an agent id (`orchestrator`, `file_reader`) — same charset as a
@@ -36,7 +36,7 @@ export type Resolved =
   | { ok: false; error: string };
 
 /** A stable id for a new entry (shown nowhere; used by remove). */
-export function newLibraryId(): string {
+function newLibraryId(): string {
   return `lib_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
 }
 
@@ -45,7 +45,7 @@ export function newLibraryId(): string {
  * and trim the note. Stored entries are trusted (they were resolved on the way
  * in), so this only guards against hand-edited config.
  */
-export function normaliseEntry(raw: unknown): LibraryEntry | null {
+function normaliseEntry(raw: unknown): LibraryEntry | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const p = String(r.path ?? "").trim();

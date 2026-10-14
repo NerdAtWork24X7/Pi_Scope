@@ -114,7 +114,7 @@ function sh(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-export interface PiBundleInfo {
+interface PiBundleInfo {
   /** How `pi` resolves for spawned processes. */
   source: "override" | "bundled" | "global";
   /** The executable/entry Chat and friends invoke. */
@@ -128,8 +128,6 @@ export interface PiBundleInfo {
    * somebody else's binary: `file` is their `bin` and `args` is empty.
    */
   launch: { file: string; args: string[] };
-  /** Directory containing the `pi` shim, when one was installed. */
-  binDir: string | null;
   /** Bundled pi CLI entry (`dist/bundle/cli.js`), when bundled. */
   cli: string | null;
   /** Force-loaded Pi Scope extension path, when bundled. */
@@ -275,7 +273,7 @@ function resolve(): PiBundleInfo {
   if (override) {
     return {
       source: "override", bin: override, launch: { file: override, args: [] },
-      binDir: null, cli: null, extension: null, dir: null,
+      cli: null, extension: null, dir: null,
     };
   }
 
@@ -307,13 +305,13 @@ function resolve(): PiBundleInfo {
     // Spawned directly it is a Node CLI, not a shim: no shell, no `.cmd`. The
     // extension flag is passed exactly as the shim would.
     const launch = { file: process.execPath, args: [cli, ...(extension ? ["--extension", extension] : [])] };
-    return { source: "bundled", bin, launch, binDir, cli, extension, dir };
+    return { source: "bundled", bin, launch, cli, extension, dir };
   }
 
   // 3. Fall back to whatever `pi` global install is on PATH.
   return {
     source: "global", bin: process.env.SCOPE_PI_BIN || "pi", launch: { file: process.env.SCOPE_PI_BIN || "pi", args: [] },
-    binDir: null, cli: null, extension: null, dir: null,
+    cli: null, extension: null, dir: null,
   };
 }
 
@@ -322,13 +320,7 @@ export const PI_BUNDLE: PiBundleInfo = resolve();
 export const PI_BIN: string = PI_BUNDLE.bin;
 /** How to launch it: `{ file, args }` to spread into a spawn (see PiBundleInfo). */
 export const PI_LAUNCH: { file: string; args: string[] } = PI_BUNDLE.launch;
-/** Directory of the bundled `pi` shim, when one is on PATH. */
-export const PI_BIN_DIR: string | null = PI_BUNDLE.binDir;
-/** Force-loaded Pi Scope extension, when the bundled agent is in use. */
-export const PI_EXTENSION: string | null = PI_BUNDLE.extension;
-/** Bundle root holding the bundled pi's `node_modules`, when bundled. */
-export const PI_BUNDLE_DIR: string | null = PI_BUNDLE.dir;
 
 console.log(
-  `  Pi bundle: pi -> ${PI_BIN} (${PI_BUNDLE.source}${PI_EXTENSION ? `, extension ${PI_EXTENSION}` : ""})`,
+  `  Pi bundle: pi -> ${PI_BIN} (${PI_BUNDLE.source}${PI_BUNDLE.extension ? `, extension ${PI_BUNDLE.extension}` : ""})`,
 );

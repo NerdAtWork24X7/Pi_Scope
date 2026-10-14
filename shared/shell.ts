@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 
 /** Shell rc files an interactive terminal sources, in the order we check them. */
-export function shellRcFiles(): string[] {
+function shellRcFiles(): string[] {
   const home = os.homedir();
   return [".zshenv", ".zshrc", ".zprofile", ".zlogin", ".bash_profile", ".bashrc", ".profile"]
     .map((f) => path.join(home, f))
@@ -203,7 +203,7 @@ export function isWindows(platform: NodeJS.Platform = process.platform): boolean
 }
 
 /** This platform's command processor — `cmd.exe` on Windows. */
-export function windowsShell(): string {
+function windowsShell(): string {
   return (process.env.ComSpec || process.env.COMSPEC || "cmd.exe").trim() || "cmd.exe";
 }
 
@@ -247,7 +247,7 @@ export function windowsCommandLine(file: string, args: string[], doubleEscapeMet
 }
 
 /** How to launch something: the resolved file, its args, and spawn options. */
-export interface SpawnPlan {
+interface SpawnPlan {
   file: string;
   args: string[];
   shell: boolean;

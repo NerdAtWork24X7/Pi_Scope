@@ -26,9 +26,9 @@ import * as path from "node:path";
 import { AGENT_DIR } from "./agent-dir.ts";
 
 /** Where the Settings page stores user-entered keys. */
-export const KEYS_JSON = process.env.SCOPE_KEYS_JSON ?? path.join(AGENT_DIR, "api-keys.json");
+const KEYS_JSON = process.env.SCOPE_KEYS_JSON ?? path.join(AGENT_DIR, "api-keys.json");
 
-export interface KnownKey {
+interface KnownKey {
   /** Environment-variable name, e.g. GROQ_API_KEY. */
   name: string;
   /** Short label for the Settings row. */
@@ -127,7 +127,7 @@ export function maskSecret(value: string): string {
   return "•".repeat(Math.min(12, v.length - 4)) + v.slice(-4);
 }
 
-export interface KeyEntry {
+interface KeyEntry {
   name: string;
   label: string;
   description: string;

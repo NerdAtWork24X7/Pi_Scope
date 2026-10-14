@@ -32,7 +32,7 @@ import * as path from "node:path";
 
 /** Pi Scope's own pi agent dir. `SCOPE_AGENT_DIR` is the explicit override
  *  (used by the e2e tests, which point it at a temp dir). */
-export function resolveAgentDir(): string {
+function resolveAgentDir(): string {
   const configured = (process.env.SCOPE_AGENT_DIR || "").trim();
   if (configured) return configured;
   return path.join(os.homedir(), ".pi-scope", "agent");

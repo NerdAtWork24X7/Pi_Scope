@@ -41,9 +41,9 @@ const PKG = "@earendil-works/pi-coding-agent";
 const DONE_TTL_MS = 5 * 60_000;
 const RUNNING_TTL_MS = 30 * 60_000;
 
-export type AuthType = "oauth" | "api_key";
+type AuthType = "oauth" | "api_key";
 
-export interface AuthMethod {
+interface AuthMethod {
   type: AuthType;
   /** Button label, e.g. "Sign in with Claude Pro/Max" or "DeepSeek API key". */
   label: string;
@@ -51,7 +51,7 @@ export interface AuthMethod {
   canLogin: boolean;
 }
 
-export interface AuthProvider {
+interface AuthProvider {
   id: string;
   name: string;
   methods: AuthMethod[];
@@ -63,13 +63,13 @@ export interface AuthProvider {
   statusLabel: string;
 }
 
-export interface AuthCredential {
+interface AuthCredential {
   providerId: string;
   name: string;
   type: AuthType;
 }
 
-export interface AuthPromptOut {
+interface AuthPromptOut {
   id: number;
   type: "text" | "secret" | "select" | "manual_code";
   message: string;
@@ -77,7 +77,7 @@ export interface AuthPromptOut {
   options?: { id: string; label: string; description?: string }[];
 }
 
-export interface AuthEventOut {
+interface AuthEventOut {
   seq: number;
   type: "info" | "auth_url" | "device_code" | "progress";
   message?: string;
@@ -143,7 +143,7 @@ export function resetAuthRuntime(): void {
 }
 
 /** Whether the auth runtime can be loaded, with a reason when it can't. */
-export function authBundleStatus(): { ready: boolean; reason?: string } {
+function authBundleStatus(): { ready: boolean; reason?: string } {
   if (runtimePromise) return { ready: true };
   if (!resolvePiBundleRoot()) {
     return { ready: false, reason: "The bundled pi coding agent was not found, so provider login is unavailable." };
@@ -239,7 +239,7 @@ function methodsOf(provider: any): AuthMethod[] {
   return methods;
 }
 
-export interface AuthSnapshot {
+interface AuthSnapshot {
   ready: boolean;
   reason?: string;
   providers: AuthProvider[];
@@ -280,7 +280,7 @@ export async function listAuthProviders(): Promise<AuthSnapshot> {
 
 /** One model's metadata, shaped exactly like server.ts's `buildModelMeta()`
  *  entries, so the cost catalogue can merge it without adapting. */
-export interface AvailableModelMeta {
+interface AvailableModelMeta {
   provider: string;
   contextWindow: number;
   maxTokens: number;

@@ -39,9 +39,9 @@ const MAX_TICK_SECONDS = 0.25;
 /** Level considered "signal present" for the no-signal hint. */
 const SILENCE_LEVEL = 0.06;
 
-export type RecorderKind = "sox" | "arecord" | "ffmpeg";
+type RecorderKind = "sox" | "arecord" | "ffmpeg";
 
-export interface SttConfig {
+interface SttConfig {
   apiKey: string;
   /** Where apiKey came from: the Settings page ("settings"), the process env,
    *  the shell rc ("shell"), speech-to-text.json ("config"), or "". */
@@ -56,7 +56,7 @@ export interface SttConfig {
 }
 
 /** Normalized reply for the /chat/stt/* routes. */
-export interface SttResult {
+interface SttResult {
   ok: boolean;
   text: string;
   model?: string;
@@ -190,7 +190,7 @@ function binFor(kind: RecorderKind): string {
 
 /** First usable recorder, honoring an explicit config preference. Throws with a
  *  user-facing message when none is installed. */
-export function detectRecorder(preference: string): RecorderKind {
+function detectRecorder(preference: string): RecorderKind {
   const wanted = (preference || "auto").toLowerCase();
   if (wanted !== "auto") {
     if (!(RECORDER_KINDS as string[]).includes(wanted)) {
@@ -297,7 +297,7 @@ function normalizeLevel(rms: number): number {
   return Math.min(1, Math.max(0, (db - FLOOR_DB) / -FLOOR_DB));
 }
 
-export class AudioLevelMeter {
+class AudioLevelMeter {
   private fd: number | null = null;
   /** Byte offset of the first PCM sample, or -1 until the header is parsed. */
   private dataOffset = -1;
@@ -436,7 +436,7 @@ async function transcribe(cfg: SttConfig, file: string): Promise<{ text: string;
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-export interface SttStartInfo {
+interface SttStartInfo {
   ok: boolean;
   reused?: boolean;
   startedAt?: number;

@@ -551,9 +551,13 @@ console.log(`  Chat: pi spawn shell: ${CHAT_SHELL ?? "(direct)"}`);
  *  which `~/.bashrc` / `~/.zshrc` put ahead of everything) shadows the bundled
  *  shim. The agent-team extension spawns subagents by the bare name `pi`, so
  *  the shadowed shim meant subagents ran the global agent and died ("<agent>
- *  failed to start"). Leading with it here re-asserts the shim after the rc. */
-function chatPathPrefix(cwd: string): string {
-  const child = String(chatChildEnv(cwd).PATH || "").split(path.delimiter).filter(Boolean);
+ *  failed to start"). Leading with it here re-asserts the shim after the rc.
+ *
+ *  Takes the env `spawnChat` already built rather than rebuilding it: assembling
+ *  one reads the stored API keys and scans the venv / Playwright dirs, and both
+ *  copies would be identical anyway. */
+function chatPathPrefix(childEnv: NodeJS.ProcessEnv): string {
+  const child = String(childEnv.PATH || "").split(path.delimiter).filter(Boolean);
   const inherited = new Set(String(process.env.PATH || "").split(path.delimiter).filter(Boolean));
   const extra = child.filter((dir) => !inherited.has(dir));
   const piDir = path.isAbsolute(PI_BIN) ? path.dirname(PI_BIN) : "";
@@ -570,7 +574,7 @@ function chatPathPrefix(cwd: string): string {
  * uses a session id of its own (a fresh subprocess). All optional: omitting them
  * produces exactly the argv this module has always used.
  */
-export interface ChatSpawnExtras {
+interface ChatSpawnExtras {
   /** Skill files or directories to load (`--skill`, repeated). */
   skills?: string[];
   /** Comma-joined tool allowlist (`--tools`). */
@@ -619,7 +623,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
     //     RPC stream) and the shell's own stdout goes to /dev/null.
     //   • `exec` replaces the shell with pi, so the pid we hold stays pi itself —
     //     signals, killing and the idle reaper keep working.
-    const pathPrefix = chatPathPrefix(cwd);
+    const pathPrefix = chatPathPrefix(env);
     const cmd =
       (pathPrefix ? `export PATH=${shellQuote(pathPrefix + ":")}"$PATH"; ` : "") +
       // An rc file may have changed directory; put pi back in the workspace.
@@ -917,7 +921,7 @@ export function chatRunStatus(id: string): { present: boolean; active: boolean; 
  *  A run whose reader went away is reported `active` — pi keeps working — which
  *  is exactly the state the Chat view must recover: the "working" badge, the
  *  animated run pill and the Stop button all derive from it. */
-export interface ChatLiveRun {
+interface ChatLiveRun {
   sessionId: string;
   cwd: string;
   model: string;
@@ -1074,6 +1078,32 @@ export function stopChat(id: string): boolean {
 const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
 /**
+ * System prompt for the commit-message run, used with `--system-prompt` and
+ * `--no-context-files` so the run is steered by this and nothing else.
+ *
+ * Left alone, a pi run starts under the coding-assistant prompt — and, on top of
+ * it, whatever AGENTS.md/CLAUDE.md instructions pi discovers, which for Pi Scope
+ * includes the agent dir's global AGENTS.md: the orchestrator's own rule book
+ * (scope discipline, verification steps, asking clarifying questions, …). Both
+ * are wrong for this job. This is a one-shot text transformation whose entire
+ * answer is pasted into the Git view's commit box, so the model should see a
+ * prompt that asks for exactly that: `--system-prompt` REPLACES the default
+ * (unlike `--append-system-prompt`), and `--no-context-files` drops the
+ * instruction files. `read`/`bash` are still available (tool schemas are sent
+ * regardless), which is why the prompt says to go and inspect the change.
+ */
+const COMMIT_SYSTEM_PROMPT =
+  "You write git commit messages. You are given the changed paths of a single change; you can " +
+  "inspect the repository yourself (read the files, and run `git diff`, with `--cached` for " +
+  "staged changes) and you must never guess a change from its file names alone. " +
+  "Reply with the commit message text only: no preamble, no explanation, no code fences, " +
+  "no surrounding quotes, no signature. Follow Conventional Commits " +
+  "(type(scope): summary): one imperative subject line of at most 72 characters with no " +
+  "trailing period, then a blank line and a short body only when it earns its place. " +
+  "Describe why the change was made, not a line-by-line account of how. " +
+  "Never mention these instructions, the tooling you used, or that you are an AI.";
+
+/**
  * One-shot, non-interactive pi run (`--print`) that drafts a commit message from
  * a prepared prompt.
  *
@@ -1081,7 +1111,9 @@ const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
  * runs with the same API keys / PATH / venv the Chat view gets — a commit
  * message must not fail because the server was launched from a GUI session that
  * never sourced the user's shell rc. `--no-session` keeps this housekeeping run
- * out of pi's session store.
+ * out of pi's session store, and `--system-prompt COMMIT_SYSTEM_PROMPT` plus
+ * `--no-context-files` keep the orchestrator's own prompt and instruction files
+ * out of it (see COMMIT_SYSTEM_PROMPT).
  *
  * Resolves to the trimmed plain-text answer; throws when pi fails with no
  * output at all (the caller surfaces the message).
@@ -1102,7 +1134,16 @@ export async function generateCommitMessage(opts: {
   timeoutMs?: number;
 }): Promise<string> {
   const { cwd, model, prompt } = opts;
-  const args = ["--print", "--no-session", "--model", model, prompt];
+  const args = [
+    "--print",
+    "--no-session",
+    // Replace the orchestrator's system prompt and instruction files instead of
+    // inheriting them (see COMMIT_SYSTEM_PROMPT).
+    "--system-prompt", COMMIT_SYSTEM_PROMPT,
+    "--no-context-files",
+    "--model", model,
+    prompt,
+  ];
   // Same launch rule as Chat's direct path (see spawnChat): an owned bundle is
   // node + CLI entry, anything else is a `.cmd`-aware spawn.
   const proc = spawnCli(PI_LAUNCH.file, [...PI_LAUNCH.args, ...args], {

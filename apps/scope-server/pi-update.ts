@@ -24,7 +24,7 @@ import { spawnCli } from "../../shared/shell.ts";
 import { PI_BUNDLE } from "./pi-bundle.ts";
 
 /** The npm package Pi Scope bundles. */
-export const PI_PACKAGE = "@earendil-works/pi-coding-agent";
+const PI_PACKAGE = "@earendil-works/pi-coding-agent";
 
 /** npm registry root; override with SCOPE_PI_REGISTRY (tests point this at a
  *  local server, air-gapped installs at a mirror). */
@@ -36,7 +36,7 @@ const UPDATE_TIMEOUT_MS = 5 * 60_000;
 /** Keep only the tail of npm's output — it is for diagnostics, not display. */
 const MAX_OUTPUT = 8_000;
 
-export interface PiUpdateStatus {
+interface PiUpdateStatus {
   /** npm package under management. */
   package: string;
   /** How `pi` resolves: "bundled" | "override" | "global". */
@@ -218,7 +218,7 @@ let updateStartedAt: string | null = null;
  *  so a page that reloaded mid-install can still learn the outcome. */
 let updateLast: PiUpdateOutcome | null = null;
 
-export interface PiUpdateOutcome {
+interface PiUpdateOutcome {
   /** When the install reached its terminal state. */
   at: string;
   ok: boolean;
@@ -226,11 +226,6 @@ export interface PiUpdateOutcome {
   installed: string;
   /** Failure reason on error. */
   error: string;
-}
-
-/** Whether an install is currently running. */
-export function isUpdating(): boolean {
-  return inFlight !== null;
 }
 
 /**

@@ -28,7 +28,7 @@
 import { readShellEnvMap } from "../../shared/shell.ts";
 
 /** Environment variables pi-ai's built-in providers read for API-key auth. */
-export const PROVIDER_ENV_VARS: readonly string[] = [
+const PROVIDER_ENV_VARS: readonly string[] = [
   "AI_GATEWAY_API_KEY",
   "ANT_LING_API_KEY",
   "AZURE_OPENAI_API_KEY",

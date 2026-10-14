@@ -2424,7 +2424,12 @@
     if (!showLive && externalRunLive()) {
       html +=
         `<div class="chat-ext-live">` +
-
+        // The avatar column every message row reserves. It has to be rendered,
+        // not just styled: `.chat-ext-live-av` is what puts the pill on the
+        // message column — with the element missing the pill started at the
+        // strip's own 8px padding and sat 42px (30px box + 12px gap) left of
+        // the messages at every width.
+        `<span class="chat-ext-live-av" aria-hidden="true">π</span>` +
         `<span class="chat-ext-live-pill">` +
         `<span class="chat-live-run-dots"><i></i><i></i><i></i></span>` +
         `<span class="chat-ext-live-label">working in your terminal…</span>` +
