@@ -9,14 +9,21 @@
  * the background** — it keeps going with no page open, streaming each node's
  * output into the run log.
  *
- * A **`loop` node** repeats the section it *dominates* — the nodes that exist
- * only because the loop feeds them — `config.count` times, one pass after the
- * next, re-arming that section between passes. Its section sees
+ * A **`loop` node** repeats a step `config.count` times, one pass after the
+ * next. It has one input and two outputs: **Repeat** and **Exit**. Wiring
+ * Repeat to a node makes that node — and everything it reaches that the Exit
+ * side does not own — the loop's section; between passes the loop hands the
+ * section the result it just produced, so each pass improves the last, and only
+ * the Exit output carries the finished loop on. Without a Repeat connection the
+ * loop keeps its original behaviour: it repeats the section it *dominates* (the
+ * nodes that exist only because the loop feeds them) and that section always
+ * starts from the same material. Either way the section sees
  * `{iteration}`/`{iterations}`/`{loop}` (and `SW_ITERATION`/`SW_ITERATIONS`/
  * `SW_LOOP` for a command), an approval gate inside the section asks again on
  * every pass, and the loop node's own output is what its section produced on
  * each pass, so a downstream node reads the whole loop. A node the `start` node
- * can still reach without the loop is *not* in the section — it runs once.
+ * can still reach without the loop is *not* in a dominated section — it runs
+ * once.
  *
  *   GET  /subagent-workflow?cwd=<workspace>            → graph + run + history +
  *                                                        triggers snapshot
@@ -45,7 +52,8 @@
  * Every edit is validated server-side: one start / one end node, no self-loops,
  * no duplicate edges, no edges into the start or out of the end (both take any
  * number of connections in the other direction — that is how a graph fans out
- * and fans back in), and no cycles.
+ * and fans back in), and no cycles — except a loop's `repeat` output, which is
+ * the one connection allowed to close a cycle because it is what a repeat *is*.
  *
  * ── Run history ────────────────────────────────────────────────────────────
  * Every run is recorded in the project store when it starts and whenever it
@@ -552,9 +560,12 @@ function normaliseApprovalConfig(raw: any) {
 }
 
 /**
- * The loop node's config: how many times the section it dominates is repeated.
- * `count` is clamped to 1…MAX_LOOPS; the default (2) is the smallest count that
- * actually loops, so a freshly dropped node is visible as a loop.
+ * The loop node's config: how many passes it runs. `count` is clamped to
+ * 1…MAX_LOOPS; the default (2) is the smallest count that actually loops, so a
+ * freshly dropped node is visible as a loop. A loop whose **Repeat** output is
+ * wired back to a node re-runs that node each pass (feeding it the previous
+ * pass's result); one with no Repeat connection repeats the section it
+ * dominates, exactly as it always has.
  */
 function normaliseLoopConfig(raw: any) {
   const r = raw && typeof raw === "object" ? raw : {};
@@ -622,7 +633,13 @@ function normaliseEdges(raw: any, nodes: any[]) {
     const key = `${from}\u0000${to}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ id: String(item.id ?? "").trim() || `edge_${out.length}`, from, to });
+    // A `repeat` connection is a loop's feedback output: the one edge kind that
+    // may close a cycle (see `hasCycle`), because closing that cycle is exactly
+    // what "repeat this step" means. The same rules `addEdge` enforces apply
+    // here, so an imported file can never hold a repeat edge `addEdge` would
+    // have refused — only a loop has one, and it never points at the end node.
+    const port = String(item.port ?? "") === "repeat" && a.type === "loop" && b.type !== "end" ? "repeat" : "";
+    out.push({ id: String(item.id ?? "").trim() || `edge_${out.length}`, from, to, ...(port ? { port } : {}) });
   }
   return out;
 }
@@ -662,10 +679,12 @@ function seedState() {
 }
 
 /** Does the whole edge list contain a cycle? Used to vet an imported graph —
- *  the runner's scheduler waits on parents, so a cycle would wedge a run. */
+ *  the runner's scheduler waits on parents, so a cycle would wedge a run.
+ *  A loop's `repeat` edge is skipped: it *is* a cycle by design (the loop feeds
+ *  the step it re-runs), and the loop engine handles it, not the scheduler. */
 function hasCycle(nodes: any[], edges: any[]): boolean {
   const adj = new Map<string, string[]>(nodes.map((n) => [n.id, []]));
-  for (const e of edges) adj.get(e.from)?.push(e.to);
+  for (const e of edges) if (e.port !== "repeat") adj.get(e.from)?.push(e.to);
   const state = new Map<string, number>(); // 0 unvisited, 1 on stack, 2 done
   const visit = (id: string): boolean => {
     const st = state.get(id) || 0;
@@ -682,7 +701,7 @@ function hasCycle(nodes: any[], edges: any[]): boolean {
 
 function createsCycle(nodes: any[], edges: any[], from: string, to: string) {
   const adj = new Map<string, string[]>(nodes.map((n) => [n.id, []]));
-  for (const e of edges) adj.get(e.from)?.push(e.to);
+  for (const e of edges) if (e.port !== "repeat") adj.get(e.from)?.push(e.to);
   adj.get(from)?.push(to);
   const stack = [to];
   const seen = new Set([to]);
@@ -1164,9 +1183,14 @@ export function activate(api: any): void {
     const byId = new Map<string, any>(wf.nodes.map((n: any) => [n.id, n]));
     const parents = new Map<string, string[]>(wf.nodes.map((n: any) => [n.id, []]));
     const children = new Map<string, string[]>(wf.nodes.map((n: any) => [n.id, []]));
+    // `deps` is the same graph *minus the repeat edges*: a repeat edge is the
+    // loop's feedback output, so it feeds the step's `{input}` (see `parents`)
+    // without ever gating when that step may run.
+    const deps = new Map<string, string[]>(wf.nodes.map((n: any) => [n.id, []]));
     for (const e of wf.edges) {
       parents.get(e.to)?.push(e.from);
       children.get(e.from)?.push(e.to);
+      if (e.port !== "repeat") deps.get(e.to)?.push(e.from);
     }
     // Reachability: only what the start node can reach is executed.
     const start = wf.nodes.find((n: any) => n.type === "start");
@@ -1191,51 +1215,129 @@ export function activate(api: any): void {
     const runningByParent = new Map<string, Set<string>>();
 
     // ── Loops ───────────────────────────────────────────────────────────────
-    // A loop node repeats the section it *dominates* — the nodes that exist only
-    // because the loop feeds them — `config.count` times, one pass after another.
-    // The engine re-arms that section between passes instead of letting it settle
-    // once, and the loop node itself keeps the run open until the last pass ends.
+    // A loop node repeats a step `config.count` times, one pass after another.
+    // Its **Repeat** output names the step(s) it re-runs: those nodes, and
+    // everything they reach that the loop's Exit side does not own, form the
+    // section. Between passes the loop hands the section the result it just
+    // produced, so each pass improves the last. A loop with NO Repeat
+    // connection keeps its original meaning: it repeats the section it
+    // *dominates* — the nodes that exist only because the loop feeds them — and
+    // that section always starts from the same material. Either way the engine
+    // re-arms the section between passes instead of letting it settle once, and
+    // the loop node keeps the run open until the last pass ends.
     const loopNodes = wf.nodes.filter((n: any) => n.type === "loop" && reachable.has(n.id));
+    /** loop id → the nodes wired to its Repeat output (the feedback targets). */
+    const loopFeedback = new Map<string, string[]>();
+    for (const e of wf.edges) {
+      if (e.port !== "repeat" || byId.get(e.from)?.type !== "loop" || !reachable.has(e.to)) continue;
+      if (!loopFeedback.has(e.from)) loopFeedback.set(e.from, []);
+      loopFeedback.get(e.from)!.push(e.to);
+    }
     /** loop id → the nodes one pass of it runs (never includes the end node). */
     const loopBodies = new Map<string, string[]>();
     /** loop id → the body's terminal nodes, whose output one pass hands back. */
     const loopExits = new Map<string, string[]>();
+    /** loop id → its body as a Set, for O(1) membership tests in the pump. */
+    const loopBodySet = new Map<string, Set<string>>();
     for (const L of loopNodes) {
-      // Everything downstream of the loop…
-      const downstream = new Set<string>();
-      const q = [...(children.get(L.id) || [])];
-      while (q.length) {
-        const id = q.pop()!;
-        if (downstream.has(id)) continue;
-        downstream.add(id);
-        for (const c of children.get(id) || []) q.push(c);
+      const feedback = loopFeedback.get(L.id) || [];
+      let body: string[];
+      if (feedback.length) {
+        // Everything the Repeat output reaches…
+        const forward = new Set<string>();
+        const qf = [...feedback];
+        while (qf.length) {
+          const id = qf.pop()!;
+          if (forward.has(id)) continue;
+          forward.add(id);
+          for (const c of children.get(id) || []) qf.push(c);
+        }
+        // …minus everything the loop's **Exit** side already owns (the nodes its
+        // ordinary out-connections reach), so a step on the exit path is never
+        // repeated, and never the loop itself or the end node. The Repeat target
+        // is the section, whether or not the graph also draws the way back.
+        const exitSide = new Set<string>();
+        const qe = wf.edges.filter((e: any) => e.from === L.id && e.port !== "repeat").map((e: any) => e.to);
+        while (qe.length) {
+          const id = qe.pop()!;
+          if (exitSide.has(id)) continue;
+          exitSide.add(id);
+          for (const c of children.get(id) || []) qe.push(c);
+        }
+        body = [...forward].filter((id) => !exitSide.has(id) && id !== L.id && byId.get(id)?.type !== "end");
+      } else {
+        // Everything downstream of the loop…
+        const downstream = new Set<string>();
+        const q = [...(children.get(L.id) || [])];
+        while (q.length) {
+          const id = q.pop()!;
+          if (downstream.has(id)) continue;
+          downstream.add(id);
+          for (const c of children.get(id) || []) q.push(c);
+        }
+        // …minus everything the start node can still reach WITHOUT going through
+        // the loop. Those nodes do not exist because of the loop, so it must not
+        // re-run them (and with two loops, this is exactly what makes their
+        // sections disjoint and nest correctly). The end node is never repeated.
+        const avoided = new Set<string>();
+        const q2 = [start.id];
+        while (q2.length) {
+          const id = q2.pop()!;
+          if (id === L.id || avoided.has(id)) continue;
+          avoided.add(id);
+          for (const c of children.get(id) || []) q2.push(c);
+        }
+        body = [...downstream].filter((id) => !avoided.has(id) && byId.get(id)?.type !== "end");
       }
-      // …minus everything the start node can still reach WITHOUT going through
-      // the loop. Those nodes do not exist because of the loop, so it must not
-      // re-run them (and with two loops, this is exactly what makes their
-      // sections disjoint and nest correctly). The end node is never repeated.
-      const avoided = new Set<string>();
-      const q2 = [start.id];
-      while (q2.length) {
-        const id = q2.pop()!;
-        if (id === L.id || avoided.has(id)) continue;
-        avoided.add(id);
-        for (const c of children.get(id) || []) q2.push(c);
-      }
-      const body = [...downstream].filter((id) => !avoided.has(id) && byId.get(id)?.type !== "end");
       loopBodies.set(L.id, body);
+      loopBodySet.set(L.id, new Set(body));
       loopExits.set(L.id, body.filter((id) => !(children.get(id) || []).some((c) => body.includes(c))));
     }
     /**
-     * What a loop is holding while it iterates: the input it was handed (passed
-     * through to its section unchanged, so every pass starts from the same
-     * material) and one entry per finished pass. It is scratch state, not part of
-     * `run.nodes`, so it is never serialized; the loop's *output* is only built
-     * from it when the last pass ends.
+     * What a loop is holding while it iterates: the input it was handed and one
+     * entry per finished pass. It is scratch state, not part of `run.nodes`, so
+     * it is never serialized; the loop's *output* is only built from it when the
+     * last pass ends.
      */
     const loopLogs = new Map<string, { input: string; parts: string[]; size: number }>();
     /** Passes this run has completed, across every loop — the run-level budget. */
     let totalPasses = 0;
+
+    /**
+     * Who must settle before `node` may run. Two rules keep a feedback loop from
+     * deadlocking itself:
+     *   • a **repeat edge is never a dependency** — it is the loop's own output
+     *     of the previous pass, not something to wait for;
+     *   • a node is never gated by the **body of a loop it is not in**… which is
+     *     the loop itself: a feedback loop does not wait for the step it re-runs,
+     *     because it starts that step.
+     * A node whose only connections are repeat edges keeps them (the loop-first
+     * wiring `start → loop`, `loop.repeat → agent` is started *by* the loop), and
+     * so does a loop fed only by its own section (`start → agent → loop`): that
+     * first run has to happen before the loop can begin.
+     */
+    function effectiveDeps(node: any): string[] {
+      const own = deps.get(node.id) || [];
+      const ps = own.length ? own : parents.get(node.id) || [];
+      const body = loopBodySet.get(node.id);
+      if (!body || !body.size) return ps;
+      const outside = ps.filter((p) => !body.has(p));
+      return outside.length ? outside : ps;
+    }
+
+    /**
+     * Whose output `{input}` is assembled from — every incoming connection,
+     * repeat edges included (they are how a pass receives the previous pass's
+     * result). A feedback loop is the one node that ignores its own section:
+     * the section is what it *produces*, not what it reads.
+     */
+    function effectiveInputs(node: any): string[] {
+      const ps = parents.get(node.id) || [];
+      const body = loopBodySet.get(node.id);
+      if (!body || !body.size) return ps;
+      const outside = ps.filter((p) => !body.has(p));
+      return outside.length ? outside : ps;
+    }
 
     const settled = (id: string) => {
       const s = run.nodes[id].status;
@@ -1292,14 +1394,14 @@ export function activate(api: any): void {
         .join("\n\n---\n\n");
     }
     const parentsReady = (node: any) => {
-      const ps = parents.get(node.id) || [];
+      const ps = effectiveDeps(node);
       if (!ps.length) return false;
       const join = node.type === "agent" ? node.config.join : "all";
       if (join === "first") return ps.some(provides);
       return ps.every(provides);
     };
     const gateFree = (node: any) => {
-      for (const pid of parents.get(node.id) || []) {
+      for (const pid of effectiveDeps(node)) {
         const parent = byId.get(pid) as any;
         if (!parent || parent.type !== "agent" || parent.config.fanout !== "serial") continue;
         if ((runningByParent.get(pid)?.size || 0) > 0) return false;
@@ -1309,7 +1411,7 @@ export function activate(api: any): void {
 
     function upstreamOutput(node: any) {
       const parts: string[] = [];
-      for (const pid of parents.get(node.id) || []) {
+      for (const pid of effectiveInputs(node)) {
         const out = run.nodes[pid]?.output;
         if (out) parts.push(String(out));
       }
@@ -1391,6 +1493,13 @@ export function activate(api: any): void {
           if (s.iteration < s.iterations) {
             s.iteration++;
             s.passes++;
+            // A feedback loop hands its section the result it just produced, so
+            // each pass improves the last. A dominated-section loop keeps passing
+            // the same material, exactly as before.
+            if (loopFeedback.has(L.id)) {
+              const latest = passOutput(L.id);
+              if (latest) s.output = latest.slice(0, RUN_OUTPUT_MAX);
+            }
             rearmBody(body);
             logLine(run, L.id, "status", `↻ ${L.name} — pass ${s.iteration}/${s.iterations}`);
             saveRun(run);
@@ -1458,19 +1567,36 @@ export function activate(api: any): void {
           if (node.type === "loop") {
             const s = run.nodes[node.id];
             const body = loopBodies.get(node.id) || [];
+            // Nothing to repeat: no Repeat connection and no dominated section.
+            // Settle it in place as a pass-through instead of burning the run's
+            // whole pass budget iterating an empty section.
+            if (!body.length) {
+              s.status = "done";
+              s.output = upstreamOutput(node).slice(0, RUN_OUTPUT_MAX);
+              s.startedAt = s.finishedAt = Date.now();
+              logLine(run, node.id, "status", `🔁 ${node.name} — no step is wired back to it, so it passes through`);
+              saveRun(run);
+              progressed = true;
+              continue;
+            }
             s.status = "running";
             s.startedAt = Date.now();
             s.iterations = s.iterations > 0 ? s.iterations : clamp(Math.round(Number(node.config.count)), 1, MAX_LOOPS);
             s.iteration = 1;
             s.passes = s.passes || 0;
-            // The loop passes what reached it straight into its section, so every
-            // pass starts from the same material; its own output is only assembled
-            // once the last pass has run.
+            // The loop's output starts as what reached it; a feedback loop replaces
+            // it with each pass's result, and its own final output is only
+            // assembled once the last pass has run.
             s.output = upstreamOutput(node).slice(0, RUN_OUTPUT_MAX);
-            loopLogs.set(node.id, { input: s.output, parts: [], size: 0 });
-            logLine(run, node.id, "status", body.length
-              ? `🔁 ${node.name} — ${s.iterations} ${s.iterations === 1 ? "pass" : "passes"} over ${body.length} node${body.length === 1 ? "" : "s"}`
-              : `🔁 ${node.name} — nothing downstream belongs to this loop alone, so it repeats nothing`);
+            // When the loop is fed by its own section (`start → agent → loop` with
+            // `loop.repeat → agent`) that section has already run, and that run IS
+            // pass 1 — so the pass it produces is the loop's whole input, and
+            // recording the seed as well would repeat the same text twice.
+            const bodySettled = body.every((b) => settled(b));
+            loopLogs.set(node.id, { input: bodySettled ? "" : s.output, parts: [], size: 0 });
+            logLine(run, node.id, "status", loopFeedback.has(node.id)
+              ? `🔁 ${node.name} — ${s.iterations} ${s.iterations === 1 ? "pass" : "passes"} over the step wired to its Repeat output`
+              : `🔁 ${node.name} — ${s.iterations} ${s.iterations === 1 ? "pass" : "passes"} over ${body.length} node${body.length === 1 ? "" : "s"}`);
             saveRun(run);
             progressed = true;
             continue;
@@ -1508,8 +1634,14 @@ export function activate(api: any): void {
       const node = byId.get(nodeId) as any;
       const s = run.nodes[nodeId];
       if (run.status !== "running" || !node || !s || s.status !== "waiting") return false;
+      // Keep the message the reviewer actually read — the rendered text the
+      // banner and the sidebar showed, `{input}`/`{task}` already interpolated —
+      // so a decided gate still shows what was reviewed. Recomputing it would be
+      // the same text, but falling back to the stored template would replace the
+      // material with a literal `{input}` the moment the gate is approved.
+      const reviewedMessage = s.approval?.message || approvalMessage(node);
       s.approval = null;
-      s.decision = { approve, note, at: Date.now() };
+      s.decision = { approve, note, at: Date.now(), message: reviewedMessage };
       s.finishedAt = Date.now();
       if (approve) {
         const reviewed = upstreamOutput(node);
@@ -1540,14 +1672,17 @@ export function activate(api: any): void {
       s.status = "running";
       s.startedAt = Date.now();
       running.add(node.id);
-      for (const pid of parents.get(node.id) || []) {
+      // Registered under the node's *dependencies*, so `gateFree` (which reads
+      // the same list) sees exactly the children it knows about.
+      const nodeDeps = effectiveDeps(node);
+      for (const pid of nodeDeps) {
         if (!runningByParent.has(pid)) runningByParent.set(pid, new Set());
         runningByParent.get(pid)!.add(node.id);
       }
       logLine(run, node.id, "status", `▶ ${node.name} (${node.config.harness})`);
       void runNode(node).finally(() => {
         running.delete(node.id);
-        for (const pid of parents.get(node.id) || []) runningByParent.get(pid)?.delete(node.id);
+        for (const pid of nodeDeps) runningByParent.get(pid)?.delete(node.id);
         s.finishedAt = Date.now();
         logLine(run, node.id, "status", s.status === "done" ? `✔ ${node.name}` : `✖ ${node.name}: ${s.error || s.status}`);
         if (s.status === "error" && !node.config.continueOnError) {
@@ -2195,12 +2330,21 @@ export function activate(api: any): void {
         const to = String(body.to ?? "").trim();
         if (!from || !to) return jsonResponse({ error: "missing from/to" }, 400);
         if (from === to) return jsonResponse({ error: "a node cannot connect to itself" }, 400);
+        // A `repeat` connection is the loop's feedback output — the only edge
+        // that may close a cycle, because the loop engine owns that cycle.
+        const port = String(body.port ?? "") === "repeat" ? "repeat" : "";
         const before = readState(workspace);
         const a = before.nodes.find((n: any) => n.id === from);
         const b = before.nodes.find((n: any) => n.id === to);
         if (!a || !b) return jsonResponse({ error: "no such node" }, 404);
         if (a.type === "end") return jsonResponse({ error: "the end node has no outgoing connections" }, 400);
         if (b.type === "start") return jsonResponse({ error: "the start node has no incoming connections" }, 400);
+        if (port === "repeat" && a.type !== "loop") {
+          return jsonResponse({ error: "only a loop node has a repeat output" }, 400);
+        }
+        if (port === "repeat" && b.type === "end") {
+          return jsonResponse({ error: "a loop cannot repeat the end node" }, 400);
+        }
         // Start and end are allowed any number of connections: everything wired
         // off the start runs in parallel (up to the run's concurrency limit) and
         // the end waits for all of its parents, so a fan-out / fan-in graph is
@@ -2208,11 +2352,12 @@ export function activate(api: any): void {
         if (before.edges.some((e: any) => e.from === from && e.to === to)) {
           return jsonResponse({ error: "those nodes are already connected" }, 409);
         }
-        if (createsCycle(before.nodes, before.edges, from, to)) {
+        // A repeat edge is exempt: it is meant to close the loop's own cycle.
+        if (port !== "repeat" && createsCycle(before.nodes, before.edges, from, to)) {
           return jsonResponse({ error: "that connection would create a cycle" }, 400);
         }
         const state = commit(workspace, (current) => {
-          current.edges.push({ id: nextId("edge"), from, to });
+          current.edges.push({ id: nextId("edge"), from, to, ...(port ? { port } : {}) });
           return current;
         });
         return jsonResponse(state);

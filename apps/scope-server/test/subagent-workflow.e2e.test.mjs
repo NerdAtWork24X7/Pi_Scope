@@ -217,6 +217,35 @@ async function buildLoopGraph(w, { count = 3, bodyPrompt = "{input}|{iteration}/
   return { start, first, loop, body, side, end };
 }
 
+/** Wire a workspace into start → loop → end with the loop's **Repeat** output
+ *  wired back to a single agent — the refinement shape: each pass re-runs that
+ *  agent with the previous pass's result as its input. `back` also wires
+ *  `agent → loop`, which the engine must read as the loop's own output rather
+ *  than as a dependency (counting it would deadlock the pair). Custom `printf`
+ *  harnesses keep the run hermetic, and the step prints its pass number so the
+ *  chain is visible in its output. */
+async function buildFeedbackGraph(w, { count = 3, back = false } = {}) {
+  const s = await snapshot(w);
+  const start = s.nodes.find((n) => n.type === "start");
+  const end = s.nodes.find((n) => n.type === "end");
+  const loop = (await act("addNode", { type: "loop", x: 360, y: 200 }, w)).data.nodes.at(-1);
+  assert.ok((await act("updateNode", { id: loop.id, name: "refine", config: { count } }, w)).res.ok);
+  const step = (await act("addNode", { type: "agent", x: 620, y: 120 }, w)).data.nodes.at(-1);
+  assert.ok((await act("updateNode", { id: step.id, name: "step", config: {
+    harness: "custom", command: `printf 'B%s[%s]' "$SW_ITERATION" "$SW_PROMPT"`, prompt: "{input}",
+  } }, w)).res.ok);
+  for (const e of s.edges) await act("removeEdge", { id: e.id }, w);
+  const wire = async (from, to, port) => {
+    const r = await act("addEdge", port ? { from, to, port } : { from, to }, w);
+    assert.ok(r.res.ok, r.data?.error);
+  };
+  await wire(start.id, loop.id);
+  await wire(loop.id, step.id, "repeat");
+  await wire(loop.id, end.id);
+  if (back) await wire(step.id, loop.id);
+  return { start, loop, step, end };
+}
+
 /** Wait until one node reaches `status`, returning the whole run each poll. */
 async function waitNode(w, nodeId, status, timeoutMs = 20_000) {
   const start = Date.now();
@@ -727,6 +756,180 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal(run.nodes[gate.id].decision.approve, true);
     assert.equal(run.nodes[gate.id].decision.note, "", "the second pass was decided on its own");
     assert.equal((run.log.map((l) => l.text).join("\n").match(/awaiting approval/g) || []).length, 2);
+  });
+
+  test("only a loop node may have a repeat output, and a repeat edge may close a cycle", async () => {
+    const solo = path.join(tmpDir, "ws-loop-wire");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const end = s.nodes.find((n) => n.type === "end");
+    const loop = (await act("addNode", { type: "loop", x: 300, y: 420 }, solo)).data.nodes.at(-1);
+
+    // Repeat belongs to a loop alone…
+    const fromAgent = await act("addEdge", { from: agent.id, to: loop.id, port: "repeat" }, solo);
+    assert.equal(fromAgent.res.status, 400);
+    assert.match(fromAgent.data.error, /only a loop/);
+    // …and never points at the end node.
+    const toEnd = await act("addEdge", { from: loop.id, to: end.id, port: "repeat" }, solo);
+    assert.equal(toEnd.res.status, 400);
+    assert.match(toEnd.data.error, /end node/);
+
+    // A repeat edge closes the loop's own cycle — the one cycle the graph allows.
+    const repeat = await act("addEdge", { from: loop.id, to: agent.id, port: "repeat" }, solo);
+    assert.ok(repeat.res.ok, repeat.data?.error);
+    assert.equal(repeat.data.edges.find((e) => e.from === loop.id && e.to === agent.id).port, "repeat");
+    // An ordinary edge in the other direction is fine too — the engine reads it
+    // as the loop's output, not as a dependency.
+    assert.ok((await act("addEdge", { from: agent.id, to: loop.id }, solo)).res.ok);
+    // The port survives a round-trip through the store, and an ordinary edge
+    // that closes a real cycle is still refused.
+    assert.equal((await snapshot(solo)).edges.find((e) => e.from === loop.id).port, "repeat");
+    assert.equal((await act("addEdge", { from: agent.id, to: end.id, port: "repeat" }, solo)).res.status, 400);
+  });
+
+  test("imports a loop's repeat connection, but still refuses a real cycle", async () => {
+    const solo = path.join(tmpDir, "ws-loop-import");
+    fs.mkdirSync(solo, { recursive: true });
+    await snapshot(solo);
+    const file = (edges) => ({
+      name: "Looped",
+      nodes: [
+        { id: "s", type: "start", name: "Start", x: 0, y: 0 },
+        { id: "l", type: "loop", name: "refine", x: 200, y: 0, config: { count: 2 } },
+        { id: "a", type: "agent", name: "step", x: 400, y: 0, config: { harness: "custom", command: "printf x", prompt: "{input}" } },
+        { id: "e", type: "end", name: "End", x: 600, y: 0 },
+      ],
+      edges,
+    });
+    // step → loop → step, both ordinary: a real cycle, refused.
+    const bad = await act("importWorkflow", { data: file([
+      { from: "s", to: "l" }, { from: "l", to: "a" }, { from: "a", to: "l" }, { from: "l", to: "e" },
+    ]) }, solo);
+    assert.equal(bad.res.status, 400);
+    assert.match(bad.data.error, /cycle/);
+
+    // The same graph, with the loop's side of that cycle marked as its Repeat
+    // output, is exactly a refinement loop — accepted, port intact.
+    const good = await act("importWorkflow", { data: file([
+      { from: "s", to: "l" }, { from: "l", to: "a", port: "repeat" }, { from: "a", to: "l" }, { from: "l", to: "e" },
+    ]) }, solo);
+    assert.ok(good.res.ok, good.data?.error);
+    assert.equal(good.data.edges.find((e) => e.to === "a").port, "repeat");
+
+    // A repeat edge at the end node is not a repeat — the same rule `addEdge`
+    // enforces — so it imports as the ordinary connection it must be.
+    const toEnd = await act("importWorkflow", { data: file([
+      { from: "s", to: "l" }, { from: "l", to: "a" }, { from: "l", to: "e", port: "repeat" },
+    ]) }, solo);
+    assert.ok(toEnd.res.ok, toEnd.data?.error);
+    assert.equal(toEnd.data.edges.find((e) => e.to === "e").port, undefined);
+  });
+
+  test("a feedback loop re-runs its step, each pass fed the previous pass's result", async () => {
+    const solo = path.join(tmpDir, "ws-loop-feedback");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildFeedbackGraph(solo, { count: 3 });
+    assert.ok((await runApi("start", { task: "seed" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done");
+    assert.equal(run.nodes[g.loop.id].status, "done");
+    assert.equal(run.nodes[g.loop.id].iterations, 3);
+    assert.equal(run.nodes[g.loop.id].iteration, 3, "it reports the last pass it ran");
+    // Three passes, each seeded by the one before: seed → B1[seed] → B2[B1[seed]]
+    // → B3[B2[B1[seed]]]. The chain is the whole point: the step never sees the
+    // original seed again after its first pass.
+    assert.equal(run.nodes[g.step.id].outputTail, "B3[B2[B1[seed]]]");
+    // The loop's own output is the whole loop — the seed, then every pass — so a
+    // node after it reads the finished result.
+    const out = run.nodes[g.loop.id].outputTail;
+    assert.match(out, /^seed/);
+    assert.ok(out.includes("B1[seed]"), "the first pass is kept");
+    assert.ok(out.trim().endsWith("B3[B2[B1[seed]]]"), "the last pass is the answer");
+    assert.match(run.nodes[g.end.id].outputTail, /B3\[B2\[B1\[seed\]\]\]/);
+  });
+
+  test("a loop fed by the step it repeats still runs that step", async () => {
+    // The reported shape: start → agent → loop, with loop.repeat → agent. The
+    // loop's only parent is the step it repeats, so it must wait for that first
+    // run (stripping every parent would leave it, and its section, never running).
+    const solo = path.join(tmpDir, "ws-loop-self-fed");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const start = s.nodes.find((n) => n.type === "start");
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const end = s.nodes.find((n) => n.type === "end");
+    assert.ok((await act("updateNode", { id: agent.id, name: "step", config: {
+      harness: "custom", command: `printf 'B%s[%s]' "$SW_ITERATION" "$SW_PROMPT"`, prompt: "{input}",
+    } }, solo)).res.ok);
+    const loop = (await act("addNode", { type: "loop", x: 600, y: 200 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: loop.id, name: "refine", config: { count: 3 } }, solo)).res.ok);
+    for (const e of s.edges) await act("removeEdge", { id: e.id }, solo);
+    for (const [from, to, port] of [[start.id, agent.id], [agent.id, loop.id], [loop.id, agent.id, "repeat"], [loop.id, end.id]]) {
+      const r = await act("addEdge", port ? { from, to, port } : { from, to }, solo);
+      assert.ok(r.res.ok, r.data?.error);
+    }
+    assert.ok((await runApi("start", { task: "seed" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", "the run neither stalls nor hangs");
+    assert.equal(run.nodes[loop.id].status, "done");
+    assert.equal(run.nodes[loop.id].iterations, 3);
+    // The step really runs — the bug was that it never executed at all.
+    const executions = run.log.filter((l) => /▶ step \(custom\)/.test(l.text)).length;
+    assert.equal(executions, 3, "the step executes on every pass");
+    // Each pass is fed the previous pass's result (the task stays in front of it,
+    // because `start → step` is still wired): B[seed] → B2[…] → B3[…].
+    assert.match(run.nodes[agent.id].outputTail, /^B3\[[\s\S]*B2\[[\s\S]*B\[seed\]/);
+    assert.match(run.nodes[end.id].outputTail, /B3\[/, "the finished loop reaches the end node");
+  });
+
+  test("an agent wired back into its loop does not deadlock the run", async () => {
+    const solo = path.join(tmpDir, "ws-loop-feedback-back");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildFeedbackGraph(solo, { count: 2, back: true });
+    assert.ok((await runApi("start", { task: "seed" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", "the loop does not wait for the step it re-runs");
+    assert.equal(run.nodes[g.step.id].outputTail, "B2[B1[seed]]");
+    assert.match(run.nodes[g.end.id].outputTail, /B2\[B1\[seed\]\]/);
+  });
+
+  test("a loop with nothing to repeat passes through instead of burning the pass budget", async () => {
+    const solo = path.join(tmpDir, "ws-loop-open");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const start = s.nodes.find((n) => n.type === "start");
+    const end = s.nodes.find((n) => n.type === "end");
+    const loop = (await act("addNode", { type: "loop", x: 300, y: 400 }, solo)).data.nodes.at(-1);
+    // A count far past the run's pass ceiling (the suite lowers it to 12): a loop
+    // that iterated an empty section would spend the budget and abort the run.
+    assert.ok((await act("updateNode", { id: loop.id, name: "open", config: { count: 100 } }, solo)).res.ok);
+    for (const e of s.edges) await act("removeEdge", { id: e.id }, solo);
+    for (const [from, to] of [[start.id, loop.id], [loop.id, end.id]]) {
+      const r = await act("addEdge", { from, to }, solo);
+      assert.ok(r.res.ok, r.data?.error);
+    }
+    assert.ok((await runApi("start", { task: "t" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", "an empty loop does not burn the pass budget");
+    assert.equal(run.nodes[loop.id].status, "done");
+    assert.ok(!run.nodes[loop.id].iterations, "it never iterated");
+    assert.equal(run.nodes[end.id].outputTail, "t", "it forwards what reached it");
+  });
+
+  test("an approved gate keeps the message it reviewed, not the raw template", async () => {
+    const solo = path.join(tmpDir, "ws-gate-message");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildApprovalGraph(solo);
+    assert.ok((await runApi("start", { task: "hello" }, solo)).res.ok);
+    const waiting = await waitNode(solo, g.gate.id, "waiting");
+    assert.equal(waiting.nodes[g.gate.id].approval.message, "Please review: A1[hello]");
+    const decided = await runApi("approve", { nodeId: g.gate.id, note: "ok" }, solo);
+    assert.ok(decided.res.ok);
+    const d = decided.data.run.nodes[g.gate.id].decision;
+    assert.equal(d.approve, true);
+    assert.equal(d.message, "Please review: A1[hello]", "the rendered message survives the decision");
+    assert.doesNotMatch(d.message, /\{input\}/);
   });
 
   test("refuses graph shapes the runner could not execute", async () => {
@@ -2385,7 +2588,114 @@ describe("subagent workflow plugin (client)", () => {
     assert.match(await page.textContent("#sw-run-log"), /review approved/);
     // The sidebar shows the decision too, now that the gate is settled.
     await page.waitForFunction(() => /approved/.test(document.querySelector(".sw-msg-gate")?.textContent || ""));
+    // …and it keeps the message the reviewer actually read: the decided card
+    // shows the interpolated text, never the raw `{input}` template.
+    assert.match(await page.textContent(".sw-msg-gate .sw-msg-gate-msg"), /Please review: A1\[hello\]/);
+    assert.doesNotMatch(await page.textContent(".sw-msg-gate .sw-msg-gate-msg"), /\{input\}/);
     assert.equal((await waitRun(solo)).status, "done");
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("pans the canvas by dragging its background, and a click still clears the selection", async () => {
+    const solo = path.join(tmpDir, "ws-pan");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    // Park the end node far away, so the canvas is definitely bigger than the
+    // viewport and the pan has room to move the scroll position.
+    await act("moveNode", { id: s.nodes.find((n) => n.type === "end").id, x: 2400, y: 1400 }, solo);
+
+    const { page, context, errors } = await openWorkflow(solo);
+    const box = await page.locator(".sw-canvas-scroll").boundingBox();
+    const scroll = () => page.$eval(".sw-canvas-scroll", (el) => ({ x: el.scrollLeft, y: el.scrollTop }));
+
+    // Select a node first: a pan must not disturb it.
+    await page.click(".sw-node.sw-t-agent .sw-node-name");
+    await page.waitForFunction(() => !!document.querySelector(".sw-node.sel"));
+
+    const before = await scroll();
+    await page.mouse.move(box.x + box.width - 60, box.y + box.height - 60);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 260, box.y + box.height - 160, { steps: 10 });
+    await page.mouse.up();
+    const after = await scroll();
+    assert.ok(after.x > before.x + 100, `dragging left scrolls the view right (${before.x} → ${after.x})`);
+    assert.ok(after.y > before.y + 50, `dragging up scrolls the view down (${before.y} → ${after.y})`);
+    assert.equal(await page.locator(".sw-node.sel").count(), 1, "a pan is not a click — the selection stays");
+
+    // Middle-button drag pans too, even from a node's own card — and it is a view
+    // gesture, so it never clears the selection.
+    const agentBox = await page.locator(".sw-node.sw-t-agent").boundingBox();
+    const midBefore = await scroll();
+    await page.mouse.move(agentBox.x + agentBox.width / 2, agentBox.y + agentBox.height / 2);
+    await page.mouse.down({ button: "middle" });
+    await page.mouse.move(agentBox.x + agentBox.width / 2 - 120, agentBox.y + agentBox.height / 2 - 60, { steps: 6 });
+    await page.mouse.up({ button: "middle" });
+    const midAfter = await scroll();
+    assert.ok(midAfter.x > midBefore.x + 60, `a middle-drag over a node pans (${midBefore.x} → ${midAfter.x})`);
+    assert.equal(await page.locator(".sw-node.sel").count(), 1, "a middle-drag keeps the selection");
+
+    // A plain click on the background is still a deselect.
+    await page.mouse.click(box.x + box.width - 60, box.y + box.height - 60);
+    await page.waitForFunction(() => !document.querySelector(".sw-node.sel"));
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("a loop carries repeat and exit ports, and dragging repeat wires a feedback edge", async () => {
+    const solo = path.join(tmpDir, "ws-loop-ui");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const start = s.nodes.find((n) => n.type === "start");
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const end = s.nodes.find((n) => n.type === "end");
+    const loop = (await act("addNode", { type: "loop", x: 40, y: 220 }, solo)).data.nodes.at(-1);
+    // Keep the four cards compact and near the top-left, so both the loop's
+    // repeat port and the agent's input port are inside the scroller's viewport.
+    await act("moveNode", { id: start.id, x: 40, y: 40 }, solo);
+    await act("moveNode", { id: agent.id, x: 340, y: 40 }, solo);
+    await act("moveNode", { id: end.id, x: 640, y: 40 }, solo);
+    for (const e of s.edges) await act("removeEdge", { id: e.id }, solo);
+    for (const [from, to] of [[start.id, loop.id], [loop.id, end.id], [start.id, agent.id]]) {
+      const r = await act("addEdge", { from, to }, solo);
+      assert.ok(r.res.ok, r.data?.error);
+    }
+
+    const { page, context, errors } = await openWorkflow(solo);
+    const loopNode = `.sw-node[data-id="${loop.id}"]`;
+    assert.equal(await page.locator(`${loopNode} .sw-port-out`).count(), 2, "a loop has repeat + exit");
+    assert.equal(await page.locator(`${loopNode} .sw-port-repeat`).count(), 1);
+    assert.equal(await page.locator(`${loopNode} .sw-port-next`).count(), 1);
+    assert.equal(await page.locator(`${loopNode} .sw-port-cap`).count(), 2, "both outputs are named");
+    // The layout the loop is drawn with: input and exit share the RIGHT edge
+    // (input above), and the repeat output leaves the LEFT edge.
+    await page.locator(`${loopNode} .sw-port-repeat`).scrollIntoViewIfNeeded();
+    const nodeBox = await page.locator(loopNode).boundingBox();
+    const inBox = await page.locator(`${loopNode} .sw-port-in`).boundingBox();
+    const repeat = await page.locator(`${loopNode} .sw-port-repeat`).boundingBox();
+    const exit = await page.locator(`${loopNode} .sw-port-next`).boundingBox();
+    const rightEdge = nodeBox.x + nodeBox.width;
+    const mid = (b) => b.x + b.width / 2;
+    assert.ok(mid(inBox) > rightEdge - 20, `the input port is on the right edge (${mid(inBox)} vs ${rightEdge})`);
+    assert.ok(mid(exit) > rightEdge - 20, "the exit port is on the right edge");
+    assert.ok(mid(repeat) < nodeBox.x + 20, `the repeat port is on the left edge (${mid(repeat)} vs ${nodeBox.x})`);
+    assert.ok(inBox.y < exit.y, "the input sits above the exit on the shared right edge");
+    assert.ok(repeat.y < exit.y, "and the repeat sits above the exit too");
+
+    // Drag repeat → the agent: the connection is stored as a feedback edge…
+    await page.locator(`.sw-node[data-id="${agent.id}"] .sw-port-in`).scrollIntoViewIfNeeded();
+    const target = await page.locator(`.sw-node[data-id="${agent.id}"] .sw-port-in`).boundingBox();
+    await page.mouse.move(repeat.x + repeat.width / 2, repeat.y + repeat.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForFunction((n) => document.querySelectorAll("path.sw-edge").length === n + 1, 3);
+    const after = (await snapshot(solo)).edges;
+    const fb = after.find((e) => e.from === loop.id && e.to === agent.id);
+    assert.ok(fb, `the feedback edge was stored — edges: ${JSON.stringify(after.map((e) => [e.from, e.to, e.port]))}`);
+    assert.equal(fb.port, "repeat");
+    // …and drawn as the loop's own dashed connection.
+    await page.waitForFunction((id) => !!document.querySelector(`path.sw-edge[data-edge="${id}"].sw-edge-repeat`), fb.id);
     assert.deepEqual(errors, []);
     await context.close();
   });

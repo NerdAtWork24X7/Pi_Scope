@@ -31,6 +31,7 @@ const TOKEN = "chat-reattach-token";
 
 const STUB = `#!/usr/bin/env node
 let buf = "";
+let refusals = 0;
 const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const delta = (t) => send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: t } });
 process.stdin.on("data", (d) => {
@@ -42,6 +43,13 @@ process.stdin.on("data", (d) => {
     let ev; try { ev = JSON.parse(line); } catch { continue; }
     if (ev.type === "prompt") {
       const msg = String(ev.message || "");
+      // REFUSE_ALWAYS: pi keeps refusing the prompt (a real misconfiguration).
+      // REFUSE: the first prompt is refused the way pi refuses one whose
+      // provider credentials have not been resolved yet, then it works.
+      if (/REFUSE_ALWAYS/.test(msg) || (/REFUSE/.test(msg) && refusals++ === 0)) {
+        send({ type: "response", command: "prompt", success: false, error: "No API key found for opencode-go." });
+        continue;
+      }
       send({ type: "message_start", message: { role: "assistant" } });
       if (/UI/.test(msg)) {
         send({ type: "extension_ui_request", id: "ui-1", method: "select", title: "Pick one", options: ["1. alpha", "2. beta"] });
@@ -329,5 +337,33 @@ describe("chat run recovery", () => {
     assert.ok(ev2.some((e) => e.type === "ui_select" && e.replayed === undefined) === false, "and neither is its original request");
 
     await api("/chat/stop", { method: "POST", body: JSON.stringify({ sessionId: "sess-ui" }) });
+  });
+
+  test("a prompt pi refuses before the turn starts is retried, not left hanging", async () => {
+    // The shape of the real bug: pi resolves a provider's credentials
+    // asynchronously at boot, so a prompt that lands immediately after spawn can
+    // be refused with "No API key found for <provider>" although the key is
+    // stored. The refusal must not leave the run "running" forever.
+    const res = await startRun("REFUSE please answer", "sess-refuse-once");
+    const events = await readEvents(res, { until: (evs) => evs.some((e) => e.type === "done"), timeoutMs: 15_000 });
+    assert.ok(events.some((e) => e.type === "done"), "the run ends instead of hanging");
+    assert.equal(texts(events), "alphabeta", "the retried prompt produced the answer");
+    assert.match(events.filter((e) => e.type === "stderr").map((e) => e.text).join("\n"),
+      /No API key found for opencode-go[\s\S]*retrying/, "the refusal and the retry are reported");
+    assert.ok(!events.some((e) => e.type === "error"), "a recovered refusal is not surfaced as a run error");
+    const run = (await status()).find((r) => r.sessionId === "sess-refuse-once");
+    assert.ok(!run || !run.active, "and the run is no longer active");
+  });
+
+  test("a prompt pi keeps refusing fails the run instead of hanging", async () => {
+    const res = await startRun("REFUSE_ALWAYS please answer", "sess-refuse-always");
+    const events = await readEvents(res, { until: (evs) => evs.some((e) => e.type === "done"), timeoutMs: 20_000 });
+    assert.ok(events.some((e) => e.type === "done"), "the run is closed, not left open");
+    assert.match(events.filter((e) => e.type === "error").map((e) => e.message).join("\n"),
+      /No API key found for opencode-go/, "the real reason reaches the reader");
+    const done = events.find((e) => e.type === "done");
+    assert.match(String(done.error || ""), /No API key found/, "and the done event carries it");
+    const run = (await status()).find((r) => r.sessionId === "sess-refuse-always");
+    assert.ok(!run || !run.active, "the run is no longer active");
   });
 });

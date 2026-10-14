@@ -50,7 +50,11 @@
   background-color: var(--surface);
   background-image: var(--grid);
   background-size: var(--grid-size);
+  /* The background is pannable by dragging it (and by middle-button drag
+     anywhere); a node/port/edge overrides this with its own cursor. */
+  cursor: grab;
 }
+.sw-canvas-scroll.panning { cursor: grabbing; }
 .sw-canvas { position: relative; width: 1000px; height: 700px; }
 
 /* ── Zoom cluster ───────────────────────────────────────────────────────── */
@@ -76,6 +80,10 @@
 .sw-edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
 .sw-edge { fill: none; stroke: color-mix(in srgb, var(--muted) 75%, transparent); stroke-width: 2; pointer-events: stroke; cursor: pointer; }
 .sw-edge:hover, .sw-edge.sel { stroke: var(--accent); stroke-width: 3; }
+/* A loop's feedback connection: dashed, in the loop's own cyan, so a cycle on
+   the canvas never reads as an accident. */
+.sw-edge-repeat { stroke: color-mix(in srgb, var(--cyan) 70%, transparent); stroke-dasharray: 6 4; }
+.sw-edge-repeat:hover, .sw-edge-repeat.sel { stroke: var(--cyan); }
 .sw-tmp { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 4; }
 
 .sw-nodes { position: absolute; inset: 0; }
@@ -212,6 +220,23 @@
 .sw-port:hover { background: var(--accent); border-color: var(--accent); transform: scale(1.15); }
 .sw-node.sw-t-start .sw-port-out { border-color: var(--green); }
 .sw-node.sw-t-end .sw-port-in { border-color: var(--red); }
+
+/* A loop's three ports, laid out for a feedback edge: its input arrives on the
+   RIGHT (shared with the Exit below it) and its Repeat output leaves the LEFT,
+   back towards the step the loop re-runs. The same fractions are what `portPos`
+   routes with, so the wiring always meets the port it was drawn from. */
+.sw-node.sw-t-loop .sw-port-in { left: auto; right: -8px; top: 30%; }
+.sw-node.sw-t-loop .sw-port-repeat { left: -8px; right: auto; top: 30%; border-color: color-mix(in srgb, var(--cyan) 60%, var(--border-strong)); }
+.sw-node.sw-t-loop .sw-port-next { right: -8px; top: 74%; }
+.sw-node.sw-t-loop .sw-port-repeat:hover { background: var(--cyan); border-color: var(--cyan); }
+/* The captions that name the two outputs, so the wiring is legible at a glance. */
+.sw-port-cap {
+  position: absolute; width: 38px;
+  font-family: var(--mono), var(--emoji); font-size: 9px; letter-spacing: .04em;
+  color: var(--muted); pointer-events: none; user-select: none;
+}
+.sw-port-cap-repeat { left: -48px; right: auto; text-align: right; top: calc(30% - 5px); color: color-mix(in srgb, var(--cyan) 70%, var(--muted)); }
+.sw-port-cap-next { right: -48px; text-align: right; top: calc(74% - 5px); }
 
 /* ── Messages sidebar ───────────────────────────────────────────────────── */
 /*

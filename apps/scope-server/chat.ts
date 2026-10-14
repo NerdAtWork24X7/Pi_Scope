@@ -44,6 +44,26 @@ const RUN_LOG_MAX_EVENTS = 20000;
 const RUN_LOG_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
+ * A prompt pi refuses *before* a turn starts is a preflight failure — nothing
+ * streamed, no agent started. The one that bites in practice is the credential
+ * check: pi resolves a provider's auth asynchronously at boot, so a prompt that
+ * lands in the first moments after spawn can be refused with "No API key found
+ * for <provider>" even though the key is stored (the workflow runner and the
+ * office queue prompt immediately, which is exactly when this happens). That is
+ * transient, so the prompt is re-sent a couple of times before the run is
+ * failed. Anything else — a genuinely missing key, an unknown model — fails
+ * after the same few attempts instead of hanging.
+ */
+const PROMPT_RETRY_MAX = 3;
+/** The first retry's wait; each further attempt waits this long times its number
+ *  (1.2s, 2.4s, 3.6s), which covers a credential resolution that needs a network
+ *  round trip without making a genuine misconfiguration feel like a hang. */
+const PROMPT_RETRY_DELAY_MS = 1200;
+/** The preflight refusals worth retrying: a credential/model resolution that has
+ *  not finished, rather than a configuration that will never work. */
+const TRANSIENT_PROMPT_ERROR = /No API key found|No model selected|Authentication failed|Credentials may have expired|while compaction is in progress/i;
+
+/**
  * One in-flight prompt (a "run") on a chat session.
  *
  * The run OWNS the readers watching it rather than the other way around: the
@@ -60,6 +80,10 @@ interface ChatRun {
   prompt: string; // the user prompt that started this run
   startedAt: number;
   openUi: Map<string, any>; // extension_ui dialogs still waiting for an answer
+  promptRetries: number; // preflight refusals already retried (see PROMPT_RETRY_MAX)
+  /** Re-send this run's prompt. Set by `startChat` (the prompt writer lives in
+   *  its stream closure); used to retry a preflight refusal from `handleLine`. */
+  resend: (() => void) | null;
 }
 
 interface ChatSession {
@@ -206,7 +230,27 @@ function handleLine(sess: ChatSession, line: string) {
       // A rejected command (e.g. a queued steer/follow-up that pi refused)
       // should surface to the client instead of a misleading "accepted".
       if (ev.success === false) {
-        runEmit(run, { type: "error", message: ev.error || "pi rejected the command" });
+        const message = String(ev.error || "pi rejected the command");
+        // A refused *prompt* is a preflight failure: no turn started, so nothing
+        // will ever follow — pi keeps the process alive waiting for the next
+        // command. Leaving the run open would hang every reader that waits for
+        // the stream to close (the workflow runner, the office queue), so the
+        // run is either retried (a startup credential race) or ended here.
+        if (ev.command === "prompt" && sess.run === run) {
+          const attempts = run.promptRetries + 1;
+          if (TRANSIENT_PROMPT_ERROR.test(message) && attempts <= PROMPT_RETRY_MAX) {
+            run.promptRetries = attempts;
+            runEmit(run, { type: "stderr", text: `${message}\n\n(pi refused the prompt before the turn started — retrying, attempt ${attempts + 1}/${PROMPT_RETRY_MAX + 1})` });
+            setTimeout(() => {
+              if (sess.run !== run) return; // stopped, killed or replaced meanwhile
+              run.resend?.();
+            }, PROMPT_RETRY_DELAY_MS * attempts);
+            return;
+          }
+          endRun(sess, { type: "error", message }, { type: "done", sessionId: sess.id, model: sess.model, error: message });
+          return;
+        }
+        runEmit(run, { type: "error", message });
         return;
       }
       runEmit(run, { type: "accepted" });
@@ -694,6 +738,8 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
         prompt,
         startedAt: Date.now(),
         openUi: new Map(),
+        promptRetries: 0,
+        resend: null,
       };
       sess!.run = run;
       // A prompt is now in flight: record it so a page that abandons this stream
@@ -756,6 +802,9 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
           failRun(err);
         }
       };
+      // `handleLine` runs outside this closure, so it reaches the prompt writer
+      // through the run: that is how a preflight refusal is retried.
+      run.resend = sendPrompt;
       // Point the subprocess at the requested session before the prompt and send
       // the prompt once pi confirms the swap; pi answers these with a `response`
       // event which fires sess.resumeCallback in handleLine.

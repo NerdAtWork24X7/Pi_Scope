@@ -551,8 +551,11 @@
       // While it runs, the pass it is on is the useful number — "2/5" beside the
       // configured count, so the canvas shows progress through the loop.
       const live = rs?.iterations > 0 ? ` <span class="sw-loop-pass">${rs.iteration || 1}/${rs.iterations}</span>` : "";
+      // Whether the Repeat output is wired decides what the loop *does*, so the
+      // card says which of the two it is.
+      const feedback = edges().some((e) => e.from === n.id && e.port === "repeat");
       return `<div class="sw-node-model">Repeat ×${count}${live}${off}</div>` +
-        `<div class="sw-node-desc">${esc(n.config?.description || "Repeats the section it feeds")}</div>`;
+        `<div class="sw-node-desc">${esc(n.config?.description || (feedback ? "Refines the step wired to its Repeat output" : "Repeats the section it feeds"))}</div>`;
     }
     if (n.type === "end") {
       // The graph's answer. Filled in by syncFinalOutput once a run reaches it.
@@ -571,8 +574,24 @@
       const off = n.type === "agent" && n.config?.enabled === false;
       const cls = `sw-node sw-t-${n.type}${n.id === sel ? " sel" : ""}${st ? ` sw-run-${st}` : ""}${off ? " sw-off" : ""}`;
       const badge = st ? `<span class="sw-badge sw-b-${st}" title="${escAttr(rs?.bypassed ? "bypassed" : st)}">${badgeGlyph(st, rs?.bypassed)}</span>` : "";
-      const inPort = n.type !== "start" ? `<span class="sw-port sw-port-in" data-port="in" title="Input"></span>` : "";
-      const outPort = n.type !== "end" ? `<span class="sw-port sw-port-out" data-port="out" title="Drag to connect to another node"></span>` : "";
+      // A loop has three ports, laid out for a feedback edge: the **input**
+      // arrives on the right (with the exit), and the **Repeat** output leaves on
+      // the LEFT, back towards the step the loop re-runs. Every other node keeps
+      // the usual input-left / output-right pair.
+      const loopNode = n.type === "loop";
+      const inPort = n.type === "start" ? ""
+        : loopNode
+          ? `<span class="sw-port sw-port-in" data-port="in" title="Input — what the previous step produced"></span>`
+          : `<span class="sw-port sw-port-in" data-port="in" title="Input"></span>`;
+      const outPort = n.type === "end" ? ""
+        : loopNode
+          ? `<span class="sw-port sw-port-out sw-port-repeat" data-port="repeat" ` +
+              `title="Repeat — drag to the step this loop re-runs each pass"></span>` +
+            `<span class="sw-port sw-port-out sw-port-next" data-port="next" ` +
+              `title="Exit — the finished loop's output"></span>` +
+            `<span class="sw-port-cap sw-port-cap-repeat" aria-hidden="true">repeat</span>` +
+            `<span class="sw-port-cap sw-port-cap-next" aria-hidden="true">exit</span>`
+          : `<span class="sw-port sw-port-out" data-port="next" title="Drag to connect to another node"></span>`;
       // The head shows the provider the node runs — the mark of the harness it
       // spawns — so a canvas of mixed agents is readable without opening the
       // node's settings. The mark carries the provider's name as its tooltip.
@@ -622,21 +641,43 @@
     for (const el of nodesEl.children) {
       const id = el.dataset && el.dataset.id;
       if (!id) continue;
-      boxCache.set(id, { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight });
+      boxCache.set(id, {
+        x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight,
+        // A loop's two out ports sit above/below the middle; the flag saves a
+        // node lookup per edge while routing.
+        loop: el.classList.contains("sw-t-loop"),
+      });
     }
   }
 
-  function portPos(id, which) {
+  /** Where a port sits, in canvas coordinates. A loop is the one node whose
+   *  ports are not the default pair: its input and its Exit share the right edge
+   *  (input above, exit below) while Repeat leaves the left edge. The fractions
+   *  are the same ones the stylesheet positions `.sw-port-*` with, so the wiring
+   *  always meets the port it was drawn from. */
+  const PORT_Y = { in: 0.30, repeat: 0.30, next: 0.74 };
+
+  function portPos(id, which, port) {
     let b = boxCache.get(id);
     if (!b) {
       // Not measured yet (e.g. a link drag before the first paint): measure just
       // this node, and remember it.
       const el = nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(id)}"]`);
       if (!el) return null;
-      b = { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight };
+      b = { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight, loop: el.classList.contains("sw-t-loop") };
       boxCache.set(id, b);
     }
-    return which === "out" ? { x: b.x + b.w, y: b.y + b.h / 2 } : { x: b.x, y: b.y + b.h / 2 };
+    if (which === "in") {
+      return b.loop
+        ? { x: b.x + b.w, y: b.y + b.h * PORT_Y.in }
+        : { x: b.x, y: b.y + b.h / 2 };
+    }
+    if (b.loop) {
+      return port === "repeat"
+        ? { x: b.x, y: b.y + b.h * PORT_Y.repeat }
+        : { x: b.x + b.w, y: b.y + b.h * PORT_Y.next };
+    }
+    return { x: b.x + b.w, y: b.y + b.h / 2 };
   }
   function edgePath(p1, p2) {
     const dx = Math.max(44, Math.abs(p2.x - p1.x) * 0.5);
@@ -661,7 +702,7 @@
     const routed = new Set();
     for (const e of list) {
       routed.add(e.id);
-      const p1 = portPos(e.from, "out"), p2 = portPos(e.to, "in");
+      const p1 = portPos(e.from, "out", e.port), p2 = portPos(e.to, "in");
       if (!p1 || !p2) continue;
       live.add(e.id);
       let item = edgeEls.get(e.id);
@@ -682,6 +723,9 @@
       }
       item.path.setAttribute("d", edgePath(p1, p2));
       item.path.classList.toggle("sel", e.id === sel);
+      // A loop's feedback edge is drawn dashed in the loop's own colour, so a
+      // cycle on the canvas never reads as an accident.
+      item.path.classList.toggle("sw-edge-repeat", e.port === "repeat");
       item.btn.style.left = `${(p1.x + p2.x) / 2 - 9}px`;
       item.btn.style.top = `${(p1.y + p2.y) / 2 - 9}px`;
     }
@@ -702,8 +746,8 @@
     measureBoxes();
     layoutEdges(edges(), true);
   }
-  function showTmpPath(fromId, toX, toY) {
-    const p1 = portPos(fromId, "out");
+  function showTmpPath(fromId, port, toX, toY) {
+    const p1 = portPos(fromId, "out", port);
     if (!p1) return;
     tmpPathEl.setAttribute("d", edgePath(p1, { x: toX, y: toY }));
     tmpPathEl.style.display = "";
@@ -1132,11 +1176,18 @@
     } else if (n.type === "loop") {
       const c = n.config || {};
       const count = Math.max(1, Math.round(Number(c.count) || 1));
+      const feedback = edges().filter((e) => e.from === n.id && e.port === "repeat")
+        .map((e) => nodeById(e.to)?.name).filter(Boolean);
       fields =
         `<label class="sw-field"><span>Passes</span>` +
           `<input class="set-input sw-count-input" id="sw-f-count" type="number" min="1" max="100" step="1" value="${count}">` +
-          `<div class="sw-hint">How many times the section this loop feeds is repeated. Every pass re-runs the nodes that ` +
-          `only this loop reaches, in order; the end node is never repeated. An approval gate inside the section asks again each pass.</div></label>` +
+          `<div class="sw-hint">How many times this loop runs. Drag the <b>repeat</b> output (the cyan port on the <b>left</b> of the node) ` +
+          `back to an agent to make it a refinement loop: each pass re-runs that agent with the previous pass's result ` +
+          `as its <code>{input}</code>, so the output improves; the <b>exit</b> output (bottom-right) carries the finished loop on. ` +
+          `With no repeat connection the loop repeats every step only it reaches.</div></label>` +
+        `<div class="sw-hint">${feedback.length
+          ? `Repeating: ${feedback.map((x) => esc(x)).join(", ")} — the pass's result feeds the next.`
+          : `Nothing is wired to the repeat output yet, so this loop repeats the section it feeds.`}</div>` +
         `<label class="sw-field"><span>Note <em>(canvas label)</em></span>` +
           `<input class="set-input" id="sw-f-desc" value="${escAttr(c.description || "")}" maxlength="300" placeholder="Repeats the section it feeds">` +
           `<div class="sw-hint">Shown on the node. A node inside the loop can use <code>{iteration}</code>, ` +
@@ -1205,10 +1256,14 @@
     const e = edges().find((x) => x.id === dlg.id);
     if (!e) { selected = null; return closeDialog(); }
     const from = nodeById(e.from), to = nodeById(e.to);
+    const repeat = e.port === "repeat";
     dlgEl.innerHTML = dialogHtml(
-      `<span class="sw-dlg-glyph">⇢</span><span class="sw-dlg-title">Connection</span>`,
+      `<span class="sw-dlg-glyph">${repeat ? "🔁" : "⇢"}</span><span class="sw-dlg-title">${repeat ? "Repeat connection" : "Connection"}</span>`,
       `<p class="sw-conn-label"><b>${esc(from?.name || e.from)}</b> → <b>${esc(to?.name || e.to)}</b></p>` +
-        `<p class="sw-muted">The source node's output is passed to the target as <code>{input}</code>.</p>`,
+        (repeat
+          ? `<p class="sw-muted">Feedback: each pass of <b>${esc(from?.name || e.from)}</b> re-runs ` +
+            `<b>${esc(to?.name || e.to)}</b> with the previous pass's result as its <code>{input}</code>.</p>`
+          : `<p class="sw-muted">The source node's output is passed to the target as <code>{input}</code>.</p>`),
       `<button class="btn-sm sw-danger" id="sw-del-edge" type="button">Delete connection</button>`,
     );
     dlgEl.querySelector("#sw-del-edge").addEventListener("click", () => removeEdge(e.id));
@@ -1378,8 +1433,8 @@
     else renderDialog();
     if (dirty) paint();
   }
-  function startLink(fromId) {
-    link = { fromId };
+  function startLink(fromId, port) {
+    link = { fromId, port: port || "next" };
     document.addEventListener("mousemove", onLinkMove);
     document.addEventListener("mouseup", onLinkUp);
   }
@@ -1389,7 +1444,7 @@
     onFrame(() => {
       if (!link) return;
       const p = canvasPoint(link.px, link.py);
-      showTmpPath(link.fromId, p.x, p.y);
+      showTmpPath(link.fromId, link.port, p.x, p.y);
     });
   }
   function onLinkUp(e) {
@@ -1405,7 +1460,45 @@
     if (!nodeEl || nodeEl.dataset.id === l.fromId) return;
     const to = nodeById(nodeEl.dataset.id);
     if (!to || to.type === "start") { S.toast?.("The start node cannot receive connections", "err"); return; }
-    run_(() => post("addEdge", { from: l.fromId, to: nodeEl.dataset.id }), "Connected");
+    // The port the drag left decides what the connection *means*: a loop's
+    // Repeat output is a feedback edge, its Exit output (and every other node's
+    // single out port) is an ordinary one.
+    run_(() => post("addEdge", { from: l.fromId, to: nodeEl.dataset.id, port: l.port }), "Connected");
+  }
+
+  // ─── Panning ──────────────────────────────────────────────────────────────
+  //
+  // Dragging the empty canvas (or dragging with the middle button anywhere)
+  // moves the view, like every canvas editor. A press that does not move is
+  // still a click: it clears the selection, which is what the background used
+  // to do on its own.
+
+  let pan = null;
+
+  function startPan(e) {
+    if (!canvasScrollEl) return;
+    e.preventDefault();
+    pan = { x: e.clientX, y: e.clientY, sl: canvasScrollEl.scrollLeft, st: canvasScrollEl.scrollTop, moved: false, button: e.button };
+    canvasScrollEl.classList.add("panning");
+    document.addEventListener("mousemove", onPanMove);
+    document.addEventListener("mouseup", onPanUp);
+  }
+  function onPanMove(e) {
+    if (!pan) return;
+    const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+    if (!pan.moved && Math.abs(dx) + Math.abs(dy) > 3) pan.moved = true;
+    canvasScrollEl.scrollLeft = pan.sl - dx;
+    canvasScrollEl.scrollTop = pan.st - dy;
+  }
+  function onPanUp() {
+    document.removeEventListener("mousemove", onPanMove);
+    document.removeEventListener("mouseup", onPanUp);
+    canvasScrollEl?.classList.remove("panning");
+    const p = pan;
+    pan = null;
+    // A drag moved the view; a plain left click still clears the selection (a
+    // middle-click never does — it is a view gesture, not a click on the canvas).
+    if (p && !p.moved && p.button === 0 && selected) { selected = null; renderNodes(); selectionChanged(); }
   }
 
   // ─── Run bar + log ────────────────────────────────────────────────────────
@@ -1616,7 +1709,10 @@
    */
   function gateCardHtml(n, waiting) {
     const rs = runNode(n.id);
-    const msg = rs?.approval?.message || n.config?.message || n.config?.description || "";
+    // The message the reviewer read while the gate waited, kept after the
+    // decision (`decision.message` is the rendered text, so an approved gate
+    // still shows what was reviewed instead of the raw `{input}` template).
+    const msg = rs?.approval?.message || rs?.decision?.message || n.config?.message || n.config?.description || "";
     const d = rs?.decision;
     return `<div class="sw-msg-gate${waiting ? " waiting" : ""}" data-gate="${escAttr(n.id)}" title="Focus ${escAttr(n.name)}">` +
         `<div class="sw-msg-gate-head">` +
@@ -1892,7 +1988,8 @@
     }
     approvalsEl.classList.add("show");
     approvalsEl.innerHTML = waiting.map((n) => {
-      const msg = runNode(n.id)?.approval?.message || n.config?.message || n.config?.description || "";
+      const rs = runNode(n.id);
+      const msg = rs?.approval?.message || rs?.decision?.message || n.config?.message || n.config?.description || "";
       return `<div class="sw-approval" data-node="${escAttr(n.id)}">` +
         `<div class="sw-approval-head"><span class="sw-approval-glyph">✋</span>` +
           `<span class="sw-approval-title">${esc(n.name)} needs a decision</span></div>` +
@@ -1968,7 +2065,7 @@
         `<div class="sw-toolbar">` +
           `<button class="btn-sm sw-primary" id="sw-add-agent" type="button" title="Add an agent node">+ Agent</button>` +
           `<button class="btn-sm" id="sw-add-approval" type="button" title="Add a human approval gate">+ Approval</button>` +
-          `<button class="btn-sm" id="sw-add-loop" type="button" title="Add a loop node — repeats the section it feeds">+ Loop</button>` +
+          `<button class="btn-sm" id="sw-add-loop" type="button" title="Add a loop node — wire its repeat output back to a step to refine it">+ Loop</button>` +
           `<button class="btn-sm" id="sw-add-start" type="button" title="Add the start node">+ Start</button>` +
           `<button class="btn-sm" id="sw-add-end" type="button" title="Add the end node">+ End</button>` +
           `<button class="btn-sm" id="sw-triggers" type="button" title="Start this workflow on a schedule or an observed event">⏱ Triggers</button>` +
@@ -2115,8 +2212,17 @@
     });
 
     canvasEl.addEventListener("mousedown", (e) => {
+      // Middle-button drag pans the view from anywhere, including over a node —
+      // but never off a control (a port, the gear, a delete button), which keeps
+      // its own click behaviour whatever button was used.
+      const onControl = e.target.closest?.(".sw-port-out, .sw-node-del, .sw-node-config, .sw-edge-del");
+      if (e.button === 1 && !onControl) { startPan(e); return; }
       const port = e.target.closest?.(".sw-port-out");
-      if (port) { e.preventDefault(); e.stopPropagation(); startLink(port.closest(".sw-node").dataset.id); return; }
+      if (port) {
+        e.preventDefault(); e.stopPropagation();
+        startLink(port.closest(".sw-node").dataset.id, port.dataset.port || "next");
+        return;
+      }
       const del = e.target.closest?.(".sw-node-del");
       if (del) { e.preventDefault(); e.stopPropagation(); removeNode(del.dataset.del); return; }
       // The gear on a node's card is how its settings are reached — the only
@@ -2154,7 +2260,10 @@
         startDrag(nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(id)}"]`) || nodeEl, e);
         return;
       }
-      if (selected) { selected = null; renderNodes(); selectionChanged(); }
+      // Nothing above matched: the pointer is on empty canvas. A drag pans the
+      // view; a click that does not move still clears the selection.
+      if (e.button === 0) startPan(e);
+      else if (selected) { selected = null; renderNodes(); selectionChanged(); }
     });
 
     // Double-clicking a node is the same as pressing its gear.
