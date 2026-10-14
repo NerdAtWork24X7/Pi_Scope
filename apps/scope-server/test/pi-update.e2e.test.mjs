@@ -291,7 +291,10 @@ describe("Settings → Update adopts an install it did not start", () => {
         { timeout: 30_000 }
       );
       assert.match(await page.textContent(".set-update-verdict.ok"), /Up to date/i);
-      assert.match(await page.textContent(".settings-panel"), new RegExp(LATEST.replace(/\./g, "\\.")));
+      assert.match(
+        await page.textContent(".settings-panel"),
+        new RegExp(LATEST.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      );
       assert.equal(await page.isDisabled("#set-update-run"), true, "nothing left to install");
       await page.close();
       const result = await started;
