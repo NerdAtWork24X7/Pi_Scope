@@ -49,6 +49,7 @@
         <ul>
           <li><a href="#appimage">AppImage</a></li>
           <li><a href="#one-command">One command</a></li>
+          <li><a href="#channels">Every channel</a></li>
           <li><a href="#windows">Windows</a></li>
           <li><a href="#source">From source</a></li>
           <li><a href="#launcher">Launcher flags</a></li>
@@ -94,8 +95,9 @@
       <strong>Node 24+</strong> is the only real requirement — Pi Scope uses
       <code>node:sqlite</code>, which ships inside Node 24, so there are zero native build
       steps in the default path. Linux, macOS and Windows all run the same server, dashboard
-      and desktop window; <code>Start.sh</code> (Linux/macOS) and <code>Start.ps1</code>
-      (Windows) are the same entry point in each platform's language.
+      and desktop window; <code>./pi-scope</code> is the cross-platform launcher
+      (<code>.\pi-scope.cmd</code> on Windows) — one Node script, one shim per
+      platform — so every mode and flag below is the same on all three.
     </p>
 
     <h2 id="install">Install &amp; run</h2>
@@ -114,26 +116,79 @@
     </ul>
 
     <h3 id="one-command">One command (the whole stack)</h3>
-    <pre><code>curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.sh | sh
-cd Pi_Scope &amp;&amp; ./Start.sh                # desktop app (Electron window)</code></pre>
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.sh | sh
+cd Pi_Scope &amp;&amp; ./pi-scope                # desktop app (Electron window)</code></pre>
     <p>
       The one-liner downloads the app (no <code>git</code> needed), checks for Node 24+ and
-      installs the dependencies. <code>install.sh --help</code> lists its options
-      (<code>--dir</code>, <code>--ref</code>, <code>--no-deps</code>); running it from a
-      checkout installs that checkout in place. Prefer git:
+      installs the dependencies. <code>install/install.sh --help</code> lists its options
+      (<code>--dir</code>, <code>--pm</code>, <code>--ref</code>, <code>--no-deps</code>); running it
+      from a checkout installs that checkout in place. <code>./pi-scope</code> is the
+      cross-platform launcher (<code>.\pi-scope.cmd</code> on Windows). Prefer npm, pnpm or Bun? Pass
+      <code>--pm pnpm</code>/<code>bun</code> to the installer (<code>-Pm</code> on Windows, or
+      set <code>PISC_PM</code> when piped) — see <code>install/README.md</code> for every
+      option. Prefer git:
     </p>
     <pre><code>git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope &amp;&amp; cd Pi_Scope
-./Start.sh                               # desktop app (Electron window)</code></pre>
+./pi-scope                               # desktop app (Electron window)</code></pre>
 
     <h3 id="windows">Windows (one command)</h3>
-    <pre><code>irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.ps1 | iex
+    <pre><code>irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.ps1 -UseBasicParsing | iex
 cd Pi_Scope
-.\Start.ps1                              # desktop app (Electron window)</code></pre>
+.\pi-scope.cmd                           # desktop app (Electron window)</code></pre>
     <p>
-      Two conveniences: <code>Start.cmd</code> is the same launcher for a double-click (it
-      bypasses the PowerShell execution policy for that launch only), and
-      <code>install.ps1</code> can be run as a file when you want to pass arguments
-      (<code>-Dir</code>, <code>-Ref</code>, <code>-NoDeps</code>).
+      <code>-UseBasicParsing</code> is not decoration: PowerShell 5.1 patched for
+      CVE-2025-54100 prompts before it will fetch a script, which hangs a piped run.
+    </p>
+    <p>
+      If Defender or SmartScreen flag <code>install.ps1</code>, that is a false positive — an
+      unsigned script that downloads and unpacks a release has the shape of the droppers those
+      heuristics exist to catch. Run it as a file instead, which trips none of them:
+    </p>
+    <pre><code>irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.ps1 -UseBasicParsing -OutFile install.ps1
+Unblock-File .\install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1</code></pre>
+    <p>
+      A file also lets you pass arguments (<code>-Dir</code>, <code>-Pm</code>, <code>-Ref</code>,
+      <code>-NoDeps</code>), and <code>.\pi-scope.cmd</code> is the same launcher for a
+      double-click and for cmd.exe.
+    </p>
+
+    <h3 id="channels">Every install channel</h3>
+    <p>
+      Two channels — curl on Linux/macOS, PowerShell on Windows. Both download the app (no
+      <code>git</code> needed), check for Node 24+ and install the dependencies; which package
+      manager runs that install is the <code>--pm</code> / <code>-Pm</code> flag.
+    </p>
+    <table>
+      <thead><tr><th>Channel</th><th>Linux / macOS</th><th>Windows (PowerShell)</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>curl / PowerShell</td>
+          <td><code>curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.sh | sh</code></td>
+          <td><code>irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.ps1 -UseBasicParsing | iex</code></td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      Which package manager installs the dependencies is a flag — <code>--pm npm|pnpm|bun</code>
+      on curl (<code>npm</code> by default), <code>-Pm</code> on PowerShell
+      (<code>PISC_PM</code> when piped into <code>iex</code>). In a checkout you can instead run
+      the command yourself: <code>npm install</code>,
+      <code>pnpm install --no-ignore-scripts</code>, or
+      <code>bun install &amp;&amp; bun pm trust --all</code>. Every channel accepts
+      <code>--dir</code>, <code>--ref</code>, <code>--url</code> and <code>--no-deps</code> —
+      PowerShell spells them <code>-Dir</code>, <code>-Ref</code>, <code>-Url</code>,
+      <code>-NoDeps</code> — and <code>install/README.md</code> documents them all.
+    </p>
+
+    <h4 id="agent-template">First-run agent template</h4>
+    <p>
+      On a fresh machine the installer seeds Pi Scope's own agent dir
+      (<code>~/.pi-scope/agent</code>, or <code>SCOPE_AGENT_DIR</code>) from
+      <code>examples/pi_local/agent</code> — settings, skills, extensions, agents and themes —
+      so the bundled <code>pi</code> has a working starting point before the first launch. An
+      existing agent dir is never touched, and the skills' large, platform-specific
+      <code>.venv</code> and the obscura <code>*.tar.gz</code> bundles are skipped.
     </p>
 
     <h4>What is Windows-aware (and what is not)</h4>
@@ -178,28 +233,29 @@ apps/scope-desktop/run.sh                # requires Node.js 24+</code></pre>
 
     <h3 id="launcher">Launcher flags</h3>
     <p>
-      <code>Start.sh</code> is the single entry point for every mode — it picks a sane Node
-      (nvm-aware), boots the server and the app together, and on Ctrl-C stops only the server it
-      started. The one exception to "no setup": in desktop mode it runs
+      <code>./pi-scope</code> is the single entry point for every mode — it finds Node
+      (nvm-aware on Linux/macOS), boots the server and the app together, and on Ctrl-C stops only
+      the server it started. Windows runs the same modes through
+      <code>.\pi-scope.cmd</code>. The one exception to "no setup": in desktop mode it runs
       <code>npm install</code> <em>once</em>, on first run only, to get Electron. The server is
       started <strong>at most once</strong>: if one is already healthy on the target port, its
       token is adopted instead of a second instance being spawned, and a server orphaned by a
       <code>kill -9</code> is reaped on the next run.
     </p>
-    <pre><code>./Start.sh                              # desktop app (Electron window, default)
-./Start.sh --web                        # headless server + open the WebUI in a browser
-./Start.sh --server                     # headless server only, stays in the foreground
-./Start.sh --dev                        # server with --watch
-./Start.sh --keep-server                # leave the server up after the script exits
-./Start.sh --port 8080 --host 0.0.0.0   # override the defaults
-./Start.sh --db /path/to/scope.db --token my-token</code></pre>
-    <p><code>Start.ps1</code> is the same, in PowerShell:</p>
-    <pre><code>.\Start.ps1 -Web                         # headless server + open the WebUI in a browser
-.\Start.ps1 -Server                      # headless server only
-.\Start.ps1 -Dev                         # server with --watch
-.\Start.ps1 -KeepServer                  # leave the server up after the script exits
-.\Start.ps1 -Port 8080 -BindHost 0.0.0.0 # override the defaults
-.\stop.ps1                               # stop a running server</code></pre>
+    <pre><code>./pi-scope                              # desktop app (Electron window, default)
+./pi-scope --web                        # headless server + open the WebUI in a browser
+./pi-scope --server                     # headless server only, stays in the foreground
+./pi-scope --dev                        # server with --watch
+./pi-scope --keep-server                # leave the server up after the script exits
+./pi-scope --port 8080 --host 0.0.0.0   # override the defaults
+./pi-scope --db /path/to/scope.db --token my-token</code></pre>
+    <p>On Windows the same flags go to the launcher shim:</p>
+    <pre><code>.\pi-scope.cmd                           # desktop app (Electron window, default)
+.\pi-scope.cmd --web                     # headless server + open the WebUI in a browser
+.\pi-scope.cmd --server                  # headless server only, stays in the foreground
+.\pi-scope.cmd --dev                     # server with --watch
+.\pi-scope.cmd --keep-server             # leave the server up after the script exits
+.\pi-scope.cmd --port 8080 --host 0.0.0.0</code></pre>
     <p>
       Per-machine defaults can live in <code>apps/scope-desktop/scope.env</code> (see
       <code>scope.env.example</code>); real environment variables always win. This matters for
@@ -488,7 +544,7 @@ node docs/seed-demo.mjs</code></pre>
           <li><a href="index.html#features">Features</a></li>
           <li><a href="index.html#tour">Screenshots</a></li>
           <li><a href="index.html#why">Comparison</a></li>
-          <li><a href="index.html#install">Install</a></li>
+          <li><a href="#install">Install</a></li>
           <li><a href="index.html#faq">FAQ</a></li>
         </ul>
       </div>

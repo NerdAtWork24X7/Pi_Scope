@@ -1,0 +1,11 @@
+# video-creator skill — Python toolchain (pinned, resolved 2026-10-04 on Python 3.12)
+# Install: scripts/setup.sh  ->  creates <skill>/.venv and installs these.
+# Only these two are imported by the pipeline.
+
+imageio-ffmpeg==0.6.0     # bundled static FFmpeg 7.0.2 (libx264, aac, libass, loudnorm) — the only encoder used
+playwright==1.63.0        # Chromium 1243: deterministic scene-frame capture + page screenshots
+
+# Optional extras (uncomment only when a job needs them):
+# faster-whisper          # local word-level caption alignment (no API key)
+# soundfile               # WAV/FLAC IO beyond the stdlib `wave` module
+# numpy                   # array processing for audio/visual effects

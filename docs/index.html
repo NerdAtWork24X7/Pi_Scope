@@ -22,11 +22,11 @@
     <nav class="nav-links">
       <span class="nav-status"><i class="dot"></i> streaming</span>
       <a href="#tour" class="hide-xs">Tour</a>
-      <a href="#install" class="hide-xs">Install</a>
+      <a href="guide.html#install" class="hide-xs">Install</a>
       <a href="guide.html" class="hide-sm">Docs</a>
       <a href="https://github.com/NerdAtWork24X7/Pi_Scope" title="GitHub repository">GitHub ↗</a>
       <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme">☀</button>
-      <a class="btn btn-nav" href="#install">Get started</a>
+      <a class="btn btn-nav" href="guide.html#install">Get started</a>
     </nav>
   </div>
 </header>
@@ -51,8 +51,28 @@
       account, and uploads nothing.
     </p>
 
+    <!-- The install one-liner, up top like pi.dev — switchable per OS, copy and go. -->
+    <div class="hero-install reveal">
+      <div class="install-tabs" role="tablist" aria-label="Install command">
+        <button class="install-tab is-active" type="button" role="tab" aria-selected="true" data-os="unix">macOS / Linux</button>
+        <button class="install-tab" type="button" role="tab" aria-selected="false" data-os="windows">Windows</button>
+      </div>
+      <div class="install-pane" role="tabpanel" data-os="unix">
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.sh | sh</code></pre>
+        <p class="hero-install-note">Then <code>cd Pi_Scope &amp;&amp; ./pi-scope</code></p>
+      </div>
+      <div class="install-pane" role="tabpanel" data-os="windows" hidden>
+        <pre><code>irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.ps1 -UseBasicParsing | iex</code></pre>
+        <p class="hero-install-note">Then <code>cd Pi_Scope; .\pi-scope.cmd</code></p>
+      </div>
+      <p class="hero-install-links">
+        <a href="guide.html#install">All install options</a> ·
+        <a href="https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/README.md">Every flag</a>
+      </p>
+    </div>
+
     <div class="hero-cta">
-      <a class="btn btn-primary btn-lg" href="#install">Install in one line</a>
+      <a class="btn btn-primary btn-lg" href="guide.html#install">Install options</a>
       <a class="btn btn-outline btn-lg" href="guide.html">Read the docs</a>
     </div>
 
@@ -587,71 +607,6 @@
   </div>
 </section>
 
-<!-- ═══ Install ═══════════════════════════════════════════════════════════ -->
-<section class="band grid-tex" id="install">
-  <div class="wrap">
-    <div class="band-head reveal" style="margin-bottom: 40px">
-      <p class="eyebrow">install</p>
-      <h2 class="display-md">Running in <span class="tone-alt">about a minute.</span></h2>
-      <p>
-        Node 24+ is the only real requirement — Pi Scope uses <code>node:sqlite</code>, which
-        ships inside it, so there are no native build steps. Linux, macOS and Windows run the
-        same server and dashboard.
-      </p>
-    </div>
-
-    <div class="tiers reveal">
-      <div class="tier">
-        <h3>AppImage</h3>
-        <p class="tier-sub">Linux desktop · nothing to install</p>
-        <pre><code>chmod +x Pi-Scope-*.AppImage
-./Pi-Scope-*.AppImage</code></pre>
-        <ul>
-          <li>Node 24 bundled inside</li>
-          <li>Data lives in <code>~/.pi-scope/</code></li>
-          <li>Closing the window stops the server</li>
-        </ul>
-      </div>
-
-      <div class="tier featured">
-        <span class="pill">easiest</span>
-        <h3>One command</h3>
-        <p class="tier-sub">Linux &amp; macOS · downloads the app, checks Node</p>
-        <pre><code>curl -fsSL https://raw.githubusercontent.com/
-NerdAtWork24X7/Pi_Scope/main/install.sh | sh
-cd Pi_Scope &amp;&amp; ./Start.sh</code></pre>
-        <ul>
-          <li>No <code>git</code> needed</li>
-          <li><code>./Start.sh --web</code> for a headless server</li>
-          <li>Windows: the <code>install.ps1</code> one-liner</li>
-        </ul>
-      </div>
-
-      <div class="tier">
-        <h3>From source</h3>
-        <p class="tier-sub">Any OS · Node.js 24+</p>
-        <pre><code>git clone https://github.com/
-  NerdAtWork24X7/Pi_Scope.git Pi_Scope
-cd Pi_Scope &amp;&amp; ./Start.sh --dev</code></pre>
-        <ul>
-          <li>Vanilla JS dashboard, zero frameworks</li>
-          <li><code>npm run dev</code> adds <code>--watch</code></li>
-          <li>DB defaults to <code>db/scope.db</code></li>
-        </ul>
-      </div>
-    </div>
-
-    <div class="callout reveal">
-      <h4>See it before you wire up an agent</h4>
-      <p>
-        Seed a realistic demo session — a coder adding dark mode, its tester subagent, and a
-        second project with a failing command:
-      </p>
-      <pre style="margin: 12px 0 0"><code>node docs/seed-demo.mjs</code></pre>
-    </div>
-  </div>
-</section>
-
 <!-- ═══ FAQ ═══════════════════════════════════════════════════════════════ -->
 <section class="band" id="faq">
   <div class="wrap">
@@ -727,7 +682,7 @@ cd Pi_Scope &amp;&amp; ./Start.sh --dev</code></pre>
       read, replay and step into.
     </p>
     <div class="hero-cta">
-      <a class="btn btn-primary btn-lg" href="#install">Install Pi Scope</a>
+      <a class="btn btn-primary btn-lg" href="guide.html#install">Install Pi Scope</a>
       <a class="btn btn-outline btn-lg" href="guide.html">Read the docs</a>
     </div>
   </div>
@@ -747,7 +702,7 @@ cd Pi_Scope &amp;&amp; ./Start.sh --dev</code></pre>
           <li><a href="#features">Features</a></li>
           <li><a href="#tour">Screenshots</a></li>
           <li><a href="#why">Comparison</a></li>
-          <li><a href="#install">Install</a></li>
+          <li><a href="guide.html#install">Install</a></li>
           <li><a href="#faq">FAQ</a></li>
         </ul>
       </div>

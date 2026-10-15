@@ -55,22 +55,49 @@ chmod +x Pi-Scope-1.0.0.AppImage && ./Pi-Scope-1.0.0.AppImage
 **Linux & macOS — one command:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.sh | sh
-cd Pi_Scope && ./Start.sh          # desktop app; --web for a headless server
+curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.sh | sh
+cd Pi_Scope && ./pi-scope          # desktop app; --web for a headless server
 ```
 
 **Windows:**
 
 ```powershell
-irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install.ps1 | iex
-cd Pi_Scope; .\Start.ps1
+irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.ps1 -UseBasicParsing | iex
+cd Pi_Scope; .\pi-scope.cmd
+```
+
+`-UseBasicParsing` matters on patched PowerShell 5.1: without it the web cmdlet
+prompts first, which hangs a piped run. Defender or SmartScreen may still warn —
+an unsigned script that downloads and unpacks a release looks like the droppers
+their heuristics were trained on. That is a false positive, and the file form
+trips none of it:
+
+```powershell
+irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.ps1 -UseBasicParsing -OutFile install.ps1
+Unblock-File .\install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+`pi-scope` is the launcher on all three platforms — `pi-scope.mjs` plus a shim
+each — so the modes and flags below are the same everywhere.
+
+Choose the dependency installer with `--pm` — `npm` (default), `pnpm` or `bun`.
+On Windows the flag is `-Pm`, and a piped `iex` cannot take it, so set `PISC_PM`
+(`install/README.md` has every flag):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.sh | sh -s -- --pm pnpm
+```
+
+```powershell
+$env:PISC_PM = 'pnpm'; irm https://raw.githubusercontent.com/NerdAtWork24X7/Pi_Scope/main/install/install.ps1 -UseBasicParsing | iex
 ```
 
 **From source** (Node 24+):
 
 ```bash
 git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
-./Start.sh --dev
+./pi-scope --dev
 ```
 
 Want to see it before wiring up an agent? With the server running, seed a realistic demo
@@ -83,7 +110,9 @@ node docs/seed-demo.mjs
 The dashboard comes alive when a `pi` agent feeds it — and Pi Scope **bundles its own**. Chat,
 the commit-message generator and the in-browser terminal all launch that copy with the Pi Scope
 extension force-loaded, in its own agent dir (`~/.pi-scope/agent`), so nothing to install and no
-interference with a global `pi`. Any other tool can feed it too: just `POST` events to
+interference with a global `pi`. On first install that agent dir is seeded from
+`examples/pi_local/agent` (settings, skills, extensions) so there is something to start from; an
+existing agent dir is never touched. Any other tool can feed it too: just `POST` events to
 `/events`.
 
 ## Documentation
@@ -98,6 +127,7 @@ The detail lives in the docs, not here — this file is the front door.
 | 🔌 [`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md) | Write a plugin: manifests, routes, event hooks, storage |
 | 🤖 [`extension/README.md`](extension/README.md) | Telemetry extension flags, env vars and the event reference |
 | 🧪 [`docs/seed-demo.mjs`](docs/seed-demo.mjs) | The script that creates the demo session behind the screenshots |
+| 🧩 [`install/README.md`](install/README.md) | Every install channel and flag, and the first-run agent template |
 | 📁 [`docs/README.md`](docs/README.md) | How the docs site itself is laid out and published |
 
 **Want to know what's actually captured?** Session start/end, every user and assistant message,
@@ -113,8 +143,10 @@ everything.
 - **`apps/scope-server/`** — the server, dashboard and built-in feature plugins
 - **`apps/scope-desktop/`** — the Electron shell, launcher and bundled `pi`
 - **`extension/`** — the `pi` extension that streams telemetry
+- **`install/`** — the install scripts (curl `install.sh`, PowerShell `install.ps1`) and their docs
+- **`pi-scope` / `pi-scope.cmd`** — the cross-platform launcher (`pi-scope.mjs` core plus platform shims)
 - **`docs/`** — the published docs site (plain HTML/CSS/JS, no build step) and its screenshots
-- **`examples/plugins/`** — an installable example plugin
+- **`examples/`** — an installable example plugin (`plugins/`) and the starter agent config (`pi_local/agent`)
 
 Every feature is a plugin, so the fastest way to change Pi Scope is usually to write one rather
 than edit the core.

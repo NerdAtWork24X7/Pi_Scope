@@ -1,0 +1,50 @@
+{
+  "lastChangelogVersion": "1.1.0",
+  "doubleEscapeAction": "tree",
+  "quietStartup": true,
+  "defaultProvider": "opencode-go",
+  "defaultModel": "opencode-go/longcat-2.5-preview-free",
+  "defaultThinkingLevel": "high",
+  "packages": [
+    "npm:@juicesharp/rpiv-ask-user-question",
+    {
+      "source": "npm:@juicesharp/rpiv-todo",
+      "extensions": [
+        "-index.ts"
+      ]
+    },
+    "npm:pi-updater"
+  ],
+  "theme": "cyberpunk",
+  "hideThinkingBlock": false,
+  "skills": [
+    "-skills/flet/SKILL.md",
+    "-skills/pyside6/SKILL.md",
+    "-skills/improve-codebase-architecture/SKILL.md",
+    "-skills/electron-scaffold/SKILL.md",
+    "-skills/graphify/SKILL.md",
+    "-skills/video-creator/SKILL.md"
+  ],
+  "enabledModels": [
+    "opencode-go/step-5-preview-free",
+    "opencode-go/longcat-2.5-preview-free"
+  ],
+  "extensions": [
+    "+extensions/agent-team/index.ts",
+    "+extensions/custom-tools/index.ts",
+    "+extensions/web_fetch/index.ts",
+    "+extensions/speech-to-text/index.ts",
+    "+extensions/model_provider.ts",
+    "-extensions/obscura/index.ts",
+    "+extensions/browser.ts",
+    "+extensions/pi-scope.ts",
+    "+extensions/custom-footer.ts"
+  ],
+  "terminal": {
+    "showTerminalProgress": true
+  },
+  "compaction": {
+    "enabled": true
+  },
+  "editorPaddingX": 1
+}

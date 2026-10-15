@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# pi-scope — start the Pi Scope app on Linux and macOS.
+#
+#   ./pi-scope              desktop app (Electron window, default)
+#   ./pi-scope --web        headless server + open the WebUI in your browser
+#   ./pi-scope --server     headless server only, stays in the foreground
+#
+# A tiny shim: it finds Node and hands off to pi-scope.mjs, where the actual
+# start-up logic lives (shared with the Windows pi-scope.cmd). Works no matter
+# where it is invoked from, and follows a symlink onto PATH (e.g.
+# `ln -s "$PWD/pi-scope" /usr/local/bin/pi-scope`).
+set -euo pipefail
+
+# Resolve this script's real directory, dereferencing symlinks without relying
+# on `readlink -f` (absent on stock macOS).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE" ;; esac
+done
+HERE="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+# A GUI launch (double-click, desktop icon) does not source .bashrc, so node —
+# often installed via nvm — can be missing from PATH. Load nvm first.
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+# shellcheck disable=SC1091
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+
+command -v node >/dev/null 2>&1 || {
+  printf 'pi-scope: node not found on PATH — install Node.js 24+ (https://nodejs.org) and run this again\n' >&2
+  exit 1
+}
+
+exec node "$HERE/pi-scope.mjs" "$@"

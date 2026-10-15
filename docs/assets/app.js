@@ -31,6 +31,24 @@
       return;
     }
 
+    // ── Install tabs: switch the hero command between macOS/Linux and Windows. ──
+    const tab = event.target.closest(".install-tab");
+    if (tab) {
+      const group = tab.closest(".hero-install");
+      if (group) {
+        const os = tab.dataset.os;
+        group.querySelectorAll(".install-tab").forEach((t) => {
+          const active = t === tab;
+          t.classList.toggle("is-active", active);
+          t.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        group.querySelectorAll(".install-pane").forEach((pane) => {
+          pane.hidden = pane.dataset.os !== os;
+        });
+      }
+      return;
+    }
+
     // ── Copy button on every <pre> ──
     const copy = event.target.closest(".copy");
     if (copy) {

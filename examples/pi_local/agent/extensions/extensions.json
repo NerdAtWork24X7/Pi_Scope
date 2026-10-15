@@ -1,0 +1,57 @@
+{
+  "_doc": [
+    "Per-extension enablement, read by the agent-team orchestrator.",
+    "Keys are extension names: the directory name for a directory extension",
+    "(web_fetch), the file stem for a single-file extension (browser).",
+    "  orchestrator: true  -> the extension's tools are offered to the orchestrator (default true).",
+    "  subagent:     true  -> the extension may load in spawned subagents (default true).",
+    "A subagent can only call the tools its own .md frontmatter lists under",
+    "\"tools:\" - being enabled here never widens that allowlist, it only makes",
+    "the extension available to it.",
+    "An extension omitted here - or this whole file missing - is enabled for both."
+  ],
+  "custom-tools": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "web_fetch": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "browser": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "context7": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "speech-to-text": {
+    "orchestrator": true,
+    "subagent": false
+  },
+  "custom-footer": {
+    "orchestrator": true,
+    "subagent": false
+  },
+  "image-preview": {
+    "orchestrator": true,
+    "subagent": false
+  },
+  "model_provider": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "pi-scope": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "herdr-agent-state": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "obscura": {
+    "orchestrator": false,
+    "subagent": false
+  }
+}

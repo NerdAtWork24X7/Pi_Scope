@@ -1,0 +1,1293 @@
+/**
+ * pi-scope.ts — Pi Scope extension for Pi agents (DEPRECATED)
+ *
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║  DEPRECATED: Use the capture endpoints instead —                    ║
+ * ║  POST /capture/llm-request and POST /capture/llm-response           ║
+ * ║                                                                     ║
+ * ║  Any harness (Pi, other agents, scripts) can POST the raw           ║
+ * ║  provider-format request/response bodies to the scope server.       ║
+ * ║  No Pi-specific extension needed. See server.ts capture routes.     ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ *
+ * This extension hooks the Pi agent lifecycle and streams events to
+ * the scope server. It still works but the capture endpoint approach
+ * is recommended for new integrations.
+ */
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import { fileURLToPath } from "node:url";
+
+/** This file's own absolute path, for the duplicate-copy guard in the default
+ *  export. Loaded as ESM by pi (with a CJS fallback for other loaders). */
+function selfFilePath(): string {
+  try {
+    const url = (import.meta as any)?.url;
+    if (url) return fileURLToPath(url);
+  } catch { /* not ESM */ }
+  try { if (typeof __filename === "string") return __filename; } catch { /* not CJS */ }
+  return "";
+}
+
+// ━━ Truncation constants & helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// These were previously (erroneously) imported from "./pi-scope.ts" — a
+// self-import that resolves to `undefined` at runtime. They live here instead.
+const MAX_TEXT_FIELD = 1024 * 1024;   // 1 MB cap for free-text fields
+const MAX_ARGS_BYTES = 16 * 1024;    // 16 KiB cap per tool-call argument
+const MAX_RESULT_BYTES = 1024 * 1024; // 1 MB cap for tool-result text
+
+/** Set by the spawning harness (agent-team dispatch clones + memory
+ *  summarizer) on the child's env. A worker process boots, runs one task and is
+ *  killed, so host-only work is pure overhead: the connectivity probe and the
+ *  session-seq seed are dashboard/UX concerns for the top-level session, and the
+ *  completion flush is capped hard below so the child's tail never waits on a
+ *  slow observability server (the orchestrator kills it on agent_end). */
+const IS_SUBAGENT = process.env.PI_SUBAGENT === "1";
+/** How long a subagent's final event flush may block its exit. The localhost
+ *  POST completes in a few ms; the cap only bounds the pathological case. */
+const SUBAGENT_FLUSH_CAP_MS = 250;
+
+interface TruncateResult {
+  text: string;
+  truncated: boolean;
+}
+
+/** Truncate a UTF-8 string to at most `maxBytes` bytes without splitting a
+ *  multi-byte character. Returns the (possibly shortened) text plus a flag. */
+function truncateToBytes(s: string, maxBytes: number): TruncateResult {
+  const buf = Buffer.from(s, "utf8");
+  if (buf.length <= maxBytes) return { text: s, truncated: false };
+  // Walk back to a code-point boundary so we never cut a multi-byte char.
+  let cut = maxBytes;
+  while (cut > 0 && (buf[cut] & 0xc0) === 0x80) cut--;
+  return { text: buf.subarray(0, cut).toString("utf8"), truncated: true };
+}
+
+// ━━ Local event payload types (previously self-imported, now defined here) ━━
+interface ObsEventEnvelope<T = unknown> {
+  event_id: string;
+  ts: string;
+  type: string;
+  session_id: string;
+  session_file?: string;
+  cwd: string;
+  agent_name?: string;
+  pool: string;
+  tags: string[];
+  provider?: string;
+  model?: string;
+  payload: T;
+  seq: number;
+}
+
+interface SessionStartPayload {
+  reason?: string;
+  pi_version?: string;
+  previous_session_file?: string;
+}
+
+interface SessionShutdownPayload {
+  reason?: string;
+}
+
+interface AgentStartPayload {
+  prompt: string;
+  images_count: number;
+  session_id: string;
+  session_file?: string;
+  turn_index?: number;
+}
+
+interface LLMRequestPayload {
+  system_prompt: string;
+  tools?: string[];
+  model?: string;
+  message_count?: number;
+  request_args?: Record<string, string>;
+  turn_index?: number;
+  /** First 400 chars of the first user message in this request, for quick identification. */
+  user_msg_preview?: string;
+}
+
+interface AgentEndPayload {
+  message_count: number;
+  final_response?: string;
+  final_response_truncated?: boolean;
+}
+
+interface TurnStartPayload {
+  turn_index: number;
+}
+
+interface UsageSummary {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  total_tokens: number;
+  cost_total: number;
+}
+
+interface TurnEndPayload {
+  turn_index: number;
+  usage: UsageSummary | undefined;
+}
+
+interface UserMessagePayload {
+  text: string;
+  images_count: number;
+}
+
+interface AssistantMessagePayload {
+  text: string;
+  thinking: string;
+  tool_call_ids: string[];
+  stop_reason: string;
+  usage: UsageSummary;
+  error_message?: string;
+  latency_ms?: number;
+  prefill_ms?: number;
+  generation_ms?: number;
+  output_tps?: number;
+  turn_index: number;
+}
+
+interface ThinkingPayload {
+  text: string;
+}
+
+interface ToolCallPayload {
+  tool_call_id: string;
+  tool_name: string;
+  args: Record<string, any>;
+  args_truncated: boolean;
+}
+
+interface ToolResultPayload {
+  tool_call_id: string;
+  tool_name: string;
+  content_text: string;
+  content_truncated: boolean;
+  is_error: boolean;
+  details_summary?: Record<string, any>;
+}
+
+interface ModelChangePayload {
+  provider: string;
+  model: string;
+  previous_provider?: string;
+  previous_model?: string;
+  source?: string;
+}
+
+interface CompactionPayload {
+  reason: string;
+  tokens_before: number;
+  first_kept_entry_id: string;
+  summary_preview: string;
+}
+
+interface BranchNavPayload {
+  from_id: string;
+  to_id: string;
+  has_summary: boolean;
+  summary_preview?: string;
+}
+
+// ━━ Module-scope state ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Per-session monotonic sequence counters. Seeded from the server at boot for
+// a resumed session so continued turns keep numbering where the session left
+// off — restarting at 0 would collide on the server's (session_id, seq) UNIQUE
+// index and every continued message would be silently dropped by INSERT OR
+// IGNORE, leaving transcripts stuck at the original session's data.
+const seqBySession = new Map<string, number>();
+function nextSeq(sessionId: string): number {
+  const n = seqBySession.get(sessionId) ?? 0;
+  seqBySession.set(sessionId, n + 1);
+  return n;
+}
+
+// Last text captured from a message_end → assistant_message event.  Used as a
+// definitive fallback in agent_end when scanning event.messages yields nothing
+// (common for subagents whose chronological last assistant message contains
+// only tool-call blocks).  Reset every session_start.
+let lastAssistantText: string | null = null;
+
+// Last tool-result text captured across the session.  Used as a last-resort
+// fallback in agent_end when neither assistant text nor thinking exists in the
+// message array — subagents that end with a tool-call-only message often have
+// their real answer only in the final tool_result content.  Reset every
+// session_start.
+let lastToolResultText: string | null = null;
+
+// Per-run server token is persisted to tmp/scope_token by the server; reuse it
+// so the extension and server agree on auth without a hardcoded constant.
+const EXT_PROJECT_ROOT = path.resolve(__dirname, "..", "..");
+// Candidate locations where the scope server may have persisted its per-run
+// token. In dev the server writes <project>/tmp/scope_token. When launched via
+// the packaged AppImage, scope-control sets SCOPE_TOKEN_FILE to
+// $HOME/.pi-scope/scope_token — so we must check that too.
+function tokenCandidates(): string[] {
+  const out: string[] = [];
+  if (process.env.SCOPE_TOKEN_FILE) out.push(process.env.SCOPE_TOKEN_FILE);
+  // Packaged AppImage server writes its per-run token to the data dir
+  // (~/.pi-scope/scope_token); check it BEFORE the dev tmp/scope_token so a
+  // stale dev token can't shadow the real one and cause every POST to 401
+  // (no activity in the dashboard).
+  out.push(path.join(os.homedir(), ".pi-scope", "scope_token"));
+  out.push(path.join(EXT_PROJECT_ROOT, "tmp", "scope_token"));
+  return out;
+}
+
+// Friendly random agent name used when neither --o-name nor OBS_NAME is set,
+// so sessions stop falling back to the cwd folder name (e.g. "pi-agent-observability").
+const AGENT_ADJ = ["calm", "bold", "quick", "quiet", "keen", "wise", "brave", "swift", "cool", "fuzzy"];
+const AGENT_NOUN = ["otter", "lynx", "wren", "fox", "heron", "moth", "ibex", "newt", "raven", "yeti"];
+function genAgentName(): string {
+  const a = AGENT_ADJ[Math.floor(Math.random() * AGENT_ADJ.length)];
+  const n = AGENT_NOUN[Math.floor(Math.random() * AGENT_NOUN.length)];
+  const k = Math.floor(Math.random() * 90 + 10);
+  return `${a}-${n}-${k}`;
+}
+
+// ━━ Helper functions ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function loadEnv(cwd: string) {
+  const envPaths = [
+    path.join(cwd, ".env"),
+    path.join(cwd, ".env.local"),
+  ];
+  for (const envPath of envPaths) {
+    if (fs.existsSync(envPath)) {
+      try {
+        const content = fs.readFileSync(envPath, "utf8");
+        for (const line of content.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#")) continue;
+          const eqIdx = trimmed.indexOf("=");
+          if (eqIdx <= 0) continue;
+          const key = trimmed.slice(0, eqIdx).trim();
+          let val = trimmed.slice(eqIdx + 1).trim();
+          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1);
+          }
+          // Don't overwrite vars already set by the shell (avoid stale-.env footgun)
+          if (process.env[key] === undefined) process.env[key] = val;
+        }
+      } catch {
+        // ignore errors reading env files
+      }
+    }
+  }
+}
+
+// Load env files at module init so subprocesses spawned before
+// session_start still inherit .env variables. Safe to run here:
+// guarded by fs.existsSync, and session_start re-runs with ctx.cwd.
+try { loadEnv(process.cwd()); } catch { /* cwd may be unavailable */ }
+
+// Lightweight reachability check against the obs server's unauthenticated
+// /health endpoint. Short timeout so a dead server never stalls agent boot.
+async function probeServer(url: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch(`${url.replace(/\/+$/, "")}/health`, { signal: controller.signal });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Seed the seq counter for a resumed session from the server's highest recorded
+// seq for that session (GET /sessions/:id/seq, loopback-trusted — no auth
+// needed, matching POST /events). Using the auth-gated events endpoint here
+// broke dev setups where the extension can't resolve the server token: the seed
+// 401'd, the counter restarted at 0, and every continued event collided on the
+// (session_id, seq) UNIQUE index and was silently dropped. On failure (server
+// down, session unknown) we start at 0 — the previous behavior. Fire-and-forget;
+// a short timeout keeps this from ever stalling agent boot.
+async function seedSessionSeq(sessionId: string, url: string): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch(
+      `${url.replace(/\/+$/, "")}/sessions/${encodeURIComponent(sessionId)}/seq`,
+      { signal: controller.signal }
+    );
+    if (!res.ok) return;
+    const data: any = await res.json();
+    if (typeof data?.seq === "number" && data.seq >= 0) {
+      seqBySession.set(sessionId, data.seq + 1);
+    }
+  } catch {
+    // server unreachable — start at 0
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function truncateArgs(args: Record<string, any>): { args: Record<string, any>; truncated: boolean } {
+  let truncated = false;
+  let copy: Record<string, any>;
+  try {
+    copy = JSON.parse(JSON.stringify(args));
+  } catch {
+    return { args, truncated: false };
+  }
+
+  function walk(obj: any) {
+    if (!obj || typeof obj !== "object") return;
+    for (const key of Object.keys(obj)) {
+      if (typeof obj[key] === "string") {
+        const res = truncateToBytes(obj[key], MAX_ARGS_BYTES);
+        if (res.truncated) {
+          obj[key] = res.text;
+          truncated = true;
+        }
+      } else if (typeof obj[key] === "object") {
+        walk(obj[key]);
+      }
+    }
+  }
+
+  walk(copy);
+  return { args: copy, truncated };
+}
+
+function extractUserMessage(content: any): { text: string; images_count: number } {
+  if (typeof content === "string") {
+    return { text: content, images_count: 0 };
+  }
+  let text = "";
+  let images_count = 0;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block && block.type === "text") {
+        text += (block.text || "") + "\n";
+      } else if (block && block.type === "image") {
+        images_count++;
+      }
+    }
+  }
+  return { text: text.trim(), images_count };
+}
+
+// Extract the FINAL system prompt (and a few request-shape facts) from the raw
+// provider request payload. pi hands us the exact body it ships to the model:
+// Anthropic keeps the system prompt in `payload.system` (string or array of
+// {type:"text",text}); OpenAI-style puts it as `payload.messages[0]` with role
+// "system"/"developer". Tools/message-count are normalized when present.
+function extractFinalSystemPrompt(payload: any): { text: string; tools: string[]; model?: string; messageCount?: number; args: Record<string, string> } {
+  let text = "";
+  const tools: string[] = [];
+  let model: string | undefined;
+  let messageCount: number | undefined;
+  if (!payload || typeof payload !== "object") return { text, tools, model, messageCount, args: {} };
+
+  if (payload.system != null) {
+    if (typeof payload.system === "string") {
+      text = payload.system;
+    } else if (Array.isArray(payload.system)) {
+      text = payload.system
+        .map((b: any) => (typeof b === "string" ? b : (b?.text ?? "")))
+        .join("\n");
+    }
+  }
+  if (!text && Array.isArray(payload.messages)) {
+    const sysMsg = payload.messages.find(
+      (m: any) => m && (m.role === "system" || m.role === "developer")
+    );
+    if (sysMsg) {
+      text = typeof sysMsg.content === "string" ? sysMsg.content : JSON.stringify(sysMsg.content);
+    }
+  }
+  if (Array.isArray(payload.tools)) {
+    for (const t of payload.tools) {
+      if (!t || typeof t !== "object") continue;
+      const name = typeof t.name === "string" ? t.name : t.function?.name;
+      if (typeof name === "string") tools.push(name);
+    }
+  }
+  if (typeof payload.model === "string") model = payload.model;
+  if (Array.isArray(payload.messages)) messageCount = payload.messages.length;
+  const args = extractRequestArgs(payload);
+  return { text, tools, model, messageCount, args };
+}
+
+// Provider request parameters worth surfacing in the LLM-request inspector — the
+// "knobs" the request was sent with (thinking mode, sampling temperature, token
+// caps, etc.). event.payload is the EXACT body pi ships to the model (built by
+// the external provider SDK), so field names vary by provider. Rather than a
+// fixed whitelist (which misses provider-specific params), we surface every
+// top-level key EXCEPT the structural ones (system prompt / messages / tools /
+// model, which are captured separately) — so temperature, max_tokens, top_p,
+// thinking, reasoning_effort, stop, stream, … all show regardless of naming.
+const STRUCTURAL_PAYLOAD_KEYS = new Set(["system", "messages", "tools", "model"]);
+
+function normalizeArgValue(key: string, value: any): string {
+  if (value === undefined || value === null) return "null";
+  if (key === "thinking") {
+    if (typeof value === "object") {
+      const enabled = value.type === "enabled" || value.enabled === true;
+      if (!enabled) return "disabled";
+      const budget = value.budget_tokens ?? value.budgetTokens;
+      return budget != null ? `enabled (budget_tokens=${budget})` : "enabled";
+    }
+    return String(value);
+  }
+  if (Array.isArray(value)) return value.length ? JSON.stringify(value) : "[]";
+  if (typeof value === "object") {
+    try { return JSON.stringify(value); } catch { return String(value); }
+  }
+  return String(value);
+}
+
+function extractRequestArgs(payload: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!payload || typeof payload !== "object") return out;
+  for (const key of Object.keys(payload)) {
+    if (STRUCTURAL_PAYLOAD_KEYS.has(key)) continue;
+    const raw = (payload as any)[key];
+    if (raw === undefined || raw === null) continue;
+    out[key] = normalizeArgValue(key, raw);
+  }
+  return out;
+}
+
+function createEventEnvelope<T>(
+  type: string,
+  payload: T,
+  sessionInfo: {
+    sessionId: string;
+    sessionFile?: string;
+    cwd: string;
+    agentName?: string;
+    parentSessionId?: string;
+    pool: string;
+    tags: string[];
+    provider?: string;
+    model?: string;
+  }
+): ObsEventEnvelope<T> {
+  const seq = nextSeq(sessionInfo.sessionId);
+  return {
+    event_id: crypto.randomUUID(),
+    ts: new Date().toISOString(),
+    type: type as any,
+    session_id: sessionInfo.sessionId,
+    session_file: sessionInfo.sessionFile,
+    cwd: sessionInfo.cwd,
+    agent_name: sessionInfo.agentName,
+    parent_session_id: sessionInfo.parentSessionId,
+    pool: sessionInfo.pool,
+    tags: sessionInfo.tags,
+    provider: sessionInfo.provider,
+    model: sessionInfo.model,
+    payload,
+    seq,
+  };
+}
+
+// ━━ Event Queue Manager ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class EventQueue {
+  private queue: any[] = [];
+  private maxQueueSize = 10000;
+  private flushTimer: NodeJS.Timeout | null = null;
+  private backoffMs = 250;
+  private maxBackoffMs = 5000;
+  private isFlushing = false;
+  private consecutiveFailures = 0;
+  private droppedEventsCount = 0;
+  private getNextSeq: (sessionId: string) => number;
+
+  constructor(
+    private serverUrl: string,
+    private tokenProvider: () => string,
+    private pi: ExtensionAPI,
+    private onPostFailed: (err: any) => void,
+    getNextSeq: (sessionId: string) => number
+  ) {
+    this.getNextSeq = getNextSeq;
+  }
+
+  public push(event: any) {
+    if (this.queue.length >= this.maxQueueSize) {
+      this.queue.shift(); // Drop oldest
+      this.droppedEventsCount++;
+      if (this.droppedEventsCount === 1) {
+        const overflowError = this.createOverflowErrorEvent(event.session_id, event.cwd, event.pool, event.tags);
+        this.queue.push(overflowError);
+      }
+    }
+    this.queue.push(event);
+
+    if (this.queue.length >= 50) {
+      void this.flush();
+    } else {
+      this.scheduleFlush();
+    }
+  }
+
+  private createOverflowErrorEvent(sessionId: string, cwd: string, pool: string, tags: string[]): any {
+    return {
+      event_id: crypto.randomUUID(),
+      ts: new Date().toISOString(),
+      type: "error",
+      session_id: sessionId,
+      cwd: cwd,
+      pool: pool,
+      tags: tags,
+      payload: {
+        message: "Extension event queue overflowed. Oldest events dropped.",
+        where: "extension-queue",
+      },
+      // Allocate a real monotonic seq instead of -1 (which would collide on the
+      // server's (session_id, seq) UNIQUE index if overflow recurs).
+      seq: this.getNextSeq(event.session_id),
+    };
+  }
+
+  private scheduleFlush() {
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flush();
+    }, this.backoffMs);
+  }
+
+  /** Scan the queue in reverse for the most recent content-bearing event.
+   *  Returns text from the last assistant_message (text or thinking) or
+   *  tool_result (content_text).  Used as a last-resort fallback in agent_end
+   *  when event.messages + module-level variables produce nothing — common
+   *  for subagents whose agent_end fires before message_end / tool_result
+   *  handlers have run (RPC mode event-ordering race). */
+  public lastContentText(): string | undefined {
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      const e = this.queue[i];
+      if (!e || e.session_id !== this.queue[this.queue.length - 1]?.session_id) continue;
+      if (e.type === "assistant_message") {
+        const t = e.payload?.text ?? e.payload?.content ?? "";
+        if (t.trim()) return t.trim();
+        const th = e.payload?.thinking ?? "";
+        if (th.trim()) return th.trim();
+      }
+      if (e.type === "tool_result") {
+        const ct = e.payload?.content_text ?? "";
+        if (ct.trim()) return ct.trim();
+      }
+    }
+    return undefined;
+  }
+
+  public async flush() {
+    if (this.isFlushing || this.queue.length === 0) return;
+    this.isFlushing = true;
+
+    const batch = this.queue.slice(0, 50);
+
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      const tok = this.tokenProvider();
+      if (tok) {
+        headers["Authorization"] = `Bearer ${tok}`;
+      }
+
+      const response = await fetch(`${this.serverUrl}/events`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(batch),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+      }
+
+      // Success! Remove sent items from the queue
+      this.queue.splice(0, batch.length);
+      this.consecutiveFailures = 0;
+      this.backoffMs = 250;
+      this.droppedEventsCount = 0;
+    } catch (err) {
+      this.consecutiveFailures++;
+      this.onPostFailed(err);
+      this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs);
+    } finally {
+      this.isFlushing = false;
+      if (this.queue.length > 0) {
+        this.scheduleFlush();
+      }
+    }
+  }
+
+  public async stop() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.queue.length > 0) {
+      await this.flush();
+    }
+  }
+}
+
+// ━━ Default Export (Extension Entry) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+export default function (pi: ExtensionAPI) {
+  // ━━ Duplicate-copy guard ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Pi Scope's bundled launcher force-loads this file with `--extension` and
+  // sets PI_SCOPE_FORCE_EXTENSION to its absolute path. A user's global pi
+  // settings.json may independently list its own copy; if both
+  // loaded, the second would abort with a hard "Flag ... conflicts" error. So
+  // when the launcher names an authoritative copy, any *other* copy no-ops.
+  const forcedPath = process.env.PI_SCOPE_FORCE_EXTENSION;
+  if (forcedPath) {
+    const self = selfFilePath();
+    try {
+      if (self && fs.realpathSync(self) !== fs.realpathSync(forcedPath)) return;
+    } catch {
+      // If either path can't be resolved, fall through and load as normal.
+    }
+  }
+
+  // ━━ CLI flag registrations ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.registerFlag("obs-server-url", {
+    description: "Pi Scope server URL (overrides env OBS_SERVER_URL)",
+    type: "string",
+    default: undefined,
+  });
+  pi.registerFlag("obs-token", {
+    description: "Bearer token for authenticating with the Pi Scope server",
+    type: "string",
+    default: undefined,
+  });
+  pi.registerFlag("o-pool", {
+    description: "Logical pool name (overrides env OBS_POOL)",
+    type: "string",
+    default: undefined,
+  });
+  pi.registerFlag("o-tag", {
+    description: "Observation tags (comma-separated or repeated)",
+    type: "string",
+    default: undefined,
+  });
+  pi.registerFlag("o-name", {
+    description: "Friendly name for the agent (overrides env OBS_NAME)",
+    type: "string",
+    default: undefined,
+  });
+  // Captures the `--o-name <role>` the agent-teams harness passes to each spawned
+  // process (subagents, memory summarizer, …) so observability labels it by its real
+  // role. NOTE: pi's built-in `--name` is NOT forwarded to extensions, so `--o-name`
+  // (which pi.getFlag DOES forward) is the signal used.
+  pi.registerFlag("obs-disable", {
+    description: "Disable Pi Scope extension entirely (overrides env OBS_DISABLE)",
+    type: "boolean",
+    default: false,
+  });
+
+  const isDisabled = pi.getFlag("obs-disable") === true || process.env.OBS_DISABLE === "true";
+  if (isDisabled) {
+    return;
+  }
+
+  let queue: EventQueue | null = null;
+  let sessionInfo: {
+    sessionId: string;
+    sessionFile?: string;
+    cwd: string;
+    agentName?: string;
+    parentSessionId?: string;
+    pool: string;
+    tags: string[];
+    provider?: string;
+    model?: string;
+  } | null = null;
+
+  let activeTurnIndex = 0;
+  const turnStartTimes = new Map<number, number>();
+  // turnIndex → ts of first text/thinking delta (per-turn TTFT marker).
+  // Cleared alongside turnStartTimes at message_end.
+  const firstTokenTimes = new Map<number, number>();
+
+  function logObs(message: string, extra?: any) {
+    try {
+      pi.appendEntry("obs-log", { message, timestamp: new Date().toISOString(), ...extra });
+    } catch {
+      // ignore
+    }
+  }
+
+  // ━━ session_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("session_start", async (event, ctx) => {
+    // Context snapshot taken NOW. pi invalidates the ctx when the session is
+    // replaced (ctx.newSession()/ctx.switchSession()/ctx.reload()), and the
+    // runner fires session_start again for the new session. Work that survives
+    // past this handler must use only these captured values — touching ctx after
+    // an await (e.g. the probe below) would throw the stale-ctx error and crash
+    // the whole agent process mid-turn.
+    const notify = (() => { try { return ctx.ui?.notify?.bind(ctx.ui); } catch { return undefined; } })();
+    const cwd = (() => { try { return ctx.cwd; } catch { return undefined; } })();
+    const sessId = (() => { try { return ctx.sessionManager.getSessionId(); } catch { return undefined; } })();
+    const sessFile = (() => { try { return ctx.sessionManager.getSessionFile(); } catch { return undefined; } })();
+    const sessModel = (() => { try { return ctx.model; } catch { return undefined; } })();
+
+    // 1. Load env files from CWD
+    if (cwd) loadEnv(cwd);
+
+    // 2. Resolve parameters
+    const serverUrl = (pi.getFlag("obs-server-url") as string) || process.env.OBS_SERVER_URL || "http://127.0.0.1:43190";
+    // Resolve the auth token lazily: prefer an explicit flag/env, then fall
+    // back to the per-run token the server wrote to tmp/scope_token. Using a
+    // provider (not a snapshot) means a token generated after this extension
+    // started is still picked up on the first POST.
+    const resolveToken = (): string => {
+      const explicit = (pi.getFlag("obs-token") as string) || process.env.OBS_AUTH_TOKEN;
+      if (explicit) return explicit;
+      for (const f of tokenCandidates()) {
+        try {
+          const t = fs.readFileSync(f, "utf8").trim();
+          if (t) return t;
+        } catch { /* try next candidate */ }
+      }
+      return "";
+    };
+    const token = resolveToken();
+    const pool = (pi.getFlag("o-pool") as string) || process.env.OBS_POOL || "default";
+    // Resolution order:
+    //   1. explicit operator override (--o-name / OBS_NAME)
+    //   2. spawned-process role (--o-name, passed by agent-teams to subagents & memory summarizer)
+    //   3. orchestrator label (SCOPE_NAME=orchestrator, set by agent-teams when a team is active)
+    //   4. random friendly name (standalone sessions)
+    const name =
+      (pi.getFlag("o-name") as string) ||
+      process.env.OBS_NAME ||
+      process.env.SCOPE_NAME ||
+      genAgentName();
+    // Exact spawn linkage: the harness that spawns a subagent passes the
+    // PARENT pi session id in SCOPE_PARENT_SESSION. The server stores it on
+    // the session row so the UI can nest the subagent under the session that
+    // spawned it — no timestamp/args inference needed. Set it (per process)
+    // when launching subagents, e.g. SCOPE_PARENT_SESSION=<parent session_id>.
+    const parentSessionId = (process.env.SCOPE_PARENT_SESSION || "").trim() || undefined;
+
+    // Parse tags
+    const rawTag = pi.getFlag("o-tag");
+    let tags: string[] = [];
+    if (rawTag) {
+      if (Array.isArray(rawTag)) {
+        tags = rawTag.map(t => String(t).trim()).filter(Boolean);
+      } else if (typeof rawTag === "string") {
+        tags = rawTag.split(",").map(t => t.trim()).filter(Boolean);
+      }
+    } else if (process.env.OBS_TAG) {
+      tags = process.env.OBS_TAG.split(",").map(t => t.trim()).filter(Boolean);
+    }
+
+    // 3. Reset per-session seq counters + boot-snapshot gate
+    seqBySession.clear();
+    lastAssistantText = null;
+    lastToolResultText = null;
+
+    // 4. Initialize Queue Manager
+    queue = new EventQueue(
+      serverUrl,
+      resolveToken,
+      pi,
+      (err) => {
+        logObs("post_failed", { error: err?.message || String(err) });
+      },
+      (sid: string) => nextSeq(sid)
+    );
+
+    if (!token) {
+      // Loud, single-line warning. Server will 401 every POST otherwise.
+      try {
+        notify?.(`⚠️ Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`, "warning");;
+      } catch { /* hasUI may be false */ }
+      logObs("no_token_configured", { server_url: serverUrl });
+    }
+
+    // 4b. Simple connectivity check — tell the operator whether the obs server
+    // is reachable. Fire-and-forget with a short timeout so boot never blocks.
+    // The ctx may be invalidated (switch_session/new_session) while the probe is
+    // in flight — only captured notify is used, and the whole block is guarded so
+    // a stale snapshot can never crash the agent mid-turn.
+    void (async () => {
+      if (IS_SUBAGENT) return; // no dashboard notice to deliver from a worker
+      try {
+        const connected = await probeServer(serverUrl);
+        try {
+          if (connected) {
+            notify?.(`✅ Pi Scope: connected to ${serverUrl}`, "info");;
+          } else {
+            notify?.(`⚠️ Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`, "warning");
+          }
+        } catch { /* hasUI may be false */ }
+        logObs(connected ? "server_connected" : "server_unreachable", { server_url: serverUrl });
+      } catch {
+        // Session was replaced while probing — nothing to report, and the new
+        // session_start already took over. Never throw into the runner.
+      }
+    })();
+
+    // 5. Initialize session info
+    sessionInfo = {
+      sessionId: sessId,
+      sessionFile: sessFile,
+      cwd,
+      agentName: name,
+      parentSessionId,
+      pool,
+      tags,
+      provider: sessModel?.provider,
+      model: sessModel?.id,
+    };
+
+    // 5b. If this process resumed an existing pi session, continue its event
+    // sequence where the server left off instead of restarting at 0 (which
+    // would collide on the server's (session_id, seq) UNIQUE index and drop
+    // every continued turn). Fire-and-forget — boot must never block.
+    // A worker always starts a FRESH session file (the harness wipes it per
+    // dispatch), so its seq legitimately restarts at 0 — nothing to seed.
+    if (!IS_SUBAGENT) void seedSessionSeq(sessionInfo.sessionId, serverUrl);
+
+    // 6. Log boot
+    logObs("obs boot", { serverUrl, pool, tags, agentName: name });
+
+
+  });
+
+  // ━━ before_agent_start (agent_start) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Emits only the turn's prompt + images_count (+ session ids). llm_request is
+  // the sole system-prompt record, so agent_start carries no system-prompt data.
+  pi.on("before_agent_start", async (_event, _ctx) => {
+    // Suppressed — not logged to scope server.
+  });
+
+
+  // ━━ before_provider_request (final LLM request) ━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Emitted on EVERY provider call.  Each call costs money — we capture every
+  // single one, with turn_index, system prompt, tools, model, message count,
+  // request args, and a preview of the first user message (the real content
+  // being sent).  No dedup — every request gets its own event.
+  pi.on("before_provider_request", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    const { text, tools, model, messageCount, args } = extractFinalSystemPrompt(event.payload);
+
+    // Extract a preview of the LAST user message in the request payload
+    // (the most recent user prompt, not the first one from history).
+    let userMsgPreview: string | undefined;
+    const messages = Array.isArray(event.payload?.messages) ? event.payload.messages : [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (!m || m.role !== "user") continue;
+      if (typeof m.content === "string") {
+        userMsgPreview = m.content.slice(0, 400).trim();
+      } else if (Array.isArray(m.content)) {
+        for (const b of m.content) {
+          if (b && b.type === "text") {
+            userMsgPreview = (b.text || "").slice(0, 400).trim();
+            break;
+          }
+        }
+      }
+      if (userMsgPreview) break;
+    }
+
+    const payload: LLMRequestPayload = {
+      system_prompt: text || "(no system prompt)",
+      turn_index: activeTurnIndex ?? undefined,
+    };
+    if (tools.length) payload.tools = tools;
+    if (model) payload.model = model;
+    if (messageCount != null) payload.message_count = messageCount;
+    if (Object.keys(args).length) payload.request_args = args;
+    if (userMsgPreview) payload.user_msg_preview = userMsgPreview;
+    queue.push(createEventEnvelope("llm_request", payload, sessionInfo));
+  });
+
+  // ━━ agent_end ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("agent_end", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    const messages = Array.isArray(event.messages) ? event.messages : [];
+    let final_response: string | undefined;
+    let final_response_truncated = false;
+
+    // Scan messages in reverse for the last assistant text (or thinking
+    // block as a fallback).  Subagents / team members sometimes have a
+    // content structure where the answer only lives in a thinking block,
+    // and the chronologically-last assistant message may have only tool
+    // calls — so continue scanning earlier messages until we find text.
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m && m.role === "assistant") {
+        let text = "";
+        let thinkingFallback = "";
+        if (typeof m.content === "string") {
+          text = m.content;
+        } else if (Array.isArray(m.content)) {
+          for (const b of m.content) {
+            if (!b) continue;
+            if (b.type === "text") {
+              text += (b.text || "") + "\n";
+            } else if (b.type === "thinking") {
+              thinkingFallback += (b.thinking || b.text || "") + "\n";
+            }
+          }
+        }
+        // Prefer the explicit text response; fall back to thinking content.
+        const candidate = text.trim() || thinkingFallback.trim();
+        if (candidate) {
+          const tr = truncateToBytes(candidate, MAX_TEXT_FIELD);
+          final_response = tr.text || undefined;
+          final_response_truncated = tr.truncated;
+          break; // found real content
+        }
+        // This assistant message had no text/thinking — keep scanning
+        // earlier messages (common for subagents whose last message
+        // only contains a tool-call block).
+      }
+    }
+
+    // If no assistant message was found in the array, try the last user
+    // message as a rough proxy (some API shapes include the task there).
+    if (!final_response) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m && m.role === "user") {
+          if (typeof m.content === "string") {
+            const tr = truncateToBytes(m.content.trim(), MAX_TEXT_FIELD);
+            final_response = tr.text || undefined;
+            final_response_truncated = tr.truncated;
+          }
+          break;
+        }
+      }
+    }
+
+    // Last-resort fallback: live-captured text from message_end → assistant_message.
+    // Subagents that end with a tool-call-only message will have no text in their
+    // final assistant entry, but lastAssistantText holds the most recent text
+    // that was actually streamed to the user.
+    if (!final_response && lastAssistantText) {
+      const tr = truncateToBytes(lastAssistantText, MAX_TEXT_FIELD);
+      final_response = tr.text || undefined;
+      final_response_truncated = tr.truncated;
+    }
+
+    // Final fallback: last tool_result content.  Subagents whose last assistant
+    // message is a bare tool call (no text / no thinking) produce their real
+    // answer inside the tool_result.  Capturing it here makes the subagent's
+    // output visible in agent_end.final_response and turn_end summaries.
+    if (!final_response && lastToolResultText) {
+      const tr = truncateToBytes(lastToolResultText, MAX_TEXT_FIELD);
+      final_response = tr.text || undefined;
+      final_response_truncated = tr.truncated;
+    }
+
+    // Last-resort: scan the queue for content from this session.  Covers the
+    // RPC-mode race where agent_end fires before the message_end / tool_result
+    // handlers have updated the module-level fallback variables.
+    if (!final_response) {
+      const qtext = queue.lastContentText();
+      if (qtext) {
+        const tr = truncateToBytes(qtext, MAX_TEXT_FIELD);
+        final_response = tr.text || undefined;
+        final_response_truncated = tr.truncated;
+      }
+    }
+
+    // Sentinel: if every fallback is exhausted, emit a placeholder so the
+    // trajectory view doesn't silently drop this turn.
+    if (!final_response) {
+      final_response = "(pending)";
+    }
+
+    const payload: AgentEndPayload = {
+      message_count: messages.length,
+      final_response,
+      final_response_truncated,
+    };
+    queue.push(createEventEnvelope("agent_end", payload, sessionInfo));
+
+    // Wait for the HTTP POST to complete before the subprocess is killed.
+    // The agent's event loop awaits extension handlers before writing agent_end
+    // to stdout, and agent-team kills the subprocess as soon as it reads
+    // agent_end from stdout.  Without this await, SIGKILL tears down the
+    // in-flight fetch and the events never reach the observability server.
+    // A 5 s cap prevents a dead server from hanging the top-level session; a
+    // dispatch worker (killed the instant its result lands) gets a much tighter
+    // cap, which still delivers localhost events but never delays its tail.
+    await Promise.race([
+      queue.flush(),
+      new Promise<void>(r => setTimeout(r, IS_SUBAGENT ? SUBAGENT_FLUSH_CAP_MS : 5_000)),
+    ]);
+  });
+
+  // ━━ turn_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("turn_start", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    activeTurnIndex = event.turnIndex;
+    turnStartTimes.set(event.turnIndex, Date.now());
+    const payload: TurnStartPayload = {
+      turn_index: event.turnIndex,
+    };
+    queue.push(createEventEnvelope("turn_start", payload, sessionInfo));
+  });
+
+  // ━━ turn_end ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("turn_end", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    let usage: UsageSummary | undefined = undefined;
+    if (event.message?.usage) {
+      const u = event.message.usage;
+      usage = {
+        input: u.input ?? 0,
+        output: u.output ?? 0,
+        cache_read: u.cacheRead ?? 0,
+        cache_write: u.cacheWrite ?? 0,
+        total_tokens: u.totalTokens ?? 0,
+        cost_total: u.cost?.total ?? 0,
+      };
+    }
+    const payload: TurnEndPayload = {
+      turn_index: event.turnIndex,
+      usage,
+    };
+    queue.push(createEventEnvelope("turn_end", payload, sessionInfo));
+  });
+
+  // ━━ message_start (user_message) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("message_start", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    if (event.message?.role !== "user") return;
+
+    const { text, images_count } = extractUserMessage(event.message.content);
+    const payload: UserMessagePayload = {
+      text: truncateToBytes(text, MAX_TEXT_FIELD).text,
+      images_count,
+    };
+    queue.push(createEventEnvelope("user_message", payload, sessionInfo));
+  });
+
+  // First-token timing for TTFT — we watch streaming deltas only to record
+  // the first-token timestamp, not to emit per-delta observability events.
+  // Either text or thinking counts as "first token on the wire". Using
+  // activeTurnIndex (set in turn_start) since event.turnIndex isn't
+  // guaranteed on message_update payloads (obv-flash review note).
+  pi.on("message_update", async (event: any, _ctx) => {
+    if (firstTokenTimes.has(activeTurnIndex)) return;
+    const d = event?.assistantMessageEvent;
+    if (d?.type === "text_delta" || d?.type === "thinking_delta") {
+      firstTokenTimes.set(activeTurnIndex, Date.now());
+    }
+  });
+
+  // ━━ message_end (assistant_message & thinking) ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("message_end", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    if (event.message?.role !== "assistant") return;
+
+    let text = "";
+    let thinking = "";
+    const tool_call_ids: string[] = [];
+
+    if (Array.isArray(event.message.content)) {
+      for (const block of event.message.content) {
+        if (block.type === "text") {
+          text += (block.text || "") + "\n";
+        } else if (block.type === "thinking") {
+          thinking += (block.thinking || block.text || "") + "\n";
+        } else if (block.type === "toolCall") {
+          if (block.id) {
+            tool_call_ids.push(block.id);
+          }
+        }
+      }
+    } else if (typeof event.message.content === "string") {
+      text = event.message.content;
+    }
+
+    text = truncateToBytes(text.trim(), MAX_TEXT_FIELD).text;
+    thinking = truncateToBytes(thinking.trim(), MAX_TEXT_FIELD).text;
+
+    // Stash the latest assistant text so agent_end can use it as a fallback
+    // when scanning event.messages produces nothing (subagent edge-case).
+    if (text) lastAssistantText = text;
+    else if (thinking && !lastAssistantText) lastAssistantText = thinking;
+
+    let usage: UsageSummary = {
+      input: 0,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+      total_tokens: 0,
+      cost_total: 0,
+    };
+    if (event.message.usage) {
+      const u = event.message.usage;
+      usage = {
+        input: u.input ?? 0,
+        output: u.output ?? 0,
+        cache_read: u.cacheRead ?? 0,
+        cache_write: u.cacheWrite ?? 0,
+        total_tokens: u.totalTokens ?? 0,
+        cost_total: u.cost?.total ?? 0,
+      };
+    }
+
+    const startTs = turnStartTimes.get(activeTurnIndex);
+    const firstTs = firstTokenTimes.get(activeTurnIndex);
+    const endTs   = Date.now();
+    const latency_ms    = startTs ? endTs - startTs : undefined;
+    const prefill_ms    = startTs && firstTs ? firstTs - startTs : undefined;
+    const generation_ms = firstTs ? endTs - firstTs : undefined;
+    // Floor at 50 ms: below that the streaming window is too small to measure
+    // a rate (batched deltas produce e.g. 4 ms → 18000 TPS, pure measurement
+    // noise). 50 ms × 2000 TPS ceiling = 100 tokens, which is still well above
+    // any realistic single-batch arrival, so the floor only drops noise.
+    const output_tps    = generation_ms && generation_ms >= 50 && usage.output > 0
+      ? Math.round((usage.output / generation_ms) * 1000)
+      : undefined;
+    // Memory hygiene (obv-flash v3 nit, bundled here): clean both Maps so they
+    // don't accumulate one entry per turn over the life of the session.
+    turnStartTimes.delete(activeTurnIndex);
+    firstTokenTimes.delete(activeTurnIndex);
+
+    const payload: AssistantMessagePayload = {
+      text,
+      thinking,
+      tool_call_ids,
+      stop_reason: event.message.stopReason || "stop",
+      usage,
+      error_message: event.message.errorMessage,
+      latency_ms,
+      prefill_ms,
+      generation_ms,
+      output_tps,
+      turn_index: activeTurnIndex,
+    };
+
+    queue.push(createEventEnvelope("assistant_message", payload, sessionInfo));
+
+    if (thinking) {
+      const thinkingPayload: ThinkingPayload = {
+        text: thinking,
+      };
+      queue.push(createEventEnvelope("thinking", thinkingPayload, sessionInfo));
+    }
+  });
+
+  // ━━ tool_call (do NOT block) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("tool_call", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    const { args, truncated } = truncateArgs(event.input || {});
+    const payload: ToolCallPayload = {
+      tool_call_id: event.toolCallId,
+      tool_name: event.toolName,
+      args,
+      args_truncated: truncated,
+    };
+    queue.push(createEventEnvelope("tool_call", payload, sessionInfo));
+  });
+
+  // ━━ tool_result (do NOT modify) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("tool_result", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    let content_text = "";
+    if (Array.isArray(event.content)) {
+      for (const block of event.content) {
+        if (block.type === "text") {
+          content_text += (block.text || "") + "\n";
+        }
+      }
+    } else if (typeof event.content === "string") {
+      content_text = event.content;
+    }
+
+    const tr = truncateToBytes(content_text.trim(), MAX_RESULT_BYTES);
+
+    // Stash the last tool result text so agent_end can use it as a fallback
+    // when the subagent's final assistant message is tool-call-only.
+    const trimmed = content_text.trim();
+    if (trimmed) lastToolResultText = trimmed;
+
+    let details_summary: Record<string, any> | undefined = undefined;
+    if (event.details && typeof event.details === "object") {
+      details_summary = {};
+      if ("exitCode" in event.details) details_summary.exit_code = event.details.exitCode;
+      if ("exit_code" in event.details) details_summary.exit_code = event.details.exit_code;
+      if ("cancelled" in event.details) details_summary.cancelled = event.details.cancelled;
+      if ("truncated" in event.details) details_summary.truncated = event.details.truncated;
+    }
+
+    const payload: ToolResultPayload = {
+      tool_call_id: event.toolCallId,
+      tool_name: event.toolName,
+      content_text: tr.text,
+      content_truncated: tr.truncated,
+      is_error: event.isError === true,
+      details_summary,
+    };
+    queue.push(createEventEnvelope("tool_result", payload, sessionInfo));
+  });
+
+  // ━━ model_select ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("model_select", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+
+    sessionInfo.provider = event.model.provider;
+    sessionInfo.model = event.model.id;
+
+    const payload: ModelChangePayload = {
+      provider: event.model.provider,
+      model: event.model.id,
+      previous_provider: event.previousModel?.provider,
+      previous_model: event.previousModel?.id,
+      source: event.source ?? "set",
+    };
+    queue.push(createEventEnvelope("model_change", payload, sessionInfo));
+  });
+
+  // ━━ session_compact ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("session_compact", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    const ce = event.compactionEntry;
+    const payload: CompactionPayload = {
+      reason: event.fromExtension ? "manual" : "auto",
+      tokens_before: ce?.tokensBefore ?? 0,
+      first_kept_entry_id: ce?.firstKeptEntryId ?? "",
+      summary_preview: truncateToBytes(ce?.summary ?? "", 2000).text,
+    };
+    queue.push(createEventEnvelope("compaction", payload, sessionInfo));
+  });
+
+  // ━━ session_tree ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("session_tree", async (event, _ctx) => {
+    if (!queue || !sessionInfo) return;
+    const se = event.summaryEntry;
+    const payload: BranchNavPayload = {
+      from_id: event.oldLeafId ?? "",
+      to_id:   event.newLeafId ?? "",
+      has_summary: !!se,
+      summary_preview: se ? truncateToBytes(se.summary ?? "", 2000).text : undefined,
+    };
+    queue.push(createEventEnvelope("branch_nav", payload, sessionInfo));
+  });
+
+  // ━━ session_shutdown ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pi.on("session_shutdown", async (_event, _ctx) => {
+    // Suppressed — not logged to scope server.
+    if (!queue) return;
+    await queue.stop();
+  });
+}

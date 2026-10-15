@@ -1,0 +1,54 @@
+# Agent Team Definitions
+# ---------------------------------------------
+# Simple format:
+#   team_name:
+#     - agent_name
+#
+# With model override (takes precedence over .md frontmatter model):
+#   team_name:
+#     - name: agent_name
+#       model: provider/model-name
+#
+# Top-level keys:
+#   memory_model:
+#       model: <provider>/<model>  - summarizer model; memory runs only when active: true.
+#       active: true|false         - persistent on/off switch (must be true to run; sidebar toggle).
+#       A background subprocess summarizes each orchestrator turn and writes
+#       per-category files under <cwd>/.pi_memory/.
+
+memory_model:
+  model: xiaomi-token-plan-ams/mimo-v2.6-flash
+  active: true
+
+subagent_team:
+  - name: file_reader
+    model: xiaomi-token-plan-ams/mimo-v2.6-flash
+  - name: searcher
+    model: xiaomi-token-plan-ams/mimo-v2.6-flash
+  - name: coder
+    model: opencode-go/deepseek-v4.1-flash
+  - name: tester
+    model: xiaomi-token-plan-ams/mimo-v2.6-flash
+  - name: documenter
+    model: xiaomi-token-plan-ams/mimo-v2.6-flash
+  - name: doc_generator
+    model: xiaomi-token-plan-ams/mimo-v2.6-flash
+  - name: image_analyzer
+    model: xiaomi-token-plan-ams/mimo-v2.6-flash
+  - name: harsh_critic
+    model: xiaomi-token-plan-ams/mimo-v2.6-pro
+
+test_subagent_team:
+  - name: coder
+    active: false
+  - name: documenter
+    active: false
+  - name: file_reader
+  - name: searcher
+  - name: tester
+    active: false
+  - name: image_analyzer
+    active: false
+  - name: doc_generator
+    active: false
+

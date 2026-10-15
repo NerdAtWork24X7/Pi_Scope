@@ -1,0 +1,6 @@
+# Web-fetch extension — Python dependencies.
+# Installed into this repo's local .venv so the extension is self-contained
+# (no dependency on a global install or external venv).
+# Versions pinned to the known-good set used during development.
+playwright==1.62
+html-to-markdown==3.12.2

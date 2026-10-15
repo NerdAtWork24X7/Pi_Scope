@@ -1,0 +1,30 @@
+{
+  "activeTeam": "subagent_team",
+  "gridCols": 2,
+  "enabled": true,
+  "parallelDispatch": true,
+  "maxParallel": 5,
+  "dispatchTimeoutMs": 1200000,
+  "destructiveTools": [
+    "write",
+    "custom_write",
+    "edit",
+    "custom_edit",
+    "doc_generator"
+  ],
+  "disabledAgents": [],
+  "orchestratorSkills": [],
+  "skipOrchestratorTools": [
+    "context7-search",
+    "context7-query",
+    "browser",
+    "edit",
+    "write",
+    "read",
+    "powershell"
+  ],
+  "debugLevel": 0,
+  "mode": "standard",
+  "chatWorkspaces": [],
+  "chatWorkspacesRemoved": []
+}

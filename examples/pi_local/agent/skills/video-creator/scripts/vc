@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Launcher: finds the skill venv (bootstrapping it on first run) and forwards all args to video.py.
+set -euo pipefail
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY="$SKILL_DIR/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "→ first run: bootstrapping video-creator toolchain" >&2
+  "$SKILL_DIR/scripts/setup.sh" >&2
+fi
+exec "$PY" "$SKILL_DIR/scripts/video.py" "$@"
