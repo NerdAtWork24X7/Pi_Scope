@@ -2601,6 +2601,18 @@
       stroke-width: 2.4;
     }
 
+    /* The blast radius has to read at a glance on a dimmed floor: a bare red
+       outline over a box the same colour as the dimmed ones still looked grey.
+       Unchanged dependents take the red tint as well; a changed one keeps the
+       fill of its own status (`.st-*` above) and only gains the red ring. */
+    .dnode.impact:not(.changed) .dbox {
+      fill: var(--tint-red);
+    }
+
+    .dnode.impact text {
+      fill: var(--text);
+    }
+
     .dnode.dim {
       opacity: 0.22;
     }
@@ -2707,6 +2719,7 @@
     }
 
     .dsw.impact {
+      background: var(--tint-red);
       border-color: var(--red);
       border-width: 2.5px;
     }

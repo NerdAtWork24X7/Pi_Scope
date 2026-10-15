@@ -990,13 +990,18 @@
    * server orders it), else the most-depended-on node on the floor. Without
    * this the toggle silently did nothing until a node had been clicked, which
    * reads as a broken checkbox.
+   *
+   * Entries nothing on the floor depends on are skipped. An entry point (the
+   * server, a launcher, an index page) routinely tops the queue — risk ranks
+   * churn as much as fan-in — and it has no blast radius at all, so picking it
+   * left the whole floor grey with nothing highlighted.
    */
   function defaultImpactNode() {
     const model = graphModel();
     if (!model.nodes.length) return null;
     const onFloor = new Set(model.nodes.map((n) => n.id));
     for (const c of (graph && graph.changed) || []) {
-      if (onFloor.has(c.path)) return c.path;
+      if (onFloor.has(c.path) && transitiveDependents(c.path, model.edges).size) return c.path;
     }
     return model.nodes.slice().sort((a, b) => b.fanIn - a.fanIn)[0].id;
   }
@@ -1052,6 +1057,11 @@
     // reports, so "nothing depends on this" is still distinguishable from "the
     // toggle is off" — the two used to look identical on the floor.
     const impacted = (diagramImpact && sel) ? transitiveDependents(sel.id, LAY.edges) : null;
+    // …and `blast` is that same radius only while there is something in it. An
+    // empty one changes nothing on the floor: a uniformly grey map with no red
+    // on it read as "impact is broken", not as "nothing depends on this" — which
+    // the readout and the side panel already say in words.
+    const blast = impacted && impacted.size ? impacted : null;
     const byId = new Map(LAY.nodes.map((n) => [n.id, n]));
     LAY.byId = byId; // kept so a live drag can re-route the edges it touches
 
@@ -1079,10 +1089,15 @@
     }
 
     let edgeHtml = "";
+    // A hot edge is a dependency path the change travels: both ends inside the
+    // radius (the last hop lands on the selected node itself). Marking every edge
+    // that merely leaves a dependent — or the selected node's own imports, which
+    // run the other way — painted hops the change cannot take.
+    const inBlast = blast ? (id) => id === sel.id || blast.has(id) : null;
     for (const e of LAY.edges) {
       const a = byId.get(e.from), b = byId.get(e.to);
       if (!a || !b) continue;
-      const hot = impacted && (impacted.has(e.from) || (sel && e.from === sel.id));
+      const hot = inBlast && inBlast(e.from) && inBlast(e.to);
       edgeHtml += `<path class="dedge${hot ? " hot" : ""}" data-from="${esc(e.from)}" data-to="${esc(e.to)}" d="${orthoPath(a, b)}" fill="none" vector-effect="non-scaling-stroke" marker-end="url(#d-arrow)"/>`;
     }
     let nodeHtml = "";
@@ -1095,8 +1110,8 @@
       // signal. (Dimming on a plain click too made the toggle look like it did
       // nothing — the floor was already darkened before the box was ticked.)
       if (sel && nd.id === sel.id) cls.push("sel");
-      else if (impacted && impacted.has(nd.id)) cls.push("impact");
-      else if (impacted) cls.push("dim");
+      else if (blast && blast.has(nd.id)) cls.push("impact");
+      else if (blast) cls.push("dim");
       const tip = `${nd.full}${nd.changed ? " · " + (nd.status || "modified") : ""}${nd.fanIn ? " · " + nd.fanIn + " dependents" : ""}${isReviewed(nd.full) ? " · reviewed" : ""}`;
       const sub = nodeSubLabel(nd);
       nodeHtml += `<g class="${cls.join(" ")}" data-node="${esc(nd.id)}" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})">`
