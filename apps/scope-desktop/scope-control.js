@@ -149,7 +149,18 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
         : "/usr/local/bin:/usr/bin:/bin"),
     };
     const launch = serverLaunch();
-    const proc = spawn(launch.bin, launch.args, { cwd: launch.cwd, env, detached: true, stdio: "inherit" });
+    // Detach only on POSIX: that gives the server its own process group so
+    // stopServer can SIGTERM the whole tree. On Windows a detached child runs in
+    // its own console while `stdio: "inherit"` still hands it the parent's
+    // console handles — Node then dies on its first write (server.ts logs during
+    // import), so the server never reaches listen() and /health never answers.
+    // Windows teardown uses taskkill /T instead, which needs no detachment.
+    const proc = spawn(launch.bin, launch.args, {
+      cwd: launch.cwd,
+      env,
+      detached: process.platform !== "win32",
+      stdio: "inherit",
+    });
     proc.on("error", (err) => console.error("[scope-control] failed to spawn server:", err.message));
     await waitForHealth(cfg.healthUrl, { timeoutMs });
     return { proc, spawned: true, cfg };

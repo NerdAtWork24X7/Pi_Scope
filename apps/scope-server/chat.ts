@@ -81,6 +81,18 @@ interface ChatRun {
   startedAt: number;
   openUi: Map<string, any>; // extension_ui dialogs still waiting for an answer
   promptRetries: number; // preflight refusals already retried (see PROMPT_RETRY_MAX)
+  /** The last provider-side failure pi reported for this run: a `message_end`
+   *  (or `auto_retry_end`) whose message carries `stopReason: "error"` and an
+   *  `errorMessage` — a 403 from the gateway, an expired model, a dead
+   *  credential. pi answers such a turn with an EMPTY assistant message, so
+   *  without this the turn ends with nothing to show and the Chat view falls
+   *  back to "(no text response)". Held until the run ends so a retry that then
+   *  succeeds never reports the earlier attempt's error. */
+  providerError: string | null;
+  /** Whether the agent produced any assistant text on this run. A provider error
+   *  only earns a bubble when the turn ended without one — a turn that talked and
+   *  then failed (a bad tool call, a mid-run compaction) already has its text. */
+  sawText: boolean;
   /** Re-send this run's prompt. Set by `startChat` (the prompt writer lives in
    *  its stream closure); used to retry a preflight refusal from `handleLine`. */
   resend: (() => void) | null;
@@ -174,6 +186,28 @@ function endRun(sess: ChatSession, ...events: any[]) {
   run.subs.clear();
 }
 
+/** Turn pi's raw provider failure into one line a user can act on.
+ *
+ *  pi reports a failed call as `"<status>: <body>"` — e.g.
+ *  `403: {"type":"server_error","message":"An active … subscription is required"}`.
+ *  The status and the body's own `message` are the whole story; the JSON wrapper
+ *  and any escape sequences are noise in a chat bubble. Anything that does not
+ *  match that shape is passed through unchanged. */
+function formatProviderError(raw: string): string {
+  const text = String(raw).replace(ANSI_RE, "").replace(/\s+$/g, "").trim();
+  const m = /^(\d{3}):\s*([\s\S]*)$/.exec(text);
+  if (!m) return text;
+  const status = m[1];
+  const body = m[2].trim();
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed.message === "string" && parsed.message.trim()) {
+      return `HTTP ${status}: ${parsed.message.trim()}`;
+    }
+  } catch { /* not JSON — fall through to the raw body */ }
+  return body ? `HTTP ${status}: ${body}` : `HTTP ${status}`;
+}
+
 /** Pull the first fatal pi error line out of captured stderr. pi writes startup
  *  failures (e.g. "Error: Model ... is ambiguous across providers: ...") to
  *  stderr before exiting. Surfacing that instead of the generic "process closed"
@@ -201,9 +235,24 @@ function handleLine(sess: ChatSession, line: string) {
   // running. The office queue runner reads this to settle a task whose run
   // outlived the client that dispatched it, instead of re-dispatching it.
   if (ev.type === "agent_settled") {
+    const settled = sess.run;
     sess.runState = null;
     sess.lastRun = { outcome: sess.stopRequested ? "aborted" : "done", at: Date.now() };
-    endRun(sess, { type: "done", sessionId: sess.id, model: sess.model, aborted: sess.stopRequested });
+    // pi answers a provider failure (an HTTP 4xx/5xx from the gateway, a dead
+    // model, an expired credential) with an EMPTY assistant message: the turn
+    // settles normally and the only trace of the failure is the `errorMessage`
+    // pi attached to each attempt. Left unsurfaced the Chat view showed
+    // "(no text response)" for a turn that in fact failed for a stated reason,
+    // so the recorded transcript (which the extension fills from that very same
+    // field) and the live one told different stories. Report it here, in the
+    // same error+done shape the preflight refusal below uses — but only when the
+    // turn produced no text at all.
+    const done = { type: "done", sessionId: sess.id, model: sess.model, aborted: sess.stopRequested };
+    if (settled && !settled.sawText && settled.providerError) {
+      endRun(sess, { type: "error", message: settled.providerError }, { ...done, error: settled.providerError });
+    } else {
+      endRun(sess, done);
+    }
     sess.stopRequested = false;
     return;
   }
@@ -259,7 +308,10 @@ function handleLine(sess: ChatSession, line: string) {
     case "message_update":
       if (ev.assistantMessageEvent) {
         const a = ev.assistantMessageEvent;
-        if (a.type === "text_delta") runEmit(run, { type: "text", delta: a.delta || "" });
+        if (a.type === "text_delta") {
+          if (a.delta) run.sawText = true;
+          runEmit(run, { type: "text", delta: a.delta || "" });
+        }
         else if (a.type === "thinking_delta") runEmit(run, { type: "thinking", delta: a.delta || "" });
       }
       if (ev.usage) runEmit(run, { type: "usage", usage: ev.usage });
@@ -286,13 +338,29 @@ function handleLine(sess: ChatSession, line: string) {
       // `final` snapshot so the client always ends up with the full text even if
       // it never saw any text_delta deltas.
       if (ev.message?.role === "assistant") {
+        // A failed LLM call arrives as an assistant message with no content and
+        // `stopReason: "error"` — remember why (see ChatRun.providerError); pi
+        // retries these on its own, so it is only reported if the turn ends
+        // without ever producing text.
+        if (ev.message.stopReason === "error" && typeof ev.message.errorMessage === "string" && ev.message.errorMessage.trim()) {
+          run.providerError = formatProviderError(ev.message.errorMessage);
+        }
         const content = Array.isArray(ev.message.content) ? ev.message.content : [];
         const text = content.filter((c: any) => c.type === "text").map((c: any) => c.text || "").join("");
         const thinking = content.filter((c: any) => c.type === "thinking").map((c: any) => c.thinking || "").join("");
+        if (text) run.sawText = true;
         runEmit(run, { type: "final", text, thinking });
       }
       return;
     }
+    case "auto_retry_end":
+      // pi gave up retrying a provider failure (attempts exhausted, or a status
+      // it will not retry). `agent_settled` follows immediately; this keeps the
+      // message even if that attempt's message_end was never observed.
+      if (ev.success === false && typeof ev.finalError === "string" && ev.finalError.trim()) {
+        run.providerError = formatProviderError(ev.finalError);
+      }
+      return;
     case "tool_execution_start":
       runEmit(run, { type: "tool_start", name: ev.toolName || ev.tool || "", args: ev.args || "" });
       return;
@@ -682,7 +750,10 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
       sess.runState = null;
       sess.lastRun = { outcome: "error", at: Date.now() };
     }
-    endRun(sess, { type: "done", sessionId: id, model, error: extractPiError(sess.stderrBuf) || "process closed" });
+    // A run whose turn already failed at the provider reports that reason, not
+    // the generic "process closed" (see ChatRun.providerError).
+    const providerError = sess.run && !sess.run.sawText ? sess.run.providerError : null;
+    endRun(sess, { type: "done", sessionId: id, model, error: providerError || extractPiError(sess.stderrBuf) || "process closed" });
     sessions.delete(id);
   });
 
@@ -760,6 +831,8 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
         startedAt: Date.now(),
         openUi: new Map(),
         promptRetries: 0,
+        providerError: null,
+        sawText: false,
         resend: null,
       };
       sess!.run = run;

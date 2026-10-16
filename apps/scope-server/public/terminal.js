@@ -28,18 +28,54 @@
   // it is installed and PowerShell (or cmd.exe) otherwise, so the button is
   // relabelled from the server's own platform report rather than pretending.
   let shellLabel = "Bash";
+  // Herdr is a POSIX multiplexer: the server spawns `herdr` by name for it, so
+  // on a Windows host the button could only ever produce a failed pane. It is
+  // hidden there, and a "herdr" selection an earlier POSIX session left in
+  // localStorage falls back to the platform shell.
+  // Hidden up front and revealed only once the server confirms a non-Windows
+  // host: a Windows user must never be offered a button that cannot work, and a
+  // probe that never answers leaves the safe state (hidden) rather than a broken
+  // one. `promptHint()` owns the placeholder sentence so its wording follows the
+  // button instead of being re-derived at each call site.
+  const herdrBtnEl = document.getElementById("btn-herdr");
+  if (herdrBtnEl) herdrBtnEl.style.display = "none";
+  function herdrShown() {
+    return !!herdrBtnEl && herdrBtnEl.style.display !== "none";
+  }
+  function promptHint() {
+    return "Click " + shellLabel + (herdrShown() ? " or Herdr above" : " above");
+  }
+  function refreshPromptHint() {
+    const sub = document.getElementById("terminal-prompt-sub");
+    if (sub) sub.textContent = promptHint();
+  }
   (async function labelForPlatform() {
+    let windows = false;
     try {
       const res = await fetch(window.apiUrl("/health", {}), { headers: window.authHeaders() });
       const data = await res.json();
-      if (data?.platform !== "win32") return;
-      shellLabel = "Shell";
-      const btn = document.getElementById("btn-bash");
-      if (btn) {
-        btn.textContent = "Shell";
-        btn.title = "Open a terminal — Git Bash when installed, otherwise PowerShell or cmd";
-      }
-    } catch { /* keep the POSIX label */ }
+      windows = data?.platform === "win32";
+    } catch { /* host unknown — leave Herdr hidden */ }
+    if (!windows) {
+      if (herdrBtnEl) herdrBtnEl.style.display = "";
+      refreshPromptHint();
+      return;
+    }
+    shellLabel = "Shell";
+    const btn = document.getElementById("btn-bash");
+    if (btn) {
+      btn.textContent = "Shell";
+      btn.title = "Open a terminal — Git Bash when installed, otherwise PowerShell or cmd";
+    }
+    // Reconnect guard: a "herdr" selection restored from localStorage (this is
+    // the same browser profile as a POSIX host) would dial the multiplexer this
+    // platform does not have. The server would fall back anyway; doing it here
+    // keeps the stored choice honest too.
+    if (selectedShell === "herdr") {
+      selectedShell = "bash";
+      try { localStorage.setItem(LAST_SHELL_KEY, selectedShell); } catch {}
+    }
+    refreshPromptHint();
   })();
 
   function shellPromptEl() {
@@ -48,7 +84,7 @@
       el = document.createElement("div");
       el.id = "terminal-shell-prompt";
       el.style.cssText = "display:none;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--muted);font-family:monospace;gap:10px;";
-      el.innerHTML = '<span id="terminal-prompt-title" style="font-size:15px;">Select a terminal to start</span><span id="terminal-prompt-sub" style="font-size:13px;">Click ' + shellLabel + ' or Herdr above</span>';
+      el.innerHTML = '<span id="terminal-prompt-title" style="font-size:15px;">Select a terminal to start</span><span id="terminal-prompt-sub" style="font-size:13px;">' + promptHint() + '</span>';
       container.appendChild(el);
     }
     return el;
@@ -58,7 +94,7 @@
     if (el) el.style.display = "flex";
     if (container) container.style.background = "var(--glass-bg)";
     const sub = document.getElementById("terminal-prompt-sub");
-    if (sub) sub.textContent = error || ("Click " + shellLabel + " or Herdr above");
+    if (sub) sub.textContent = error || promptHint();
   }
   function hideShellPrompt() {
     const el = document.getElementById("terminal-shell-prompt");
@@ -334,7 +370,11 @@
     // Only auto-connect if the user has previously chosen a shell; otherwise
     // wait for an explicit Bash/Herdr selection.
     if (!isConnected) {
-      const last = localStorage.getItem(LAST_SHELL_KEY);
+      let last = localStorage.getItem(LAST_SHELL_KEY);
+      // A "herdr" choice only exists on a host that offers it (see
+      // labelForPlatform): on Windows the chooser is hidden, so reconnect with
+      // the platform shell rather than the multiplexer.
+      if (last === "herdr" && !herdrShown()) last = "bash";
       if (last === "bash" || last === "herdr") {
         selectedShell = last;
         connect();

@@ -143,8 +143,15 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
   wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     const reqUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const shellParam = reqUrl.searchParams.get("shell");
-    const selectedShell = shellParam === "herdr" ? "herdr" : "bash";
-    const shellName = shellParam === "herdr" ? "herdr" : defaultShellName();
+    // Herdr is a POSIX terminal multiplexer: its socket, its `herdr` binary and
+    // every detection helper behind it live on Linux/macOS, so selecting it on
+    // Windows would only reach `pty.spawn("herdr")` and fail the pane. Such a
+    // request is served by the platform's own shell instead (the client hides
+    // the chooser there — see terminal.js — this closes the gap for a stale tab
+    // or a hand-written URL).
+    const herdrAvailable = process.platform !== "win32";
+    const selectedShell = herdrAvailable && shellParam === "herdr" ? "herdr" : "bash";
+    const shellName = selectedShell === "herdr" ? "herdr" : defaultShellName();
     const shell = resolveShellPath(shellName);
     // The `cd` injection from the workspace rail is POSIX syntax (`cd -- <path>`);
     // PowerShell and cmd would take it as nonsense, so it is skipped there (and
