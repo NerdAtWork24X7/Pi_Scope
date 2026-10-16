@@ -16,9 +16,13 @@ NODE_URL="https://nodejs.org/dist/${NODE_VER}/${NODE_TARBALL}"
 echo "[build] installing workspace deps (electron, node-pty, ws, esbuild, electron-builder)..."
 ( cd "$ROOT" && npm install --no-audit --no-fund )
 
-echo "[build] bundling the Pi coding agent (pi-bundle)..."
+# Pre-install the Pi coding agent so the packaged app can seed the user's own
+# copy (~/.pi-scope/pi) on first launch with no network and no system npm. The
+# app never runs the agent from resources/pi directly: that copy is read-only, so
+# Settings → Update could not replace it.
+echo "[build] bundling the Pi coding agent (pi-bundle seed)..."
 ( cd "$LAUNCHER/pi-bundle" && npm install --no-audit --no-fund )
-# Ship the Pi Scope extension inside the bundle so the packaged `pi` shim can
+# Ship the Pi Scope extension inside the seed so the seeded `pi` shim can
 # force-load it without depending on the user's global pi configuration.
 cp "$ROOT/extension/pi-scope.ts" "$LAUNCHER/pi-bundle/pi-scope.ts"
 

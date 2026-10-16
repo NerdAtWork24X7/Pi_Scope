@@ -1,7 +1,7 @@
 /**
  * agent-dir.ts — Pi Scope's own pi agent dir.
  *
- * Pi Scope ships and launches its own copy of the pi coding agent (see
+ * Pi Scope installs and launches its own copy of the pi coding agent (see
  * pi-bundle.ts). That agent must NOT share the user's global pi agent dir:
  * if it did, pi would discover the global `settings.json` (and any extensions
  * listed there) alongside the Pi Scope extension Pi Scope force-loads, and the
@@ -17,6 +17,7 @@
  *
  * Location (override with SCOPE_AGENT_DIR):
  *   • dev + packaged: ~/.pi-scope/agent
+ * The bundled agent itself lives beside it in ~/.pi-scope/pi (pi-bundle-paths.ts).
  *
  * Importing this module creates the dir and pins `PI_CODING_AGENT_DIR` to it,
  * so every pi process Pi Scope spawns — Chat subprocesses, the commit-message

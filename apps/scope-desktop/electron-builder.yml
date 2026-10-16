@@ -10,6 +10,9 @@ files:
   - scope-control.js
   - preload.js
   - package.json
+  # Seeds the user's own copy of the bundled pi agent (~/.pi-scope/pi) from
+  # resources/pi on first launch, so Settings → Update can replace it.
+  - pi-bundle-install.mjs
   - server-bundle/**/*
   - node_modules/**/*
 asar: false
@@ -19,6 +22,8 @@ extraResources:
     to: node
   # The Pi coding agent bundled with Pi Scope. The server installs a `pi` shim
   # from here that every spawned process uses instead of a global pi install.
+  # On first launch scope-control.js seeds ~/.pi-scope/pi from this read-only
+  # copy and the server runs the seeded one instead.
   - from: pi-bundle
     to: pi
     filter:

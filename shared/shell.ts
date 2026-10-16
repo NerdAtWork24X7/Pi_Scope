@@ -133,6 +133,11 @@ export function shellQuote(value: string): string {
  * `claude`, …) resolve only if these are searched too. Override with
  * SCOPE_SYSTEM_BIN_DIRS (a path-delimiter-separated list) — e.g. to point at a
  * Homebrew or Nix prefix. Empty on Windows, where PATHEXT handles the rest.
+ *
+ * `~/.opencode/bin` is listed even though it is not a "system" dir: opencode's
+ * official installer hardcodes that path and only appends it to `~/.bashrc` /
+ * `~/.zshrc`, so a GUI-launched server (which sources no rc) would otherwise
+ * never detect the opencode harness on the Workflow page.
  */
 export function systemBinDirs(): string[] {
   const override = process.env.SCOPE_SYSTEM_BIN_DIRS;
@@ -144,6 +149,7 @@ export function systemBinDirs(): string[] {
     "/bin",
     "/opt/homebrew/bin",
     path.join(os.homedir(), ".local", "bin"),
+    path.join(os.homedir(), ".opencode", "bin"),
   ];
 }
 

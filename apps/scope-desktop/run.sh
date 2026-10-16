@@ -43,10 +43,12 @@ if [ ! -d "$ROOT_DIR/node_modules/electron" ]; then
   ( cd "$ROOT_DIR" && npm install --no-audit --no-fund )
 fi
 
-# The bundled Pi coding agent (first run only). The server launches every `pi`
-# from here; if it is missing it falls back to a global pi install.
-if [ -f "$DIR/pi-bundle/package.json" ] && [ ! -d "$DIR/pi-bundle/node_modules" ]; then
-  ( cd "$DIR/pi-bundle" && npm install --no-audit --no-fund ) || true
+# The bundled Pi coding agent lives in the user's data dir (~/.pi-scope/pi), not
+# in this checkout — the installer seeds it there on first run and migrates a
+# bundle an older layout left in pi-bundle/. The server launches every `pi` from
+# it; when it is missing it falls back to a global pi install.
+if command -v node >/dev/null 2>&1; then
+  node "$DIR/pi-bundle-install.mjs" --move || true
 fi
 
 # Overwrite launcher.log each run so failures are easy to read.

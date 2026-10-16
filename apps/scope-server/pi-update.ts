@@ -1,10 +1,11 @@
 /**
  * pi-update.ts — check for and install a newer Pi coding agent.
  *
- * Pi Scope ships its own copy of the [`pi`](https://github.com/disler/pi-agent-observability)
- * coding agent in a small npm project (`apps/scope-desktop/pi-bundle` in dev,
- * `resources/pi` packaged) — see pi-bundle.ts. This module answers two
- * questions the Settings → Update tab asks:
+ * Pi Scope installs its own copy of the 
+ * coding agent in a small npm project under the user's data dir —
+ * `~/.pi-scope/pi` (see pi-bundle-paths.ts; the packaged app seeds it from its
+ * read-only `resources/pi` on first launch). This module answers two questions
+ * the Settings → Update tab asks:
  *
  *   1. *What version is installed, and is there a newer one?* — reads the
  *      bundled package's `package.json` and asks the npm registry for the
@@ -139,7 +140,7 @@ function baseStatus(): PiUpdateStatus {
       ? "Pi Scope is using an external pi via SCOPE_PI_BIN — update that install yourself."
       : "Pi Scope is using a globally installed pi on PATH — update it with npm install -g.";
   } else if (!isWritable(bundleDir)) {
-    reason = "The bundled agent lives on a read-only filesystem (packaged app), so it cannot be updated in place.";
+    reason = "The bundled agent lives on a read-only filesystem (a package's own copy), so it cannot be updated in place.";
   } else if (!installed) {
     reason = "No bundled pi-coding-agent package was found to update.";
   } else {
@@ -176,14 +177,49 @@ export async function checkPiUpdate(): Promise<PiUpdateStatus> {
   return status;
 }
 
+/**
+ * npm's own CLI as shipped with the Node running this server, or null.
+ *
+ * Running it through `node` is the one form that works on every platform: no
+ * PATH lookup and no `.cmd` for CreateProcess to refuse. A packaged app has no
+ * npm on PATH, but its portable Node bundles one — this is how Settings → Update
+ * stays usable there (the seeded agent in `~/.pi-scope/pi` is writable, unlike
+ * the copy inside the package). Positions checked: a POSIX install
+ * (`<prefix>/bin/node` → `<prefix>/lib/node_modules/npm`) and a Windows one
+ * (`<dir>\node.exe` → `<dir>\node_modules\npm`).
+ */
+function npmCliBesideNode(): string | null {
+  const dir = path.dirname(process.execPath);
+  const candidates = [
+    path.join(dir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(dir, "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(dir, "node_modules", "npm", "bin", "npm-cli.js"),
+  ];
+  for (const candidate of candidates) {
+    try { if (fs.statSync(candidate).isFile()) return candidate; } catch { /* try next */ }
+  }
+  return null;
+}
+
+/** How npm is invoked: `{ file, args }` to spawn, plus a label for messages.
+ *  `SCOPE_NPM_BIN` (an operator's npm, or the e2e suite's stub) always wins. */
+function npmCommand(): { file: string; args: string[]; label: string } {
+  const configured = (process.env.SCOPE_NPM_BIN || "").trim();
+  if (configured) return { file: configured, args: [], label: configured };
+  const cli = npmCliBesideNode();
+  if (cli) return { file: process.execPath, args: [cli], label: "npm (bundled with Node)" };
+  return { file: "npm", args: [], label: "npm" };
+}
+
 /** Run a command to completion, resolving with its combined output. */
-function run(bin: string, args: string[], cwd: string): Promise<string> {
+function run(command: { file: string; args: string[]; label: string }, args: string[], cwd: string): Promise<string> {
+  const bin = command.file;
   return new Promise((resolve, reject) => {
     let out = "";
     let settled = false;
     // `spawnCli`, not `spawn`: on Windows `npm` is `npm.cmd`, which Node refuses
     // to spawn directly (and `SCOPE_NPM_BIN` usually points straight at one).
-    const proc = spawnCli(bin, args, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawnCli(bin, [...command.args, ...args], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -197,7 +233,9 @@ function run(bin: string, args: string[], cwd: string): Promise<string> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      reject(err?.code === "ENOENT" ? new Error(`npm not found (${bin}) — install npm or set SCOPE_NPM_BIN`) : err);
+      reject(err?.code === "ENOENT"
+        ? new Error(`${command.label} not found — install npm or set SCOPE_NPM_BIN`)
+        : err);
     });
     proc.on("exit", (code) => {
       if (settled) return;
@@ -263,7 +301,7 @@ async function runUpdate(): Promise<PiUpdateStatus> {
   const status = baseStatus();
   if (!status.bundleDir) throw new Error(status.reason || "no bundled pi to update");
   if (!status.updatable) throw new Error(status.reason || "the bundled pi cannot be updated");
-  const npm = (process.env.SCOPE_NPM_BIN || "npm").trim() || "npm";
+  const npm = npmCommand();
   const args = ["install", "--no-audit", "--no-fund", "--save-exact", `${PI_PACKAGE}@latest`];
   const output = await run(npm, args, status.bundleDir);
   // Re-read the on-disk version and the registry (npm may report success while

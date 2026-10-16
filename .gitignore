@@ -27,8 +27,10 @@ apps/scope-desktop/server-bundle/
 apps/scope-desktop/dist/
 apps/scope-desktop/node-portable/
 
-# The Pi coding agent bundle's node_modules are gitignored by the pattern above;
-# this is the extension copy build-release.sh drops in for the packaged shim.
+# apps/scope-desktop/pi-bundle/ is only a template (package.json + lock) and the
+# seed a release build pre-installs (node_modules is ignored by the pattern
+# above) so a packaged app can create ~/.pi-scope/pi offline. This one file is a
+# build artifact build-release.sh drops in — never committed.
 apps/scope-desktop/pi-bundle/pi-scope.ts
 
 squashfs-root/

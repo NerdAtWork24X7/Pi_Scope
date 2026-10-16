@@ -168,12 +168,16 @@ else
   command -v "$PM" >/dev/null 2>&1 || die "$PM is required to install dependencies — install it and run this again"
   info "installing dependencies in $DIR with $PM (this can take a minute)…"
   pm_install "$DIR" || die "$PM install failed — run it manually in $DIR"
-  # The bundled Pi coding agent keeps its own npm project, so Chat works with no
-  # global `pi` install. A failure here is not fatal: Chat falls back to a `pi`
-  # on PATH, and the server says which one it chose at boot.
-  if [ -f "$DIR/apps/scope-desktop/pi-bundle/package.json" ]; then
+  # The bundled Pi coding agent installs into the user's own data dir
+  # (~/.pi-scope/pi) rather than into this checkout, so Settings → Update can
+  # replace it and the tree survives re-installing the app. `--move` migrates a
+  # bundle an older release left in apps/scope-desktop/pi-bundle instead of
+  # fetching it again. A failure here is not fatal: Chat falls back to a `pi` on
+  # PATH, and the server says which one it chose at boot.
+  BUNDLE_INSTALLER="$DIR/apps/scope-desktop/pi-bundle-install.mjs"
+  if [ -f "$BUNDLE_INSTALLER" ]; then
     info "installing the bundled Pi coding agent with $PM…"
-    pm_install "$DIR/apps/scope-desktop/pi-bundle" \
+    node "$BUNDLE_INSTALLER" --pm "$PM" --move \
       || info "the bundled Pi agent could not be installed — Chat will fall back to a pi on PATH."
   fi
 fi

@@ -574,3 +574,85 @@
 /* The count on a node that carries references: the message it sends is more
    than what the panel's User message box shows. */
 .sw-ref-tag { font-size: 9.5px; color: var(--muted); white-space: nowrap; }
+
+/* ── Settings → Plugins → Workflow ─────────────────────────────────────────
+ * Skill: superdesign-alpha — "Amber Terminal Noir". A small engineering console:
+ * mono readouts for resolved paths, hairline dividers, eyebrow labels in the
+ * display face, one rationed accent (--accent) for the single primary action and
+ * focus, and the theme's faint grid behind the row groups. Every colour is a
+ * theme variable, so light, dark and the DeepSeek palettes all hold. Scoped to
+ * `.sw-set` so nothing leaks into the host Settings page.
+ * --------------------------------------------------------------------------*/
+.sw-set { display: flex; flex-direction: column; gap: 22px; }
+.sw-set-lead {
+  margin: 0; max-width: 68ch;
+  font-family: var(--font-body); font-size: 14px; line-height: 1.63; color: var(--muted);
+}
+.sw-set-sec { display: flex; flex-direction: column; gap: 10px; }
+.sw-set-eyebrow {
+  display: flex; align-items: center; gap: 10px;
+  font-family: var(--font-display); font-size: 11.5px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-subtle);
+}
+.sw-set-eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--hairline); }
+.sw-set-grid {
+  display: grid; gap: 8px; padding: 10px;
+  border: 1px solid var(--hairline); border-radius: var(--r-card);
+  background-color: var(--surface);
+  background-image: var(--grid); background-size: var(--grid-size);
+}
+.sw-set-row {
+  display: grid; gap: 6px; padding: 10px 12px;
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--r-control);
+  transition: border-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sw-set-row:hover { border-color: var(--border-strong); }
+.sw-set-row:focus-within { border-color: var(--accent); box-shadow: var(--glow-accent); }
+.sw-set-rowhead { display: flex; align-items: center; gap: 8px; }
+.sw-set-name {
+  font-family: var(--font-display); font-size: 14px; font-weight: 600;
+  letter-spacing: -0.2px; color: var(--text);
+}
+.sw-set-input-name { flex: 1 1 auto; min-width: 0; font-family: var(--font-display); }
+.sw-set-status {
+  display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.02em; color: var(--text-subtle);
+}
+.sw-set-status .dot { width: 6px; height: 6px; border-radius: var(--r-pill); background: currentColor; }
+.sw-set-status.ok { color: var(--green); }
+.sw-set-status.warn { color: var(--orange); }
+.sw-set-status.ok .dot { animation: sw-set-pulse 2.4s ease-in-out infinite; }
+.sw-set-rowhead .sw-set-status { margin-left: auto; }
+.sw-set-input {
+  width: 100%; min-width: 0;
+  font-family: var(--mono); font-size: 12.5px; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-control);
+  padding: 7px 10px;
+  transition: border-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sw-set-input::placeholder { color: var(--text-subtle); }
+.sw-set-input:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--glow-accent); }
+.sw-set-path {
+  font-family: var(--mono); font-size: 11px; color: var(--text-subtle);
+  overflow-wrap: anywhere;
+}
+.sw-set-actions { display: flex; gap: 8px; }
+.sw-set-btn {
+  font-family: var(--font-display); font-size: 12.5px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--on-accent); background: var(--accent);
+  border: 1px solid transparent; border-radius: var(--r-btn); padding: 7px 14px; cursor: pointer;
+  transition: filter 150ms cubic-bezier(0.4, 0, 0.2, 1), border-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sw-set-btn:hover { filter: brightness(1.08); }
+.sw-set-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sw-set-btn.ghost { background: transparent; color: var(--text-subtle); border-color: var(--hairline-strong); }
+.sw-set-btn.ghost:hover { color: var(--text); filter: none; }
+.sw-set-new {
+  display: grid; gap: 8px; padding: 12px;
+  border: 1px dashed var(--hairline-strong); border-radius: var(--r-card);
+}
+@keyframes sw-set-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .sw-set-status.ok .dot { animation: none; }
+  .sw-set-row, .sw-set-input, .sw-set-btn { transition: none; }
+}

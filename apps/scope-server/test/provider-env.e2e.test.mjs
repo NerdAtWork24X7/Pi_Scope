@@ -18,14 +18,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as net from "node:net";
 import { fileURLToPath } from "node:url";
+import { PI_BUNDLE_ROOT, PI_BUNDLE_ENTRY } from "./bundle-path.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..", "..");
 const SERVER = path.join(ROOT, "apps", "scope-server", "server.ts");
-const PI_BUNDLE = path.join(ROOT, "apps", "scope-desktop", "pi-bundle");
-const BUNDLE_ENTRY = path.join(
-  PI_BUNDLE, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js",
-);
+const PI_BUNDLE = PI_BUNDLE_ROOT;
+const BUNDLE_ENTRY = PI_BUNDLE_ENTRY;
 const TOKEN = "provider-env-token";
 const bundlePresent = fs.existsSync(BUNDLE_ENTRY);
 

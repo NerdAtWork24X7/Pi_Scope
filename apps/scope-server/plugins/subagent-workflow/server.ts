@@ -35,6 +35,10 @@
  *   GET  /subagent-workflow/harnesses                  → harness list + availability,
  *                                                        and the model catalogue
  *                                                        the app's own runner offers
+ *   POST /subagent-workflow/harness-paths { harness,   → set/clear one harness's
+ *     path }                                             binary override
+ *   POST /subagent-workflow/user-harnesses { action,   → define / edit / remove a
+ *     name, bin, args, models }                          harness of the user's own
  *   GET  /subagent-workflow/run?cwd=<workspace>        → the workspace's live run
  *   GET  /subagent-workflow/history?cwd=[&id=]         → past runs, or one of them
  *   GET  /subagent-workflow/triggers?cwd=<workspace>   → schedule + event watch
@@ -188,9 +192,55 @@ const RUN_OUTPUT_MAX = 200_000;
 const RUN_INPUT_MAX = 20_000;
 
 const collapse = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
+/** A stable id slug from a harness name (`"DeepSeek CLI"` → `"deepseek-cli"`). */
+const slug = (v) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+/** A model list from a comma/space string or an array: trimmed, de-duped, capped. */
+const parseModels = (v: any): string[] => {
+  const raw = Array.isArray(v) ? v : String(v ?? "").split(/[\s,]+/);
+  const out: string[] = [];
+  for (const m of raw) {
+    const s = collapse(m).slice(0, HARNESS_MODEL_MAX);
+    if (s && !out.includes(s)) out.push(s);
+    if (out.length >= HARNESS_MODELS_MAX) break;
+  }
+  return out;
+};
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, Number.isFinite(n) ? n : lo));
 const multiline = (v) => String(v ?? "").replace(/\r\n?/g, "\n").trim();
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Per-harness binary overrides, set from Settings → Plugins → Workflow. A
+ * global (machine-level) map of harness id → an executable the user pointed at
+ * by hand, used instead of the PATH lookup. It is the escape hatch for a
+ * harness installed where a desktop launch does not search — an nvm or
+ * npm-global prefix, opencode's `~/.opencode/bin`, a custom location. Stored in
+ * the plugin's own store, never pi's `settings.json`.
+ */
+const BINS_KEY = "harnessBins";
+const BIN_PATH_MAX = 1024;
+
+/**
+ * Harnesses the user defines (name + binary), stored as a list beside the
+ * per-harness binary overrides. `id` is a slug the server derives from the name;
+ * a built-in id stays reserved, so a user harness can never shadow one.
+ */
+const USER_HARNESS_KEY = "userHarnesses";
+const USER_HARNESS_MAX = 50;
+/**
+ * One id rule, used in both directions: a user-harness id the store may hold,
+ * and a harness id a node may name. Deliberately permissive about case — a node
+ * that names an id this installation does not know keeps it (the run then says
+ * so) rather than being silently rewritten. `slug()` produces the canonical
+ * lowercase form.
+ */
+const HARNESS_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+const HARNESS_LABEL_MAX = 60;
+const HARNESS_ARGS_MAX = 500;
+const HARNESS_MODELS_MAX = 20;
+const HARNESS_MODEL_MAX = 64;
+/** The argument template a custom harness starts with (see `allHarnesses`). */
+const DEFAULT_HARNESS_ARGS = "{prompt}";
 
 /**
  * Built-in harnesses. `bin` is the executable looked up on PATH; `args(prompt)`
@@ -509,7 +559,12 @@ function normaliseCondition(raw: any) {
 
 function normaliseAgentConfig(raw: any) {
   const r = raw && typeof raw === "object" ? raw : {};
-  const harness = HARNESSES[String(r.harness)] ? String(r.harness) : "claude";
+  // A node may name any harness — a built-in or one the user defined. The id is
+  // kept when it is well formed (HARNESS_ID_RE, the same rule a stored user
+  // harness passes) and only falls back to `claude` for garbage: a harness this
+  // installation does not know must survive normalisation (the run reports it
+  // clearly) rather than be silently rewritten.
+  const harness = HARNESS_ID_RE.test(String(r.harness)) ? String(r.harness) : "claude";
   const timeout = Number(r.timeoutSec);
   const retries = Number(r.retries);
   const retryDelay = Number(r.retryDelaySec);
@@ -900,15 +955,139 @@ export function activate(api: any): void {
     return { model };
   }
 
+  // ─── Harness resolution: built-ins, the user's own, and binary overrides ───
+  //
+  // Everything below resolves a harness through `resolveHarness`, never through
+  // `which` directly, so a user-set override reaches both availability and the
+  // run. Both stores are read fresh on each lookup: they are tiny, and reading
+  // them keeps one source of truth (a write also drops the list cache).
+
+  /**
+   * The harnesses the user defined (Settings → Plugins → ⚙ Workflow): a name and
+   * a binary, plus an argument template. They sit *beside* the built-ins, never
+   * replacing them, so a CLI Pi Scope does not ship — DeepSeek, a private
+   * wrapper, anything — can be wired into a workflow. Global, like the overrides:
+   * a harness belongs to the machine, not to one workspace.
+   */
+  function userHarnesses(): any[] {
+    const raw = api.store.get(USER_HARNESS_KEY, []);
+    if (!Array.isArray(raw)) return [];
+    const out: any[] = [];
+    for (const e of raw.slice(0, USER_HARNESS_MAX)) {
+      const id = String(e?.id ?? "").trim();
+      const bin = String(e?.bin ?? "").trim();
+      // A built-in id is reserved; a malformed id or an empty binary is dropped.
+      if (!HARNESS_ID_RE.test(id) || HARNESSES[id] || !bin) continue;
+      out.push({
+        id,
+        label: collapse(e?.label).slice(0, HARNESS_LABEL_MAX) || id,
+        bin: bin.slice(0, BIN_PATH_MAX),
+        args: String(e?.args ?? "").trim().slice(0, HARNESS_ARGS_MAX) || DEFAULT_HARNESS_ARGS,
+        models: parseModels(e?.models),
+        modelFlag: collapse(e?.modelFlag).slice(0, 64),
+      });
+    }
+    return out;
+  }
+
+  /** Every harness a node may name: the built-ins plus the user's own. */
+  function allHarnesses(): Record<string, any> {
+    const map: Record<string, any> = { ...HARNESSES };
+    for (const u of userHarnesses()) {
+      map[u.id] = {
+        label: u.label,
+        bin: u.bin,
+        user: true,
+        userArgs: u.args,
+        // Split the template *then* substitute, so a prompt with spaces or quotes
+        // stays one argv element (a `custom` node differs: it is a shell line).
+        args: (prompt: string) =>
+          splitArgs(u.args).map((t) => (t.includes("{prompt}") ? t.replace(/\{prompt\}/g, prompt) : t)),
+        modelFlag: u.modelFlag || undefined,
+        models: u.models,
+        capabilities: { tools: null, skills: null, extensions: null },
+      };
+    }
+    return map;
+  }
+
+  /** The user's per-harness binary overrides (harness id → path). Global. */
+  function harnessBins(): Record<string, string> {
+    const raw = api.store.get(BINS_KEY, {});
+    if (!raw || typeof raw !== "object") return {};
+    const known = allHarnesses();
+    const out: Record<string, string> = {};
+    for (const [id, v] of Object.entries(raw)) {
+      const p = String(v ?? "").trim();
+      if (p && known[id]?.bin) out[id] = p;
+    }
+    return out;
+  }
+
+  /** True when `p` names an existing executable file (symlinks followed). */
+  function executableAt(p: string): boolean {
+    try {
+      if (!fs.statSync(p).isFile()) return false;
+      fs.accessSync(p, fs.constants.X_OK);
+      return true;
+    } catch { return false; }
+  }
+
+  /**
+   * Drop binary overrides that can never resolve again — a harness with no
+   * binary, or one the user removed — while keeping a key that is merely
+   * unresolvable for now (its harness still exists, its path is just missing).
+   * Called after every write that can change the harness set.
+   */
+  function pruneBins(): void {
+    const raw = api.store.get(BINS_KEY, {});
+    if (!raw || typeof raw !== "object") return;
+    const known = allHarnesses();
+    const next: Record<string, any> = { ...raw };
+    let changed = false;
+    for (const k of Object.keys(next)) if (!known[k]?.bin) { delete next[k]; changed = true; }
+    if (changed) api.store.set(BINS_KEY, next);
+  }
+
+  /**
+   * The binary a harness should run. A user override wins over the harness's own
+   * `bin`; an absolute path is validated directly, a bare command name goes
+   * through the host's PATH resolver. `null` means nothing resolves — which keeps
+   * `available` honest, and turns a run of an unreachable harness into a clear
+   * error instead of a bare ENOENT.
+   */
+  function resolveHarness(id: string, spec: any): string | null {
+    const wanted = harnessBins()[id] || spec?.bin;
+    if (!wanted) return null;
+    return wanted.includes("/") || wanted.includes("\\")
+      ? (executableAt(wanted) ? wanted : null)
+      : which(wanted, resolveBin);
+  }
+
   let harnessCache: { at: number; list: any[] } | null = null;
   function harnessList() {
     if (harnessCache && Date.now() - harnessCache.at < 30_000) return harnessCache.list;
-    const list = Object.entries(HARNESSES).map(([id, h]: [string, any]) => ({
-      id,
-      label: h.label,
-      bin: h.bin,
-      available: h.bin ? !!which(h.bin, resolveBin) : id === "custom" ? true : typeof api.kit.startChat === "function",
-      modelFlag: h.modelFlag || null,
+    const bins = harnessBins();
+    const list = Object.entries(allHarnesses()).map(([id, h]: [string, any]) => {
+      const resolved = h.bin ? resolveHarness(id, h) : null;
+      return {
+        id,
+        label: h.label,
+        bin: h.bin,
+        // A user-defined harness, and the argument template it was given (so the
+        // Settings popup can edit it back).
+        user: !!h.user,
+        argsTemplate: h.user ? h.userArgs : null,
+        // What the user set by hand (Settings → Plugins → Workflow) and the path
+        // it actually resolves to; `available` follows the override, not just PATH.
+        override: bins[id] || null,
+        resolved,
+        // `custom` runs whatever shell line the user typed — nothing to detect, so
+        // it is always "available"; `pi` is the host's own runner, whose only
+        // precondition the run engine checks is a chat runner (`runPiHarness`
+        // returns "the host has no chat runner" without `startChat`).
+        available: h.bin ? !!resolved : id === "custom" ? true : typeof api.kit.startChat === "function",
+        modelFlag: h.modelFlag || null,
       // The models this harness offers: the curated aliases/ids a CLI documents,
       // or — for the app's own runner — the whole model catalogue, each key
       // carrying its provider.
@@ -920,7 +1099,8 @@ export function activate(api: any): void {
         tools: h.capabilities?.tools ? { flag: h.capabilities.tools.flag } : null,
         extensions: h.capabilities?.extensions ? { flag: h.capabilities.extensions.flag } : null,
       },
-    }));
+      };
+    });
     harnessCache = { at: Date.now(), list };
     return list;
   }
@@ -1870,7 +2050,7 @@ export function activate(api: any): void {
           cmd = plan.file;
           args = plan.args;
         } else {
-          const spec = HARNESSES[node.config.harness] as any;
+          const spec = allHarnesses()[node.config.harness] as any;
           if (!spec || !spec.bin) { resolve({ text: "", code: null, error: `unknown harness: ${node.config.harness}` }); return; }
           args = spec.args(prompt);
           if (node.config.model && spec.modelFlag) args = [...args, spec.modelFlag, node.config.model];
@@ -1879,7 +2059,16 @@ export function activate(api: any): void {
           // Launch the binary the host resolved to an absolute path, not the bare
           // name: on Windows that is how a `claude.cmd`/`codex.cmd` is found at all
           // (and on every platform it pins the one this node was validated against).
-          cmd = which(spec.bin, resolveBin) || spec.bin;
+          // A Settings → Plugins override wins; if one is set but does not resolve,
+          // fail clearly instead of running whatever PATH happens to hold.
+          const override = harnessBins()[node.config.harness];
+          cmd = resolveHarness(node.config.harness, spec) || "";
+          if (!cmd) {
+            resolve({ text: "", code: null, error: override
+              ? `the configured binary for ${node.config.harness} is not executable: ${override}`
+              : `${spec.bin} was not found on PATH — install it, or set a binary path in Settings → Plugins → Workflow` });
+            return;
+          }
         }
 
         let child: any;
@@ -2095,6 +2284,101 @@ export function activate(api: any): void {
   api.route("GET", "/subagent-workflow/harnesses", () => ({
     harnesses: harnessList(), platform: process.platform,
   }));
+
+  /**
+   * Point one harness at a binary, or clear the override. `path` is an absolute
+   * executable (or a bare command name resolved on PATH); an empty `path`
+   * restores auto-detection. Global, because a harness lives on the machine, not
+   * in one workspace. Validation is immediate, so a wrong path is refused here
+   * rather than surfacing later as a failed node. Returns the refreshed list.
+   */
+  api.route("POST", "/subagent-workflow/harness-paths", async (ctx: any) => {
+    let body: any;
+    try { body = await parseBody(ctx); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const id = String(body?.harness ?? "").trim();
+    const spec = allHarnesses()[id];
+    if (!spec || !spec.bin) return jsonResponse({ error: `unknown harness: ${id || "(none)"}` }, 400);
+    const raw = String(body?.path ?? "").trim();
+    if (raw.length > BIN_PATH_MAX) {
+      return jsonResponse({ error: `the path may be up to ${BIN_PATH_MAX} characters` }, 400);
+    }
+    // Mutate the RAW stored map, never the filtered view `harnessBins()` returns:
+    // a write must not silently drop a key the user set — even one whose path is
+    // temporarily unresolvable, or whose harness id we no longer recognise — just
+    // because it is not part of the effective map right now.
+    const stored = api.store.get(BINS_KEY, {});
+    const bins: Record<string, any> = stored && typeof stored === "object" ? { ...stored } : {};
+    if (!raw) {
+      delete bins[id];
+    } else {
+      const isPath = raw.includes("/") || raw.includes("\\");
+      if (isPath ? !executableAt(raw) : !which(raw, resolveBin)) {
+        return jsonResponse({ error: `no executable at ${raw}` }, 400);
+      }
+      bins[id] = raw;
+    }
+    api.store.set(BINS_KEY, bins);
+    pruneBins(); // an override for a harness that no longer has a binary goes too
+    harnessCache = null; // availability just changed — never serve a stale list
+    return jsonResponse({ harnesses: harnessList(), platform: process.platform });
+  });
+
+  /**
+   * Define, edit or remove a harness of the user's own — a name and a binary,
+   * plus an optional argument template (with a `{prompt}` placeholder) and the
+   * models it offers (shown in the node's Model dropdown). The id is a slug of
+   * the name; a built-in id is reserved. Global, like the binary overrides.
+   * Returns the refreshed harness list.
+   */
+  api.route("POST", "/subagent-workflow/user-harnesses", async (ctx: any) => {
+    let body: any;
+    try { body = await parseBody(ctx); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const list = userHarnesses();
+    const action = String(body?.action ?? "save");
+
+    if (action === "remove") {
+      const id = String(body?.id ?? "").trim();
+      api.store.set(USER_HARNESS_KEY, list.filter((h) => h.id !== id));
+      pruneBins(); // the removed harness's binary override goes with it
+      harnessCache = null;
+      return jsonResponse({ harnesses: harnessList(), platform: process.platform });
+    }
+    if (action !== "save") return jsonResponse({ error: `unknown action: ${action}` }, 400);
+
+    // The id is stable once created (an edit sends it back); a new harness's id is
+    // the slug of its name, so renaming never orphans the nodes that use it.
+    // Contract: `save` with an `id` updates that harness; without one it creates
+    // (or, when the name already slugs to that id, updates) — the same name always
+    // resolves to the same id, so a repeat never duplicates a harness.
+    const name = collapse(body?.name).slice(0, HARNESS_LABEL_MAX);
+    const id = String(body?.id ?? "").trim() || slug(name);
+    const bin = String(body?.bin ?? "").trim();
+    const args = String(body?.args ?? "").trim().slice(0, HARNESS_ARGS_MAX) || DEFAULT_HARNESS_ARGS;
+    const models = parseModels(body?.models);
+    // A harness that offers models needs a way to be handed one; `--model` is the
+    // convention every CLI harness here follows, so it is the default when a model
+    // list is given and no flag is set.
+    const modelFlag = collapse(body?.modelFlag).slice(0, 64) || (models.length ? "--model" : "");
+
+    if (!HARNESS_ID_RE.test(id)) {
+      return jsonResponse({ error: `give the harness a name with at least one letter or digit (id: "${id}")` }, 400);
+    }
+    if (HARNESSES[id]) return jsonResponse({ error: `"${id}" is a built-in harness` }, 400);
+    if (!bin) return jsonResponse({ error: "a binary is required" }, 400);
+    if (bin.length > BIN_PATH_MAX) return jsonResponse({ error: `the binary may be up to ${BIN_PATH_MAX} characters` }, 400);
+    const isPath = bin.includes("/") || bin.includes("\\");
+    if (isPath ? !executableAt(bin) : !which(bin, resolveBin)) {
+      return jsonResponse({ error: `no executable at ${bin}` }, 400);
+    }
+    const entry = { id, label: name || id, bin, args, models, modelFlag };
+    const next = list.some((h) => h.id === id) ? list.map((h) => (h.id === id ? entry : h)) : [...list, entry];
+    if (next.length > USER_HARNESS_MAX) {
+      return jsonResponse({ error: `at most ${USER_HARNESS_MAX} custom harnesses` }, 400);
+    }
+    api.store.set(USER_HARNESS_KEY, next);
+    harnessCache = null;
+    return jsonResponse({ harnesses: harnessList(), platform: process.platform });
+  });
 
   /**
    * One folder of the workspace, for the reference browser: folders first, then

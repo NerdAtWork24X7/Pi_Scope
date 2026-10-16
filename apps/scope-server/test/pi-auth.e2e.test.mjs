@@ -1,7 +1,8 @@
 // End-to-end tests for Settings → Auth: the GUI mirror of pi's /login.
 //
 // The server runs for real and loads the *bundled* pi coding agent's auth
-// runtime (SCOPE_PI_BUNDLE_DIR points at the repo's pi-bundle). An API-key
+// runtime (SCOPE_PI_BUNDLE_DIR points at the installed bundle — ~/.pi-scope/pi,
+// or an older checkout's apps/scope-desktop/pi-bundle). An API-key
 // login for DeepSeek exercises the whole path — provider catalogue, the
 // `secret` prompt, answering it, the credential landing in auth.json, the
 // provider flipping to "configured", and logout — without any network call.
@@ -16,11 +17,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as net from "node:net";
 import { fileURLToPath } from "node:url";
+import { PI_BUNDLE_ROOT } from "./bundle-path.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..", "..");
 const SERVER = path.join(ROOT, "apps", "scope-server", "server.ts");
-const PI_BUNDLE = path.join(ROOT, "apps", "scope-desktop", "pi-bundle");
+const PI_BUNDLE = PI_BUNDLE_ROOT;
 const TOKEN = "pi-auth-token";
 const SECRET = "sk-gui-secret-123";
 
@@ -113,7 +115,9 @@ after(async () => {
   if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("pi auth (GUI /login)", () => {
+describe("pi auth (GUI /login)", {
+  skip: PI_BUNDLE_ROOT ? false : "pi bundle not installed (run the launcher or install/install.sh)",
+}, () => {
   test("the provider catalogue lists login methods and no credentials yet", async () => {
     const { res, data } = await api("/auth/providers");
     assert.ok(res.ok, data?.error);

@@ -24,17 +24,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as net from "node:net";
 import { fileURLToPath } from "node:url";
+import { PI_BUNDLE_CLI } from "./bundle-path.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..", "..");
 const SERVER = path.join(ROOT, "apps", "scope-server", "server.ts");
 const EXTENSION = path.join(ROOT, "extension", "pi-scope.ts");
-const BUNDLE_CLI = path.join(
-  ROOT, "apps", "scope-desktop", "pi-bundle", "node_modules",
-  "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js",
-);
+const BUNDLE_CLI = PI_BUNDLE_CLI;
 const TOKEN = "pi-bundle-sync-token";
-const HAS_BUNDLE = fs.existsSync(BUNDLE_CLI) && fs.existsSync(EXTENSION);
+const HAS_BUNDLE = Boolean(BUNDLE_CLI) && fs.existsSync(EXTENSION);
 
 function freePort() {
   return new Promise((resolve, reject) => {

@@ -90,17 +90,51 @@ function waitForHealth(healthUrl, { timeoutMs = 20000, intervalMs = 300 } = {}) 
   // Resolve how to launch the SCOPE server.
   // Dev: `node apps/scope-server/server.ts`. Packaged: the bundled portable Node runs the
   // compiled server bundle (node-pty/ws resolve from the app's node_modules).
+  // The portable Node that ships inside the package: `bin/node` on Linux/macOS,
+  // a bare `node.exe` at the root on Windows.
+  function portableNodeBin() {
+    return process.platform === "win32"
+      ? path.join(process.resourcesPath, "node", "node.exe")
+      : path.join(process.resourcesPath, "node", "bin", "node");
+  }
+
   function serverLaunch() {
     if (app && app.isPackaged) {
-      // The portable Node that ships inside the package: `bin/node` on
-      // Linux/macOS, a bare `node.exe` at the root on Windows.
-      const nodeBin = process.platform === "win32"
-        ? path.join(process.resourcesPath, "node", "node.exe")
-        : path.join(process.resourcesPath, "node", "bin", "node");
       const serverPath = path.join(__dirname, "server-bundle", "server.js");
-      return { bin: nodeBin, args: [serverPath], cwd: __dirname };
+      return { bin: portableNodeBin(), args: [serverPath], cwd: __dirname };
     }
     return { bin: "node", args: ["server.ts"], cwd: SCOPE_DIR };
+  }
+
+  /**
+   * Seed the user's own copy of the bundled Pi coding agent (~/.pi-scope/pi) from
+   * the read-only `resources/pi` this package ships.
+   *
+   * Pi Scope runs `pi` from the user's data dir rather than from the package, so
+   * Settings → Update can install a newer agent (a file inside an AppImage/NSIS
+   * install is read-only) and the agent survives an app update. The seed is a
+   * one-time copy done by the same installer the dev launcher and the one-line
+   * installers use; it needs no network and no system npm.
+   *
+   * Returns true when a usable install is in place. On failure the caller points
+   * SCOPE_PI_BUNDLE_DIR at `resources/pi` so the app still works, read-only.
+   */
+  function seedPiBundle() {
+    const bundled = path.join(process.resourcesPath, "pi");
+    const installer = path.join(__dirname, "pi-bundle-install.mjs");
+    if (!fs.existsSync(installer) || !fs.existsSync(bundled)) return false;
+    try {
+      const res = require("node:child_process").spawnSync(
+        portableNodeBin(), [installer, "--from", bundled],
+        // stdout is the installer's status chatter ("already installed");
+        // stderr keeps a failure reason visible in the launcher.
+        { stdio: ["ignore", "ignore", "inherit"] },
+      );
+      return res.status === 0;
+    } catch (err) {
+      console.error("[scope-control] could not install the bundled pi agent:", err.message);
+      return false;
+    }
   }
 
 // Ensure the SCOPE server is up. Reuses an existing one if already listening.
@@ -116,10 +150,16 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
     process.env.SCOPE_DB_PATH = path.join(dataDir, "scope.db");
     process.env.SCOPE_TOKEN_FILE = path.join(dataDir, "scope_token");
     process.env.SCOPE_PACKAGED = "1";
-    // The Pi coding agent bundled with the app (extraResources -> resources/pi).
-    // The server resolves its `pi` shim from here so every spawned agent uses
-    // the bundled copy instead of a global install.
-    process.env.SCOPE_PI_BUNDLE_DIR = path.join(process.resourcesPath, "pi");
+    // The Pi coding agent bundled with the app travels as read-only
+    // `resources/pi`; the server runs it from the user's own `~/.pi-scope/pi`
+    // so Settings → Update can replace it. Seed it once, then fall back to the
+    // shipped copy when that is impossible (a full disk, a read-only home).
+    // An explicitly configured SCOPE_PI_BUNDLE_DIR always wins.
+    const configured = process.env.SCOPE_PI_BUNDLE_DIR || FILE_ENV.SCOPE_PI_BUNDLE_DIR;
+    if (!configured && !seedPiBundle()) {
+      console.error("[scope-control] running the bundled pi agent read-only from resources/pi");
+      process.env.SCOPE_PI_BUNDLE_DIR = path.join(process.resourcesPath, "pi");
+    }
   }
   const cfg = config();
   try {

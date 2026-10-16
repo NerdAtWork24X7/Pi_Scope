@@ -51,6 +51,11 @@
 (function () {
   const S = window.SCOPE;
   if (!S || !S.Plugins) return;
+  // The bundle is injected as a classic <script>, so its own URL is readable
+  // while it runs. Captured here because `document.currentScript` is null later —
+  // e.g. when the Settings popup loads the stylesheet on its own, with the
+  // Workflow view never having been opened.
+  const SELF_SRC = (document.currentScript && document.currentScript.src) || "";
   const esc = S.escapeHtml;
   const escAttr = (s) => String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -239,13 +244,208 @@
    * on every harness fetch made opening the view (and the ↻ button) paint the
    * whole node + edge DOM twice.
    */
-  async function loadHarnesses() {
+  /** Fetch the harness list without touching the canvas. */
+  async function fetchHarnesses() {
     try {
       const data = await getJson("/subagent-workflow/harnesses");
       harnesses = data.harnesses || [];
       serverPlatform = data.platform || "";
     } catch { harnesses = []; }
+  }
+  /** Fetch + re-render the node dialog's provider dropdown. */
+  async function loadHarnesses() {
+    await fetchHarnesses();
     renderDialog();
+  }
+
+  // ─── Settings → Plugins → Workflow: harness binaries + custom harnesses ───
+  //
+  // The host renders this popup on the plugin's row in Settings → Plugins (see
+  // plugins/README.md). Two things live here, both global to the machine:
+  //
+  //   • Detected harnesses — re-point a built-in CLI when Pi Scope cannot find it
+  //     (an nvm or npm-global install, a custom prefix).
+  //   • Custom harnesses — name any CLI Pi Scope does not ship, give it a binary,
+  //     and it appears in every node's Provider list like a built-in.
+  //
+  // The server owns the store and every rule; this half paints the rows, posts a
+  // change, and reflects what the server resolved. Styled as a small engineering
+  // console (superdesign-alpha: mono readouts, hairline dividers, one rationed
+  // accent) and it never repaints the Workflow canvas — the popup lives in
+  // Settings, not that view.
+
+  /** The popup shell; both sections are filled once the harness list is known. */
+  function settingsHTML() {
+    return `<div class="sw-set">` +
+      `<p class="sw-set-lead">Point Pi Scope at the coding-agent CLIs on this machine. ` +
+      `Re-point a detected harness that lives where a desktop launch does not search, or add any ` +
+      `CLI of your own — it then appears in every node’s <b>Provider</b> list.</p>` +
+      `<section class="sw-set-sec"><div class="sw-set-eyebrow">Detected harnesses</div>` +
+      `<div class="sw-set-grid" id="sw-bin-rows"><div class="sw-set-path">Loading…</div></div></section>` +
+      `<section class="sw-set-sec"><div class="sw-set-eyebrow">Custom harnesses</div>` +
+      `<div class="sw-set-grid" id="sw-user-rows"></div>` +
+      `<div class="sw-set-new">` +
+      `<input class="sw-set-input" id="sw-new-name" spellcheck="false" autocomplete="off" placeholder="Name — e.g. DeepSeek">` +
+      `<input class="sw-set-input" id="sw-new-bin" spellcheck="false" autocomplete="off" placeholder="Binary — /usr/local/bin/deepseek, or a command on PATH">` +
+      `<input class="sw-set-input" id="sw-new-args" spellcheck="false" autocomplete="off" placeholder="Arguments (optional) — {prompt} is replaced by the node’s message">` +
+      `<input class="sw-set-input" id="sw-new-models" spellcheck="false" autocomplete="off" placeholder="Models (optional) — comma-separated; each shows in the node’s Model list">` +
+      `<input class="sw-set-input" id="sw-new-flag" spellcheck="false" autocomplete="off" placeholder="Model flag (optional) — the flag a chosen model is passed with; defaults to --model">` +
+      `<div class="sw-set-actions"><button class="sw-set-btn" id="sw-new-add" type="button">Add harness</button></div>` +
+      `</div></section></div>`;
+  }
+
+  /** A mono status readout — `found`/`not found` with a status dot. */
+  function swStatus(ok, text) {
+    return `<span class="sw-set-status ${ok ? "ok" : "warn"}"><i class="dot"></i>${esc(text)}</span>`;
+  }
+
+  /** One row per *built-in* harness that runs a binary. */
+  function binRowsHTML() {
+    const list = harnesses.filter((h) => h.bin && !h.user);
+    if (!list.length) return `<div class="sw-set-path">Harness list unavailable — reopen this popup in a moment.</div>`;
+    return list.map((h) => {
+      const state = h.resolved ? "found" : h.override ? "not executable" : "not found";
+      return `<div class="sw-set-row"><div class="sw-set-rowhead">` +
+        `<span class="sw-set-name">${esc(h.label || h.id)}</span>` + swStatus(!!h.resolved, state) +
+        `</div>` +
+        `<input class="sw-set-input" type="text" spellcheck="false" autocomplete="off" ` +
+        `data-sw-bin="${escAttr(h.id)}" data-sw-saved="${escAttr(h.override || "")}" ` +
+        `placeholder="${escAttr(h.bin)}" value="${escAttr(h.override || "")}" ` +
+        `aria-label="${escAttr((h.label || h.id) + " binary")}">` +
+        (h.resolved ? `<div class="sw-set-path">→ ${esc(h.resolved)}</div>` : "") +
+        `</div>`;
+    }).join("");
+  }
+
+  /** One editable row per *user-defined* harness. */
+  function userRowsHTML() {
+    const list = harnesses.filter((h) => h.user);
+    if (!list.length) return `<div class="sw-set-path">None yet — name a CLI below.</div>`;
+    return list.map((h) =>
+      `<div class="sw-set-row" data-sw-uid="${escAttr(h.id)}">` +
+      `<div class="sw-set-rowhead">` +
+      `<input class="sw-set-input sw-set-input-name" type="text" spellcheck="false" autocomplete="off" ` +
+      `data-sw-uname placeholder="Name" value="${escAttr(h.label || h.id)}" aria-label="Harness name">` +
+      swStatus(!!h.resolved, h.resolved ? "found" : "not found") +
+      `<button class="sw-set-btn ghost" type="button" data-sw-uremove title="Remove this harness">Remove</button>` +
+      `</div>` +
+      `<input class="sw-set-input" type="text" spellcheck="false" autocomplete="off" ` +
+      `data-sw-ubin placeholder="Binary" value="${escAttr(h.bin || "")}" aria-label="Harness binary">` +
+      `<input class="sw-set-input" type="text" spellcheck="false" autocomplete="off" ` +
+      `data-sw-uargs placeholder="Arguments — {prompt} is replaced by the node’s message" ` +
+      `value="${escAttr(h.argsTemplate || "")}" aria-label="Harness arguments">` +
+      `<input class="sw-set-input" type="text" spellcheck="false" autocomplete="off" ` +
+      `data-sw-umodels placeholder="Models — comma-separated; each shows in the node’s Model list" ` +
+      `value="${escAttr((h.models || []).join(", "))}" aria-label="Harness models">` +
+      `<input class="sw-set-input" type="text" spellcheck="false" autocomplete="off" ` +
+      `data-sw-uflag placeholder="Model flag — the flag a chosen model is passed with (default --model)" ` +
+      `value="${escAttr(h.modelFlag || "")}" aria-label="Harness model flag">` +
+      (h.resolved ? `<div class="sw-set-path">→ ${esc(h.resolved)}</div>` : "") +
+      `</div>`).join("");
+  }
+
+  /** Post a harness change; adopt the server's refreshed list; toast + return it. */
+  async function harnessPost(path, payload, okMsg) {
+    const { res, data } = await S.api(path, {}, payload);
+    if (!res.ok || data?.error) throw new Error(data?.error || `HTTP ${res.status}`);
+    harnesses = data.harnesses || harnesses;
+    if (okMsg) S.toast?.(okMsg);
+    return data;
+  }
+
+  /**
+   * Paint both sections and bind them. `repaint()` re-reads the (fresh) harness
+   * list, so an id a save may have changed, a new status and a new row all land
+   * together. Re-wiring after every paint keeps the handlers on current DOM.
+   */
+  function wireSettings(panel) {
+    const binRows = panel.querySelector("#sw-bin-rows");
+    const userRows = panel.querySelector("#sw-user-rows");
+    if (!binRows || !userRows) return;
+    const repaint = () => {
+      binRows.innerHTML = binRowsHTML();
+      userRows.innerHTML = userRowsHTML();
+      wireSettings(panel);
+    };
+
+    // Detected harnesses: save the override on change (blur).
+    binRows.querySelectorAll("input[data-sw-bin]").forEach((input) => {
+      input.addEventListener("change", async () => {
+        const id = input.dataset.swBin;
+        const value = input.value.trim();
+        if (value === (input.dataset.swSaved || "")) return;
+        try {
+          await harnessPost("/subagent-workflow/harness-paths", { harness: id, path: value },
+            value ? `Saved the ${id} binary` : `Cleared the ${id} binary`);
+          repaint();
+        } catch (err) {
+          input.value = input.dataset.swSaved || ""; // keep showing the saved value
+          S.toast?.(String(err.message || err), "err");
+        }
+      });
+    });
+
+    // Custom harnesses: edit in place, or remove.
+    userRows.querySelectorAll("[data-sw-uid]").forEach((row) => {
+      const id = row.dataset.swUid;
+      const nameEl = row.querySelector("[data-sw-uname]");
+      const binEl = row.querySelector("[data-sw-ubin]");
+      const argsEl = row.querySelector("[data-sw-uargs]");
+      const modelsEl = row.querySelector("[data-sw-umodels]");
+      const flagEl = row.querySelector("[data-sw-uflag]");
+      const saved = { name: nameEl.value, bin: binEl.value, args: argsEl.value, models: modelsEl.value, flag: flagEl.value };
+      const save = async () => {
+        const next = {
+          id,
+          name: nameEl.value.trim(),
+          bin: binEl.value.trim(),
+          args: argsEl.value.trim(),
+          models: modelsEl.value.trim(),
+          modelFlag: flagEl.value.trim(),
+        };
+        if (!next.name) { S.toast?.("A harness needs a name", "err"); nameEl.focus(); return; }
+        if (!next.bin) { S.toast?.("A harness needs a binary", "err"); binEl.focus(); return; }
+        if (next.name === saved.name && next.bin === saved.bin && next.args === saved.args
+          && next.models === saved.models && next.modelFlag === saved.flag) return;
+        try {
+          await harnessPost("/subagent-workflow/user-harnesses", Object.assign({ action: "save" }, next), `Saved ${next.name}`);
+          repaint();
+        } catch (err) {
+          nameEl.value = saved.name; binEl.value = saved.bin; argsEl.value = saved.args;
+          modelsEl.value = saved.models; flagEl.value = saved.flag;
+          S.toast?.(String(err.message || err), "err");
+        }
+      };
+      for (const el of [nameEl, binEl, argsEl, modelsEl, flagEl]) el.addEventListener("change", save);
+      row.querySelector("[data-sw-uremove]").addEventListener("click", async () => {
+        try {
+          await harnessPost("/subagent-workflow/user-harnesses", { action: "remove", id }, `Removed ${id}`);
+          repaint();
+        } catch (err) { S.toast?.(String(err.message || err), "err"); }
+      });
+    });
+
+    // Add a new harness.
+    const nn = panel.querySelector("#sw-new-name");
+    const nb = panel.querySelector("#sw-new-bin");
+    const na = panel.querySelector("#sw-new-args");
+    const nm = panel.querySelector("#sw-new-models");
+    const nf = panel.querySelector("#sw-new-flag");
+    panel.querySelector("#sw-new-add").addEventListener("click", async () => {
+      const name = nn.value.trim();
+      const bin = nb.value.trim();
+      const args = na.value.trim();
+      const models = nm.value.trim();
+      const modelFlag = nf.value.trim();
+      if (!name) { S.toast?.("Give the harness a name", "err"); nn.focus(); return; }
+      if (!bin) { S.toast?.("Give the harness a binary", "err"); nb.focus(); return; }
+      try {
+        await harnessPost("/subagent-workflow/user-harnesses",
+          { action: "save", name, bin, args, models, modelFlag }, `Added ${name}`);
+        nn.value = ""; nb.value = ""; na.value = ""; nm.value = ""; nf.value = "";
+        repaint();
+      } catch (err) { S.toast?.(String(err.message || err), "err"); }
+    });
   }
 
   /** A node variable as this server's shell spells it: `%SW_PROMPT%` on Windows,
@@ -913,10 +1113,15 @@
     const list = harnesses.length ? harnesses : [{ id: "claude", label: "Claude Code" }, { id: "codex", label: "Codex CLI" },
       { id: "gemini", label: "Gemini CLI" }, { id: "opencode", label: "opencode" }, { id: "aider", label: "Aider" },
       { id: "cursor", label: "Cursor Agent" }, { id: "pi", label: "Pi (built-in)" }, { id: "custom", label: "Custom command" }];
-    return list.map((h) => {
+    const opts = list.map((h) => {
       const unavailable = h.available === false;
       return `<option value="${escAttr(h.id)}"${h.id === current ? " selected" : ""}>${esc(h.label || h.id)}${unavailable ? " (not installed)" : ""}</option>`;
     }).join("");
+    // A harness this installation no longer knows (a custom one that was removed)
+    // stays selected and visible rather than silently snapping to the first row.
+    return current && !list.some((h) => h.id === current)
+      ? opts + `<option value="${escAttr(current)}" selected>${esc(current)} (unavailable)</option>`
+      : opts;
   }
 
   /** The models a harness offers: Pi's are the app's whole model catalogue
@@ -2341,7 +2546,7 @@
   }
 
   function loadStyles() {
-    const src = document.currentScript && document.currentScript.src;
+    const src = SELF_SRC || (document.currentScript && document.currentScript.src) || "";
     if (!src) return;
     const href = src.replace(/client\.js(\?|$)/, "client.css$1");
     if (!href || href === src || document.querySelector(`link[href="${href}"]`)) return;
@@ -2378,6 +2583,24 @@
       onHide: stopPolling,
       onCwd: () => { cwd = S.currentCwd?.() || ""; historyRun = null; historySig = ""; refresh(); },
       onReconnect: () => refresh(),
+    },
+    pluginSettings: {
+      render: () => settingsHTML(),
+      onMount(panel) {
+        // The popup is reachable without ever opening the Workflow view, so load
+        // this bundle's stylesheet here too (loadStyles is idempotent).
+        loadStyles();
+        wireSettings(panel);
+        // Paint from the embedded list first, then refresh from the server and
+        // paint again — no renderDialog(): we are in Settings, not that view.
+        void fetchHarnesses().then(() => {
+          const binRows = panel.querySelector("#sw-bin-rows");
+          const userRows = panel.querySelector("#sw-user-rows");
+          if (binRows) binRows.innerHTML = binRowsHTML();
+          if (userRows) userRows.innerHTML = userRowsHTML();
+          wireSettings(panel);
+        });
+      },
     },
   });
 })();

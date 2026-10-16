@@ -97,7 +97,8 @@ administrator rights:
   `package.json`.
 
 Neither installer writes outside the install directory and, on a fresh machine,
-`~/.pi-scope/agent` (see below). Nothing is added to `PATH`, no registry keys are
+`~/.pi-scope/` — the agent dir (`~/.pi-scope/agent`, see below) and the bundled
+`pi` coding agent (`~/.pi-scope/pi`). Nothing is added to `PATH`, no registry keys are
 touched and no Defender exclusions are created.
 
 ## From a checkout
@@ -144,8 +145,11 @@ checkout you can equally run the command yourself:
 | **pnpm** | `pnpm install --no-ignore-scripts` | runs the dependency build scripts pnpm blocks by default (`node-pty`, `esbuild`, `ffmpeg-static`) |
 | **Bun** | `bun install` then `bun pm trust --all` | runs the same blocked scripts; trusting them may add a `trustedDependencies` field to `package.json` |
 
-Each channel also does a second install for the bundled Pi coding agent under
-`apps/scope-desktop/pi-bundle`.
+Each channel also installs the bundled Pi coding agent — into the user's own
+data directory (`~/.pi-scope/pi`), not into the checkout, so Settings → Update
+can replace it and an update of the app never re-downloads it. An older release's
+install under `apps/scope-desktop/pi-bundle` is migrated instead of fetched
+again.
 
 Node.js 24+ is required regardless of package manager — the server runs its
 `.ts` sources directly and the bundled Pi agent runs on Node.
@@ -177,5 +181,6 @@ and platform-specific), as are `sessions/` and `__pycache__`.
 ## Uninstalling
 
 Pi Scope is self-contained: delete the install directory (`Pi_Scope/`). Its data
-lives in `db/scope.db` in a checkout, or `~/.pi-scope/` when packaged — remove
-that too if you want a clean slate.
+lives in `db/scope.db` in a checkout, or `~/.pi-scope/` when packaged — the
+database, the agent dir and the bundled `pi` (~/.pi-scope/pi) all live there, so
+remove that too if you want a clean slate.

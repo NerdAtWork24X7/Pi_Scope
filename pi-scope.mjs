@@ -178,12 +178,16 @@ function ensureDeps(needElectron) {
     info("installing dependencies (first run only)…");
     if (!runNpm(["install", "--no-audit", "--no-fund"], ROOT)) die(`npm install failed — run it manually in ${ROOT}`);
   }
-  // The bundled Pi coding agent keeps its own npm project. A failure here is not
-  // fatal: Chat falls back to a `pi` on PATH.
-  const bundleDir = path.join(DESKTOP_DIR, "pi-bundle");
-  if (fs.existsSync(path.join(bundleDir, "package.json")) && !fs.existsSync(path.join(bundleDir, "node_modules"))) {
-    info("installing the bundled Pi coding agent (first run only)…");
-    if (!runNpm(["install", "--no-audit", "--no-fund"], bundleDir)) {
+  // The bundled Pi coding agent is installed into the user's own data dir
+  // (~/.pi-scope/pi) by a standalone installer — never into this checkout, so a
+  // re-install or an app update never re-downloads it, and Settings → Update can
+  // replace it. `--move` migrates a bundle an older layout left in
+  // apps/scope-desktop/pi-bundle instead of fetching it again. A failure here is
+  // not fatal: Chat falls back to a `pi` on PATH.
+  const installer = path.join(DESKTOP_DIR, "pi-bundle-install.mjs");
+  if (fs.existsSync(installer)) {
+    const res = spawnSync(process.execPath, [installer, "--move"], { cwd: ROOT, stdio: "inherit" });
+    if (res.status !== 0) {
       info("the bundled Pi agent could not be installed — Chat will fall back to a pi on PATH.");
     }
   }

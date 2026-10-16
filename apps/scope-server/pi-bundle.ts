@@ -1,11 +1,11 @@
 /**
  * pi-bundle.ts — the Pi coding agent bundled with Pi Scope.
  *
- * Pi Scope ships its own copy of the [`pi`](https://github.com/disler/pi-agent-observability)
- * coding agent (`apps/scope-desktop/pi-bundle`, installed from
- * `@earendil-works/pi-coding-agent`). This module locates that copy and, when it
- * is present, exposes a `pi` shim on PATH that runs the bundled agent with the
- * Pi Scope extension force-loaded.
+ * Pi Scope installs its own copy of the [`pi`]
+ * coding agent (the `@earendil-works/pi-coding-agent` npm package) into its
+ * per-user data directory — `~/.pi-scope/pi` — and this module locates that copy
+ * and, when it is present, exposes a `pi` shim on PATH that runs the bundled
+ * agent with the Pi Scope extension force-loaded.
  *
  * The effect: every `pi` process Pi Scope launches — Chat subprocesses, the
  * git-commit-message generator, the in-browser Terminal's shell, and the nested
@@ -15,12 +15,17 @@
  * (agent-dir.ts), so the bundled agent never reads or writes the user's global
  * pi agent dir and can't collide with a globally-installed pi extension.
  *
+ * Where the bundle is installed, and who puts it there, is `pi-bundle-paths.ts`
+ * and `apps/scope-desktop/pi-bundle-install.mjs` (the launcher, the installers
+ * and the packaged app all call it). This module only resolves it.
+ *
  * Resolution order:
  *   1. `SCOPE_PI_BIN` — explicit operator override (e.g. the e2e tests' stub,
  *      or a power user pointing at a different pi). When set, the bundle is not
  *      used and no shim is installed.
- *   2. The bundled pi, from `SCOPE_PI_BUNDLE_DIR` (set by the packaged launcher)
- *      or the dev checkout path.
+ *   2. The bundled pi: `SCOPE_PI_BUNDLE_DIR` (operator override, or the
+ *      packaged launcher's read-only `resources/pi` fallback) → the managed
+ *      install `~/.pi-scope/pi` → a dev checkout's `apps/scope-desktop/pi-bundle`.
  *   3. `pi` on PATH — the legacy global install (so nothing breaks if the
  *      bundle is missing).
  *
@@ -33,66 +38,15 @@ import * as path from "node:path";
 // processes this module sets up never read the user's global pi agent dir.
 import { AGENT_DIR } from "./agent-dir.ts";
 import { isWindows } from "../../shared/shell.ts";
+import { PROJECT_ROOT, piBundleDirs, piCliIn, resolvePiBundleRoot } from "./pi-bundle-paths.ts";
 
 /** The shim's file name for this platform: `pi` is a POSIX shell script, while
  *  Windows needs `pi.cmd` (a `.cmd` is the only thing cmd/the shell can run). */
 const SHIM_NAME = isWindows() ? "pi.cmd" : "pi";
 
-/** Repo root in dev; the app resources dir when packaged. Only reliable for
- *  locating dev paths — packaged callers pass `SCOPE_PI_BUNDLE_DIR`. */
-const PROJECT_ROOT = path.resolve(import.meta.dirname, "..", "..");
-
-/** Path to the pi CLI entry inside a bundle directory, or null if it isn't one. */
-function cliIn(bundleDir: string | undefined): string | null {
-  if (!bundleDir) return null;
-  const cli = path.join(
-    bundleDir,
-    "node_modules",
-    "@earendil-works",
-    "pi-coding-agent",
-    "dist",
-    "bundle",
-    "cli.js",
-  );
-  try {
-    return fs.statSync(cli).isFile() ? cli : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Candidate bundle directories, most specific first. */
-function candidateBundleDirs(): string[] {
-  const out: string[] = [];
-  const configured = (process.env.SCOPE_PI_BUNDLE_DIR || "").trim();
-  if (configured) out.push(configured);
-  // Dev checkout: <project>/apps/scope-desktop/pi-bundle.
-  out.push(path.join(PROJECT_ROOT, "apps", "scope-desktop", "pi-bundle"));
-  return out;
-}
-
-/** Path to the bundled bar package dir inside a bundle root. */
-function packageDirIn(bundleDir: string): string {
-  return path.join(bundleDir, "node_modules", "@earendil-works", "pi-coding-agent");
-}
-
-/**
- * The bundle root Pi Scope ships, independent of how `pi` is launched.
- *
- * `PI_BUNDLE.dir` is null when an operator override (`SCOPE_PI_BIN`) or a global
- * install wins the launcher resolution — but features that operate on the
- * bundled agent itself (Settings → Update / Authentication) still need to find
- * it. This checks the same candidate dirs for the package's `package.json` and
- * returns the first hit, or null when no bundle is present.
- */
-export function resolvePiBundleRoot(): string | null {
-  for (const dir of candidateBundleDirs()) {
-    try {
-      if (fs.statSync(path.join(packageDirIn(dir), "package.json")).isFile()) return dir;
-    } catch { /* try next */ }
-  }
-  return null;
-}
+// Re-exported so callers (Settings → Update / Authentication) can find the
+// bundled agent without importing the paths module directly.
+export { resolvePiBundleRoot };
 
 /** Absolute path to the Pi Scope telemetry extension, preferring the copy
  *  shipped inside the bundle (packaged) over the dev checkout's source. */
@@ -278,8 +232,8 @@ function resolve(): PiBundleInfo {
   }
 
   // 2. Bundled pi.
-  for (const dir of candidateBundleDirs()) {
-    const cli = cliIn(dir);
+  for (const dir of piBundleDirs()) {
+    const cli = piCliIn(dir);
     if (!cli) continue;
     const extension = resolveExtension(dir);
     // Repair a stale in-agent-dir copy before anything is spawned: pi discovers
@@ -322,5 +276,6 @@ export const PI_BIN: string = PI_BUNDLE.bin;
 export const PI_LAUNCH: { file: string; args: string[] } = PI_BUNDLE.launch;
 
 console.log(
-  `  Pi bundle: pi -> ${PI_BIN} (${PI_BUNDLE.source}${PI_BUNDLE.extension ? `, extension ${PI_BUNDLE.extension}` : ""})`,
+  `  Pi bundle: pi -> ${PI_BIN} (${PI_BUNDLE.source}` +
+  `${PI_BUNDLE.dir ? ` at ${PI_BUNDLE.dir}` : ""}${PI_BUNDLE.extension ? `, extension ${PI_BUNDLE.extension}` : ""})`,
 );

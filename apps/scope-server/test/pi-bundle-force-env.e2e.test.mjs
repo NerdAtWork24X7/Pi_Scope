@@ -35,16 +35,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as net from "node:net";
 import { fileURLToPath } from "node:url";
+import { PI_BUNDLE_CLI, piBundleDirs } from "./bundle-path.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..", "..");
 const SERVER = path.join(ROOT, "apps", "scope-server", "server.ts");
 const EXTENSION = path.join(ROOT, "extension", "pi-scope.ts");
-const BUNDLE_CLI = path.join(
-  ROOT, "apps", "scope-desktop", "pi-bundle", "node_modules",
-  "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js",
-);
-const HAS_BUNDLE = fs.existsSync(BUNDLE_CLI) && fs.existsSync(EXTENSION);
+const BUNDLE_CLI = PI_BUNDLE_CLI;
+const HAS_BUNDLE = Boolean(BUNDLE_CLI) && fs.existsSync(EXTENSION);
 
 /** Merge the launch env the way chatChildEnv does: the server's own environment
  *  (which is where the marker lives) plus a per-run agent dir. */
@@ -78,6 +76,7 @@ describe("bundled pi: the force-loaded extension is named in the environment", {
 }, () => {
   let tmpDir;
   let PI_LAUNCH;
+  let PI_BUNDLE;
 
   before(async () => {
     // Temp runtime dirs so the import's side effects (shim, agent dir) stay out
@@ -87,11 +86,22 @@ describe("bundled pi: the force-loaded extension is named in the environment", {
     process.env.SCOPE_TOKEN_FILE = path.join(tmpDir, "scope_token");
     // Never let an operator override win: this test is about the bundled path.
     process.env.SCOPE_PI_BIN = "";
-    ({ PI_LAUNCH } = await import(new URL("../pi-bundle.ts", import.meta.url).href));
+    ({ PI_LAUNCH, PI_BUNDLE } = await import(new URL("../pi-bundle.ts", import.meta.url).href));
   });
 
   after(() => {
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("the bundled agent resolves from the user's own install", () => {
+    // The install lives in the data dir (~/.pi-scope/pi) and is seeded there by
+    // the launcher / installers / packaged app — never inside the checkout. A
+    // checkout that predates that layout still resolves, which is what keeps an
+    // old dev tree working until the launcher migrates it.
+    assert.ok(piBundleDirs().includes(PI_BUNDLE.dir), `${PI_BUNDLE.dir} is a candidate: ${piBundleDirs().join(", ")}`);
+    assert.ok(fs.existsSync(PI_BUNDLE.cli), `the CLI exists: ${PI_BUNDLE.cli}`);
+    assert.ok(fs.existsSync(PI_BUNDLE.bin), `the shim exists: ${PI_BUNDLE.bin}`);
+    assert.ok(fs.existsSync(PI_BUNDLE.extension), `the extension exists: ${PI_BUNDLE.extension}`);
   });
 
   test("the launch argv and the marker name the same extension", () => {

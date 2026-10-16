@@ -276,13 +276,25 @@ if ($NoDeps) {
   Info "installing dependencies in $Dir with $Pm (this can take a minute)..."
   try { Invoke-PmInstall $Dir } catch { Die "$($_.Exception.Message) - run $Pm install manually in $Dir" }
 
-  # The bundled Pi coding agent keeps its own npm project, so Chat works with no
-  # global `pi` install. A failure here is not fatal: Chat falls back to a `pi`
-  # on PATH, and the server says which one it chose at boot.
-  $bundle = Join-Path $Dir "apps\scope-desktop\pi-bundle"
-  if (Test-Path (Join-Path $bundle "package.json")) {
+  # The bundled Pi coding agent installs into the user's own data dir
+  # (%USERPROFILE%\.pi-scope\pi) rather than into this checkout, so Settings →
+  # Update can replace it and the tree survives re-installing the app. `--move`
+  # migrates a bundle an older release left in apps\scope-desktop\pi-bundle
+  # instead of fetching it again. A failure here is not fatal: Chat falls back to
+  # a `pi` on PATH, and the server says which one it chose at boot.
+  $bundleInstaller = Join-Path $Dir "apps\scope-desktop\pi-bundle-install.mjs"
+  if (Test-Path -LiteralPath $bundleInstaller) {
     Info "installing the bundled Pi coding agent with $Pm..."
-    try { Invoke-PmInstall $bundle } catch { Info "the bundled Pi agent could not be installed - Chat will fall back to a pi on PATH." }
+    # LASTEXITCODE is reset first so a stale 0 cannot mask a failure, and stderr
+    # is discarded: npm writes progress and warnings there, and under
+    # $ErrorActionPreference = "Stop" a native command writing to stderr can abort
+    # the script with a raw NativeCommandError.
+    $global:LASTEXITCODE = 0
+    try { & $node.Source $bundleInstaller --pm $Pm --move 2>$null } catch { }
+    if ($LASTEXITCODE -ne 0) {
+      Info "the bundled Pi agent could not be installed - Chat will fall back to a pi on PATH."
+      $global:LASTEXITCODE = 0
+    }
   }
 }
 
