@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 
-_SETUP_HINT = "reinstall the toolchain: rm -rf <skill>/.venv && <skill>/scripts/setup.sh"
+_SETUP_HINT = 'reinstall the shared venv: rm -rf "${SCOPE_PYTHON_VENV:-$HOME/.pi-scope/.venv}" && <skill>/scripts/setup.sh'
 
 
 def _playwright():

@@ -13,13 +13,12 @@
  * same code path as Linux/macOS:
  *
  *   • `pi-scope.mjs` / `run.sh`   — first run of a dev checkout
- *   • `install/install.sh` / `.ps1` — the one-line installers
  *   • `scope-control.js`          — the packaged app seeds itself from the
  *                                   read-only `resources/pi` it ships
  *
  * Plain Node, no repo imports and no dependencies: it runs under the server's
- * Node, under the portable Node inside a package, and under whatever Node the
- * installers found.
+ * Node, under the portable Node inside a package, and under whatever Node
+ * launched it.
  *
  * The bundle is also the *only* npm project for Pi Scope's runtime packages: the
  * server loads `node-pty` and `ws` from it (see apps/scope-server/pi-deps.ts),
@@ -57,7 +56,7 @@ const cliIn = (root) => path.join(pkgDirIn(root), "dist", "bundle", "cli.js");
 const die = (msg) => { console.error(`pi-bundle-install: ${msg}`); process.exit(1); };
 const info = (msg) => console.log(`==> ${msg}`);
 
-/** Package-manager argument sets — mirrors install/install.sh & install.ps1. */
+/** Package-manager argument sets — mirrors app-deps-install.mjs. */
 const PM_ARGS = {
   npm: [["install", "--no-audit", "--no-fund"]],
   pnpm: [["install", "--no-ignore-scripts"]],

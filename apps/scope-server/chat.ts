@@ -31,7 +31,8 @@ import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spa
 // Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
 // PATH (force-loading the Pi Scope extension). Must be imported before PI_BIN is
 // used so chat subprocesses launch the bundled agent, not a global install.
-import { PI_BIN, PI_BUNDLE, PI_LAUNCH } from "./pi-bundle.ts";
+import { PI_BIN, PI_LAUNCH } from "./pi-bundle.ts";
+import { AGENT_PI_DIR, SCOPE_VENV_DIR } from "./agent-dir.ts";
 
 const ENCODER = new TextEncoder();
 
@@ -429,12 +430,16 @@ function handleLine(sess: ChatSession, line: string) {
  *  prepend the venv's bin dir to PATH.
  *
  *  Only existing dirs that actually look like a venv (have a bin/{activate,
- *  python, python3}) are added; a workspace-local venv wins over the home one. */
+ *  python, python3}) are added; a workspace-local venv wins over the home one,
+ *  and both win over Pi Scope's shared venv (`~/.pi-scope/.venv`). */
 function venvBinDirs(cwd: string): string[] {
   const candidates = [
     path.join(cwd, ".venv", "bin"),
     path.join(cwd, "venv", "bin"),
     path.join(os.homedir(), ".venv", "bin"),
+    // Pi Scope's shared Python venv — the fallback every Python-dependent
+    // element reuses when the workspace has no venv of its own.
+    path.join(SCOPE_VENV_DIR, "bin"),
   ];
   const seen = new Set<string>();
   const dirs: string[] = [];
@@ -576,10 +581,10 @@ function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
   if (pwBrowsers) env.PLAYWRIGHT_BROWSERS_PATH = pwBrowsers;
   // Extensions that resolve their own npm packages at run time (the `browser`
   // extension) look here first. pi-extensions-install.mjs installs them into the
-  // bundled pi project, and the shim sets the same variable for the processes it
-  // launches — this covers the direct spawn that bypasses the shim, whose env is
-  // built here and nowhere else.
-  if (PI_BUNDLE.dir) env.PI_BROWSER_MODULE_ROOT = PI_BUNDLE.dir;
+  // agent dir's own npm project (<agentDir>/pi), and the shim sets the same
+  // variable for the processes it launches — this covers the direct spawn that
+  // bypasses the shim, whose env is built here and nowhere else.
+  env.PI_BROWSER_MODULE_ROOT = AGENT_PI_DIR;
   // API keys entered on the Settings page — applied last so a value the user
   // saved there wins over whatever the launcher's environment carried.
   for (const [name, value] of Object.entries(readStoredKeys())) env[name] = value;

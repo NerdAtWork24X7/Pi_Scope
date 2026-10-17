@@ -116,7 +116,7 @@ after(async () => {
 });
 
 describe("pi auth (GUI /login)", {
-  skip: PI_BUNDLE_ROOT ? false : "pi bundle not installed (run the launcher or install/install.sh)",
+  skip: PI_BUNDLE_ROOT ? false : "pi bundle not installed (run the launcher: ./pi-scope)",
 }, () => {
   test("the provider catalogue lists login methods and no credentials yet", async () => {
     const { res, data } = await api("/auth/providers");

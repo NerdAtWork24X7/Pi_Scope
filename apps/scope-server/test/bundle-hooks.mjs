@@ -14,7 +14,9 @@
  * file would pick Playwright's CJS `index.js` and lose its named exports.
  *
  * Bundle roots match pi-bundle-paths.ts: SCOPE_PI_BUNDLE_DIR, then the managed
- * `~/.pi-scope/pi`, then a legacy checkout copy.
+ * `~/.pi-scope/pi`, then a legacy checkout copy. The agent dir's own npm project
+ * (`<agentDir>/pi`, where pi-extensions-install.mjs installs the extensions'
+ * packages — Playwright among them) is a root too.
  */
 import { pathToFileURL, fileURLToPath } from "node:url";
 import * as os from "node:os";
@@ -26,6 +28,11 @@ const dirs = [];
 const configured = (process.env.SCOPE_PI_BUNDLE_DIR || "").trim();
 if (configured) dirs.push(configured);
 dirs.push(path.join(os.homedir(), ".pi-scope", "pi"));
+// The extensions' packages (Playwright for the e2e tests) live in the agent
+// dir's own npm project, not the app bundle (pi-extensions-install.mjs).
+const agentDir = (process.env.SCOPE_AGENT_DIR || process.env.PI_CODING_AGENT_DIR || "").trim()
+  || path.join(os.homedir(), ".pi-scope", "agent");
+dirs.push(path.join(agentDir, "pi"));
 // HERE is apps/scope-server/test → repo/apps/scope-desktop/pi-bundle.
 dirs.push(path.join(HERE, "..", "..", "scope-desktop", "pi-bundle"));
 

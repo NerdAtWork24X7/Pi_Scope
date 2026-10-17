@@ -1,7 +1,8 @@
 // Tests for apps/scope-desktop/pi-extensions-install.mjs — the installer that
 // walks the extensions pi has available, reads the npm packages each one
 // declares in a nearby package.json, and installs the missing ones into the
-// bundled pi project (~/.pi-scope/pi).
+// agent dir's own npm project (<agent dir>/pi by default, or an explicit
+// --bundle).
 //
 // It is deliberately plain Node with no repo imports, so these tests run it as a
 // real child process against temp agent dirs and bundles, with a stub package
@@ -210,6 +211,23 @@ describe("extension deps: installing into the bundled pi project", () => {
     assert.match(second.out, /already installed/, second.out);
     assert.equal(runs().length, runsBefore, "no second install run");
     assert.equal(fs.statSync(manifest).mtimeMs, before, "the manifest is not rewritten");
+  });
+
+  test("with no --bundle it installs into the agent dir's own project (<agent>/pi)", () => {
+    const agent = makeAgent("default-root", {
+      files: { "extensions/browser.ts": "export default () => {};\n" },
+      manifest: { dependencies: { playwright: "^1.63.0" }, allowScripts: { playwright: true } },
+    });
+    resetRuns();
+
+    const { status, out } = install(["--agent", agent]);
+    assert.equal(status, 0, out);
+    const project = path.join(agent, "pi");
+    assert.deepEqual(runs(), [fs.realpathSync(project)], "the package manager runs inside <agent>/pi");
+    assert.ok(installedIn(project, "playwright"), "playwright installed in <agent>/pi");
+    const manifest = readManifest(project);
+    assert.equal(manifest.dependencies.playwright, "^1.63.0");
+    assert.equal(manifest.allowScripts.playwright, true);
   });
 });
 

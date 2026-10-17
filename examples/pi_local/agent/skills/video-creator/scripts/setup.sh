@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # video-creator skill — one-time toolchain bootstrap (no root required).
-# Creates <skill>/.venv, installs requirements.txt, ensures the Chromium build,
-# then runs `video.py doctor` to prove the toolchain works.
+# Installs requirements.txt into Pi Scope's shared Python venv
+# (~/.pi-scope/.venv), ensures the Chromium build, then runs `video.py doctor`
+# to prove the toolchain works.
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV="$SKILL_DIR/.venv"
-PY="$VENV/bin/python"
+# The one venv every Python-dependent element shares (see
+# apps/scope-desktop/pi-python-install.mjs).
+VENV="${SCOPE_PYTHON_VENV:-$HOME/.pi-scope/.venv}"
+if [ -x "$VENV/Scripts/python.exe" ]; then
+  PY="$VENV/Scripts/python.exe"
+else
+  PY="$VENV/bin/python"
+fi
 
 HAVE_UV=0; command -v uv >/dev/null 2>&1 && HAVE_UV=1
 
+echo "→ venv      : $VENV"
 echo "→ skill dir : $SKILL_DIR"
 if [ "$HAVE_UV" = 1 ]; then
   [ -d "$VENV" ] || uv venv --python 3.12 "$VENV"

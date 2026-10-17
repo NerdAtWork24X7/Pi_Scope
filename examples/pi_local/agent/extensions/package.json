@@ -10,14 +10,14 @@
     "Nothing here runs a package manager by itself. Pi Scope's installer",
     "(apps/scope-desktop/pi-extensions-install.mjs) reads these dependencies for",
     "every extension pi has available and installs the missing ones into the",
-    "bundled pi project (~/.pi-scope/pi), whose node_modules the app, the agent",
-    "and every extension share — no per-extension node_modules anywhere.",
+    "agent dir's own npm project (<agentDir>/pi, i.e. ~/.pi-scope/agent/pi),",
+    "so they live with the agent — no per-extension node_modules anywhere.",
     "",
     "Keep host-provided packages (@earendil-works/pi-*, @mariozechner/pi-*,",
     "typebox) out of \"dependencies\": pi maps those itself.",
     "",
     "browser.ts resolves its packages from PI_BROWSER_MODULE_ROOT (which Pi Scope",
-    "pins to the bundled pi project), then the process cwd, then $HOME."
+    "pins to the agent dir's npm project), then the process cwd, then $HOME."
   ],
   "dependencies": {
     "playwright": "^1.63.0",

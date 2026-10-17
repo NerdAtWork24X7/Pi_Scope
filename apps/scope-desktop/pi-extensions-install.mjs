@@ -11,15 +11,16 @@
  * those for the *packages it installed itself* (npm/git sources, which land in
  * `<agentDir>/npm`). For a local extension nobody does it, so Pi Scope does.
  *
- * Where they go: the bundled pi project (`~/.pi-scope/pi`), whose node_modules
- * the app, the agent and every extension already share (see
- * apps/scope-server/pi-deps.ts). One tree — no per-extension node_modules — and
- * Pi Scope pins `PI_BROWSER_MODULE_ROOT` to it so extensions that resolve their
- * packages at runtime (the `browser` extension) find them.
+ * Where they go: the agent dir's own npm project (`<agentDir>/pi`, i.e.
+ * `~/.pi-scope/agent/pi`). pi loads extensions from the agent dir, so their
+ * packages live with it — never buried in the app's bundled-pi project
+ * (`~/.pi-scope/pi`, which Settings → Update owns) — and there are no
+ * per-extension node_modules. Pi Scope pins `PI_BROWSER_MODULE_ROOT` to it so
+ * extensions that resolve their packages at runtime (the `browser` extension)
+ * find them.
  *
  * Every entry point uses this one script, like pi-bundle-install.mjs:
  *
- *   • install/install.sh / install.ps1 — after seeding the agent dir
  *   • `pi-scope.mjs` / `run.sh`        — the dev launcher, in the background
  *   • `scope-control.js`                — the packaged app, in the background
  *
@@ -30,8 +31,7 @@
  *
  *     --agent <dir>   agent dir       [default: SCOPE_AGENT_DIR,
  *                                      PI_CODING_AGENT_DIR, ~/.pi-scope/agent]
- *     --bundle <dir>  install root    [default: SCOPE_PI_BUNDLE_DIR,
- *                                      ~/.pi-scope/pi]
+ *     --bundle <dir>  install root    [default: <agent dir>/pi]
  *     --seed-manifest <file>
  *                     the shipped extensions manifest, used for an extension
  *                     that has none of its own (an agent dir seeded before the
@@ -76,7 +76,7 @@ const PM_ARGS = {
 function usage() {
   process.stdout.write(
     "Install the npm dependencies of the extensions pi has available into the\n" +
-    "bundled pi project.\n\n" +
+    "agent dir's own npm project (<agent dir>/pi).\n\n" +
     "  node pi-extensions-install.mjs [--agent <dir>] [--bundle <dir>]\n" +
     "                                 [--pm npm|pnpm|bun] [--npm <bin>] [--json]\n",
   );
@@ -88,8 +88,8 @@ function parseArgs(argv) {
   const opts = {
     agent: (process.env.SCOPE_AGENT_DIR || process.env.PI_CODING_AGENT_DIR || "").trim()
       || path.join(os.homedir(), ".pi-scope", "agent"),
-    bundle: (process.env.SCOPE_PI_BUNDLE_DIR || "").trim()
-      || path.join(os.homedir(), ".pi-scope", "pi"),
+    bundle: "",
+    bundleGiven: false,
     seedManifest: "",
     pm: "npm",
     npm: "",
@@ -99,7 +99,7 @@ function parseArgs(argv) {
     const need = (name) => { if (i + 1 >= argv.length) die(`${name} needs a value`); return argv[++i]; };
     switch (argv[i]) {
       case "--agent": opts.agent = need("--agent"); break;
-      case "--bundle": opts.bundle = need("--bundle"); break;
+      case "--bundle": opts.bundle = need("--bundle"); opts.bundleGiven = true; break;
       case "--seed-manifest": opts.seedManifest = need("--seed-manifest"); break;
       case "--pm": opts.pm = need("--pm"); break;
       case "--npm": opts.npm = need("--npm"); break;
@@ -110,6 +110,9 @@ function parseArgs(argv) {
   }
   if (!PM_ARGS[opts.pm]) die(`--pm must be npm, pnpm or bun (got '${opts.pm}')`);
   opts.agent = path.resolve(opts.agent);
+  // Default root is the agent dir's own npm project, so the extensions'
+  // packages live with the agent rather than in the app's bundled-pi project.
+  if (!opts.bundle) opts.bundle = path.join(opts.agent, "pi");
   opts.bundle = path.resolve(opts.bundle);
   opts.seedManifest = opts.seedManifest && isFile(opts.seedManifest) ? path.resolve(opts.seedManifest) : null;
   return opts;
@@ -226,7 +229,7 @@ function manifestDeps(manifest) {
   return { deps, allowScripts: { ...(pkg.allowScripts ?? {}) } };
 }
 
-/** Whether `spec` is installed in the bundle's node_modules. */
+/** Whether `spec` is installed in the extensions project's node_modules. */
 function installedIn(bundle, spec) {
   return isFile(path.join(bundle, "node_modules", ...spec.split("/"), "package.json"));
 }
@@ -234,10 +237,10 @@ function installedIn(bundle, spec) {
 // ── Install ─────────────────────────────────────────────────────────────────
 
 /**
- * Record the dependencies in the bundle's own manifest, so a later `npm install`
- * (or Settings → Update) keeps them and the tree stays reproducible. Existing
- * entries win — an extension's range must not rewrite the version the bundle
- * already resolved. The file is only written when a field actually changes.
+ * Record the dependencies in the extensions project's own manifest, so a later
+ * `npm install` keeps them and the tree stays reproducible. Existing entries win
+ * — an extension's range must not rewrite the version the project already
+ * resolved. The file is only written when a field actually changes.
  */
 function mergeIntoBundle(bundle, deps, allowScripts) {
   const file = path.join(bundle, "package.json");
@@ -305,7 +308,7 @@ const opts = parseArgs(process.argv.slice(2));
 quiet = opts.json;
 
 // No agent dir yet is a normal state: Pi Scope creates it on first run and the
-// installers seed it. Nothing to inspect, nothing to install.
+// launcher seeds it. Nothing to inspect, nothing to install.
 if (!isDir(opts.agent)) {
   const empty = {
     agent: opts.agent, bundle: opts.bundle, extensions: [], piPackages: [], disabled: [],
@@ -406,8 +409,21 @@ if (!missing.length) {
   process.exit(0);
 }
 
+// The default root is the agent dir's own project, so create it on first use. An
+// explicit --bundle is the caller's project and must already exist.
 if (!isFile(path.join(opts.bundle, "package.json"))) {
-  die(`no bundled pi project at ${opts.bundle} to install ${missing.join(", ")} into`);
+  if (opts.bundleGiven) {
+    die(`no bundled pi project at ${opts.bundle} to install ${missing.join(", ")} into`);
+  }
+  try {
+    fs.mkdirSync(opts.bundle, { recursive: true });
+    fs.writeFileSync(
+      path.join(opts.bundle, "package.json"),
+      JSON.stringify({ name: "pi-scope-agent-extensions", version: "1.0.0", private: true }, null, 2) + "\n",
+    );
+  } catch (err) {
+    die(`could not create the extensions project at ${opts.bundle}: ${err.message}`);
+  }
 }
 const ranges = Object.fromEntries([...wanted].map(([spec, entry]) => [spec, entry.range]));
 const allowScripts = Object.assign({}, ...[...wanted.values()].map((entry) => entry.allowScripts));

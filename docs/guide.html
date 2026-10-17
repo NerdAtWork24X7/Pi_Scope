@@ -188,8 +188,10 @@ cd Pi_Scope &amp;&amp; ./pi-scope              # desktop app (Electron window)</
         Nothing to install first: <code>./pi-scope</code> is the cross-platform launcher
         (<code>.\pi-scope.cmd</code> on Windows) — one Node script, one shim per platform — and it
         fetches what it needs on first launch: the workspace dependencies, Electron for the desktop
-        window, and Pi Scope's own copy of the <code>pi</code> coding agent (~220&nbsp;MB under
-        <code>~/.pi-scope/pi</code>). Node 24+ is the only prerequisite. Prefer the terminal or a
+        window, Pi Scope's own copy of the <code>pi</code> coding agent (~220&nbsp;MB under
+        <code>~/.pi-scope/pi</code>), and the shared Python environment
+        (<code>~/.pi-scope/.venv</code>, built with <code>uv</code>) that the <code>web-fetch</code>
+        extension and <code>video-creator</code> skill share. Node 24+ is the only prerequisite. Prefer the terminal or a
         server? The same launcher runs headless — <code>./pi-scope --web</code> opens the WebUI in
         your browser, <code>./pi-scope --server</code> stays in the foreground; every mode and flag
         is listed under <a href="#launcher">Launcher flags</a>. On a machine with no display (a
@@ -213,12 +215,11 @@ cd Pi_Scope
         Pi Scope runs its bundled <code>pi</code> in its own agent dir
         (<code>~/.pi-scope/agent</code>, or <code>SCOPE_AGENT_DIR</code>). The repo ships a starter
         config — settings, skills, extensions, agents and themes — in
-        <code>examples/pi_local/agent</code>, and both install paths seed it the same way: the
-        template is copied in on first run whenever the agent dir has no
-        <code>extensions/</code> yet — the tell that nothing has set it up. The launcher
-        (<code>./pi-scope</code>) and the one-line installer (<code>install/install.sh</code>) apply
-        the same rule, so an agent dir the server created on first boot (with a little state of its
-        own, such as <code>auth.json</code>) is still seeded.
+        <code>examples/pi_local/agent</code>, and the launcher seeds it on first run: the template
+        is copied in whenever the agent dir has no <code>extensions/</code> yet — the tell that
+        nothing has set it up. The launcher (<code>./pi-scope</code>) applies that rule, so an agent
+        dir the server created on first boot (with a little state of its own, such as
+        <code>auth.json</code>) is still seeded.
       </p>
       <p>
         Once the dir has extensions it is left alone, so a configured agent dir is never disturbed,
@@ -578,6 +579,15 @@ node docs/seed-demo.mjs</code></pre>
               <td style="text-align:left">Colon-separated extra dirs prepended to <code>PATH</code> for chat-spawned
                 <code>pi</code> subprocesses (e.g. a non-standard venv:
                 <code>SCOPE_EXTRA_PATH=/path/to/.venv/bin</code>)
+              </td>
+            </tr>
+            <tr>
+              <th scope="row"><code>SCOPE_PYTHON_VENV</code></th>
+              <td style="text-align:left"><code>~/.pi-scope/.venv</code></td>
+              <td style="text-align:left">The shared Python venv, built with <code>uv</code> on launch by
+                <code>pi-python-install.mjs</code>, for every Python-dependent element (<code>web-fetch</code>,
+                <code>video-creator</code>). Its <code>bin</code> is prepended to the chat/agent
+                <code>PATH</code>. Override to relocate it
               </td>
             </tr>
             <tr>

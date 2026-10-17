@@ -17,7 +17,8 @@
  *
  * Location (override with SCOPE_AGENT_DIR):
  *   • dev + packaged: ~/.pi-scope/agent
- * The bundled agent itself lives beside it in ~/.pi-scope/pi (pi-bundle-paths.ts).
+ * The bundled agent itself lives beside it in ~/.pi-scope/pi (pi-bundle-paths.ts);
+ * the extensions' own npm dependencies live inside it, in <agentDir>/pi.
  *
  * Importing this module creates the dir and pins `PI_CODING_AGENT_DIR` to it,
  * so every pi process Pi Scope spawns — Chat subprocesses, the commit-message
@@ -41,6 +42,18 @@ function resolveAgentDir(): string {
 
 export const AGENT_DIR: string = resolveAgentDir();
 
+/** The agent dir's own npm project. The dependencies the extensions declare are
+ *  installed here (`pi-extensions-install.mjs`), and extensions that resolve
+ *  their packages at run time are pointed at it with `PI_BROWSER_MODULE_ROOT`. */
+export const AGENT_PI_DIR: string = path.join(AGENT_DIR, "pi");
+
+/** The shared Python venv Pi Scope builds for every Python-dependent element
+ *  (the `web_fetch` extension, the `video-creator` skill, …): a sibling of the
+ *  agent dir, built with uv by `pi-python-install.mjs`. Elements locate it
+ *  through `SCOPE_PYTHON_VENV`. Override with `SCOPE_PYTHON_VENV`. */
+export const SCOPE_VENV_DIR: string = (process.env.SCOPE_PYTHON_VENV || "").trim()
+  || path.join(path.dirname(AGENT_DIR), ".venv");
+
 try {
   fs.mkdirSync(AGENT_DIR, { recursive: true });
 } catch { /* read-only runtime dir — pi will recreate it / fail loudly */ }
@@ -49,3 +62,7 @@ try {
 // Setting it here (at import time) covers chatChildEnv's `{...process.env}`,
 // the bundled `pi` shim's `env` invocation, and the in-app Terminal.
 process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
+
+// Name the shared Python venv for everything spawned from here too, so an
+// element reads the resolved path instead of guessing the default.
+process.env.SCOPE_PYTHON_VENV = SCOPE_VENV_DIR;

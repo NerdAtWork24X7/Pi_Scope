@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
-# Launcher: finds the skill venv (bootstrapping it on first run) and forwards all args to video.py.
+# Launcher: uses Pi Scope's shared Python venv (bootstrapping it on first run)
+# and forwards all args to video.py.
 set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="$SKILL_DIR/.venv/bin/python"
+
+# The one venv every Python-dependent element shares (SCOPE_PYTHON_VENV names it
+# when Pi Scope launched us; the default covers a manual run). The interpreter
+# lives in bin/ on POSIX but Scripts/ on Windows.
+VENV="${SCOPE_PYTHON_VENV:-$HOME/.pi-scope/.venv}"
+if [ -x "$VENV/Scripts/python.exe" ]; then
+  PY="$VENV/Scripts/python.exe"
+else
+  PY="$VENV/bin/python"
+fi
+
 if [ ! -x "$PY" ]; then
-  echo "→ first run: bootstrapping video-creator toolchain" >&2
+  echo "→ first run: bootstrapping the shared video-creator toolchain" >&2
   "$SKILL_DIR/scripts/setup.sh" >&2
 fi
 exec "$PY" "$SKILL_DIR/scripts/video.py" "$@"

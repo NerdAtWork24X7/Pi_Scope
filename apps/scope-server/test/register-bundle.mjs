@@ -1,7 +1,8 @@
 /**
  * register-bundle.mjs — resolve the test suite's bare ESM imports (Playwright)
- * out of the shared install in `~/.pi-scope/pi`, since a checkout keeps no
- * `node_modules` of its own.
+ * out of the install that holds them — the app bundle in `~/.pi-scope/pi` or the
+ * agent dir's own npm project in `~/.pi-scope/agent/pi` — since a checkout keeps
+ * no `node_modules` of its own.
  *
  * The server loads its runtime packages through `pi-deps.ts`, but the e2e tests
  * (and test/harness.mjs) import `playwright` as an ordinary bare specifier, and

@@ -149,9 +149,10 @@ mkdir -p tmp/video
 - **`<shot>: type must be one of …`** → use a valid scene type.
 - **`ffmpeg not found` / `playwright is unavailable`** → `vc doctor` names the broken piece and prints the
   fix: run `scripts/setup.sh` (or set `FFMPEG_BIN`); for a missing browser, `python -m playwright install
-  chromium` in the skill venv.
+  chromium` in the shared venv.
 - **A render dies with a core dump / `SIGBUS`, or imports fail after a crash** → the venv was truncated
-  (interrupted install): `rm -rf <skill>/.venv && <skill>/scripts/setup.sh`, then re-run `vc clips`.
+  (interrupted install): `rm -rf "${SCOPE_PYTHON_VENV:-$HOME/.pi-scope/.venv}" && <skill>/scripts/setup.sh`,
+  then re-run `vc clips`.
   Never hand-patch the venv; `vc doctor` verifies the binary actually *runs*.
 - **An edited page does not re-render** → only file:///local targets are fingerprinted into the clip key;
   a remote url needs `vc clips --only <id> --force`.

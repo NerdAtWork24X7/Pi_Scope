@@ -35,8 +35,8 @@ in the `user` message, the text to speak in the `assistant` message, and
 in `choices[0].message.audio.data`.
 
 ```bash
-.venv/bin/python scripts/video.py doctor     # prints the resolved key source + base URL
-.venv/bin/python scripts/video.py tts-api \
+"$SCOPE_PYTHON_VENV/bin/python" scripts/video.py doctor     # prints the resolved key source + base URL
+"$SCOPE_PYTHON_VENV/bin/python" scripts/video.py tts-api \
   --text "Welcome to the walkthrough." \
   --style "warm, confident narrator, medium pace" \
   --voice Milo --out audio/scene-01.wav
@@ -49,13 +49,13 @@ it with **Playwright directly** — no pi `browser` tool and no system-audio cap
 
 ```bash
 # auto: open the page, type the text, submit, and save the generated audio
-.venv/bin/python scripts/video.py tts-browser \
+"$SCOPE_PYTHON_VENV/bin/python" scripts/video.py tts-browser \
   --url "https://aistudio.xiaomimimo.com/" \
   --text "Welcome to the walkthrough." \
   --out audio/scene-01.wav
 
 # manual: open a headed window, generate the clip yourself, it is saved on capture
-.venv/bin/python scripts/video.py tts-browser --url "https://aistudio.xiaomimimo.com/" \
+"$SCOPE_PYTHON_VENV/bin/python" scripts/video.py tts-browser --url "https://aistudio.xiaomimimo.com/" \
   --manual --out audio/scene-01.wav
 ```
 
@@ -69,7 +69,7 @@ If the page is unreachable in your region, use the API instead.
 For a payload extracted some other way, `tts-save` still wraps base64/PCM16:
 
 ```bash
-.venv/bin/python scripts/video.py tts-save --b64-file audio/scene-01.b64 --out audio/scene-01.wav
+"$SCOPE_PYTHON_VENV/bin/python" scripts/video.py tts-save --b64-file audio/scene-01.b64 --out audio/scene-01.wav
 ```
 
 ## Reachability notes

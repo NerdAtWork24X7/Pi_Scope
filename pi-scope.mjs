@@ -220,6 +220,7 @@ function ensureDeps(needElectron) {
   // dependencies are resolved (the template carries the extensions manifest).
   seedAgentTemplate();
   runExtensionDeps();
+  runPythonDeps();
 }
 
 /**
@@ -249,6 +250,27 @@ function runExtensionDeps() {
 }
 
 /**
+ * Create or refresh the shared Python venv (~/.pi-scope/.venv) in the
+ * background (see apps/scope-desktop/pi-python-install.mjs).
+ *
+ * Detached for the same reason as the npm extension deps: the first build
+ * downloads Python packages and a Chromium build, and no view waits on it.
+ * Once satisfied the installer is a filesystem-only no-op. Output lands in
+ * tmp/pi-python-install.log.
+ */
+function runPythonDeps() {
+  const installer = path.join(DESKTOP_DIR, "pi-python-install.mjs");
+  if (!fs.existsSync(installer)) return;
+  try {
+    fs.mkdirSync(RUN_DIR, { recursive: true });
+    const log = fs.openSync(path.join(RUN_DIR, "pi-python-install.log"), "a");
+    spawn(process.execPath, [installer], { detached: true, stdio: ["ignore", log, log] }).unref();
+  } catch (err) {
+    info(`the Python environment install could not be started: ${err.message}`);
+  }
+}
+
+/**
  * Seed the agent template on first run.
  *
  * Pi Scope's bundled `pi` runs in its own agent dir (`~/.pi-scope/agent`, or
@@ -257,20 +279,19 @@ function runExtensionDeps() {
  * the shipped starter config (`examples/pi_local/agent`) in. Nothing is
  * overwritten (an existing file wins), and a dir that already has any extension
  * is left completely alone — so this is a no-op after the first run, and it
- * never disturbs a dir the user or the installer already populated. The skills'
- * large, platform-bound `.venv` and the obscura `*.tar.gz` bundles are skipped,
- * as are session logs and `__pycache__`.
+ * never disturbs a dir the user (or the packaged app) already populated. The
+ * skills' large, platform-bound `.venv` and the obscura `*.tar.gz` bundles are
+ * skipped, as are session logs and `__pycache__`.
  *
- * install/install.sh and install/install.ps1 seed the same template under the
- * same "extensions empty" rule, so every entry point ends up the same.
- */
+ * This is the single seeding path: the launcher runs it on every start, so
+ * every entry point ends up the same. */
 function seedAgentTemplate() {
   const agentDir = process.env.SCOPE_AGENT_DIR || path.join(os.homedir(), ".pi-scope", "agent");
   const template = path.join(ROOT, "examples", "pi_local", "agent");
   const extensions = path.join(agentDir, "extensions");
 
-  // A non-empty extensions dir means it is already set up (by the installer, by
-  // the user, or by a previous run). Missing or empty → seed.
+  // A non-empty extensions dir means it is already set up (by the user, by the
+  // packaged app, or by a previous run). Missing or empty → seed.
   try { if (fs.readdirSync(extensions).length > 0) return; } catch { /* missing → seed */ }
   try { if (!fs.statSync(template).isDirectory()) return; } catch { return; }
 

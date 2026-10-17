@@ -86,6 +86,7 @@ describe("bundled pi: the force-loaded extension is named in the environment", {
     process.env.SCOPE_TOKEN_FILE = path.join(tmpDir, "scope_token");
     // Never let an operator override win: this test is about the bundled path.
     process.env.SCOPE_PI_BIN = "";
+    process.env.SCOPE_PYTHON_VENV = "";
     ({ PI_LAUNCH, PI_BUNDLE } = await import(new URL("../pi-bundle.ts", import.meta.url).href));
   });
 
@@ -95,7 +96,7 @@ describe("bundled pi: the force-loaded extension is named in the environment", {
 
   test("the bundled agent resolves from the user's own install", () => {
     // The install lives in the data dir (~/.pi-scope/pi) and is seeded there by
-    // the launcher / installers / packaged app — never inside the checkout. A
+    // the launcher / the packaged app — never inside the checkout. A
     // checkout that predates that layout still resolves, which is what keeps an
     // old dev tree working until the launcher migrates it.
     assert.ok(piBundleDirs().includes(PI_BUNDLE.dir), `${PI_BUNDLE.dir} is a candidate: ${piBundleDirs().join(", ")}`);
@@ -115,16 +116,29 @@ describe("bundled pi: the force-loaded extension is named in the environment", {
     );
   });
 
-  test("the shim names the bundle as the extensions' module root", () => {
+  test("the shim names the agent dir's npm project as the extensions' module root", () => {
     // Extensions that resolve their own npm packages at run time (the `browser`
     // extension) look at PI_BROWSER_MODULE_ROOT, and pi-extensions-install.mjs
-    // installed those packages into this bundle's node_modules. Pointing at it
-    // here — rather than leaving the extension to fall back on cwd/$HOME — is
-    // what makes them findable however the agent was started.
-    assert.equal(process.env.PI_BROWSER_MODULE_ROOT, PI_BUNDLE.dir);
+    // installed those packages into the agent dir's own npm project
+    // (<agentDir>/pi). Pointing at it here — rather than leaving the extension to
+    // fall back on cwd/$HOME — is what makes them findable however the agent was
+    // started.
+    const agentPiDir = path.join(process.env.SCOPE_AGENT_DIR, "pi");
+    assert.equal(process.env.PI_BROWSER_MODULE_ROOT, agentPiDir);
     const shim = fs.readFileSync(PI_BUNDLE.bin, "utf8");
     assert.ok(shim.includes("PI_BROWSER_MODULE_ROOT"), `the shim exports the module root:\n${shim}`);
-    assert.ok(shim.includes(PI_BUNDLE.dir), `the shim names the bundle (${PI_BUNDLE.dir}):\n${shim}`);
+    assert.ok(shim.includes(agentPiDir), `the shim names the agent npm project (${agentPiDir}):\n${shim}`);
+  });
+
+  test("the shim names the shared Python venv and puts it on PATH", () => {
+    // The Python-dependent elements (web_fetch, video-creator) reuse one venv
+    // built by pi-python-install.mjs; the shim names it and prepends its bin so
+    // `python`/`playwright` resolve from it however the agent was started.
+    const scopeVenv = path.join(tmpDir, ".venv");
+    assert.equal(process.env.SCOPE_PYTHON_VENV, scopeVenv);
+    const shim = fs.readFileSync(PI_BUNDLE.bin, "utf8");
+    assert.ok(shim.includes("SCOPE_PYTHON_VENV"), `the shim exports the venv variable:\n${shim}`);
+    assert.ok(shim.includes(scopeVenv), `the shim names the shared venv (${scopeVenv}):\n${shim}`);
   });
 
   test("the child really discovers extensions in the agent dir", async () => {

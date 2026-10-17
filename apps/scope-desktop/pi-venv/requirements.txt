@@ -1,0 +1,14 @@
+# Pi Scope — the shared Python environment (~/.pi-scope/.venv).
+#
+# One venv for every Python-dependent element Pi Scope ships, instead of a
+# per-element .venv. apps/scope-desktop/pi-python-install.mjs builds it with uv
+# on every launch (a no-op once the packages are present).
+#
+#   • web_fetch extension — playwright, html-to-markdown
+#   • video-creator skill — imageio-ffmpeg (bundled static FFmpeg), playwright
+#
+# playwright is pinned once here: an element must not pin its own, or the shared
+# venv cannot satisfy both.
+imageio-ffmpeg==0.6.0
+html-to-markdown==3.12.2
+playwright==1.63.0

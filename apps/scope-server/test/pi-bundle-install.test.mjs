@@ -1,7 +1,7 @@
 // Tests for apps/scope-desktop/pi-bundle-install.mjs — the one installer every
 // entry point uses to put the bundled `pi` coding agent in the user's data dir
-// (~/.pi-scope/pi): the dev launcher (pi-scope.mjs / run.sh), install.sh,
-// install.ps1 and the packaged app's scope-control.js.
+// (~/.pi-scope/pi): the dev launcher (pi-scope.mjs / run.sh) and the packaged
+// app's scope-control.js.
 //
 // It is deliberately plain Node with no repo imports, which is why it can run
 // under the packaged app's portable Node on every platform — these tests run it

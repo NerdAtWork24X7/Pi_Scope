@@ -389,14 +389,43 @@ function installExtensionDeps() {
 }
 
 /**
+ * Create or refresh the shared Python venv (~/.pi-scope/.venv) detached (see
+ * apps/scope-desktop/pi-python-install.mjs), for the same reason as
+ * installExtensionDeps: the first build is a real download and nothing waits
+ * on it. Once satisfied it is a filesystem-only no-op. Output lands in
+ * ~/.pi-scope/pi-python-install.log.
+ */
+function installPythonDeps() {
+  const installer = path.join(__dirname, "pi-python-install.mjs");
+  if (!fs.existsSync(installer)) return;
+  const bin = app && app.isPackaged ? portableNodeBin() : process.execPath;
+  const dataDir = path.join(os.homedir(), ".pi-scope");
+  let out = "ignore";
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    out = fs.openSync(path.join(dataDir, "pi-python-install.log"), "a");
+  } catch { /* read-only home: the install still runs, just unlogged */ }
+  try {
+    const child = require("node:child_process").spawn(bin, [installer], {
+      detached: true,
+      stdio: ["ignore", out, out],
+      env: { ...process.env, HOME: process.env.HOME || os.homedir() },
+    });
+    child.unref();
+  } catch (err) {
+    console.error("[scope-control] could not start the Python environment install:", err.message);
+  }
+}
+
+/**
  * Seed the user's own copy of the bundled Pi coding agent (~/.pi-scope/pi) from
  * the read-only `resources/pi` this package ships.
    *
    * Pi Scope runs `pi` from the user's data dir rather than from the package, so
    * Settings → Update can install a newer agent (a file inside an AppImage/NSIS
    * install is read-only) and the agent survives an app update. The seed is a
-   * one-time copy done by the same installer the dev launcher and the one-line
-   * installers use; it needs no network and no system npm.
+   * one-time copy done by the same installer the dev launcher uses; it needs no
+   * network and no system npm.
    *
    * Returns true when a usable install is in place. On failure the caller points
    * SCOPE_PI_BUNDLE_DIR at `resources/pi` so the app still works, read-only.
@@ -466,6 +495,7 @@ async function ensureServer({ timeoutMs = 20000, port, reuse = true } = {}) {
     }
   }
   installExtensionDeps();
+  installPythonDeps();
   const cfg = config(overrides);
   if (reuse) {
     try {

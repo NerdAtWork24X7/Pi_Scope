@@ -8,26 +8,27 @@ agent events, stores them in SQLite, and serves a live scope UI.
 Requires Node 24+ (no install step — `node:sqlite` is built in).
 
 ```bash
-# Start with the default dev_token
+# Start it — a random auth token is generated and printed in the boot banner
 node server.ts
 
-# Or with explicit token
+# Or pin the token yourself
 SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 ```
 
 The server's own runtime packages — `node-pty` (the Terminal's PTY) and `ws` (its
 WebSockets) — are not installed here. They come from the bundled pi project in
-the user's data dir (`~/.pi-scope/pi`), which the launcher and installers seed on
+the user's data dir (`~/.pi-scope/pi`), which the launcher seeds on
 first run, so the server and the desktop app share one copy
 (`pi-deps.ts` holds the resolution rules). A checkout whose bundle is missing can
 seed it with `node apps/scope-desktop/pi-bundle-install.mjs`.
 
-Extension packages live in that same install: the extensions pi has available
-are inspected on every install/launch and their declared dependencies are
-installed there too (`apps/scope-desktop/pi-extensions-install.mjs`). Extensions
-that resolve their own packages at run time are pointed at it with
-`PI_BROWSER_MODULE_ROOT`, which the `pi` shim and the chat child environment set,
-so they find their packages wherever the agent was started from.
+Extension packages live in the agent dir's own npm project (`<agentDir>/pi`,
+i.e. `~/.pi-scope/agent/pi`): the extensions pi has available are inspected on
+every install/launch and their declared dependencies are installed there
+(`apps/scope-desktop/pi-extensions-install.mjs`). Extensions that resolve their
+own packages at run time are pointed at it with `PI_BROWSER_MODULE_ROOT`, which
+the `pi` shim and the chat child environment set, so they find their packages
+wherever the agent was started from.
 
 ## Environment variables
 
@@ -36,13 +37,14 @@ so they find their packages wherever the agent was started from.
 | `SCOPE_PORT` | `43190` | HTTP port |
 | `SCOPE_HOST` | `127.0.0.1` | Bind address |
 | `SCOPE_DB_PATH` | `db/scope.db` | SQLite database path |
-| `SCOPE_AUTH_TOKEN` | dev_token | Bearer token for auth |
+| `SCOPE_AUTH_TOKEN` | *(random UUID)* | Bearer token for auth. When unset a random one is generated per run and written to `tmp/scope_token` (mode 0600) so the launcher and the pi extension can find it |
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
 | `SCOPE_AGENT_DIR` | `~/.pi-scope/agent` | Pi Scope's **own** pi agent dir. The bundled `pi` is pinned here via `PI_CODING_AGENT_DIR`, so it never reads or writes the global pi agent dir. |
 | `SCOPE_SETTINGS_JSON` | `<agentDir>/settings.json` | Override the pi settings file the agent-team sidebar reads/writes |
 | `SCOPE_PROVIDER_CACHE_FILE` | `<agentDir>/../Provider_Cache/model_provider.json` | Override where the kilo / tokenharbor extension model cache is read from. The default is derived from the agent dir's parent, which is where the extension's `model-cache.ts` writes it (`~/.pi-scope/Provider_Cache` for Pi Scope, `~/.pi/Provider_Cache` for a global pi) |
 | `SCOPE_SKILLS_DIR` | `<agentDir>/skills` | Override the skills directory scanned for the agent-team sidebar |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
+| `SCOPE_PYTHON_VENV` | `~/.pi-scope/.venv` | The shared Python venv (built with `uv` by `apps/scope-desktop/pi-python-install.mjs`) for every Python-dependent element. Its `bin` is prepended to the chat/agent `PATH`. Override to relocate it |
 | `SCOPE_KEYS_JSON` | `<agentDir>/api-keys.json` | API keys entered in Settings → API Keys (owner-only file, mode 0600) |
 | `SCOPE_PI_REGISTRY` | `https://registry.npmjs.org` | npm registry the Settings → Update tab asks for the latest bundled `pi` version (point at a mirror for air-gapped installs) |
 | `SCOPE_NPM_BIN` | `npm` | `npm` executable the Update tab runs to install a newer bundled `pi` |

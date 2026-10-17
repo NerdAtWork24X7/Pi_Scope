@@ -112,7 +112,6 @@ The detail lives in the docs, not here — this file is the front door.
 | 🔌 [`apps/scope-server/plugins/README.md`](apps/scope-server/plugins/README.md) | Write a plugin: manifests, routes, event hooks, storage |
 | 🤖 [`extension/README.md`](extension/README.md) | Telemetry extension flags, env vars and the event reference |
 | 🧪 [`docs/seed-demo.mjs`](docs/seed-demo.mjs) | The script that creates the demo session behind the screenshots |
-| 🧩 [`install/README.md`](install/README.md) | Every install channel and flag, and the first-run agent template |
 | 📁 [`docs/README.md`](docs/README.md) | How the docs site itself is laid out and published |
 
 **Want to know what's actually captured?** Session start/end, every user and assistant message,
@@ -130,8 +129,10 @@ server the machine has listening, each with its own Kill button. See
 [Port already in use](https://nerdatwork24x7.github.io/Pi_Scope/guide.html#port-in-use).
 
 **What does the first run download?** Everything the app needs — Electron
-(desktop mode), the build tooling, and Pi Scope's own `pi` coding agent with its
-runtime packages — into one shared project in `~/.pi-scope/pi` (~1 GB). The
+(desktop mode), the build tooling, Pi Scope's own `pi` coding agent with its
+runtime packages — into one shared project in `~/.pi-scope/pi` (~1 GB) — plus the
+shared Python environment in `~/.pi-scope/.venv` that the `web-fetch` extension
+and `video-creator` skill share. The
 checkout itself stays free of `node_modules`. It happens once.
 
 **Uninstalling?** Delete the checkout, then remove `~/.pi-scope/` for a clean slate — the database,
@@ -143,7 +144,6 @@ the agent dir and the bundled `pi` all live there. (A clone's database may also 
 - **`apps/scope-server/`** — the server, dashboard and built-in feature plugins
 - **`apps/scope-desktop/`** — the Electron shell, launcher and the bundled-`pi` installer (the agent itself is installed into `~/.pi-scope/pi`)
 - **`extension/`** — the `pi` extension that streams telemetry
-- **`install/`** — the optional one-line installer scripts (`install.sh`, `install.ps1`) and their docs
 - **`pi-scope` / `pi-scope.cmd`** — the cross-platform launcher (`pi-scope.mjs` core plus platform shims)
 - **`docs/`** — the published docs site (plain HTML/CSS/JS, no build step) and its screenshots
 - **`examples/`** — an installable example plugin (`plugins/`) and the starter agent config (`pi_local/agent`)

@@ -18,9 +18,8 @@
  * agent from `resources/pi` (scope-control.js → pi-bundle-install.mjs), so these
  * never travel to an end user.
  *
- * Plain Node, no repo imports and no dependencies: the dev launcher, the
- * one-line installers and the release build all call it, under whatever Node
- * they already found.
+ * Plain Node, no repo imports and no dependencies: the dev launcher and the
+ * release build call it, under whatever Node they already found.
  *
  *   node app-deps-install.mjs [options]
  *
@@ -48,7 +47,7 @@ const RUNTIME_INSTALLER = path.join(HERE, "pi-bundle-install.mjs");
 const die = (msg) => { console.error(`app-deps-install: ${msg}`); process.exit(1); };
 const info = (msg) => console.log(`==> ${msg}`);
 
-/** Package-manager argument sets — mirrors pi-bundle-install.mjs / the installers. */
+/** Package-manager argument sets — mirrors pi-bundle-install.mjs. */
 const PM_ARGS = {
   npm: [["install", "--no-audit", "--no-fund"]],
   pnpm: [["install", "--no-ignore-scripts"]],

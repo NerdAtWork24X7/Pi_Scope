@@ -1,8 +1,8 @@
 // Where the installed pi bundle is, for the suites that need the real agent.
 //
 // The bundle is no longer part of the checkout: Pi Scope installs it into the
-// user's data dir (`~/.pi-scope/pi`) — the launcher, the one-line installers and
-// the packaged app all seed it there (apps/scope-desktop/pi-bundle-install.mjs).
+// user's data dir (`~/.pi-scope/pi`) — the launcher and the packaged app both
+// seed it there (apps/scope-desktop/pi-bundle-install.mjs).
 // These helpers ask the server's own resolution rules (pi-bundle-paths.ts), so a
 // test never hardcodes a path that can move again, and a checkout that still has
 // the old in-repo install keeps working.

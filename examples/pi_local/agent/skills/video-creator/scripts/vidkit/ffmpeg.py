@@ -20,7 +20,7 @@ class FfmpegError(RuntimeError):
     """Raised when no usable FFmpeg binary can be found."""
 
 
-REINSTALL_HINT = "reinstall the toolchain: rm -rf <skill>/.venv && <skill>/scripts/setup.sh"
+REINSTALL_HINT = 'reinstall the shared venv: rm -rf "${SCOPE_PYTHON_VENV:-$HOME/.pi-scope/.venv}" && <skill>/scripts/setup.sh'
 
 
 @lru_cache(maxsize=1)
