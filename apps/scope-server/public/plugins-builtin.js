@@ -152,8 +152,8 @@
           `<div class="set-field-hint">Placeholders: <code>{{branch}}</code> ` +
           `<code>{{source}}</code> <code>{{files}}</code> <code>{{diff}}</code>. ` +
           `Leave empty to use the default template (shown as the placeholder). ` +
-          `The default sends only the changed file paths and lets the model inspect the files itself; ` +
-          `a template that uses <code>{{diff}}</code> sends the unified diff instead.</div>`
+          `The staged file paths are sent, and the model inspects the files itself; ` +
+          `a template that uses <code>{{diff}}</code> sends the staged unified diff instead.</div>`
         );
       },
       onMount(panel, ctx) { ctx.wire(panel); },

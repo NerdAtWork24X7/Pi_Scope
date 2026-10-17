@@ -484,9 +484,9 @@
     }
   }
 
-  // Draft a commit message from the changed files with the model configured in
+  // Draft a commit message from the staged files with the model configured in
   // Settings → Plugins → Git (server-side; falls back to the agent's default
-  // model). The server hands the model the changed paths and lets it inspect
+  // model). The server hands the model the staged paths and lets it inspect
   // the files itself.
   async function generateMessage() {
     const cwd = selectedCwd(); if (!cwd) return;

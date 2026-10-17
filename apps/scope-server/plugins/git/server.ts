@@ -367,21 +367,19 @@ export function activate(api: any): void {
    * tools), which keeps the prompt small — no clipped diff, no argv size risk —
    * and bases the message on the real code rather than a truncated hunk. A
    * custom template that still references `{{diff}}` keeps the old behaviour.
+   *
+   * Only the index is described: the message must match the commit that would
+   * actually be made, so unstaged worktree changes are ignored rather than
+   * drafted into it. A commit with nothing staged has nothing to describe.
    */
   function buildCommitPrompt(absCwd: string): { prompt: string; model: string; source: string } | Response {
-    // Prefer the index (what a commit would actually contain); fall back to the
-    // worktree so the button still helps before anything is staged. `--name-status`
-    // gives the model each path with the status that changed it (A/M/D/R), which
-    // is all it needs to go and look.
-    let listed = gitTry(absCwd, ["diff", "--cached", "--name-status"]);
-    let source = "staged";
-    if (!listed.ok || !listed.out.trim()) {
-      listed = gitTry(absCwd, ["diff", "--name-status"]);
-      source = "working tree";
-    }
+    // `--name-status` gives the model each staged path with the status that
+    // changed it (A/M/D/R), which is all it needs to go and look.
+    const listed = gitTry(absCwd, ["diff", "--cached", "--name-status"]);
     if (!listed.ok) return jsonResponse({ error: listed.out || "git diff failed" }, 409);
     const files = listed.out.trim();
-    if (!files) return jsonResponse({ error: "nothing to describe — no staged or unstaged changes" }, 400);
+    if (!files) return jsonResponse({ error: "nothing staged to describe — stage your changes first" }, 400);
+    const source = "staged";
 
     const branch = gitTry(absCwd, ["rev-parse", "--abbrev-ref", "HEAD"]).out.trim();
     // The commit-message model/template are this feature's own settings, kept in
@@ -407,7 +405,7 @@ export function activate(api: any): void {
     const MAX_DIFF = 12_000;
     let clipped = "";
     if (usesDiffSlot) {
-      const diff = gitTry(absCwd, ["diff", ...(source === "staged" ? ["--cached"] : []), "--no-color", "--unified=3"]);
+      const diff = gitTry(absCwd, ["diff", "--cached", "--no-color", "--unified=3"]);
       const diffText = diff.ok ? diff.out.trim() : "";
       clipped = diffText.length > MAX_DIFF
         ? `${diffText.slice(0, MAX_DIFF)}\n\n… (diff truncated; ${diffText.length - MAX_DIFF} more characters)`
@@ -422,7 +420,7 @@ export function activate(api: any): void {
     // model has nothing to describe — append the changed paths.
     const prompt = usesChangeSlot
       ? rendered
-      : `${rendered}\n\nBranch: ${branch || "(detached)"}\nChanged files (${source}):\n${files}`;
+      : `${rendered}\n\nBranch: ${branch || "(detached)"}\nStaged files (${source}):\n${files}`;
 
     return { prompt, model, source };
   }

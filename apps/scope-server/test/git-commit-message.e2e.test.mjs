@@ -264,17 +264,41 @@ describe("git commit message generation", () => {
     });
   });
 
-  test("falls back to the working tree when nothing is staged", async () => {
-    // Unstage everything, then modify a TRACKED file so `git diff` sees it
-    // (untracked files never appear in a plain diff).
+  test("describes only the staged change, ignoring unstaged worktree edits", async () => {
+    // Unstage everything, leave a TRACKED worktree edit (a plain `git diff`
+    // would see it), and stage a different file. The draft must describe the
+    // index — the commit that would actually be made — not the worktree.
     git(repoDir, ["reset", "-q", "HEAD"]);
     fs.appendFileSync(path.join(repoDir, "README.md"), "\nworking tree change\n");
+    fs.writeFileSync(path.join(repoDir, "staged.js"), "export const staged = true;\n");
+    git(repoDir, ["add", "staged.js"]);
+
+    if (fs.existsSync(argvLog)) fs.rmSync(argvLog);
     const { res, data } = await api("/git/commit-message", {
       method: "POST", body: JSON.stringify({ cwd: repoDir }),
     });
     assert.ok(res.ok, `expected 200, got ${res.status}: ${JSON.stringify(data)}`);
-    assert.equal(data.source, "working tree");
-    // Restore: drop the worktree edit and stage the new file again for the UI test.
+    assert.equal(data.source, "staged");
+    const prompt = fs.readFileSync(argvLog, "utf8");
+    assert.ok(prompt.includes("staged.js"), "the staged path is sent");
+    assert.ok(!prompt.includes("README.md"), "the unstaged worktree edit is not sent");
+
+    // Restore: drop the worktree edit and the extra file, stage feature.js again.
+    git(repoDir, ["checkout", "--", "README.md"]);
+    git(repoDir, ["reset", "-q", "HEAD"]);
+    fs.rmSync(path.join(repoDir, "staged.js"), { force: true });
+    git(repoDir, ["add", "feature.js"]);
+  });
+
+  test("returns 400 when nothing is staged", async () => {
+    // A worktree edit alone is not enough: a commit would contain nothing.
+    git(repoDir, ["reset", "-q", "HEAD"]);
+    fs.appendFileSync(path.join(repoDir, "README.md"), "\nworktree only\n");
+    const { res, data } = await api("/git/commit-message", {
+      method: "POST", body: JSON.stringify({ cwd: repoDir }),
+    });
+    assert.equal(res.status, 400);
+    assert.match(data.error, /nothing staged/i);
     git(repoDir, ["checkout", "--", "README.md"]);
     git(repoDir, ["add", "feature.js"]);
   });
@@ -284,7 +308,7 @@ describe("git commit message generation", () => {
       method: "POST", body: JSON.stringify({ cwd: cleanRepoDir }),
     });
     assert.equal(res.status, 400);
-    assert.match(data.error, /nothing to describe/i);
+    assert.match(data.error, /nothing staged/i);
   });
 
   test("rejects a cwd outside the allowed roots", async () => {
