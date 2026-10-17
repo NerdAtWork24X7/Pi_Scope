@@ -18,7 +18,9 @@
  * Location (override with SCOPE_AGENT_DIR):
  *   • dev + packaged: ~/.pi-scope/agent
  * The bundled agent itself lives beside it in ~/.pi-scope/pi (pi-bundle-paths.ts);
- * the extensions' own npm dependencies live inside it, in <agentDir>/pi.
+ * the extensions' own npm dependencies live inside it, in <agentDir>/pi. The
+ * shared Python venv and the Playwright browser builds sit beside it too
+ * (~/.pi-scope/.venv, ~/.pi-scope/playwright-browsers).
  *
  * Importing this module creates the dir and pins `PI_CODING_AGENT_DIR` to it,
  * so every pi process Pi Scope spawns — Chat subprocesses, the commit-message
@@ -54,6 +56,29 @@ export const AGENT_PI_DIR: string = path.join(AGENT_DIR, "pi");
 export const SCOPE_VENV_DIR: string = (process.env.SCOPE_PYTHON_VENV || "").trim()
   || path.join(path.dirname(AGENT_DIR), ".venv");
 
+/** Pi Scope's Playwright browsers dir: the Chromium/… builds `playwright
+ *  install` drops. A sibling of the agent dir so the browser the shared Python
+ *  venv installed is the one the `browser` extension launches. Override with the
+ *  standard `PLAYWRIGHT_BROWSERS_PATH` (an inherited value wins). */
+export const SCOPE_BROWSERS_DIR: string = (process.env.PLAYWRIGHT_BROWSERS_PATH || "").trim()
+  || path.join(path.dirname(AGENT_DIR), "playwright-browsers");
+
+/** True when `dir` holds an installed Playwright browser build (a subdirectory
+ *  named like chromium-<build>, firefox-<build>, webkit-<build>,
+ *  headless_shell-<build>, or chromium_headless_shell-<build>). Used so
+ *  `SCOPE_BROWSERS_DIR` is only adopted once it will actually work — an
+ *  unfinished (or failed) install must never hide a browser the user already has
+ *  in their shell rc / Playwright's default cache. */
+export function holdsPlaywrightBrowser(dir: string = SCOPE_BROWSERS_DIR): boolean {
+  try {
+    return fs.readdirSync(dir).some((name) =>
+      /^(chromium|firefox|webkit|headless_shell|chromium_headless_shell)-/.test(name)
+    );
+  } catch {
+    return false;
+  }
+}
+
 try {
   fs.mkdirSync(AGENT_DIR, { recursive: true });
 } catch { /* read-only runtime dir — pi will recreate it / fail loudly */ }
@@ -66,3 +91,9 @@ process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
 // Name the shared Python venv for everything spawned from here too, so an
 // element reads the resolved path instead of guessing the default.
 process.env.SCOPE_PYTHON_VENV = SCOPE_VENV_DIR;
+
+// Advertise Pi Scope's Playwright browsers dir once it actually holds a build,
+// so the `browser` extension and the Python elements share one Chromium — but
+// leave the variable unset until then, so an incomplete install can't override a
+// browser the user already has elsewhere.
+if (holdsPlaywrightBrowser()) process.env.PLAYWRIGHT_BROWSERS_PATH = SCOPE_BROWSERS_DIR;

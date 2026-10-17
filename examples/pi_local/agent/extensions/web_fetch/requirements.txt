@@ -1,5 +1,6 @@
 # Web-fetch extension — Python dependencies.
-# Installed into Pi Scope's shared venv (~/.pi-scope/.venv, see
+# Installed into the shared venv (the `.venv` beside the `pi` agent dir:
+# ~/.pi-scope/.venv under Pi Scope, ~/.pi/.venv under a global pi; see
 # apps/scope-desktop/pi-venv/requirements.txt); this file is the declaration the
 # extension falls back to via `uv run` when the shared venv is absent.
 # playwright is pinned to match the shared venv — an element must not pin its own.

@@ -66,7 +66,7 @@ function makeUvStub() {
     "  fs.mkdirSync(path.join(dir, 'bin'), { recursive: true });",
     "  const py = path.join(dir, 'bin', 'python3');",
     "  fs.writeFileSync(py, '#!/usr/bin/env node\\n' +",
-    "    'require(\"node:fs\").appendFileSync(process.env.STUB_PY_RUNS, JSON.stringify(process.argv.slice(2)) + \"\\\\n\");\\n' +",
+    "    'require(\"node:fs\").appendFileSync(process.env.STUB_PY_RUNS, JSON.stringify({ args: process.argv.slice(2), browsers: process.env.PLAYWRIGHT_BROWSERS_PATH ?? null }) + \"\\\\n\");\\n' +",
     "    'process.exit(Number(process.env.STUB_PY_EXIT || 0));\\n');",
     "  fs.chmodSync(py, 0o755);",
     "}",
@@ -89,18 +89,23 @@ describe("python venv: building it", () => {
   test("creates the venv, installs the requirements and ensures Chromium", () => {
     const requirements = writeRequirements("build.txt");
     const venv = path.join(tmpDir, "build-venv");
+    const browsers = path.join(tmpDir, "build-browsers");
     resetRuns();
 
-    const { status, out } = install(["--venv", venv, "--requirements", requirements, "--uv", stubUv, "--json"]);
+    const { status, out } = install(["--venv", venv, "--requirements", requirements, "--browsers", browsers, "--uv", stubUv, "--json"]);
     assert.equal(status, 0, out);
     const report = JSON.parse(out);
     assert.deepEqual(report.installed, ["venv", "requirements", "chromium"]);
     assert.equal(report.upToDate, false);
+    assert.equal(report.browsers, browsers);
 
     const calls = uvRuns();
     assert.deepEqual(JSON.parse(calls[0]), ["venv", "--python", "3.12", venv]);
     assert.deepEqual(JSON.parse(calls[1]), ["pip", "install", "--python", path.join(venv, "bin", "python3"), "-r", requirements]);
-    assert.deepEqual(pyRuns().map((l) => JSON.parse(l)), [["-m", "playwright", "install", "chromium"]]);
+    const pyCalls = pyRuns().map((l) => JSON.parse(l));
+    assert.equal(pyCalls.length, 1);
+    assert.deepEqual(pyCalls[0].args, ["-m", "playwright", "install", "chromium"]);
+    assert.equal(pyCalls[0].browsers, browsers, "Chromium installs into Pi Scope's own browsers dir");
   });
 
   test("a satisfied venv is a pure no-op", () => {
@@ -127,6 +132,21 @@ describe("python venv: building it", () => {
     assert.equal(second.status, 0, second.out);
     assert.deepEqual(JSON.parse(second.out).installed, ["requirements", "chromium"], "re-installed, no new venv");
   });
+
+  test("moving the browsers dir reinstalls Chromium, without re-resolving pip", () => {
+    const requirements = writeRequirements("browsers.txt", "playwright==1.63.0\n");
+    const venv = path.join(tmpDir, "browsers-venv");
+    const first = path.join(tmpDir, "browsers-a");
+    const second = path.join(tmpDir, "browsers-b");
+    assert.equal(install(["--venv", venv, "--requirements", requirements, "--browsers", first, "--uv", stubUv]).status, 0);
+    resetRuns();
+
+    const res = install(["--venv", venv, "--requirements", requirements, "--browsers", second, "--uv", stubUv, "--json"]);
+    assert.equal(res.status, 0, res.out);
+    assert.deepEqual(JSON.parse(res.out).installed, ["chromium"]);
+    assert.deepEqual(uvRuns(), [], "no pip resolve");
+    assert.equal(pyRuns().map((l) => JSON.parse(l))[0].browsers, second);
+  });
 });
 
 describe("python venv: failures", () => {
@@ -151,6 +171,6 @@ describe("python venv: failures", () => {
     const second = install(["--venv", venv, "--requirements", requirements, "--uv", stubUv, "--json"], { STUB_PY_EXIT: "1" });
     assert.equal(second.status, 0, second.out);
     assert.deepEqual(uvRuns(), [], "no pip resolve");
-    assert.deepEqual(pyRuns().map((l) => JSON.parse(l)), [["-m", "playwright", "install", "chromium"]]);
+    assert.deepEqual(pyRuns().map((l) => JSON.parse(l).args), [["-m", "playwright", "install", "chromium"]]);
   });
 });

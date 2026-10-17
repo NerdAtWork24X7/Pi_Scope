@@ -4,12 +4,20 @@
  *
  * Pi Scope ships Python-dependent elements (the `web_fetch` extension, the
  * `video-creator` skill). Instead of each one bootstrapping its own `.venv`,
- * they all share one environment in the user's data dir — `~/.pi-scope/.venv` —
- * built with `uv` from the single requirements file this script owns
- * (apps/scope-desktop/pi-venv/requirements.txt).
+ * they all share one environment beside the `pi` agent dir — `~/.pi-scope/.venv`
+ * under Pi Scope, `~/.pi/.venv` under a global `pi` — built with `uv` from the
+ * single requirements file this script owns
+ * (apps/scope-desktop/pi-venv/requirements.txt). When the set includes
+ * playwright, its Chromium build is installed beside it in the same base dir's
+ * `playwright-browsers` — the one dir the Node `browser` extension and the
+ * Python elements share — instead of Playwright's default `~/.cache/ms-playwright`.
  *
- * Elements find it through `SCOPE_PYTHON_VENV` (pinned by agent-dir.ts, the `pi`
- * shim and the chat child env) or by the well-known default path.
+ * The base dir is derived from the agent dir (`SCOPE_AGENT_DIR` /
+ * `PI_CODING_AGENT_DIR`, falling back to Pi Scope's `~/.pi-scope/agent`), so the
+ * same defaults serve both Pi Scope and a global `pi`. Elements find the venv
+ * through `SCOPE_PYTHON_VENV` (pinned by agent-dir.ts, the `pi` shim and the chat
+ * child env) or by the well-known default path; the browsers dir is advertised
+ * through `PLAYWRIGHT_BROWSERS_PATH` the same way.
  *
  * Cheapest path first: a stamp beside the venv records the requirements file's
  * content hash; when it matches and the interpreter exists, the install is
@@ -27,13 +35,15 @@
  *
  *   node pi-python-install.mjs [options]
  *
- *     --venv <dir>          venv to build   [default: SCOPE_PYTHON_VENV,
- *                                            ~/.pi-scope/.venv]
+ *     --venv <dir>          venv to build   [default: SCOPE_PYTHON_VENV, else
+ *                                            <agentDir>/../.venv]
  *     --requirements <file> what to install  [default: pi-venv/requirements.txt
  *                                            beside this script]
  *     --uv <bin>            uv launcher      [default: PATH, then well-known
  *                                            install dirs]
  *     --python <version>    interpreter for `uv venv` [default: 3.12]
+ *     --browsers <dir>      Playwright browsers [default: PLAYWRIGHT_BROWSERS_PATH,
+ *                                            else <agentDir>/../playwright-browsers]
  *     --json                machine-readable report on stdout
  *     -h, --help            this text
  *
@@ -93,19 +103,39 @@ function resolveUv(explicit) {
 
 function usage() {
   process.stdout.write(
-    "Create and refresh Pi Scope's shared Python venv (~/.pi-scope/.venv)\n" +
-    "from pi-venv/requirements.txt, using uv.\n\n" +
+    "Create and refresh the shared Python venv (~/.pi-scope/.venv under Pi Scope,\n" +
+    "~/.pi/.venv under a global pi) from pi-venv/requirements.txt, using uv, plus\n" +
+    "its Playwright browsers.\n\n" +
     "  node pi-python-install.mjs [--venv <dir>] [--requirements <file>]\n" +
-    "                             [--uv <bin>] [--python <version>] [--json]\n",
+    "                             [--uv <bin>] [--python <version>]\n" +
+    "                             [--browsers <dir>] [--json]\n",
   );
+}
+
+/** Pi Scope's data dir — the parent of the `pi` agent dir. Under Pi Scope that
+ *  is ~/.pi-scope; under a global `pi` the agent dir defaults to ~/.pi/agent, so
+ *  deriving here lets one set of defaults serve both. Resolves like agent-dir.ts
+ *  (SCOPE_AGENT_DIR, Pi Scope's own override, wins so the built venv always
+ *  matches what the server pins), then PI_CODING_AGENT_DIR (what pi itself
+ *  reads; point the installer at a global pi with it), then Pi Scope's own
+ *  default. */
+function scopeBaseDir() {
+  const agentDir = (process.env.SCOPE_AGENT_DIR || process.env.PI_CODING_AGENT_DIR || "").trim()
+    || path.join(os.homedir(), ".pi-scope", "agent");
+  return path.dirname(agentDir);
 }
 
 // ── Arguments ───────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
+  const base = scopeBaseDir();
   const opts = {
-    venv: (process.env.SCOPE_PYTHON_VENV || "").trim() || path.join(os.homedir(), ".pi-scope", ".venv"),
+    venv: (process.env.SCOPE_PYTHON_VENV || "").trim() || path.join(base, ".venv"),
     requirements: DEFAULT_REQUIREMENTS,
+    // One Playwright browsers dir shared by the Node and Python elements,
+    // beside the agent dir (agent-dir.ts computes the same default).
+    browsers: (process.env.PLAYWRIGHT_BROWSERS_PATH || "").trim()
+      || path.join(base, "playwright-browsers"),
     uv: "",
     python: "3.12",
     json: false,
@@ -115,6 +145,7 @@ function parseArgs(argv) {
     switch (argv[i]) {
       case "--venv": opts.venv = need("--venv"); break;
       case "--requirements": opts.requirements = need("--requirements"); break;
+      case "--browsers": opts.browsers = need("--browsers"); break;
       case "--uv": opts.uv = need("--uv"); break;
       case "--python": opts.python = need("--python"); break;
       case "--json": opts.json = true; break;
@@ -124,16 +155,18 @@ function parseArgs(argv) {
   }
   opts.venv = path.resolve(opts.venv);
   opts.requirements = path.resolve(opts.requirements);
+  opts.browsers = path.resolve(opts.browsers);
   return opts;
 }
 
 // ── Install ─────────────────────────────────────────────────────────────────
 
 /** Run a command. `--json` captures output so the report on stdout stays
- *  parseable; otherwise the child writes straight to the log. */
-function run(opts, cmd, args) {
+ *  parseable; otherwise the child writes straight to the log. `extraEnv` layers
+ *  on top of the inherited environment (the Playwright browsers dir). */
+function run(opts, cmd, args, extraEnv = null) {
   const res = spawnSync(cmd, args, {
-    env: process.env,
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
     stdio: opts.json ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (res.error) return { ok: false, note: `could not run ${cmd}: ${res.error.message}` };
@@ -158,6 +191,7 @@ const report = {
   python: py,
   requirements: opts.requirements,
   requirementsHash: reqHash,
+  browsers: opts.browsers,
   installed: [],
   upToDate: false,
 };
@@ -168,12 +202,14 @@ const emit = (extra = {}) => {
 };
 
 // Fast path: interpreter present, the requirements are unchanged since the last
-// successful install, and — when the set needs it — Chromium is on disk. A
-// failed Chromium download leaves the stamp's `chromium` false so the next
-// launch retries the browser without re-resolving the Python packages.
+// successful install, and — when the set needs it — Chromium is already in
+// `opts.browsers`. A failed download leaves the stamp's `chromium` false (and a
+// relocated browsers dir changes `browsers`), so the next launch retries the
+// browser without re-resolving the Python packages.
 const requirementsMatch = stamp?.requirementsHash === reqHash;
 const needsPlaywright = /^\s*playwright\b/m.test(fs.readFileSync(opts.requirements, "utf8"));
-if (isFile(py) && requirementsMatch && (!needsPlaywright || stamp?.chromium === true)) {
+const chromiumReady = !needsPlaywright || (stamp?.chromium === true && stamp?.browsers === opts.browsers);
+if (isFile(py) && requirementsMatch && chromiumReady) {
   emit({ upToDate: true });
   info(`the shared Python venv is up to date: ${opts.venv}`);
   process.exit(0);
@@ -200,12 +236,15 @@ if (!venvExisted || !requirementsMatch) {
   report.installed.push("requirements");
 }
 
-// Chromium for Playwright, only when playwright is part of the set. A failure
-// here is not fatal: a browser build may already be cached elsewhere and
-// PLAYWRIGHT_BROWSERS_PATH is honoured through the inherited env.
+// Chromium for Playwright, only when playwright is part of the set. It lands in
+// Pi Scope's own browsers dir so the Node `browser` extension and the Python
+// elements share one build. A failure here is not fatal: a browser build may
+// already be cached elsewhere.
 let chromium = !needsPlaywright;
 if (needsPlaywright) {
-  const res = run(opts, py, ["-m", "playwright", "install", "chromium"]);
+  const res = run(opts, py, ["-m", "playwright", "install", "chromium"], {
+    PLAYWRIGHT_BROWSERS_PATH: opts.browsers,
+  });
   chromium = res.ok;
   if (res.ok) report.installed.push("chromium");
   else info(`Chromium could not be installed (a cached build may still work) — ${res.note}`);
@@ -214,7 +253,7 @@ if (needsPlaywright) {
 try {
   fs.writeFileSync(
     stampFile,
-    JSON.stringify({ requirementsHash: reqHash, python: py, chromium }, null, 2) + "\n",
+    JSON.stringify({ requirementsHash: reqHash, python: py, browsers: opts.browsers, chromium }, null, 2) + "\n",
   );
 } catch (err) {
   info(`could not write ${stampFile} (the venv still works): ${err.message}`);

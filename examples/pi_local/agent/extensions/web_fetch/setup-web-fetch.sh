@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Standalone setup for the web-fetch extension package.
-# Installs Python deps into Pi Scope's shared venv (~/.pi-scope/.venv) and
-# ensures the Chromium browser binary is available — no package-local .venv.
+# Installs Python deps into the shared venv beside the `pi` agent dir (under Pi
+# Scope: ~/.pi-scope/.venv; under a global pi: ~/.pi/.venv) and ensures the
+# Chromium browser binary is available — no package-local .venv.
 #
 # Normally the launcher builds the shared venv (pi-python-install.mjs); this is
 # the manual / fallback path. POSIX/macOS. On native Windows run
@@ -9,9 +10,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"   # this package directory
 
-# The one venv every Python-dependent element shares (SCOPE_PYTHON_VENV names
-# it when Pi Scope launched us; the default covers a manual run).
-VENV="${SCOPE_PYTHON_VENV:-$HOME/.pi-scope/.venv}"
+# The one venv every Python-dependent element shares. Derive its base from the
+# agent dir (PI_CODING_AGENT_DIR is set by Pi Scope's shim; a global `pi` uses
+# ~/.pi/agent by default) so the same script works under either. SCOPE_PYTHON_VENV
+# names the venv directly when Pi Scope launched us.
+AGENT_DIR="${PI_CODING_AGENT_DIR:-${SCOPE_AGENT_DIR:-$HOME/.pi/agent}}"
+BASE_DIR="$(dirname "$AGENT_DIR")"
+VENV="${SCOPE_PYTHON_VENV:-$BASE_DIR/.venv}"
+# Keep Playwright's Chromium in the shared browsers dir (not ~/.cache/ms-playwright)
+# so it matches what the launcher installs.
+export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$BASE_DIR/playwright-browsers}"
 
 # The venv interpreter lives in bin/ on POSIX but Scripts/ on Windows, so a
 # Windows venv reached through Git-Bash/MSYS resolves too.

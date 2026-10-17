@@ -131,8 +131,9 @@ server the machine has listening, each with its own Kill button. See
 **What does the first run download?** Everything the app needs — Electron
 (desktop mode), the build tooling, Pi Scope's own `pi` coding agent with its
 runtime packages — into one shared project in `~/.pi-scope/pi` (~1 GB) — plus the
-shared Python environment in `~/.pi-scope/.venv` that the `web-fetch` extension
-and `video-creator` skill share. The
+shared Python environment (`~/.pi-scope/.venv`) and Playwright browsers
+(`~/.pi-scope/playwright-browsers`) that the `web-fetch` extension,
+`video-creator` skill and the `browser` extension share. The
 checkout itself stays free of `node_modules`. It happens once.
 
 **Uninstalling?** Delete the checkout, then remove `~/.pi-scope/` for a clean slate — the database,

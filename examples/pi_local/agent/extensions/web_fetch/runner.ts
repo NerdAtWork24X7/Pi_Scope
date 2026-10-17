@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "fs";
 import { join, dirname, delimiter } from "path";
 import { homedir } from "node:os";
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { SerpRecord } from "./search";
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -100,12 +101,13 @@ function resolveUvBin(): string {
 }
 const UV_BIN = resolveUvBin();
 
-/** Pi Scope's shared Python venv (see apps/scope-desktop/pi-python-install.mjs):
- *  the `web_fetch` requirements are installed there, so prefer its interpreter
- *  over a per-call ephemeral uv environment. `SCOPE_PYTHON_VENV` names it; the
- *  well-known default covers a process that never saw the variable. */
+/** The shared Python venv (see apps/scope-desktop/pi-python-install.mjs): the
+ *  `web_fetch` requirements are installed there, so prefer its interpreter over
+ *  a per-call ephemeral uv environment. `SCOPE_PYTHON_VENV` names it when Pi
+ *  Scope launched the agent; otherwise it is derived from the agent dir, so the
+ *  same extension works under a global `pi` (whose agent dir is ~/.pi/agent). */
 function sharedVenvPython(): string | null {
-	const venv = process.env.SCOPE_PYTHON_VENV || join(homedir(), ".pi-scope", ".venv");
+	const venv = process.env.SCOPE_PYTHON_VENV || join(dirname(getAgentDir()), ".venv");
 	const py = process.platform === "win32"
 		? join(venv, "Scripts", "python.exe")
 		: join(venv, "bin", "python3");

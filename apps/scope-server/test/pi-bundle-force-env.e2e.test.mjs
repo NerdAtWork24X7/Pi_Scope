@@ -87,6 +87,11 @@ describe("bundled pi: the force-loaded extension is named in the environment", {
     // Never let an operator override win: this test is about the bundled path.
     process.env.SCOPE_PI_BIN = "";
     process.env.SCOPE_PYTHON_VENV = "";
+    // A populated browsers dir, so agent-dir.ts advertises
+    // PLAYWRIGHT_BROWSERS_PATH (it deliberately leaves the variable unset until a
+    // build is actually present, so an unfinished install can't hide the user's).
+    process.env.PLAYWRIGHT_BROWSERS_PATH = "";
+    fs.mkdirSync(path.join(tmpDir, "playwright-browsers", "chromium-9999"), { recursive: true });
     ({ PI_LAUNCH, PI_BUNDLE } = await import(new URL("../pi-bundle.ts", import.meta.url).href));
   });
 
@@ -139,6 +144,17 @@ describe("bundled pi: the force-loaded extension is named in the environment", {
     const shim = fs.readFileSync(PI_BUNDLE.bin, "utf8");
     assert.ok(shim.includes("SCOPE_PYTHON_VENV"), `the shim exports the venv variable:\n${shim}`);
     assert.ok(shim.includes(scopeVenv), `the shim names the shared venv (${scopeVenv}):\n${shim}`);
+  });
+
+  test("the shim names Pi Scope's Playwright browsers dir", () => {
+    // Chromium installs into ~/.pi-scope/playwright-browsers; the shim names it so
+    // a shim-launched pi (e.g. typed into the in-app Terminal) finds the same
+    // browser the Python elements use.
+    const browsers = path.join(tmpDir, "playwright-browsers");
+    assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH, browsers);
+    const shim = fs.readFileSync(PI_BUNDLE.bin, "utf8");
+    assert.ok(shim.includes("PLAYWRIGHT_BROWSERS_PATH"), `the shim exports the browsers variable:\n${shim}`);
+    assert.ok(shim.includes(browsers), `the shim names Pi Scope's browsers dir (${browsers}):\n${shim}`);
   });
 
   test("the child really discovers extensions in the agent dir", async () => {

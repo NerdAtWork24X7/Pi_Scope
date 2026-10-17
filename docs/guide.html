@@ -190,8 +190,9 @@ cd Pi_Scope &amp;&amp; ./pi-scope              # desktop app (Electron window)</
         fetches what it needs on first launch: the workspace dependencies, Electron for the desktop
         window, Pi Scope's own copy of the <code>pi</code> coding agent (~220&nbsp;MB under
         <code>~/.pi-scope/pi</code>), and the shared Python environment
-        (<code>~/.pi-scope/.venv</code>, built with <code>uv</code>) that the <code>web-fetch</code>
-        extension and <code>video-creator</code> skill share. Node 24+ is the only prerequisite. Prefer the terminal or a
+        (<code>~/.pi-scope/.venv</code>, built with <code>uv</code>) plus the Playwright browsers
+        (<code>~/.pi-scope/playwright-browsers</code>) that the <code>web-fetch</code> extension,
+        <code>video-creator</code> skill and <code>browser</code> extension share. Node 24+ is the only prerequisite. Prefer the terminal or a
         server? The same launcher runs headless — <code>./pi-scope --web</code> opens the WebUI in
         your browser, <code>./pi-scope --server</code> stays in the foreground; every mode and flag
         is listed under <a href="#launcher">Launcher flags</a>. On a machine with no display (a
@@ -583,11 +584,22 @@ node docs/seed-demo.mjs</code></pre>
             </tr>
             <tr>
               <th scope="row"><code>SCOPE_PYTHON_VENV</code></th>
-              <td style="text-align:left"><code>~/.pi-scope/.venv</code></td>
+              <td style="text-align:left"><code>&lt;agentDir&gt;/../.venv</code></td>
               <td style="text-align:left">The shared Python venv, built with <code>uv</code> on launch by
                 <code>pi-python-install.mjs</code>, for every Python-dependent element (<code>web-fetch</code>,
-                <code>video-creator</code>). Its <code>bin</code> is prepended to the chat/agent
+                <code>video-creator</code>). Derived from the agent dir's parent —
+                <code>~/.pi-scope/.venv</code> under Pi Scope, <code>~/.pi/.venv</code> under a global
+                <code>pi</code>. Its <code>bin</code> is prepended to the chat/agent
                 <code>PATH</code>. Override to relocate it
+              </td>
+            </tr>
+            <tr>
+              <th scope="row"><code>PLAYWRIGHT_BROWSERS_PATH</code></th>
+              <td style="text-align:left"><code>&lt;agentDir&gt;/../playwright-browsers</code></td>
+              <td style="text-align:left">Where Playwright's Chromium build lives. Installed on launch by
+                <code>pi-python-install.mjs</code> and shared by the <code>browser</code> extension and the Python
+                elements. Derived from the agent dir's parent. An inherited value wins; the user's shell rc /
+                Playwright's default cache is used only when Pi Scope's own dir has no build
               </td>
             </tr>
             <tr>

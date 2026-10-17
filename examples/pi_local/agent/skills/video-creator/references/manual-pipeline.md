@@ -151,7 +151,7 @@ mkdir -p tmp/video
   fix: run `scripts/setup.sh` (or set `FFMPEG_BIN`); for a missing browser, `python -m playwright install
   chromium` in the shared venv.
 - **A render dies with a core dump / `SIGBUS`, or imports fail after a crash** → the venv was truncated
-  (interrupted install): `rm -rf "${SCOPE_PYTHON_VENV:-$HOME/.pi-scope/.venv}" && <skill>/scripts/setup.sh`,
+  (interrupted install): `rm -rf "${SCOPE_PYTHON_VENV:-$(dirname "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}")/.venv}" && <skill>/scripts/setup.sh`,
   then re-run `vc clips`.
   Never hand-patch the venv; `vc doctor` verifies the binary actually *runs*.
 - **An edited page does not re-render** → only file:///local targets are fingerprinted into the clip key;

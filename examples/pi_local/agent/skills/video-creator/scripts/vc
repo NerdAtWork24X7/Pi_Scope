@@ -4,10 +4,12 @@
 set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The one venv every Python-dependent element shares (SCOPE_PYTHON_VENV names it
-# when Pi Scope launched us; the default covers a manual run). The interpreter
-# lives in bin/ on POSIX but Scripts/ on Windows.
-VENV="${SCOPE_PYTHON_VENV:-$HOME/.pi-scope/.venv}"
+# The one venv every Python-dependent element shares. Derive its base from the
+# agent dir (PI_CODING_AGENT_DIR is set by Pi Scope's shim; a global `pi` uses
+# ~/.pi/agent by default) so the same launcher works under either. The
+# interpreter lives in bin/ on POSIX but Scripts/ on Windows.
+AGENT_DIR="${PI_CODING_AGENT_DIR:-${SCOPE_AGENT_DIR:-$HOME/.pi/agent}}"
+VENV="${SCOPE_PYTHON_VENV:-$(dirname "$AGENT_DIR")/.venv}"
 if [ -x "$VENV/Scripts/python.exe" ]; then
   PY="$VENV/Scripts/python.exe"
 else

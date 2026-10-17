@@ -11,7 +11,7 @@
 import { Type } from "@mariozechner/pi-ai";
 import { getAgentDir, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
 import { homedir, tmpdir } from "os";
 import { createRequire } from "module";
 import { pathToFileURL } from "url";
@@ -302,7 +302,9 @@ function interop(mod: any, namedExport?: string): any {
 
 /**
  * Locate the Chromium binary inside PLAYWRIGHT_BROWSERS_PATH (default
- * $HOME/playwright-browsers). Prefers the revision this playwright build wants
+ * <agentDir>/../playwright-browsers — ~/.pi-scope/playwright-browsers under Pi
+ * Scope, ~/.pi/playwright-browsers under a global pi). Prefers the revision
+ * this playwright build wants
  * (read from its own browsers.json), else the newest installed one. Returns
  * null when nothing is installed, so the caller can fall back to playwright's
  * own registry lookup.
@@ -312,7 +314,7 @@ function interop(mod: any, namedExport?: string): any {
  * silently fall back to the registry lookup instead of pinning the revision.
  */
 function resolveChromiumExecutable(): string | null {
-  const root = process.env.PLAYWRIGHT_BROWSERS_PATH || join(homedir(), "playwright-browsers");
+  const root = process.env.PLAYWRIGHT_BROWSERS_PATH || join(dirname(getAgentDir()), "playwright-browsers");
   if (!existsSync(root)) return null;
 
   const exeOf = (dir: string) => {

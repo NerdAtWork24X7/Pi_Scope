@@ -1,5 +1,6 @@
 # Standalone setup for the web-fetch extension package (native Windows).
-# Installs Python deps into Pi Scope's shared venv (%USERPROFILE%\.pi-scope\.venv)
+# Installs Python deps into the shared venv beside the `pi` agent dir (under Pi
+# Scope: %USERPROFILE%\.pi-scope\.venv; under a global pi: %USERPROFILE%\.pi\.venv)
 # and ensures the Chromium browser binary is available - no package-local .venv.
 #
 # Normally the launcher builds the shared venv (pi-python-install.mjs); this is
@@ -11,8 +12,12 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 Set-Location -LiteralPath $PSScriptRoot   # this package directory
 
-# The one venv every Python-dependent element shares.
-$Venv = if ($env:SCOPE_PYTHON_VENV) { $env:SCOPE_PYTHON_VENV } else { Join-Path $env:USERPROFILE ".pi-scope\.venv" }
+# The one venv every Python-dependent element shares. Derive its base from the
+# agent dir so the same script works under Pi Scope and a global pi.
+$AgentDir = if ($env:PI_CODING_AGENT_DIR) { $env:PI_CODING_AGENT_DIR } elseif ($env:SCOPE_AGENT_DIR) { $env:SCOPE_AGENT_DIR } else { Join-Path $env:USERPROFILE ".pi\agent" }
+$BaseDir = Split-Path -Parent $AgentDir
+$Venv = if ($env:SCOPE_PYTHON_VENV) { $env:SCOPE_PYTHON_VENV } else { Join-Path $BaseDir ".venv" }
+if (-not $env:PLAYWRIGHT_BROWSERS_PATH) { $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $BaseDir "playwright-browsers" }
 $Py = Join-Path $Venv "Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath $Py)) {

@@ -32,7 +32,7 @@ import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spa
 // PATH (force-loading the Pi Scope extension). Must be imported before PI_BIN is
 // used so chat subprocesses launch the bundled agent, not a global install.
 import { PI_BIN, PI_LAUNCH } from "./pi-bundle.ts";
-import { AGENT_PI_DIR, SCOPE_VENV_DIR } from "./agent-dir.ts";
+import { AGENT_PI_DIR, SCOPE_BROWSERS_DIR, SCOPE_VENV_DIR, holdsPlaywrightBrowser } from "./agent-dir.ts";
 
 const ENCODER = new TextEncoder();
 
@@ -457,30 +457,19 @@ function venvBinDirs(cwd: string): string[] {
   return dirs;
 }
 
-/** True when `dir` holds an installed Playwright browser build (a subdirectory
- *  named like chromium-<build>, firefox-<build>, webkit-<build>,
- *  headless_shell-<build>, or chromium_headless_shell-<build>). Used so we
- *  only adopt a candidate browsers dir that will actually work — never a stale
- *  rc path that would break an otherwise-fine default resolution. */
-function looksLikePlaywrightBrowsersDir(dir: string): boolean {
-  try {
-    return fs.readdirSync(dir).some((name) =>
-      /^(chromium|firefox|webkit|headless_shell|chromium_headless_shell)-/.test(name)
-    );
-  } catch {
-    return false;
-  }
-}
-
 /** Resolve the Playwright browsers dir the way the user's interactive terminal
  *  would, so chat-spawned pi subprocesses see the same Chromium as the
  *  terminal. Order:
- *  1. The server's own env, when the launcher already carried it through.
+ *  1. The server's own env, when the launcher already carried it through
+ *     (agent-dir.ts sets it from Pi Scope's own dir once that holds a build).
  *  2. An `export PLAYWRIGHT_BROWSERS_PATH=...` (or bare assignment) in the
  *     user's shell rc files — the typical setup for a custom browser dir
  *     (e.g. `~/.zshrc` → `export PLAYWRIGHT_BROWSERS_PATH=$HOME/playwright-browsers`).
  *     Quotes are stripped and `$HOME`/`${HOME}`/`~` expanded.
- *  3. Playwright's own default cache locations, when they actually hold a
+ *  3. Pi Scope's own browsers dir (`~/.pi-scope/playwright-browsers`, filled by
+ *     `pi-python-install.mjs`) — preferred over a stray system cache so the
+ *     self-contained install is what runs.
+ *  4. Playwright's own default cache locations, when they actually hold a
  *     browser build (Linux `~/.cache/ms-playwright`, macOS
  *     `~/Library/Caches/ms-playwright`, Windows `%LOCALAPPDATA%\ms-playwright`).
  *  Returns null when nothing usable is found, so the child keeps its inherited
@@ -492,16 +481,17 @@ function resolvePlaywrightBrowsersPath(): string | null {
   // First rc assignment that actually points at an installed browser build wins.
   for (const val of readShellEnvValues("PLAYWRIGHT_BROWSERS_PATH")) {
     const dir = expandShellPath(val);
-    if (looksLikePlaywrightBrowsersDir(dir)) return dir;
+    if (holdsPlaywrightBrowser(dir)) return dir;
   }
   const candidates = [
+    SCOPE_BROWSERS_DIR,
     process.env.XDG_CACHE_HOME ? path.join(process.env.XDG_CACHE_HOME, "ms-playwright") : "",
     path.join(home, ".cache", "ms-playwright"),
     path.join(home, "Library", "Caches", "ms-playwright"),
     path.join(home, "AppData", "Local", "ms-playwright"),
   ];
   for (const dir of candidates) {
-    if (dir && looksLikePlaywrightBrowsersDir(dir)) return dir;
+    if (dir && holdsPlaywrightBrowser(dir)) return dir;
   }
   return null;
 }
@@ -528,9 +518,10 @@ function resolvePlaywrightBrowsersPath(): string | null {
  *     dies instantly with "exec: node: not found" (stderr) and every chat
  *     fails with the generic "process closed".
  *
- *  Beyond PATH, PLAYWRIGHT_BROWSERS_PATH is restored from the user's shell rc
- *  (see resolvePlaywrightBrowsersPath) so pi's web-fetch-style tools find the
- *  Chromium binaries exactly like they do in the terminal.
+ *  Beyond PATH, PLAYWRIGHT_BROWSERS_PATH is restored from Pi Scope's own
+ *  browsers dir or the user's shell rc (see resolvePlaywrightBrowsersPath) so
+ *  pi's web-fetch-style tools find the Chromium binaries exactly like they do in
+ *  the terminal.
  *
  *  API keys saved on the Settings page are injected too (see readStoredKeys),
  *  so pi extensions that read process.env (omni-router, kilo,
@@ -571,12 +562,13 @@ function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
     if (!parts.includes(dir)) parts.unshift(dir);
   }
   env.PATH = parts.join(path.delimiter);
-  // Playwright browser binaries (pi's web-fetch / crawl tools): the GUI
-  // session that launched the server never sources the user's shell rc, so a
-  // PLAYWRIGHT_BROWSERS_PATH exported there (e.g. a custom ~/playwright-browsers
-  // instead of the default ~/.cache/ms-playwright) is missing from the child
-  // env. Without it playwright can import fine (venv PATH fix above) but cannot
-  // find Chromium, so web-fetch fails in Chat while working in the terminal.
+  // Playwright browser binaries (pi's web-fetch / crawl tools): Pi Scope keeps
+  // its own builds in ~/.pi-scope/playwright-browsers (installed by
+  // pi-python-install.mjs), and a GUI-launched server never sources the shell rc
+  // that might export a different PLAYWRIGHT_BROWSERS_PATH. Resolve one and hand
+  // it to the child so playwright can find Chromium — otherwise it imports fine
+  // (venv PATH fix above) but web-fetch fails in Chat while working in a
+  // terminal that sourced the rc.
   const pwBrowsers = resolvePlaywrightBrowsersPath();
   if (pwBrowsers) env.PLAYWRIGHT_BROWSERS_PATH = pwBrowsers;
   // Extensions that resolve their own npm packages at run time (the `browser`

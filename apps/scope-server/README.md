@@ -44,7 +44,8 @@ wherever the agent was started from.
 | `SCOPE_PROVIDER_CACHE_FILE` | `<agentDir>/../Provider_Cache/model_provider.json` | Override where the kilo / tokenharbor extension model cache is read from. The default is derived from the agent dir's parent, which is where the extension's `model-cache.ts` writes it (`~/.pi-scope/Provider_Cache` for Pi Scope, `~/.pi/Provider_Cache` for a global pi) |
 | `SCOPE_SKILLS_DIR` | `<agentDir>/skills` | Override the skills directory scanned for the agent-team sidebar |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
-| `SCOPE_PYTHON_VENV` | `~/.pi-scope/.venv` | The shared Python venv (built with `uv` by `apps/scope-desktop/pi-python-install.mjs`) for every Python-dependent element. Its `bin` is prepended to the chat/agent `PATH`. Override to relocate it |
+| `SCOPE_PYTHON_VENV` | `<agentDir>/../.venv` | The shared Python venv (built with `uv` by `apps/scope-desktop/pi-python-install.mjs`) for every Python-dependent element. The default is derived from the agent dir's parent (`~/.pi-scope/.venv` for Pi Scope, `~/.pi/.venv` for a global pi). Its `bin` is prepended to the chat/agent `PATH`. Override to relocate it |
+| `PLAYWRIGHT_BROWSERS_PATH` | `<agentDir>/../playwright-browsers` | Where Playwright's Chromium build lives (installed by `pi-python-install.mjs`). Derived from the agent dir's parent (`~/.pi-scope/playwright-browsers` for Pi Scope, `~/.pi/playwright-browsers` for a global pi) so the Node `browser` extension and the Python elements share one build. An inherited value wins |
 | `SCOPE_KEYS_JSON` | `<agentDir>/api-keys.json` | API keys entered in Settings → API Keys (owner-only file, mode 0600) |
 | `SCOPE_PI_REGISTRY` | `https://registry.npmjs.org` | npm registry the Settings → Update tab asks for the latest bundled `pi` version (point at a mirror for air-gapped installs) |
 | `SCOPE_NPM_BIN` | `npm` | `npm` executable the Update tab runs to install a newer bundled `pi` |
@@ -59,14 +60,15 @@ can't delay or corrupt the chat protocol. The shell's own stdout is discarded an
 pi's NDJSON stream is routed to a dedicated fd, so rc banners or prompt themes
 can't corrupt the RPC stream either.
 
-On top of that they get the workspace's Python venv bin dirs prepended to `PATH`,
-and `PLAYWRIGHT_BROWSERS_PATH` restored from the user's shell rc files (or
-Playwright's default cache dirs) when the server env lacks it — so tools like
-`web-fetch` find the venv's `playwright` and its Chromium browser exactly as they
-do in the terminal, even when the server was launched from a GUI session that
-never sourced the shell rc. The `PATH` prefix is re-applied inside the shell too,
-so an rc file that reassigns `PATH` instead of prepending to it doesn't drop
-those dirs.
+On top of that they get the workspace's Python venv bin dirs (and Pi Scope's
+shared venv, `~/.pi-scope/.venv`) prepended to `PATH`, and
+`PLAYWRIGHT_BROWSERS_PATH` set to Pi Scope's own browsers dir
+(`~/.pi-scope/playwright-browsers`, or the user's shell rc / Playwright's default
+cache when that is what actually holds a build) — so tools like `web-fetch` find
+the venv's `playwright` and its Chromium browser exactly as they do in the
+terminal, even when the server was launched from a GUI session that never sourced
+the shell rc. The `PATH` prefix is re-applied inside the shell too, so an rc file
+that reassigns `PATH` instead of prepending to it doesn't drop those dirs.
 
 API keys entered in **Settings → API Keys** are stored in Pi Scope's own agent
 dir (`~/.pi-scope/agent/api-keys.json`, mode 0600) and injected into

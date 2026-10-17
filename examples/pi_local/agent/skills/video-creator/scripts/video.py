@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """video-creator skill CLI — HTML scenes -> browser recording -> FFmpeg -> MP4.
 
-Run with the shared Pi Scope venv (`$SCOPE_PYTHON_VENV`, default
-`~/.pi-scope/.venv`), e.g. `"${SCOPE_PYTHON_VENV:-$HOME/.pi-scope/.venv}/bin/python" <skill>/scripts/video.py`.
+Run with the shared Python venv (`$SCOPE_PYTHON_VENV`; default: `.venv` beside
+the `pi` agent dir — `~/.pi-scope/.venv` under Pi Scope, `~/.pi/.venv` under a
+global `pi`), e.g. `"${SCOPE_PYTHON_VENV:-$(dirname "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}")/.venv}/bin/python" <skill>/scripts/video.py`.
 The `vc` launcher resolves that interpreter for you.
 
 Workflow (see SKILL.md):  next | draft | voice | check | probe | clips | merge | fetch | make

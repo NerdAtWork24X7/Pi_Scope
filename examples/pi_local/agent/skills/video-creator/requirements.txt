@@ -1,6 +1,7 @@
 # video-creator skill — Python toolchain (pinned, resolved 2026-10-04 on Python 3.12)
-# Install: scripts/setup.sh -> installs these into Pi Scope's shared venv
-# (~/.pi-scope/.venv), which every Python-dependent element reuses.
+# Install: scripts/setup.sh -> installs these into the shared venv (the `.venv`
+# beside the `pi` agent dir: ~/.pi-scope/.venv under Pi Scope, ~/.pi/.venv under
+# a global pi), which every Python-dependent element reuses.
 # Only these two are imported by the pipeline.
 
 imageio-ffmpeg==0.6.0     # bundled static FFmpeg 7.0.2 (libx264, aac, libass, loudnorm) — the only encoder used
