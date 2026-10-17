@@ -45,11 +45,21 @@
  * nothing to do"); 1 means something is still missing, with the reason on
  * stderr. A missing extension dependency is never fatal to the app: the
  * extension that needs it reports that itself when it runs.
+ *
+ * The install itself is made to survive what a detached, often-concurrent
+ * process runs into. Every entry point starts this script in the background and
+ * nothing prevents two launches from overlapping, so a lock file serialises the
+ * `npm install`s against the one shared tree; and because an interrupted npm run
+ * can leave `node_modules` half-removed (the `ENOTEMPTY` a later run hits while
+ * it re-links the tree), a transient failure is retried once from a clean tree.
+ * This never hides a real failure: a genuine error is reported exactly as before
+ * (exit 1 with the reason), it is just retried from a known-good state first.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 /** Packages pi provides to extensions itself — never installed from here. */
 const HOST_PACKAGES = [/^@earendil-works\/pi-/, /^@mariozechner\/pi-/, /^typebox$/];
@@ -65,6 +75,7 @@ const isHostProvided = (spec) => HOST_PACKAGES.some((pattern) => pattern.test(sp
 const dedupe = (values) => [...new Set(values)];
 const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const isFile = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Package-manager argument sets — mirrors pi-bundle-install.mjs. */
 const PM_ARGS = {
@@ -280,19 +291,141 @@ function shellQuote(value) {
     : `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-/** Run the package manager's install in `dir`. Returns true on success. */
-function runInstall(pm, explicitBin, dir) {
-  const npmCli = !explicitBin && pm === "npm" ? npmCliBeside(process.execPath) : null;
-  for (const args of PM_ARGS[pm]) {
-    const res = npmCli
-      ? spawnSync(process.execPath, [npmCli, ...args], { cwd: dir, stdio: "inherit" })
-      : spawnSync(`${shellQuote(explicitBin || pm)} ${args.join(" ")}`, { cwd: dir, stdio: "inherit", shell: true });
-    const who = npmCli ? `node ${npmCli}` : (explicitBin || pm);
-    if (res.error) { console.error(`pi-extensions-install: could not run ${who}: ${res.error.message}`); return false; }
-    // `bun pm trust` exits 1 when nothing is left to trust — not a failure.
-    if (res.status !== 0 && !(pm === "bun" && args[0] === "pm")) return false;
+// ── Concurrency and recovery ────────────────────────────────────────────────
+
+/**
+ * The lock that serialises installs against one bundled project, and how long a
+ * wait for it may last. A stale lock (its owner died) is reclaimed rather than
+ * waited on, and `SCOPE_EXTENSIONS_LOCK_WAIT_MS` shortens the wait in tests.
+ */
+const LOCK_NAME = ".installing.lock";
+const LOCK_STALE_MS = 10 * 60_000;
+const lockWaitMs = () => {
+  const raw = Number(process.env.SCOPE_EXTENSIONS_LOCK_WAIT_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 120_000;
+};
+
+/**
+ * Take the bundle's install lock, waiting for a live holder to finish and
+ * reclaiming one whose owner is gone.
+ *
+ * Two launches of Pi Scope both start this installer in the background, and two
+ * `npm install`s sharing one `node_modules` corrupt each other (npm removes a
+ * directory another process is still reading). A waiting caller can make the
+ * same finding as the holder once it is done — `missing` is a filesystem check —
+ * so the holder owns the install and everyone else just waits for it. Returns
+ * false when the lock is still held after the wait (or cannot be created at
+ * all), which is not a failure: the caller verifies afterwards either way.
+ */
+async function acquireInstallLock(bundle) {
+  const file = path.join(bundle, LOCK_NAME);
+  const started = Date.now();
+  for (let warned = false; ;) {
+    try {
+      const fd = fs.openSync(file, "wx");
+      fs.writeSync(fd, `${process.pid}\n`);
+      fs.closeSync(fd);
+      return true;
+    } catch (err) {
+      // Nothing below can help when the lock is uncreatable for another reason
+      // (a read-only directory, say): let the verification report the result.
+      if (err.code !== "EEXIST") return false;
+    }
+    const age = (() => { try { return Date.now() - fs.statSync(file).mtimeMs; } catch { return 0; } })();
+    const owner = (() => { try { return fs.readFileSync(file, "utf8").trim(); } catch { return "?"; } })();
+    const dead = age > LOCK_STALE_MS || (Number(owner) > 0 && !isAlive(Number(owner)));
+    if (dead) {
+      if (!warned) { info(`stale extension install lock (${file}) — reclaiming it`); warned = true; }
+      try { fs.rmSync(file, { force: true }); } catch { /* the poll below waits it out */ }
+      continue;
+    }
+    if (Date.now() - started >= lockWaitMs()) return false;
+    await sleep(200);
   }
-  return true;
+}
+
+/** Whether a pid names a process that still exists (signal 0 probes without sending). */
+function isAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (err) { return err?.code !== "ESRCH"; }
+}
+
+/** Release the bundle's install lock (best effort — a leftover is reclaimed). */
+function releaseInstallLock(bundle) {
+  try { fs.rmSync(path.join(bundle, LOCK_NAME), { force: true }); } catch { /* nothing to do */ }
+}
+
+/**
+ * Run a package manager once, streaming its output to this process and
+ * returning the exit status (`null` when a signal killed it).
+ *
+ * Streaming rather than buffering matters here: this installer is detached and
+ * its log is the only sign of progress on a first-run download. The captured
+ * text is only used to recognise a retryable failure.
+ */
+function streamInstall(pm, explicitBin, dir, args = PM_ARGS[pm][0]) {
+  const npmCli = !explicitBin && pm === "npm" ? npmCliBeside(process.execPath) : null;
+  return new Promise((resolve) => {
+    const child = npmCli
+      ? spawn(process.execPath, [npmCli, ...args], { cwd: dir })
+      : spawn(`${shellQuote(explicitBin || pm)} ${args.join(" ")}`, { cwd: dir, shell: true });
+    let tail = "";
+    const decoder = new StringDecoder("utf8");
+    const sink = (stream) => (chunk) => {
+      stream.write(chunk);
+      tail = (tail + decoder.write(chunk)).slice(-8192);
+    };
+    child.stdout?.on("data", sink(process.stdout));
+    child.stderr?.on("data", sink(process.stderr));
+    child.on("error", (err) => {
+      const who = npmCli ? `node ${npmCli}` : (explicitBin || pm);
+      console.error(`pi-extensions-install: could not run ${who}: ${err.message}`);
+      resolve({ status: null, output: tail, spawnError: true });
+    });
+    child.on("close", (status) => { tail += decoder.end(); resolve({ status, output: tail }); });
+  });
+}
+
+/**
+ * Exit statuses npm returns for problems a retry from a clean tree can clear.
+ * The tree below is reached only after a run *failed* and only for npm, and a
+ * real error reproduces on the retry — so this recovers an interrupted install
+ * without ever turning a genuine failure into a success.
+ */
+const TRANSIENT_STATUSES = new Set([1, 2, 3, 4, 5]);
+const TRANSIENT_PATTERN = /ENOTEMPTY|ENOTDIR|EBUSY|ENOENT|EACCES|EPERM|EEXIST|reify|tarball|TAR_ENTRY|must be empty|not empty/i;
+
+/** Whether a failed npm run looks like a half-removed tree rather than a real error. */
+function isTransientFailure(pm, result) {
+  if (pm !== "npm" || result.spawnError) return false;
+  if (result.status !== null && !TRANSIENT_STATUSES.has(result.status)) return false;
+  return TRANSIENT_PATTERN.test(result.output);
+}
+
+/** Remove the bundle's package tree so the next install re-links it from scratch. */
+function cleanInstallTree(bundle) {
+  try { fs.rmSync(path.join(bundle, "node_modules"), { recursive: true, force: true }); }
+  catch { /* a locked file: the retry attempts the install anyway */ }
+}
+
+/** Run the package manager's install in `dir`. Returns true on success. */
+async function runInstall(pm, explicitBin, dir) {
+  const first = await streamInstall(pm, explicitBin, dir, PM_ARGS[pm][0]);
+  if (first.status === 0) {
+    // `bun` blocks a package's build scripts until it is trusted; that second
+    // pass is not a reinstall, and the tree is verified from disk afterwards.
+    if (pm !== "bun" || PM_ARGS[pm].length < 2) return true;
+    const trust = await streamInstall(pm, explicitBin, dir, PM_ARGS[pm][1]);
+    // `bun pm trust` exits 1 when nothing is left to trust — not a failure.
+    return trust.status === 0 || trust.status === 1;
+  }
+
+  // An interrupted npm run leaves the tree half-removed. Re-running on top of it
+  // only reproduces ENOTEMPTY, so the second attempt starts from a clean tree.
+  // Other package managers (and non-npm failures) are reported as before.
+  if (!isTransientFailure(pm, first)) return false;
+  info(`${pm} install hit a transient error — retrying from a clean node_modules…`);
+  cleanInstallTree(dir);
+  return (await streamInstall(pm, explicitBin, dir, PM_ARGS[pm][0])).status === 0;
 }
 
 /** Human label for how the install will run (mirrors runInstall's choice). */
@@ -432,13 +565,32 @@ if (!mergeIntoBundle(opts.bundle, ranges, allowScripts)) {
   die(`could not record ${missing.join(", ")} in ${path.join(opts.bundle, "package.json")}`);
 }
 
+// Serialise against another launch's installer sharing this tree (see
+// acquireInstallLock). Losing the race is not a failure: the holder installs and
+// this call simply verifies the result.
+const locked = await acquireInstallLock(opts.bundle);
 const explicit = (opts.npm || process.env.SCOPE_NPM_BIN || "").trim();
-info(`installing ${missing.join(", ")} with ${pmLabel(opts.pm, explicit)} in ${opts.bundle} (this can take a minute)…`);
-if (!runInstall(opts.pm, explicit, opts.bundle)) {
-  die(`${pmLabel(opts.pm, explicit)} install failed — ${missing.join(", ")} missing from ${opts.bundle}`);
+try {
+  if (locked) {
+    // The installer tells the truth about the tree, not about `missing` above:
+    // the wait for the lock may have been satisfied by the holder.
+    const stillToInstall = declared.filter((spec) => !installedIn(opts.bundle, spec));
+    if (stillToInstall.length) {
+      info(`installing ${stillToInstall.join(", ")} with ${pmLabel(opts.pm, explicit)} in ${opts.bundle} (this can take a minute)…`);
+      if (!(await runInstall(opts.pm, explicit, opts.bundle))) {
+        die(`${pmLabel(opts.pm, explicit)} install failed — ${declared.join(", ")} missing from ${opts.bundle}`);
+      }
+    }
+  } else {
+    info(`another extension install is running in ${opts.bundle}; waiting for it was not possible — verifying instead.`);
+  }
+} finally {
+  if (locked) releaseInstallLock(opts.bundle);
 }
 
 const stillMissing = declared.filter((spec) => !installedIn(opts.bundle, spec));
 emit({ missing: stillMissing, installed: declared.filter((spec) => !stillMissing.includes(spec)), ok: stillMissing.length === 0 });
-if (stillMissing.length) die(`${stillMissing.join(", ")} still missing from ${opts.bundle} after installing`);
-info(`installed ${missing.join(", ")} into ${opts.bundle}`);
+if (stillMissing.length) {
+  die(`${stillMissing.join(", ")} still missing from ${opts.bundle}${locked ? " after installing" : " — another install is in progress"}`);
+}
+info(`installed ${declared.join(", ")} into ${opts.bundle}`);

@@ -12,7 +12,7 @@
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -37,6 +37,24 @@ function install(args, env = {}) {
   return { status: res.status, out: res.stdout || "", err: res.stderr || "" };
 }
 
+/**
+ * Run the installer without blocking, so two can overlap (the way two launches
+ * of Pi Scope start it). Resolves with the same shape `install` returns.
+ */
+function installAsync(args, env = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [INSTALLER, ...args], {
+      cwd: ROOT,
+      env: { ...process.env, SCOPE_NPM_BIN: stub, STUB_RUNS: runsFile, ...env },
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    child.stderr.on("data", (chunk) => { err += chunk; });
+    child.on("close", (status) => resolve({ status, out, err }));
+  });
+}
+
 const runs = () => (fs.existsSync(runsFile) ? fs.readFileSync(runsFile, "utf8").trim().split("\n").filter(Boolean) : []);
 /** Forget the installs earlier tests triggered (the log is shared on purpose). */
 const resetRuns = () => fs.rmSync(runsFile, { force: true });
@@ -45,13 +63,42 @@ const resetRuns = () => fs.rmSync(runsFile, { force: true });
  * A stub package manager: records the directory it ran in and installs every
  * dependency the bundle's manifest names — the part of `npm install` the
  * installer's verification depends on.
+ *
+ * `mode: "transient"` makes it fail with npm's `ENOTEMPTY` (and install nothing)
+ * on its first two runs, then succeed. That is the state an interrupted npm run
+ * leaves behind, and it is what the installer's recover-and-retry has to clear.
  */
-function makeNpmStub() {
-  const file = path.join(tmpDir, "npm-stub");
-  fs.writeFileSync(file, [
+function makeNpmStub({ mode = "sync" } = {}) {
+  const file = path.join(tmpDir, mode === "sync" ? "npm-stub" : `npm-stub-${mode}`);
+  const counter = path.join(tmpDir, `npm-count-${mode}`);
+  fs.writeFileSync(counter, "0");
+  const lines = [
     "#!/usr/bin/env node",
     "const fs = require('node:fs'), path = require('node:path');",
     "fs.appendFileSync(process.env.STUB_RUNS, process.cwd() + '\\n');",
+  ];
+  if (mode === "slow") {
+    // Hold the install open long enough that a second installer started at the
+    // same time finds the lock held (SCOPE_EXTENSIONS_LOCK_WAIT_MS is lowered).
+    lines.push("Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600);");
+  }
+  if (mode === "transient") {
+    lines.push(
+      "const countFile = process.env.STUB_COUNT;",
+      "const n = Number(fs.readFileSync(countFile, 'utf8')) + 1;",
+      "fs.writeFileSync(countFile, String(n));",
+      // The first run reproduces an interrupted npm run exactly: nothing is
+      // installed and the removal of a half-empty tree fails with ENOTEMPTY. The
+      // second run (the installer's retry from a clean tree) succeeds.
+      "if (n <= 1) {",
+      "  console.error('npm error code ENOTEMPTY');",
+      "  console.error('npm error syscall rmdir');",
+      "  console.error(\"npm error ENOTEMPTY: directory not empty, rmdir 'node_modules/fs-extra/lib/ensure'\");",
+      "  process.exit(1);",
+      "}",
+    );
+  }
+  lines.push(
     "const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));",
     "for (const name of Object.keys(pkg.dependencies ?? {})) {",
     "  const dir = path.join('node_modules', ...name.split('/'));",
@@ -59,9 +106,10 @@ function makeNpmStub() {
     "  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name, version: '9.9.9' }));",
     "}",
     "",
-  ].join("\n"));
+  );
+  fs.writeFileSync(file, lines.join("\n"));
   fs.chmodSync(file, 0o755);
-  return file;
+  return { file, counter };
 }
 
 /** An agent dir with the given extension files and, optionally, a manifest. */
@@ -91,7 +139,7 @@ const readManifest = (bundle) => JSON.parse(fs.readFileSync(path.join(bundle, "p
 
 before(() => {
   tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "scope-pi-extensions-")));
-  stub = makeNpmStub();
+  stub = makeNpmStub().file;
   runsFile = path.join(tmpDir, "runs.txt");
 });
 
@@ -323,6 +371,76 @@ describe("extension deps: an agent dir seeded before the manifest existed", () =
       "--seed-manifest", path.join(tmpDir, "not-there.json"),
     ]);
     assert.equal(status, 0);
+  });
+});
+
+describe("extension deps: concurrent launches and interrupted installs", () => {
+  test("two overlapping installers run npm only once", async () => {
+    // The state that produced the ENOTEMPTY report: two launches both start this
+    // installer in the background against the same tree. The lock serialises
+    // them, and the second finds the work already done.
+    const agent = makeAgent("concurrent", {
+      files: { "extensions/browser.ts": "export default () => {};\n" },
+      manifest: { dependencies: { playwright: "^1.63.0" } },
+    });
+    const bundle = makeBundle("concurrent-bundle");
+    const { file: slow, counter } = makeNpmStub({ mode: "slow" });
+    resetRuns();
+    const env = { SCOPE_NPM_BIN: slow, STUB_COUNT: counter, SCOPE_EXTENSIONS_LOCK_WAIT_MS: "30000" };
+
+    const [a, b] = await Promise.all([
+      installAsync(["--agent", agent, "--bundle", bundle], env),
+      installAsync(["--agent", agent, "--bundle", bundle], env),
+    ]);
+    assert.equal(a.status, 0, `${a.out}\n${a.err}`);
+    assert.equal(b.status, 0, `${b.out}\n${b.err}`);
+    assert.equal(runs().length, 1, `npm must run once, ran ${runs().length} time(s)`);
+    assert.ok(installedIn(bundle, "playwright"), "playwright installed");
+  });
+
+  test("a transient ENOTEMPTY is retried from a clean tree", () => {
+    const agent = makeAgent("transient", {
+      files: { "extensions/browser.ts": "export default () => {};\n" },
+      manifest: { dependencies: { playwright: "^1.63.0" } },
+    });
+    const bundle = makeBundle("transient-bundle");
+    const { file: flaky, counter } = makeNpmStub({ mode: "transient" });
+    resetRuns();
+
+    const { status, out, err } = install(
+      ["--agent", agent, "--bundle", bundle],
+      { SCOPE_NPM_BIN: flaky, STUB_COUNT: counter },
+    );
+    // The stub fails its first run before succeeding; the installer clears the
+    // tree and tries again, so the final result is a real install, not the error.
+    assert.equal(status, 0, `${out}\n${err}`);
+    assert.match(out, /transient error/, out);
+    assert.equal(runs().length, 2, `expected one failure and one retry, ran ${runs().length}`);
+    assert.ok(installedIn(bundle, "playwright"), "playwright installed after the retry");
+  });
+
+  test("a real failure is retried but still reported, never hidden", () => {
+    const agent = makeAgent("still-fails", {
+      files: { "extensions/browser.ts": "export default () => {};\n" },
+      manifest: { dependencies: { playwright: "^1.63.0" } },
+    });
+    const bundle = makeBundle("still-fails-bundle");
+    // Always ENOTEMPTY: recovery runs, but the failure is genuine and must surface.
+    const always = path.join(tmpDir, "npm-always-transient");
+    fs.writeFileSync(always, [
+      "#!/bin/sh",
+      "echo \"npm error code ENOTEMPTY\" >&2",
+      "echo \"npm error syscall rmdir\" >&2",
+      "exit 1",
+      "",
+    ].join("\n"));
+    fs.chmodSync(always, 0o755);
+    resetRuns();
+
+    const { status, err } = install(["--agent", agent, "--bundle", bundle], { SCOPE_NPM_BIN: always });
+    assert.equal(status, 1);
+    assert.match(err, /install failed/, err);
+    assert.ok(!installedIn(bundle, "playwright"));
   });
 });
 
