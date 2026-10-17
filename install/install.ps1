@@ -68,30 +68,6 @@ if ($PmOverride) {
   $Pm = $PmOverride
 }
 
-# Run the chosen package manager's install in one directory and fail loudly on a
-# non-zero exit (ErrorActionPreference does not catch native exit codes).
-function Invoke-PmInstall($Path) {
-  Push-Location $Path
-  try {
-    switch ($Pm) {
-      "npm"  { & npm install --no-audit --no-fund }
-      # pnpm blocks dependency build scripts by default; node-pty, esbuild and
-      # ffmpeg-static need them, so force them to run.
-      "pnpm" { & pnpm install --no-ignore-scripts }
-      # Bun also blocks those scripts until a package is trusted. Trusting them
-      # may write a trustedDependencies field; it exits 1 when there is nothing
-      # left to run, which is not a failure.
-      "bun"  {
-        & bun install
-        if ($LASTEXITCODE -ne 0) { throw "bun install failed with exit code $LASTEXITCODE" }
-        & bun pm trust --all
-        $global:LASTEXITCODE = 0
-      }
-    }
-    if ($LASTEXITCODE -ne 0) { throw "$Pm install failed with exit code $LASTEXITCODE" }
-  } finally { Pop-Location }
-}
-
 # Download one URL to a local file. curl.exe (shipped with Windows 10 1803 and
 # later) is tried first: it is a plain file downloader, so it neither trips the
 # PowerShell 5.1 web-cmdlet prompt nor buffers the whole response in memory. The
@@ -270,33 +246,28 @@ if (-not $InPlace) {
 if ($NoDeps) {
   Info "skipping dependency install (-NoDeps)."
 } else {
-  if (-not (Get-Command $Pm -ErrorAction SilentlyContinue)) {
+  # npm ships with Node; pnpm/bun have to be on PATH.
+  if ($Pm -ne "npm" -and -not (Get-Command $Pm -ErrorAction SilentlyContinue)) {
     Die "$Pm is required to install dependencies - install it and run this again"
   }
-  Info "installing dependencies in $Dir with $Pm (this can take a minute)..."
-  try { Invoke-PmInstall $Dir } catch { Die "$($_.Exception.Message) - run $Pm install manually in $Dir" }
-
-  # The bundled Pi coding agent - and with it the server's own runtime packages
-  # (node-pty, ws, see apps/scope-server/pi-deps.ts) - installs into the user's
-  # own data dir (%USERPROFILE%\.pi-scope\pi) rather than into this checkout, so
-  # Settings → Update can replace it and the tree survives re-installing the app.
-  # `--move` migrates a bundle an older release left in
-  # apps\scope-desktop\pi-bundle instead of fetching it again. A failure here is
-  # not fatal: Chat falls back to a `pi` on PATH, and the server says which one it
-  # chose at boot.
-  $bundleInstaller = Join-Path $Dir "apps\scope-desktop\pi-bundle-install.mjs"
-  if (Test-Path -LiteralPath $bundleInstaller) {
-    Info "installing the bundled Pi coding agent and server packages with $Pm..."
-    # LASTEXITCODE is reset first so a stale 0 cannot mask a failure, and stderr
-    # is discarded: npm writes progress and warnings there, and under
-    # $ErrorActionPreference = "Stop" a native command writing to stderr can abort
-    # the script with a raw NativeCommandError.
-    $global:LASTEXITCODE = 0
-    try { & $node.Source $bundleInstaller --pm $Pm --move 2>$null } catch { }
-    if ($LASTEXITCODE -ne 0) {
-      Info "the bundled Pi agent could not be installed - Chat will fall back to a pi on PATH."
-      $global:LASTEXITCODE = 0
-    }
+  # Pi Scope keeps no node_modules of its own: the bundled pi agent, the server's
+  # runtime packages (node-pty, ws, see apps\scope-server\pi-deps.ts) and the
+  # app's desktop/build tooling all install into one shared project in the user's
+  # data dir (%USERPROFILE%\.pi-scope\pi). app-deps-install.mjs runs the bundle
+  # installer and then completes that same tree, so re-installing the app reuses
+  # it rather than fetching everything again.
+  $appInstaller = Join-Path $Dir "apps\scope-desktop\app-deps-install.mjs"
+  if (-not (Test-Path -LiteralPath $appInstaller)) {
+    Die "missing $appInstaller - is $Dir a Pi Scope checkout?"
+  }
+  Info "installing Pi Scope's dependencies into ~/.pi-scope/pi with $Pm (this can take a minute)..."
+  # LASTEXITCODE is reset first so a stale 0 cannot mask a failure.
+  $global:LASTEXITCODE = 0
+  try { & $node.Source $appInstaller --pm $Pm } catch {
+    Die "$($_.Exception.Message) - run it manually: node `"$appInstaller`" --pm $Pm"
+  }
+  if ($LASTEXITCODE -ne 0) {
+    Die "$Pm install failed - run it manually: node `"$appInstaller`" --pm $Pm"
   }
 }
 

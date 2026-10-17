@@ -18,8 +18,11 @@ files:
   - pi-extensions-install.mjs
   - agent-extensions.json
   - server-bundle/**/*
-  - node_modules/**/*
 asar: false
+# The Electron version to package. Declared here (rather than read from the
+# app's devDependencies) because the checkout keeps no node_modules: the app's
+# tooling lives in ~/.pi-scope/pi (apps/scope-desktop/app-deps-install.mjs).
+electronVersion: 43.7.7
 publish: null
 extraResources:
   - from: node-portable

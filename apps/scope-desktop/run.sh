@@ -13,9 +13,15 @@ export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Shared deps live in the repo-root node_modules (npm workspaces).
-ROOT_DIR="$(cd "$DIR/../.." && pwd)"
 cd "$DIR"
+
+# Everything the app needs — the bundled pi agent, the server's runtime packages
+# (node-pty, ws) and the desktop tooling (electron, …) — lives in one shared npm
+# project in the user's data dir, not in this checkout, so the checkout keeps no
+# node_modules. app-deps-install.mjs seeds/completes that install (idempotent);
+# the server launches every `pi` from it and falls back to a global pi install
+# when it is missing.
+PI_DIR="$HOME/.pi-scope/pi"
 
 # Install the .desktop into the user applications dir (idempotent) so the DE
 # can match this window's WM_CLASS to its icon in the dock/taskbar.
@@ -37,20 +43,13 @@ mkdir -p "$APPS_DIR"
 #  chmod +x "$DESKTOP_SHORTCUT"
 #fi
 
-# Install dependencies on first run (idempotent). The workspace install runs at
-# the repo root; electron is hoisted there. The server's runtime packages
-# (node-pty, ws) live in the pi bundle, installed below.
-if [ ! -d "$ROOT_DIR/node_modules/electron" ]; then
-  ( cd "$ROOT_DIR" && npm install --no-audit --no-fund )
-fi
-
-# The bundled Pi coding agent lives in the user's data dir (~/.pi-scope/pi), not
-# in this checkout — the installer seeds it there on first run and migrates a
-# bundle an older layout left in pi-bundle/. The server launches every `pi` from
-# it; when it is missing it falls back to a global pi install.
-if command -v node >/dev/null 2>&1; then
-  node "$DIR/pi-bundle-install.mjs" --move || true
+# Install the shared app project on first run (idempotent). app-deps-install.mjs
+# also seeds the bundled pi agent into the same tree and migrates a bundle an
+# older layout left in pi-bundle/.
+if command -v node >/dev/null 2>&1 &&
+   { [ ! -d "$PI_DIR/node_modules/electron" ] || [ ! -d "$PI_DIR/node_modules/@earendil-works/pi-coding-agent" ]; }; then
+  node "$DIR/app-deps-install.mjs" || true
 fi
 
 # Overwrite launcher.log each run so failures are easy to read.
-exec "$ROOT_DIR/node_modules/.bin/electron" . > "$DIR/launcher.log" 2>&1
+exec "$PI_DIR/node_modules/.bin/electron" . > "$DIR/launcher.log" 2>&1

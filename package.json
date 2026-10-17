@@ -9,12 +9,22 @@
     "url": "https://github.com/NerdAtWork24X7/Pi_Scope.git"
   },
   "license": "MIT",
-  "workspaces": [
-    "apps/scope-server",
-    "apps/scope-desktop"
-  ],
+  "//": "Pi Scope keeps no node_modules in the checkout: apps/scope-desktop/app-deps-install.mjs installs these (plus the bundled pi agent and the server's runtime packages) into ~/.pi-scope/pi and everything resolves from there. The runtime packages are declared in apps/scope-desktop/pi-bundle/package.json, not here — that manifest is what ships inside the packaged app's read-only seed.",
   "devDependencies": {
+    "electron": "43.7.7",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
     "ffmpeg-static": "^5.3.0",
     "playwright": "^1.63.0"
+  },
+  "//allowScripts": "Build-step approvals merged into ~/.pi-scope/pi's manifest (see npm's install-scripts audit): Electron downloads its binary, esbuild/ffmpeg-static fetch their platform binaries.",
+  "allowScripts": {
+    "electron": true,
+    "esbuild": true,
+    "ffmpeg-static": true
+  },
+  "scripts": {
+    "deps": "node apps/scope-desktop/app-deps-install.mjs",
+    "test": "npm test --prefix apps/scope-server"
   }
 }

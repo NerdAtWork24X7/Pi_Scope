@@ -89,12 +89,13 @@ administrator rights:
 - **No silent privilege change.** Neither script elevates. Running one as root
   (a container) or from an elevated PowerShell only prints a warning that the
   tree will be owned by that account.
-- **No hidden dependency trust beyond the install itself.** `npm install` runs
-  the packages' own install scripts, which `node-pty`, `esbuild` and
-  `ffmpeg-static` need — that is why pnpm gets `--no-ignore-scripts` and Bun
+- **No hidden dependency trust beyond the install itself.** The install targets
+  the shared npm project in `~/.pi-scope/pi`, where `npm install` runs the
+  packages' own install scripts — `node-pty`, `esbuild`, `ffmpeg-static` and
+  Electron need them — which is why pnpm gets `--no-ignore-scripts` and Bun
   `bun pm trust --all`. If vendored build scripts are not acceptable, pass
   `--no-deps` / `-NoDeps` and install the dependencies yourself after reading
-  `package.json`.
+  the manifests.
 
 Neither installer writes outside the install directory and, on a fresh machine,
 `~/.pi-scope/` — the agent dir (`~/.pi-scope/agent`, see below) and the bundled
@@ -118,10 +119,11 @@ project and skips the download:
 
 Add `-ExecutionPolicy Bypass` if PowerShell blocks the file.
 
-> In a checkout, `npm install` may rewrite `package-lock.json` to bring it in step
-> with the workspace `package.json` files (a committed lockfile can drift from the
-> manifests), leaving the file modified in `git status`. That is expected, not a
-> failed install.
+> In a checkout the installer writes nothing to the project tree: the bundled
+> `pi` agent, the server's runtime packages (`node-pty`, `ws`) and the app's own
+> tooling (Electron, electron-builder, esbuild, Playwright) all install into one
+> shared project at `~/.pi-scope/pi`, so the checkout keeps no `node_modules` and
+> `git status` stays clean.
 
 ## Options
 
@@ -142,30 +144,36 @@ be passed, so the defaults apply; run the file to customize.
 ## Package managers
 
 `--pm` / `-Pm` selects which package manager installs the dependencies. Inside a
-checkout you can equally run the command yourself:
+checkout you can equally run the shared installer yourself:
 
 | Manager | Command | Notes |
 |---|---|---|
-| **npm** | `npm install` | the default |
-| **pnpm** | `pnpm install --no-ignore-scripts` | runs the dependency build scripts pnpm blocks by default (`esbuild`, `ffmpeg-static`, and `node-pty` in the pi bundle) |
-| **Bun** | `bun install` then `bun pm trust --all` | runs the same blocked scripts; trusting them may add a `trustedDependencies` field to `package.json` |
+| **npm** | `node apps/scope-desktop/app-deps-install.mjs` | the default |
+| **pnpm** | `node apps/scope-desktop/app-deps-install.mjs --pm pnpm` | runs the dependency build scripts pnpm blocks by default (`esbuild`, `ffmpeg-static`, and `node-pty`) |
+| **Bun** | `node apps/scope-desktop/app-deps-install.mjs --pm bun` | runs the same blocked scripts; trusting them may add a `trustedDependencies` field to the manifest in `~/.pi-scope/pi` |
+
+`app-deps-install.mjs` seeds the bundled `pi` agent first
+(`pi-bundle-install.mjs`), then merges the app's own packages declared in the
+repo-root `package.json` and installs the whole tree in `~/.pi-scope/pi`.
 
 > **Modern npm and install scripts.** npm 11.19+ gates a dependency's install
 > scripts behind an `allowScripts` allow-list, so an install can print
 > `npm warn install-scripts … not yet covered by allowScripts` for packages such as
-> `esbuild`, `ffmpeg-static` and `protobufjs`. Those warnings are expected and are
-> **not** a failure — review them with `npm install-scripts ls`, and approve any
-> you want to run with `npm install-scripts approve <pkg>`.
+> `esbuild`, `ffmpeg-static` and `protobufjs`. The ones Pi Scope needs are
+> pre-approved in the repo-root `package.json` and merged into the shared
+> manifest; the rest are expected and are **not** a failure — review them with
+> `npm install-scripts ls`, and approve any you want to run with
+> `npm install-scripts approve <pkg>`.
 
 Each channel also installs the bundled Pi coding agent — and with it the
 server's own runtime packages (`node-pty`, `ws`) — into the user's own data
 directory (`~/.pi-scope/pi`), not into the checkout, so Settings → Update can
-replace it and an update of the app never re-downloads it. One npm project means
-one copy of those packages: the server loads them from there
-(`apps/scope-server/pi-deps.ts`) and neither the server nor the desktop app keeps
-a duplicate. An install an older release left behind (agent only) — under
-`apps/scope-desktop/pi-bundle` or already in `~/.pi-scope/pi` — is completed in
-place rather than downloaded again.
+replace it and an update of the app never re-downloads it. That directory is the
+only npm project: the server loads its runtime packages from there
+(`apps/scope-server/pi-deps.ts`), the desktop launcher runs Electron from there,
+and neither the server nor the desktop app keeps a duplicate. An install an
+older release left behind (agent only) — under `apps/scope-desktop/pi-bundle` or
+already in `~/.pi-scope/pi` — is completed in place rather than downloaded again.
 
 Finally, the extensions pi has available get their npm packages. Every extension
 in the agent dir (`~/.pi-scope/agent/extensions`, narrowed or extended by that

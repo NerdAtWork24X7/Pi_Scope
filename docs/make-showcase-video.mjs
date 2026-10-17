@@ -36,7 +36,11 @@ import { inflateSync } from "node:zlib";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { chromium } from "playwright";
+import { loadPiDep } from "../apps/scope-server/pi-deps.ts";
+
+// Playwright lives in the shared app install (~/.pi-scope/pi), not in the
+// checkout — pi-deps.ts resolves it there.
+const { chromium } = loadPiDep("playwright");
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = 43190;
@@ -514,10 +518,12 @@ async function record(token) {
 // ─── 5. Transcode webm → mp4 with the playwright-bundled ffmpeg ────────────
 function findFfmpeg() {
   // Prefer ffmpeg-static (a full build with libx264); fall back to the minimal
-  // playwright-bundled ffmpeg if ffmpeg-static is unavailable.
+  // playwright-bundled ffmpeg if ffmpeg-static is unavailable. Both resolve from
+  // the shared app install (~/.pi-scope/pi) via pi-deps.ts — the checkout keeps
+  // no node_modules.
   try {
-    const p = execSync(`node -p "require('ffmpeg-static')"`).toString().trim();
-    if (p && existsSync(p)) return p;
+    const p = loadPiDep("ffmpeg-static");
+    if (typeof p === "string" && existsSync(p)) return p;
   } catch { /* not installed */ }
   const browsersDir = process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(os.homedir(), ".cache", "ms-playwright");
   const found = execSync(`find "${browsersDir}" -maxdepth 2 -name 'ffmpeg-linux*' 2>/dev/null | head -1`).toString().trim();

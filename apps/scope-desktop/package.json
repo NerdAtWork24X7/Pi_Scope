@@ -8,10 +8,5 @@
     "start": "electron .",
     "build": "bash ../build-release.sh",
     "dist": "bash ../build-release.sh"
-  },
-  "devDependencies": {
-    "electron": "43.7.7",
-    "electron-builder": "^26.15.3",
-    "esbuild": "^0.28.1"
   }
 }

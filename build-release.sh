@@ -2,8 +2,15 @@
 # build-release.sh — build a standalone Linux AppImage release of Pi Scope.
 # Produces apps/scope-desktop/dist/Pi-Scope-<version>.AppImage.
 # The server runs under a bundled portable Node 24 (required for node:sqlite).
-# node-pty and ws are installed into the pi-bundle seed below (not into the
-# workspace), and node-pty is built for that Node's ABI by that `npm install`.
+#
+# Pi Scope keeps no node_modules in the checkout. The app's tooling (Electron,
+# electron-builder, esbuild, Playwright) and the server's runtime packages
+# (node-pty, ws) live in one shared project in the user's data dir —
+# ~/.pi-scope/pi — installed by apps/scope-desktop/app-deps-install.mjs. For the
+# packaged app, a runtime-only copy of the Pi agent is bundled as the read-only
+# `resources/pi` seed (the `pi-bundle` template below, carrying node-pty built
+# for the portable Node's ABI); scope-control.js then seeds ~/.pi-scope/pi from
+# it on first launch.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,13 +21,23 @@ NODE_VER="v24.15.0"   # must match the Node that builds node-pty here (same ABI)
 NODE_TARBALL="node-${NODE_VER}-linux-x64.tar.xz"
 NODE_URL="https://nodejs.org/dist/${NODE_VER}/${NODE_TARBALL}"
 
-echo "[build] installing workspace deps (electron, esbuild, electron-builder)..."
-( cd "$ROOT" && npm install --no-audit --no-fund )
+# The shared install: the whole app's npm project, outside the checkout.
+PI_DIR="${SCOPE_PI_BUNDLE_DIR:-$HOME/.pi-scope/pi}"
 
-# Pre-install the Pi coding agent and the server's own packages (node-pty, ws)
+echo "[build] installing the app project (agent, node-pty, ws, electron, esbuild, electron-builder) into $PI_DIR..."
+node "$LAUNCHER/app-deps-install.mjs"
+
+ESBUILD="$PI_DIR/node_modules/.bin/esbuild"
+ELECTRON_BUILDER="$PI_DIR/node_modules/.bin/electron-builder"
+[ -x "$ESBUILD" ] || { echo "[build] missing $ESBUILD — run apps/scope-desktop/app-deps-install.mjs" >&2; exit 1; }
+[ -x "$ELECTRON_BUILDER" ] || { echo "[build] missing $ELECTRON_BUILDER — run apps/scope-desktop/app-deps-install.mjs" >&2; exit 1; }
+
+# Pre-install a runtime-only copy of the Pi coding agent (with node-pty and ws)
 # so the packaged app can seed the user's copy (~/.pi-scope/pi) on first launch
-# with no network and no system npm. The app never runs from resources/pi
-# directly: that copy is read-only, so Settings → Update could not replace it.
+# with no network and no system npm. This is the one build artifact that
+# materializes under the checkout; it is removed again by the cleanup at the end.
+# The app never runs from resources/pi directly: that copy is read-only, so
+# Settings → Update could not replace it.
 echo "[build] bundling the Pi coding agent and server packages (pi-bundle seed)..."
 ( cd "$LAUNCHER/pi-bundle" && npm install --no-audit --no-fund )
 # Ship the Pi Scope extension inside the seed so the seeded `pi` shim can
@@ -39,7 +56,7 @@ cp "$ROOT/examples/pi_local/agent/extensions/package.json" "$LAUNCHER/agent-exte
 # see apps/scope-server/pi-deps.ts), so they are not imported here at all.
 echo "[build] bundling SCOPE server (TS -> JS)..."
 mkdir -p server-bundle/public server-bundle/plugins
-npx esbuild "$ROOT/apps/scope-server/server.ts" \
+"$ESBUILD" "$ROOT/apps/scope-server/server.ts" \
   --bundle --platform=node --target=node22 --format=esm \
   --outfile="$LAUNCHER/server-bundle/server.js"
 
@@ -62,12 +79,16 @@ if [ ! -x "$LAUNCHER/node-portable/bin/node" ]; then
 fi
 
 echo "[build] running electron-builder (linux AppImage)..."
-npx electron-builder --linux AppImage --config electron-builder.yml
+"$ELECTRON_BUILDER" --linux AppImage --config electron-builder.yml
 
 # Clean up intermediate build files, keeping the final AppImage and the
 # node-portable cache (so the next build skips re-downloading portable Node).
+# The pi-bundle seed's node_modules is deleted too: the checkout keeps no
+# node_modules — the shared install in ~/.pi-scope/pi is the only real tree.
 echo "[build] cleaning up intermediate build files..."
 rm -rf "$LAUNCHER/server-bundle"
+rm -rf "$LAUNCHER/pi-bundle/node_modules" "$LAUNCHER/pi-bundle/pi-scope.ts"
+rm -f "$LAUNCHER/agent-extensions.json"
 if [ -d "$LAUNCHER/dist" ]; then
   # drop linux-unpacked/, builder-*.yml metadata, blockmaps, etc. — keep *.AppImage
   find "$LAUNCHER/dist" -mindepth 1 -maxdepth 1 ! -name '*.AppImage' -exec rm -rf {} +

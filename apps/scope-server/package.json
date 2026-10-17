@@ -6,6 +6,6 @@
   "scripts": {
     "dev": "node --watch server.ts",
     "start": "node server.ts",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --import ./test/register-bundle.mjs --test test/*.test.mjs"
   }
 }

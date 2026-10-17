@@ -165,35 +165,56 @@ async function waitForHealth(url, timeoutMs) {
   return false;
 }
 
-function runNpm(args, cwd) {
-  // shell:true so `npm` resolves to npm.cmd on Windows.
-  const r = spawnSync("npm", args, { cwd, stdio: "inherit", shell: true });
-  return r.status === 0;
+/** Candidate dirs for the shared app install, most specific first (mirrors
+ *  apps/scope-server/pi-bundle-paths.ts). */
+function bundleDirs() {
+  const out = [];
+  const configured = (process.env.SCOPE_PI_BUNDLE_DIR || "").trim();
+  if (configured) out.push(configured);
+  out.push(path.join(os.homedir(), ".pi-scope", "pi"));
+  out.push(path.join(DESKTOP_DIR, "pi-bundle"));
+  return [...new Set(out)];
 }
 
-/** Install workspace deps (and Electron for the desktop path) on first run. */
-function ensureDeps(needElectron) {
-  const hasModules = fs.existsSync(path.join(ROOT, "node_modules"));
-  const hasElectron = fs.existsSync(path.join(ROOT, "node_modules", "electron"));
-  if (!hasModules || (needElectron && !hasElectron)) {
-    if (opts.noInstall) die(`dependencies are missing — run \`npm install\` in ${ROOT} first`);
-    info("installing dependencies (first run only)…");
-    if (!runNpm(["install", "--no-audit", "--no-fund"], ROOT)) die(`npm install failed — run it manually in ${ROOT}`);
+/** Whether the shared install provides `spec`. */
+function hasBundlePackage(spec) {
+  for (const dir of bundleDirs()) {
+    try { if (fs.statSync(path.join(dir, "node_modules", ...spec.split("/"))).isDirectory()) return true; }
+    catch { /* not in this bundle — try the next */ }
   }
-  // The bundled Pi coding agent — together with the server's own runtime
-  // packages (node-pty, ws, see apps/scope-server/pi-deps.ts) — is installed
-  // into the user's own data dir (~/.pi-scope/pi) by a standalone installer,
-  // never into this checkout, so a re-install or an app update never
-  // re-downloads it, and Settings → Update can replace it. `--move` migrates a
-  // bundle an older layout left in apps/scope-desktop/pi-bundle instead of
-  // fetching it again. A failure here is not fatal: Chat falls back to a `pi` on
-  // PATH, and the terminal needs the bundle's node-pty.
-  const installer = path.join(DESKTOP_DIR, "pi-bundle-install.mjs");
-  if (fs.existsSync(installer)) {
-    const res = spawnSync(process.execPath, [installer, "--move"], { cwd: ROOT, stdio: "inherit" });
-    if (res.status !== 0) {
-      info("the bundled Pi agent could not be installed — Chat will fall back to a pi on PATH.");
+  return false;
+}
+
+/** Load a package from the shared install. `electron`'s module exports its
+ *  binary path, so returning the module's value is exactly what we want. */
+function loadBundleDep(spec) {
+  const requireFromHere = createRequire(import.meta.url);
+  for (const dir of bundleDirs()) {
+    try { return requireFromHere(requireFromHere.resolve(spec, { paths: [dir] })); }
+    catch { /* not in this bundle — try the next */ }
+  }
+  try { return requireFromHere(spec); } catch { return null; }
+}
+
+/**
+ * Install the shared app project (`~/.pi-scope/pi`) on first run: the bundled pi
+ * agent, the server's runtime packages (node-pty, ws) and the desktop tooling
+ * (electron, …). One tree, outside the checkout — apps/scope-desktop/
+ * app-deps-install.mjs owns the install, so this only decides whether to run it.
+ */
+function ensureDeps(needElectron) {
+  const required = ["@earendil-works/pi-coding-agent", "node-pty", "ws"];
+  if (needElectron) required.push("electron");
+  const missing = required.filter((spec) => !hasBundlePackage(spec));
+  if (missing.length) {
+    const installer = path.join(DESKTOP_DIR, "app-deps-install.mjs");
+    if (opts.noInstall) {
+      die(`dependencies are missing (${missing.join(", ")}) — run \`node ${path.relative(ROOT, installer)}\` first`);
     }
+    if (!fs.existsSync(installer)) die(`missing installer: ${installer}`);
+    info("installing dependencies into ~/.pi-scope/pi (first run only)…");
+    const res = spawnSync(process.execPath, [installer], { cwd: ROOT, stdio: "inherit" });
+    if (res.status !== 0) die(`the dependency install failed — run it manually: node ${installer}`);
   }
   // Give a fresh agent dir a working starting point before the extensions'
   // dependencies are resolved (the template carries the extensions manifest).
@@ -275,8 +296,7 @@ function seedAgentTemplate() {
 
 /** Path to the Electron binary the desktop app should run under, or null. */
 function resolveElectron() {
-  try { return createRequire(path.join(ROOT, "package.json"))("electron"); }
-  catch { return null; }
+  return loadBundleDep("electron");
 }
 
 function openBrowser(url) {
@@ -309,7 +329,7 @@ function tailLog(n = 20) {
 async function runDesktop() {
   ensureDeps(true);
   const electron = resolveElectron();
-  if (!electron) die(`the Electron binary is missing — run \`npm install\` in ${ROOT}`);
+  if (!electron) die(`the Electron binary is missing — run \`node apps/scope-desktop/app-deps-install.mjs\``);
 
   const env = { ...process.env };
   // Chromium's SUID sandbox is broken in a few environments and hard-crashes

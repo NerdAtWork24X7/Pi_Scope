@@ -149,38 +149,26 @@ fi
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
 
-pm_install() { # pm_install <dir> — install one npm project with the chosen PM
-  case "$PM" in
-    npm)  ( cd "$1" && npm install --no-audit --no-fund ) ;;
-    # pnpm blocks dependency build scripts by default; node-pty, esbuild and
-    # ffmpeg-static need them, so force them to run.
-    pnpm) ( cd "$1" && pnpm install --no-ignore-scripts ) ;;
-    # Bun also blocks those build scripts until a package is trusted. Trusting
-    # them may write a trustedDependencies field; it exits 1 when there is
-    # nothing left to run, which is not a failure.
-    bun)  ( cd "$1" && bun install && { bun pm trust --all || true; } ) ;;
-  esac
-}
+# Pi Scope keeps no node_modules of its own: the bundled pi agent, the server's
+# runtime packages (node-pty, ws, see apps/scope-server/pi-deps.ts) and the app's
+# desktop/build tooling all install into one shared project in the user's data
+# dir (~/.pi-scope/pi). apps/scope-desktop/app-deps-install.mjs runs the bundle
+# installer and then completes that same tree, so re-installing the app reuses
+# it rather than fetching everything again.
 
 if [ "$SKIP_DEPS" -eq 1 ]; then
   info "skipping dependency install (--no-deps)."
 else
-  command -v "$PM" >/dev/null 2>&1 || die "$PM is required to install dependencies — install it and run this again"
-  info "installing dependencies in $DIR with $PM (this can take a minute)…"
-  pm_install "$DIR" || die "$PM install failed — run it manually in $DIR"
-  # The bundled Pi coding agent — and with it the server's own runtime packages
-  # (node-pty, ws, see apps/scope-server/pi-deps.ts) — installs into the user's
-  # own data dir (~/.pi-scope/pi) rather than into this checkout, so Settings →
-  # Update can replace it and the tree survives re-installing the app. `--move`
-  # migrates a bundle an older release left in apps/scope-desktop/pi-bundle
-  # instead of fetching it again. A failure here is not fatal: Chat falls back
-  # to a `pi` on PATH, and the server says which one it chose at boot.
-  BUNDLE_INSTALLER="$DIR/apps/scope-desktop/pi-bundle-install.mjs"
-  if [ -f "$BUNDLE_INSTALLER" ]; then
-    info "installing the bundled Pi coding agent and server packages with $PM…"
-    node "$BUNDLE_INSTALLER" --pm "$PM" --move \
-      || info "the bundled Pi agent could not be installed — Chat will fall back to a pi on PATH."
-  fi
+  # npm ships with Node; pnpm/bun have to be on PATH.
+  case "$PM" in
+    npm) ;;
+    *) command -v "$PM" >/dev/null 2>&1 || die "$PM is required to install dependencies — install it and run this again" ;;
+  esac
+  APP_INSTALLER="$DIR/apps/scope-desktop/app-deps-install.mjs"
+  [ -f "$APP_INSTALLER" ] || die "missing $APP_INSTALLER — is $DIR a Pi Scope checkout?"
+  info "installing Pi Scope's dependencies into ~/.pi-scope/pi with $PM (this can take a minute)…"
+  node "$APP_INSTALLER" --pm "$PM" \
+    || die "$PM install failed — run it manually: node \"$APP_INSTALLER\" --pm $PM"
 fi
 
 # ── Seed the agent dir (first run only) ──────────────────────────────────────

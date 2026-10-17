@@ -26,6 +26,9 @@ db/scope.db-wal
 apps/scope-desktop/server-bundle/
 apps/scope-desktop/dist/
 apps/scope-desktop/node-portable/
+# The extensions dependency manifest build-release.sh copies beside the app (a
+# packaged app reads it; a checkout falls back to the source under examples/).
+apps/scope-desktop/agent-extensions.json
 
 # apps/scope-desktop/pi-bundle/ is only a template (package.json + lock) and the
 # seed a release build pre-installs (node_modules is ignored by the pattern

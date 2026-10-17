@@ -76,9 +76,11 @@ git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope; cd Pi_Scope
 
 Nothing else to install. `pi-scope` is the launcher on all three platforms —
 `pi-scope.mjs` plus a shim each — so the modes and flags below are the same
-everywhere. Its first launch fetches the workspace dependencies, Electron for the
-desktop window, and Pi Scope's own copy of the `pi` coding agent (into
-`~/.pi-scope/pi`), so there is no global `pi` install and no manual `npm` step.
+everywhere. Its first launch fetches Pi Scope's dependencies — Electron for the
+desktop window, the build tooling, and Pi Scope's own copy of the `pi` coding
+agent — into one shared project in your data dir (`~/.pi-scope/pi`), so the
+checkout keeps no `node_modules`, there is no global `pi` install and no manual
+`npm` step.
 Every flag is under [Launcher flags](https://nerdatwork24x7.github.io/Pi_Scope/guide.html#launcher).
 
 Want to see it before wiring up an agent? With the server running, seed a realistic demo
@@ -121,10 +123,10 @@ prompt, model changes, compactions and branch navigation.
 even though the server runs in `apps/scope-server/`), `~/.pi-scope/` when packaged — created mode
 `0600`. Delete a session from the sidebar, or `DELETE /sessions` for everything.
 
-**What does the first run download?** Beyond the workspace dependencies, the launcher fetches
-Electron (desktop mode) and Pi Scope's own `pi` coding agent into `~/.pi-scope/pi` (~220 MB). A full
-clone install is roughly 0.9 GB in the checkout (`node_modules`) plus ~0.2 GB in `~/.pi-scope/`.
-It happens once.
+**What does the first run download?** Everything the app needs — Electron
+(desktop mode), the build tooling, and Pi Scope's own `pi` coding agent with its
+runtime packages — into one shared project in `~/.pi-scope/pi` (~1 GB). The
+checkout itself stays free of `node_modules`. It happens once.
 
 **Uninstalling?** Delete the checkout, then remove `~/.pi-scope/` for a clean slate — the database,
 the agent dir and the bundled `pi` all live there. (A clone's database may also be at
