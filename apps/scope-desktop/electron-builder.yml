@@ -17,6 +17,13 @@ files:
   # manifest is the declaration for an agent dir seeded by an older release.
   - pi-extensions-install.mjs
   - agent-extensions.json
+  # Builds the shared Python venv (~/.pi-scope/.venv) and its Playwright
+  # Chromium, which the web_fetch extension and the video-creator skill use.
+  # requirements.txt is read from pi-venv/ beside the installer, so both travel
+  # together — without them installPythonDeps() silently finds no installer and
+  # web-fetch fails for want of a browser.
+  - pi-python-install.mjs
+  - pi-venv/**/*
   - server-bundle/**/*
 asar: false
 # The Electron version to package. Declared here (rather than read from the

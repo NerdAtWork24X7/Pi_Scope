@@ -65,6 +65,12 @@ const DEFAULT_REQUIREMENTS = path.join(HERE, "pi-venv", "requirements.txt");
  *  pure filesystem check on the next launch. */
 const STAMP_NAME = ".pi-scope-venv.json";
 
+/** Playwright's download socket timeout defaults to 30s, which a slow first-run
+ *  Chromium download easily trips — a stalled connection then fails the whole
+ *  install. Give it 10 minutes instead (the install runs detached, so nobody
+ *  waits on it). An explicit PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT still wins. */
+const DOWNLOAD_TIMEOUT_MS = (process.env.PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT || "").trim() || "600000";
+
 /** Set by `--json`: the report on stdout must stay parseable on its own. */
 let quiet = false;
 const die = (msg) => { console.error(`pi-python-install: ${msg}`); process.exit(1); };
@@ -244,6 +250,7 @@ let chromium = !needsPlaywright;
 if (needsPlaywright) {
   const res = run(opts, py, ["-m", "playwright", "install", "chromium"], {
     PLAYWRIGHT_BROWSERS_PATH: opts.browsers,
+    PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT: DOWNLOAD_TIMEOUT_MS,
   });
   chromium = res.ok;
   if (res.ok) report.installed.push("chromium");

@@ -67,8 +67,10 @@
           <pre><code>git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope
 cd Pi_Scope &amp;&amp; ./pi-scope</code></pre>
           <p class="hero-install-note"><a href="guide.html#node">Node 24+</a> is the only
-            prerequisite — the first launch fetches Electron and Pi Scope's own
-            <code>pi</code> agent.
+            prerequisite — the first launch fetches everything the app needs into one shared
+            project under <code>~/.pi-scope/pi</code> (Electron, the build tooling and Pi Scope's
+            own <code>pi</code> agent), plus the shared Python env and Playwright browsers the
+            <code>web-fetch</code> tools use. The checkout stays free of <code>node_modules</code>.
           </p>
         </div>
         <div class="install-pane" role="tabpanel" data-os="windows" hidden>
@@ -741,7 +743,31 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
           <div class="answer">
             One SQLite file — <code>db/scope.db</code> in development, <code>~/.pi-scope/</code>
             when packaged — created with permissions <code>0600</code>. Session data never
-            leaves it unless you export it.
+            leaves it unless you export it. The agent dir, the bundled <code>pi</code> and the
+            shared Python and Playwright installs sit beside it under <code>~/.pi-scope/</code>,
+            so removing that folder is a clean uninstall.
+          </div>
+        </details>
+        <details>
+          <summary>What does the first run download?<span class="glyph">+</span></summary>
+          <div class="answer">
+            Everything the app needs, once, into one shared project in your data dir —
+            <code>~/.pi-scope/pi</code>: Electron, the build tooling, and Pi Scope's own
+            <code>pi</code> agent with its runtime packages (roughly 1&nbsp;GB). It also builds the
+            shared Python environment (<code>~/.pi-scope/.venv</code>) and, in the background, the
+            Playwright Chromium (<code>~/.pi-scope/playwright-browsers</code>) that the
+            <code>web-fetch</code> and <code>video-creator</code> tools share. Your checkout stays
+            free of <code>node_modules</code>.
+          </div>
+        </details>
+        <details>
+          <summary>Can I run two instances at once?<span class="glyph">+</span></summary>
+          <div class="answer">
+            Yes. The desktop app checks its port before booting. If it is taken, it shows a port
+            console — open the running instance, free (or kill) the port, or start a second, fully
+            independent instance on another port with its own token and database. It also lists
+            every Pi Scope server this machine has listening, each with a Kill button.
+            <a href="guide.html#port-in-use">How the port console works</a>.
           </div>
         </details>
         <details>

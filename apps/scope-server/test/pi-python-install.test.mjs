@@ -66,7 +66,7 @@ function makeUvStub() {
     "  fs.mkdirSync(path.join(dir, 'bin'), { recursive: true });",
     "  const py = path.join(dir, 'bin', 'python3');",
     "  fs.writeFileSync(py, '#!/usr/bin/env node\\n' +",
-    "    'require(\"node:fs\").appendFileSync(process.env.STUB_PY_RUNS, JSON.stringify({ args: process.argv.slice(2), browsers: process.env.PLAYWRIGHT_BROWSERS_PATH ?? null }) + \"\\\\n\");\\n' +",
+    "    'require(\"node:fs\").appendFileSync(process.env.STUB_PY_RUNS, JSON.stringify({ args: process.argv.slice(2), browsers: process.env.PLAYWRIGHT_BROWSERS_PATH ?? null, downloadTimeout: process.env.PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT ?? null }) + \"\\\\n\");\\n' +",
     "    'process.exit(Number(process.env.STUB_PY_EXIT || 0));\\n');",
     "  fs.chmodSync(py, 0o755);",
     "}",
@@ -106,6 +106,7 @@ describe("python venv: building it", () => {
     assert.equal(pyCalls.length, 1);
     assert.deepEqual(pyCalls[0].args, ["-m", "playwright", "install", "chromium"]);
     assert.equal(pyCalls[0].browsers, browsers, "Chromium installs into Pi Scope's own browsers dir");
+    assert.equal(pyCalls[0].downloadTimeout, "600000", "a slow first-run download gets 10 minutes, not Playwright's 30s default");
   });
 
   test("a satisfied venv is a pure no-op", () => {

@@ -187,10 +187,10 @@ cd Pi_Scope &amp;&amp; ./pi-scope              # desktop app (Electron window)</
       <p>
         Nothing to install first: <code>./pi-scope</code> is the cross-platform launcher
         (<code>.\pi-scope.cmd</code> on Windows) — one Node script, one shim per platform — and it
-        fetches what it needs on first launch: the workspace dependencies, Electron for the desktop
-        window, Pi Scope's own copy of the <code>pi</code> coding agent (~220&nbsp;MB under
-        <code>~/.pi-scope/pi</code>), and the shared Python environment
-        (<code>~/.pi-scope/.venv</code>, built with <code>uv</code>) plus the Playwright browsers
+        fetches Pi Scope's dependencies on first launch — Electron for the desktop window, the build
+        tooling, and Pi Scope's own copy of the <code>pi</code> coding agent (~220&nbsp;MB under
+        <code>~/.pi-scope/pi</code>) — plus the shared Python environment
+        (<code>~/.pi-scope/.venv</code>, built with <code>uv</code>) and the Playwright browsers
         (<code>~/.pi-scope/playwright-browsers</code>) that the <code>web-fetch</code> extension,
         <code>video-creator</code> skill and <code>browser</code> extension share. Node 24+ is the only prerequisite. Prefer the terminal or a
         server? The same launcher runs headless — <code>./pi-scope --web</code> opens the WebUI in
@@ -687,6 +687,10 @@ node docs/seed-demo.mjs</code></pre>
         <li><strong>Where's my data?</strong> A single SQLite file (<code>db/scope.db</code> in dev,
           or <code>~/.pi-scope/</code> packaged), chmod <code>0600</code>. Delete sessions from the
           sidebar — or <code>DELETE /sessions</code> for everything.</li>
+        <li><strong>The first browser is a background download.</strong> The Playwright Chromium
+          the <code>web-fetch</code> and <code>video-creator</code> tools need installs into
+          <code>~/.pi-scope/playwright-browsers</code> on launch without blocking the window; a
+          slow download gets 10 minutes, and a failed one is retried on the next launch.</li>
         <li><strong>What's captured?</strong> Session start/end, every user/assistant message,
           thinking blocks, tool calls + results (with exit codes), LLM request args + system prompt,
           model changes, compactions and branch navigation.</li>
