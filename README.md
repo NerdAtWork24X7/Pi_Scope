@@ -123,6 +123,12 @@ prompt, model changes, compactions and branch navigation.
 even though the server runs in `apps/scope-server/`), `~/.pi-scope/` when packaged — created mode
 `0600`. Delete a session from the sidebar, or `DELETE /sessions` for everything.
 
+**Two windows at once?** The desktop app checks its port before booting. If it is taken, it shows a
+port console — open the running instance, kill a port (or just free it and quit), and start a second,
+fully independent instance on another port (its own token and database). It also lists every Pi Scope
+server the machine has listening, each with its own Kill button. See
+[Port already in use](https://nerdatwork24x7.github.io/Pi_Scope/guide.html#port-in-use).
+
 **What does the first run download?** Everything the app needs — Electron
 (desktop mode), the build tooling, and Pi Scope's own `pi` coding agent with its
 runtime packages — into one shared project in `~/.pi-scope/pi` (~1 GB). The

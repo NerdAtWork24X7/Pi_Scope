@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src file:">
+<title>Pi Scope — ports</title>
+<!--
+  port-conflict.html — the pre-launch popup the desktop shell shows when the
+  configured port is already taken (see apps/scope-desktop/main.js). It reports
+  what holds the port, lists every Pi Scope server this machine has listening
+  (each killable), and lets the user open the running instance, kill a port, or
+  start this instance on a different port — the last is how a second,
+  independent app instance runs.
+
+  It is a plain file:// page with no network access at all: every decision and
+  every probe goes back over the `scopeNative.portConflict` IPC bridge
+  (preload.js). It dresses in the same Amber Terminal Noir system as the WebUI
+  (surfaces, hairline grids, one rationed amber accent, Clash Grotesk / Satoshi /
+  Meslo) using the bundled fonts beside this file, so it renders with no server
+  running.
+-->
+<style>
+  @font-face {
+    font-family: "Clash Grotesk";
+    src: url("fonts/ClashGrotesk-Variable.woff2") format("woff2");
+    font-weight: 200 700;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "Satoshi";
+    src: url("fonts/Satoshi-Variable.woff2") format("woff2");
+    font-weight: 300 900;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "MesloLGS NFM";
+    src: url("fonts/MesloLGSNerdFontMono-Regular.ttf") format("truetype");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+
+  :root {
+    color-scheme: dark;
+    /* Palette — the same values styles.css declares for the dark theme. */
+    --bg: #0a0a0a;
+    --surface: #121212;
+    --surface-2: #141414;
+    --text: #ffffff;
+    --text-2: #71717a;
+    --text-3: #a1a1aa;
+    --muted: #52525b;
+    --border: #2a2a2a;
+    --hairline: rgba(255, 255, 255, 0.08);
+    --accent: #f5c400;
+    --accent-strong: #ffd740;
+    --accent-rgb: 245, 196, 0;
+    --on-accent: #0a0a0a;
+    --danger: #dc2626;
+    --green: #10b981;
+    --glow-accent: 0 0 24px rgba(var(--accent-rgb), 0.25);
+    --shadow-panel: 0 0 0 1px var(--hairline), 0 24px 64px rgba(0, 0, 0, 0.55);
+    --grid-line: rgba(255, 255, 255, 0.025);
+    /* Geometry / type / motion — identical to the WebUI tokens. */
+    --mono: "MesloLGS NFM", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --font-display: "Clash Grotesk", "Satoshi", ui-sans-serif, system-ui, sans-serif;
+    --font-body: "Satoshi", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --r-sharp: 2px;
+    --r-control: 6px;
+    --r-btn: 8px;
+    --r-card: 12px;
+    --r-pill: 9999px;
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-std: cubic-bezier(0.4, 0, 0.2, 1);
+    --dur-slow: 700ms;
+    --dur-fast: 150ms;
+  }
+
+  * { box-sizing: border-box; }
+  html { height: 100%; }
+  body {
+    min-height: 100%;
+    margin: 0;
+    padding: 24px;
+    display: flex;
+    background: var(--bg);
+    /* Hairline graph-paper grid + a single rationed amber glow at top-center. */
+    background-image:
+      radial-gradient(60% 40% at 50% 0%, rgba(var(--accent-rgb), 0.07), rgba(0, 0, 0, 0) 70%),
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: auto, 26px 26px, 26px 26px;
+    color: var(--text);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  .mono { font-family: var(--mono); }
+
+  /* ── Panel (the "console" component: faux chrome + near-black surface) ──── */
+  .panel {
+    width: min(560px, 100%);
+    margin: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    box-shadow: var(--shadow-panel);
+    overflow: hidden;
+    animation: rise var(--dur-slow) var(--ease-out) both;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .chrome {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .dots { display: inline-flex; gap: 6px; }
+  .dots i {
+    width: 9px; height: 9px; border-radius: var(--r-pill);
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid var(--hairline);
+  }
+  .chrome-label {
+    flex: 1;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .chrome-status {
+    width: 8px; height: 8px; border-radius: var(--r-pill);
+    background: var(--accent);
+    box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.6);
+    animation: pulse 2.4s var(--ease-std) infinite;
+  }
+  .chrome-status[data-state="free"] { background: var(--green); box-shadow: 0 0 10px rgba(16, 185, 129, 0.6); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .body { padding: 20px; }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0 0 10px;
+    font-family: var(--font-display);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+  .eyebrow::before {
+    content: "";
+    width: 6px; height: 6px; border-radius: var(--r-pill);
+    background: var(--accent);
+  }
+
+  .title {
+    margin: 0 0 8px;
+    font-family: var(--font-display);
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.05;
+    letter-spacing: -0.6px;
+    color: var(--text);
+  }
+  .title .accent { color: var(--accent); }
+  .title .mono { font-size: 0.92em; letter-spacing: -0.5px; }
+
+  .lede {
+    margin: 0 0 16px;
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--text-2);
+    max-width: 48ch;
+  }
+
+  /* ── Readout: what holds the busy port, in the console mono face ────────── */
+  .readout {
+    margin: 0 0 16px;
+    padding: 4px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-control);
+  }
+  .readout > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 7px 0;
+    border-top: 1px solid var(--hairline);
+  }
+  .readout > div:first-child { border-top: 0; }
+  .readout dt {
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .readout dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--text-3);
+    text-align: right;
+    word-break: break-all;
+  }
+
+  /* ── Active servers list ───────────────────────────────────────────────── */
+  .section { margin: 0 0 16px; }
+  .section-label {
+    margin: 0 0 6px;
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .ports {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 120px;
+    overflow: auto;
+    background: var(--surface-2);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-control);
+  }
+  .port-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 8px 4px 11px;
+    border-top: 1px solid var(--hairline);
+  }
+  .port-row:first-child { border-top: 0; }
+  .port-row[data-busy="true"] {
+    background: rgba(var(--accent-rgb), 0.06);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .port-row-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .port-num { font-size: 13px; color: var(--text); }
+  .port-meta {
+    font-size: 11.5px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tag {
+    flex: none;
+    font-family: var(--font-display);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .empty {
+    margin: 0;
+    padding: 9px 11px;
+    background: var(--surface-2);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-control);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+
+  /* ── New-port chooser ──────────────────────────────────────────────────── */
+  .chooser { margin: 0 0 16px; }
+  .chooser label {
+    display: block;
+    margin-bottom: 6px;
+    font-family: var(--font-display);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+  .field { display: flex; align-items: center; gap: 10px; }
+  #newport {
+    width: 120px;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--r-control);
+    color: var(--text);
+    font-size: 14px;
+    letter-spacing: 0.02em;
+    transition: border-color var(--dur-fast) var(--ease-std), box-shadow var(--dur-fast) var(--ease-std);
+  }
+  #newport:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: var(--glow-accent);
+  }
+  #newport:disabled { opacity: 0.5; }
+  .hint {
+    flex: 1;
+    min-height: 18px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--muted);
+  }
+  .hint[data-tone="good"] { color: var(--green); }
+  .hint[data-tone="bad"]  { color: var(--danger); }
+
+  /* ── Actions ───────────────────────────────────────────────────────────── */
+  .error {
+    margin: 0 0 12px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--danger);
+  }
+  .actions-main { display: flex; gap: 8px; margin-bottom: 10px; }
+  .actions-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .kill-group { display: flex; align-items: center; gap: 4px; }
+
+  .btn {
+    height: 38px;
+    padding: 0 14px;
+    border: 1px solid transparent;
+    border-radius: var(--r-btn);
+    font-family: var(--font-display);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -0.2px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--dur-fast) var(--ease-std), border-color var(--dur-fast) var(--ease-std), color var(--dur-fast) var(--ease-std);
+  }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .btn.primary {
+    flex: 1;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+    box-shadow: var(--glow-accent);
+  }
+  .btn.primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); }
+
+  .btn.outline {
+    flex: 1;
+    background: transparent;
+    border-color: var(--hairline);
+    color: var(--text-3);
+  }
+  .btn.outline:hover:not(:disabled) { color: var(--text); border-color: rgba(255, 255, 255, 0.18); }
+
+  .btn.danger {
+    height: 32px;
+    padding: 0 10px;
+    background: transparent;
+    color: var(--danger);
+    font-size: 13px;
+  }
+  .btn.danger:hover:not(:disabled) {
+    color: #fff;
+    background: rgba(220, 38, 38, 0.12);
+    border-color: rgba(220, 38, 38, 0.35);
+  }
+  .btn.tiny { height: 25px; padding: 0 9px; font-size: 12px; flex: none; }
+
+  .btn.ghost {
+    height: 32px;
+    padding: 0 10px;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 13px;
+  }
+  .btn.ghost:hover:not(:disabled) { color: var(--text); }
+
+  [hidden] { display: none !important; }
+  body.is-busy .btn { pointer-events: none; opacity: 0.6; }
+</style>
+</head>
+<body>
+  <main class="panel" role="dialog" aria-modal="true" aria-labelledby="pc-title">
+    <div class="chrome">
+      <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="chrome-label" id="pc-path">pi-scope</span>
+      <span class="chrome-status" id="pc-status" data-state="busy" aria-hidden="true"></span>
+    </div>
+
+    <div class="body">
+      <p class="eyebrow">Port check</p>
+      <h1 class="title" id="pc-title">
+        Port <span class="mono" id="pc-port">—</span> <span class="accent" id="pc-verb">is already in use</span>.
+      </h1>
+      <p class="lede" id="pc-lede">Checking what is listening…</p>
+
+      <dl class="readout" id="pc-readout">
+        <div><dt>host</dt><dd id="pc-host">—</dd></div>
+        <div><dt>holder</dt><dd id="pc-holder">—</dd></div>
+        <div><dt>pid</dt><dd id="pc-pids">—</dd></div>
+      </dl>
+
+      <div class="section">
+        <p class="section-label">Active Pi Scope servers</p>
+        <ul class="ports" id="pc-ports"></ul>
+        <p class="empty" id="pc-ports-empty" hidden>No Pi Scope server is listening.</p>
+      </div>
+
+      <form class="chooser" id="pc-chooser" autocomplete="off">
+        <label for="newport">Start this instance on another port</label>
+        <div class="field">
+          <input id="newport" class="mono" type="text" inputmode="numeric" pattern="[0-9]*"
+                 spellcheck="false" aria-describedby="pc-hint">
+          <span class="hint" id="pc-hint" data-tone="muted"></span>
+        </div>
+      </form>
+
+      <p class="error" id="pc-error" hidden></p>
+
+      <div class="actions-main">
+        <button id="pc-continue" class="btn primary" type="button" hidden>Continue on <span class="mono" id="pc-continue-port">—</span></button>
+        <button id="pc-use" class="btn primary" type="button">Start on <span class="mono" id="pc-use-port">—</span></button>
+        <button id="pc-reuse" class="btn outline" type="button" hidden>Open the running instance</button>
+      </div>
+      <div class="actions-foot">
+        <div class="kill-group">
+          <button id="pc-kill" class="btn danger" type="button"
+                  title="Kill the process holding the port, then start this instance on it">Kill &amp; take <span class="mono" id="pc-kill-port">—</span></button>
+          <button id="pc-kill-only" class="btn danger" type="button"
+                  title="Kill the process holding the port and close Pi Scope, without starting anything">Kill only</button>
+        </div>
+        <button id="pc-quit" class="btn ghost" type="button">Quit</button>
+      </div>
+    </div>
+  </main>
+
+<script>
+(function () {
+  "use strict";
+  var api = window.scopeNative && window.scopeNative.portConflict;
+  var $ = function (id) { return document.getElementById(id); };
+
+  var details = null;
+  var mode = "busy";       // "busy" | "free" (once the busy port is freed)
+  var checkTimer = null;
+  var chosenPort = null;
+
+  function busy(on) { document.body.classList.toggle("is-busy", !!on); }
+  function setHint(text, tone) {
+    var el = $("pc-hint");
+    el.textContent = text;
+    el.setAttribute("data-tone", tone || "muted");
+  }
+  function showError(text) {
+    var el = $("pc-error");
+    el.textContent = text || "";
+    el.hidden = !text;
+  }
+  function setPrimary(port, enabled) {
+    chosenPort = enabled ? port : null;
+    $("pc-use-port").textContent = port == null ? "—" : String(port);
+    $("pc-use").disabled = !enabled;
+  }
+
+  function render(d) {
+    details = d;
+    mode = "busy";
+    $("pc-port").textContent = String(d.port);
+    $("pc-kill-port").textContent = String(d.port);
+    $("pc-continue-port").textContent = String(d.port);
+    $("pc-path").textContent = "pi-scope · port " + d.port;
+    $("pc-host").textContent = d.host || "—";
+    var holders = d.holders || [];
+    var pids = holders.map(function (h) { return h.pid; }).join(", ");
+    $("pc-pids").textContent = pids || "unknown";
+    if (d.state === "scope") {
+      $("pc-verb").textContent = "is already in use";
+      $("pc-holder").textContent = "Pi Scope server" + (d.version ? " v" + d.version : "");
+      $("pc-lede").textContent = "Another Pi Scope instance is already serving this port. Open it, "
+        + "kill a port below, or start this instance on a different port while it keeps running.";
+      $("pc-reuse").hidden = false;
+    } else {
+      $("pc-verb").textContent = "is already taken";
+      $("pc-holder").textContent = (holders[0] && holders[0].name) || "another process";
+      $("pc-lede").textContent = "Something other than Pi Scope holds this port. Kill the process "
+        + "holding it, or start this instance on a different port.";
+      $("pc-reuse").hidden = true;
+    }
+    $("pc-continue").hidden = true;
+    $("pc-kill").hidden = false;
+    $("pc-kill-only").hidden = false;
+    $("pc-use").className = "btn primary";
+    $("pc-status").setAttribute("data-state", "busy");
+
+    var suggestion = d.suggested || (d.port < 65535 ? d.port + 1 : 65534);
+    $("newport").value = String(suggestion);
+    setHint("Checking port " + suggestion + "…", "muted");
+    setPrimary(suggestion, false);
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(runCheck, 0);
+    refreshPorts();
+  }
+
+  // The busy port was freed (by us): the conflict is gone, so offer to just run here.
+  function renderFree() {
+    mode = "free";
+    $("pc-verb").textContent = "is now free";
+    $("pc-lede").textContent = "The port is free. Continue here, or start this instance on a different port below.";
+    $("pc-holder").textContent = "—";
+    $("pc-pids").textContent = "—";
+    $("pc-reuse").hidden = true;
+    $("pc-continue").hidden = false;
+    $("pc-kill").hidden = true;
+    $("pc-kill-only").hidden = true;
+    $("pc-use").className = "btn outline";
+    $("pc-status").setAttribute("data-state", "free");
+  }
+
+  function refreshPorts() {
+    return api.ports().then(function (res) {
+      renderPorts((res && res.ports) || []);
+    }).catch(function () { renderPorts([]); });
+  }
+
+  function renderPorts(list) {
+    var ul = $("pc-ports");
+    ul.textContent = "";
+    $("pc-ports-empty").hidden = list.length > 0;
+    list.forEach(function (item) {
+      var li = document.createElement("li");
+      li.className = "port-row";
+      var isBusy = details && item.port === details.port;
+      if (isBusy) li.setAttribute("data-busy", "true");
+
+      var main = document.createElement("div");
+      main.className = "port-row-main";
+      var num = document.createElement("span");
+      num.className = "port-num mono";
+      num.textContent = String(item.port);
+      var meta = document.createElement("span");
+      meta.className = "port-meta mono";
+      var pids = (item.holders || []).map(function (h) { return h.pid; }).join(", ");
+      meta.textContent = (item.version ? "v" + item.version : "Pi Scope") + (pids ? " · pid " + pids : "");
+      meta.title = meta.textContent;
+      main.appendChild(num);
+      main.appendChild(meta);
+      li.appendChild(main);
+
+      if (isBusy) {
+        var tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = "this port";
+        li.appendChild(tag);
+      }
+
+      var kill = document.createElement("button");
+      kill.type = "button";
+      kill.className = "btn danger tiny";
+      kill.textContent = "Kill";
+      kill.title = "Kill the Pi Scope server on port " + item.port;
+      kill.addEventListener("click", function () { killPort(item.port); });
+      li.appendChild(kill);
+
+      ul.appendChild(li);
+    });
+  }
+
+  function runCheck() {
+    clearTimeout(checkTimer);
+    var raw = $("newport").value.trim();
+    var port = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isInteger(port) || port < 1 || port > 65535) {
+      setHint("Enter a port between 1 and 65535.", "bad");
+      setPrimary(null, false);
+      return;
+    }
+    if (details && port === details.port) {
+      setHint("That is the busy port — pick another.", "bad");
+      setPrimary(null, false);
+      return;
+    }
+    setHint("Checking port " + port + "…", "muted");
+    setPrimary(port, false);
+    api.checkPort(port).then(function (res) {
+      // Ignore a stale reply for a port the user has since changed.
+      if (Number($("newport").value.trim()) !== port) return;
+      if (res && res.ok) {
+        setHint("Port " + port + " is free.", "good");
+        setPrimary(port, true);
+      } else {
+        setHint((res && res.reason) || ("Port " + port + " is not available."), "bad");
+        setPrimary(port, false);
+      }
+    });
+  }
+
+  // Kill one port, then refresh: if it was the busy port and it is now free, the
+  // conflict is resolved and the popup switches to the "continue here" state.
+  function killPort(port) {
+    busy(true);
+    showError("");
+    api.killPort(port).then(function (res) {
+      if (!res || !res.ok) {
+        busy(false);
+        showError((res && res.reason) || ("Could not free port " + port + "."));
+        return;
+      }
+      return api.state().then(function (s) {
+        if (mode === "busy" && s && s.state === "free") renderFree();
+        return refreshPorts();
+      }).then(function () { busy(false); });
+    }).catch(function (e) { busy(false); showError(String((e && e.message) || e)); });
+  }
+
+  function settleKill(takePort) {
+    busy(true);
+    showError("");
+    api.killPort(details.port).then(function (res) {
+      if (!res || !res.ok) {
+        busy(false);
+        showError((res && res.reason) || "Could not free the port.");
+        return;
+      }
+      if (takePort) api.takePort();  // start this instance on the freed port
+      else api.quit();               // just free it, then leave
+    }).catch(function (e) { busy(false); showError(String((e && e.message) || e)); });
+  }
+
+  function wire() {
+    $("newport").addEventListener("input", function () {
+      clearTimeout(checkTimer);
+      checkTimer = setTimeout(runCheck, 220);
+    });
+    $("pc-chooser").addEventListener("submit", function (e) { e.preventDefault(); });
+    $("pc-chooser").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); if (chosenPort != null) { busy(true); api.usePort(chosenPort); } }
+    });
+    $("pc-use").addEventListener("click", function () {
+      if (chosenPort != null) { busy(true); api.usePort(chosenPort); }
+    });
+    $("pc-reuse").addEventListener("click", function () { busy(true); api.reuse(); });
+    $("pc-continue").addEventListener("click", function () { busy(true); api.takePort(); });
+    $("pc-kill").addEventListener("click", function () { settleKill(true); });
+    $("pc-kill-only").addEventListener("click", function () { settleKill(false); });
+    $("pc-quit").addEventListener("click", function () { busy(true); api.quit(); });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { e.preventDefault(); busy(true); api.quit(); }
+    });
+  }
+
+  function start() {
+    if (!api) {
+      $("pc-lede").textContent = "This window must be opened by the Pi Scope launcher.";
+      return;
+    }
+    wire();
+    api.details().then(function (d) {
+      render(d);
+      $("newport").focus();
+      $("newport").select();
+    });
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
+</script>
+</body>
+</html>

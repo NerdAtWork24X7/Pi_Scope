@@ -21,6 +21,10 @@ tmp/
 db/scope.db
 db/scope.db-shm
 db/scope.db-wal
+# Databases of extra dev instances started on another port (db/scope-<port>.db).
+db/scope-*.db
+db/scope-*.db-shm
+db/scope-*.db-wal
 
 # Build / release artifacts
 apps/scope-desktop/server-bundle/

@@ -303,6 +303,45 @@ cd Pi_Scope
         the desktop icon, which inherits no shell environment.
       </p>
 
+      <h3 id="port-in-use">Port already in use (running a second instance)</h3>
+      <p>
+        The desktop app checks its port before it boots. If something is already there, it does
+        not silently take over or fail — it shows a small console-styled popup that names what
+        holds the port and offers these ways forward:
+      </p>
+      <ul>
+        <li><strong>Open the running instance</strong> — when the port holds another Pi Scope
+          server, adopt it instead of starting a second one.</li>
+        <li><strong>Kill &amp; take the port</strong> — free the port, then start this instance on
+          it. A Pi Scope server is asked to <code>POST /shutdown</code> (so it tears its own
+          agents and terminals down first); anything else is signalled, escalating to
+          <code>SIGKILL</code> / <code>taskkill /T /F</code>.</li>
+        <li><strong>Kill only</strong> — free the port and close Pi Scope, without starting
+          anything. Handy when something else holds the port and you just want it back.</li>
+        <li><strong>Start on another port</strong> — boot a second, fully independent instance.
+          It gets its own token file (<code>scope_token.&lt;port&gt;</code>) and its own database
+          (<code>scope-&lt;port&gt;.db</code>), so the two instances never share a token or contend
+          for one SQLite file. The default port keeps the historic paths
+          (<code>tmp/scope_token</code>, <code>db/scope.db</code>; <code>~/.pi-scope/</code> when
+          packaged). The choice is per-launch — nothing is written to
+          <code>scope.env</code>.</li>
+      </ul>
+      <p>
+        The popup also lists <strong>every Pi Scope server this machine has listening right now</strong>
+        — port, version and pid — each with its own <em>Kill</em> button, so a stray instance started
+        earlier can be shut down from the same place. The list is found by probing the configured
+        port and the ones above it, plus any port named by a <code>scope_token.&lt;port&gt;</code>
+        file left by an isolated instance; each one is asked to shut down gracefully using its own
+        token. If you free the busy port this way, the popup switches to
+        <strong>Continue on &lt;port&gt;</strong> and you can start here after all.
+      </p>
+      <p>
+        To pin a different port permanently, set <code>SCOPE_PORT</code> (see
+        <a href="#environment">Server environment variables</a>). The headless launcher
+        (<code>./pi-scope</code>) keeps its own rule: it reuses a healthy server on the target port
+        and never prompts.
+      </p>
+
       <h3 id="demo">Take a test drive (no agent needed)</h3>
       <p>
         Want to see it before wiring up an agent? Seed the dashboard with a realistic demo
