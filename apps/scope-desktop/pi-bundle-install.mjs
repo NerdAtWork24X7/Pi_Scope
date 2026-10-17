@@ -21,6 +21,12 @@
  * Node, under the portable Node inside a package, and under whatever Node the
  * installers found.
  *
+ * The bundle is also the *only* npm project for Pi Scope's runtime packages: the
+ * server loads `node-pty` and `ws` from it (see apps/scope-server/pi-deps.ts),
+ * so neither the server workspace nor the desktop app keeps a duplicate. An
+ * install seeded before that (agent only) is completed in place below, without
+ * touching the agent version it already holds.
+ *
  *   node pi-bundle-install.mjs [options]
  *
  *     --from <dir>    template/seed project  [default: <script dir>/pi-bundle]
@@ -42,6 +48,8 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG = "@earendil-works/pi-coding-agent";
+/** Packages the Pi Scope server itself loads from the bundle. */
+const APP_PACKAGES = ["node-pty", "ws"];
 /** The installed package dir, and the CLI entry the server launches. */
 const pkgDirIn = (root) => path.join(root, "node_modules", ...PKG.split("/"));
 const cliIn = (root) => path.join(pkgDirIn(root), "dist", "bundle", "cli.js");
@@ -92,6 +100,55 @@ function installedVersion(root) {
     const pkg = JSON.parse(fs.readFileSync(path.join(pkgDirIn(root), "package.json"), "utf8"));
     return typeof pkg?.version === "string" ? pkg.version : null;
   } catch { return null; }
+}
+
+/** Whether `spec` is installed under `root`'s node_modules. */
+function hasPackage(root, spec) {
+  try {
+    return fs.statSync(path.join(root, "node_modules", ...spec.split("/"), "package.json")).isFile();
+  } catch { return false; }
+}
+
+/** The agent plus the server's own packages that are missing from an install. */
+function missingRequired(root) {
+  return [PKG, ...APP_PACKAGES].filter((spec) => !hasPackage(root, spec));
+}
+
+/** A bundle manifest, or null when it cannot be read. */
+function readManifest(root) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+    return pkg && typeof pkg === "object" ? pkg : null;
+  } catch { return null; }
+}
+
+/**
+ * Add the seed's `dependencies` and `allowScripts` to an existing install's
+ * manifest.
+ *
+ * This is how a bundle seeded before the server's packages moved in gains
+ * `node-pty` and `ws` (and the install-script approval node-pty's native build
+ * needs on npm versions that block unapproved scripts). The target's own entries
+ * win: Settings → Update may have pinned a newer agent than the seed ships, and
+ * re-stamping the seed's version would silently downgrade it on the next launch.
+ *
+ * Returns false when either manifest cannot be read (nothing was written).
+ */
+function mergeSeedDeps(target, from) {
+  const seed = readManifest(from);
+  const pkg = readManifest(target);
+  if (!seed?.dependencies || !pkg) return false;
+  const merged = {
+    ...pkg,
+    dependencies: { ...seed.dependencies, ...(pkg.dependencies || {}) },
+  };
+  if (seed.allowScripts) merged.allowScripts = { ...seed.allowScripts, ...(pkg.allowScripts || {}) };
+  // Only rewrite a field that actually changes, so an up-to-date install keeps
+  // its mtime (and the "already installed" path stays a true no-op).
+  const added = (want = {}, have = {}) => Object.entries(want).some(([name, range]) => have[name] !== range);
+  if (!added(merged.dependencies, pkg.dependencies) && !added(merged.allowScripts, pkg.allowScripts)) return true;
+  fs.writeFileSync(path.join(target, "package.json"), JSON.stringify(merged, null, 2) + "\n");
+  return true;
 }
 
 /**
@@ -241,7 +298,29 @@ const STAGING_PREFIX = `.${path.basename(opts.target)}.tmp-`;
 // marker, so a partially copied tree simply gets seeded again below.
 const existing = installedVersion(opts.target);
 if (existing) {
-  info(`pi bundle: v${existing} already installed in ${opts.target}`);
+  // Bring the manifest in step with the seed's dependencies and install-script
+  // approvals. A no-op for an up-to-date install (the file is not rewritten).
+  const merged = mergeSeedDeps(opts.target, opts.from);
+  const missing = missingRequired(opts.target);
+  if (missing.length === 0) {
+    info(`pi bundle: v${existing} already installed in ${opts.target}`);
+    process.exit(0);
+  }
+  // An install seeded before the server's own packages moved into the bundle
+  // (the agent is there, `node-pty`/`ws` are not). Complete it in place: a full
+  // re-seed would replace the agent with whatever version `--from` ships,
+  // undoing Settings → Update.
+  if (!merged) {
+    die(`nothing to install from ${opts.from} (no readable manifest) — cannot add ${missing.join(", ")} to ${opts.target}`);
+  }
+  const explicit = (opts.npm || process.env.SCOPE_NPM_BIN || "").trim();
+  info(`pi bundle: adding ${missing.join(", ")} to the existing install with ${pmLabel(opts.pm, explicit)} in ${opts.target} (this can take a minute)…`);
+  if (!runInstall(opts.pm, explicit, opts.target)) {
+    die(`${pmLabel(opts.pm, explicit)} install failed — the terminal and WebSocket layer need ${missing.join(", ")} in ${opts.target}`);
+  }
+  const stillMissing = missingRequired(opts.target);
+  if (stillMissing.length) die(`${stillMissing.join(", ")} still missing from ${opts.target} after installing`);
+  info(`pi bundle: v${installedVersion(opts.target)} installed in ${opts.target}`);
   process.exit(0);
 }
 
@@ -311,16 +390,21 @@ try {
   die(`could not seed ${opts.target}: ${err?.message || err}`);
 }
 
-// 5. Dependencies: only needed when the source shipped no node_modules (a fresh
-//    download's template). Needs npm and network.
-if (!hasModules) {
+// 5. Dependencies the seed did not carry. A fresh template (no node_modules)
+//    needs the whole project installed; a checkout migrated from an older
+//    layout has the agent but not the server's packages (APP_PACKAGES). One
+//    `npm install` in the target covers both. Needs npm and network.
+const missing = missingRequired(opts.target);
+if (missing.length) {
   const explicit = (opts.npm || process.env.SCOPE_NPM_BIN || "").trim();
-  info(`pi bundle: installing the agent with ${pmLabel(opts.pm, explicit)} in ${opts.target} (this can take a minute)…`);
+  info(`pi bundle: installing ${missing.join(", ")} with ${pmLabel(opts.pm, explicit)} in ${opts.target} (this can take a minute)…`);
   if (!runInstall(opts.pm, explicit, opts.target)) {
-    die(`${pmLabel(opts.pm, explicit)} install failed — the app will fall back to a pi on PATH until this succeeds`);
+    die(`${pmLabel(opts.pm, explicit)} install failed — the app needs ${missing.join(", ")} from ${opts.target}`);
   }
 }
 
 const version = installedVersion(opts.target);
 if (!version) die(`the agent's package is missing from ${opts.target} after installing`);
+const stillMissing = missingRequired(opts.target);
+if (stillMissing.length) die(`${stillMissing.join(", ")} still missing from ${opts.target} after installing`);
 info(`pi bundle: v${version} installed in ${opts.target}`);

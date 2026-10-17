@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # build-release.sh — build a standalone Linux AppImage release of Pi Scope.
 # Produces apps/scope-desktop/dist/Pi-Scope-<version>.AppImage.
-# The server runs under a bundled portable Node 24 (required for node:sqlite),
-# and node-pty is built for that Node's ABI during `npm install`.
+# The server runs under a bundled portable Node 24 (required for node:sqlite).
+# node-pty and ws are installed into the pi-bundle seed below (not into the
+# workspace), and node-pty is built for that Node's ABI by that `npm install`.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,24 +14,33 @@ NODE_VER="v24.15.0"   # must match the Node that builds node-pty here (same ABI)
 NODE_TARBALL="node-${NODE_VER}-linux-x64.tar.xz"
 NODE_URL="https://nodejs.org/dist/${NODE_VER}/${NODE_TARBALL}"
 
-echo "[build] installing workspace deps (electron, node-pty, ws, esbuild, electron-builder)..."
+echo "[build] installing workspace deps (electron, esbuild, electron-builder)..."
 ( cd "$ROOT" && npm install --no-audit --no-fund )
 
-# Pre-install the Pi coding agent so the packaged app can seed the user's own
-# copy (~/.pi-scope/pi) on first launch with no network and no system npm. The
-# app never runs the agent from resources/pi directly: that copy is read-only, so
-# Settings → Update could not replace it.
-echo "[build] bundling the Pi coding agent (pi-bundle seed)..."
+# Pre-install the Pi coding agent and the server's own packages (node-pty, ws)
+# so the packaged app can seed the user's copy (~/.pi-scope/pi) on first launch
+# with no network and no system npm. The app never runs from resources/pi
+# directly: that copy is read-only, so Settings → Update could not replace it.
+echo "[build] bundling the Pi coding agent and server packages (pi-bundle seed)..."
 ( cd "$LAUNCHER/pi-bundle" && npm install --no-audit --no-fund )
 # Ship the Pi Scope extension inside the seed so the seeded `pi` shim can
 # force-load it without depending on the user's global pi configuration.
 cp "$ROOT/extension/pi-scope.ts" "$LAUNCHER/pi-bundle/pi-scope.ts"
 
-echo "[build] bundling SCOPE server (TS -> JS; node-pty/ws kept external)..."
+# The agent extensions' dependency manifest travels beside the app (not inside
+# the pi seed): scope-control.js hands it to pi-extensions-install.mjs as the
+# declaration for an agent dir that was seeded before the manifest existed —
+# those dirs are never re-seeded, so it is the only way their extensions get
+# their packages installed.
+echo "[build] copying the extensions dependency manifest..."
+cp "$ROOT/examples/pi_local/agent/extensions/package.json" "$LAUNCHER/agent-extensions.json"
+
+# node-pty/ws are loaded at runtime from the bundled pi agent (~/.pi-scope/pi,
+# see apps/scope-server/pi-deps.ts), so they are not imported here at all.
+echo "[build] bundling SCOPE server (TS -> JS)..."
 mkdir -p server-bundle/public server-bundle/plugins
 npx esbuild "$ROOT/apps/scope-server/server.ts" \
   --bundle --platform=node --target=node22 --format=esm \
-  --external:node-pty --external:ws \
   --outfile="$LAUNCHER/server-bundle/server.js"
 
 echo "[build] copying WebUI assets..."

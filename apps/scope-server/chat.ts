@@ -31,7 +31,7 @@ import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spa
 // Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
 // PATH (force-loading the Pi Scope extension). Must be imported before PI_BIN is
 // used so chat subprocesses launch the bundled agent, not a global install.
-import { PI_BIN, PI_LAUNCH } from "./pi-bundle.ts";
+import { PI_BIN, PI_BUNDLE, PI_LAUNCH } from "./pi-bundle.ts";
 
 const ENCODER = new TextEncoder();
 
@@ -574,6 +574,12 @@ function chatChildEnv(cwd: string): NodeJS.ProcessEnv {
   // find Chromium, so web-fetch fails in Chat while working in the terminal.
   const pwBrowsers = resolvePlaywrightBrowsersPath();
   if (pwBrowsers) env.PLAYWRIGHT_BROWSERS_PATH = pwBrowsers;
+  // Extensions that resolve their own npm packages at run time (the `browser`
+  // extension) look here first. pi-extensions-install.mjs installs them into the
+  // bundled pi project, and the shim sets the same variable for the processes it
+  // launches — this covers the direct spawn that bypasses the shim, whose env is
+  // built here and nowhere else.
+  if (PI_BUNDLE.dir) env.PI_BROWSER_MODULE_ROOT = PI_BUNDLE.dir;
   // API keys entered on the Settings page — applied last so a value the user
   // saved there wins over whatever the launcher's environment carried.
   for (const [name, value] of Object.entries(readStoredKeys())) env[name] = value;

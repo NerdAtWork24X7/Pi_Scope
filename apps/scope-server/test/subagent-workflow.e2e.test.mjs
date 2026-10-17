@@ -72,9 +72,10 @@ let ws5;   // the node panel (provider + model + message)
 let ws6;   // parallel vs sequential scheduling
 let ws7;   // reference files (a node's injected paths)
 let ws8;   // the reference browser + the messages sidebar
-let stubDir;    // fake `claude` / `gemini` binaries, prepended to PATH
+let stubDir;    // fake `claude` / `gemini` / `opencode` binaries, prepended to PATH
 let claudeLog;  // argv the fake claude was invoked with
 let geminiLog;  // argv the fake gemini was invoked with
+let opencodeRuns; // how often the fake opencode ran (its `models` answer is cached)
 
 /** A fake harness binary that records its argv and the SW_* env it was given,
  *  then prints a marker — so a node's flags can be asserted end to end. */
@@ -85,6 +86,32 @@ function writeStubHarness(dir, name, log, marker) {
     // Record the argv and the capability env the plugin handed the harness.
     "{ printf '%s\\n' \"$@\"; printf 'SW_TOOLS=%s SW_MODEL=%s\\n' \"$SW_TOOLS\" \"$SW_MODEL\"; } >> " + JSON.stringify(log),
     "printf '%s\\n' " + JSON.stringify(marker),
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, script);
+  fs.chmodSync(file, 0o755);
+}
+
+/**
+ * A fake `opencode` whose `models` subcommand prints a catalogue the way the real
+ * CLI does — one `provider/model` per line, exit 0 — mixed with the noise a real
+ * one can carry (an SGR escape, a human sentence, a blank line). Every
+ * invocation appends to `runsLog`, so a test can prove the answer was cached.
+ */
+function writeModelsStubHarness(dir, runsLog) {
+  const file = path.join(dir, "opencode");
+  const script = [
+    "#!/bin/sh",
+    `printf 'run\\n' >> ${JSON.stringify(runsLog)}`,
+    `if [ "$1" = "models" ]; then`,
+    `  printf 'zen/deepseek-v4.1-flash\\n'`,
+    `  printf '\\033[0mzen/gpt-5\\n'`,
+    `  printf 'opencode is up to date\\n'`,
+    `  printf '\\n'`,
+    `  printf 'local/qwen3\\n'`,
+    "  exit 0",
+    "fi",
+    "exit 0",
     "",
   ].join("\n");
   fs.writeFileSync(file, script);
@@ -336,6 +363,8 @@ before(async () => {
   geminiLog = path.join(tmpDir, "gemini-argv.log");
   writeStubHarness(stubDir, "claude", claudeLog, "CLAUDE_STUB_OK");
   writeStubHarness(stubDir, "gemini", geminiLog, "GEMINI_STUB_OK");
+  opencodeRuns = path.join(tmpDir, "opencode-runs.log");
+  writeModelsStubHarness(stubDir, opencodeRuns);
 
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
@@ -405,6 +434,33 @@ describe("subagent workflow plugin (server)", () => {
     const custom = data.harnesses.find((h) => h.id === "custom");
     assert.equal(custom.available, true);
     for (const h of data.harnesses) assert.equal(typeof h.available, "boolean");
+    // A provider that can print its own catalogue says how to ask it; the others
+    // have only the list they declare.
+    assert.deepEqual(data.harnesses.find((h) => h.id === "opencode").modelsArgs, ["models"]);
+    assert.equal(data.harnesses.find((h) => h.id === "claude").modelsArgs, null);
+  });
+
+  test("asks a provider's own CLI for its model list", async () => {
+    // opencode can print the catalogue it is set up for on this machine
+    // (`opencode models`): that is the list a node's Model dropdown adds to the
+    // handful of ids this plugin hard-codes.
+    const { res, data } = await api(`/${PLUGIN}/models?harness=opencode`);
+    assert.ok(res.ok, data?.error);
+    assert.deepEqual(data.models, ["zen/deepseek-v4.1-flash", "zen/gpt-5", "local/qwen3"],
+      "one model per line — the escape stripped and the sentence dropped");
+    assert.match(data.source, /opencode models/, "and the command that answered rides along");
+
+    // Cached: opening a second node does not spawn the CLI a second time.
+    const spawns = () => (fs.existsSync(opencodeRuns) ? fs.readFileSync(opencodeRuns, "utf8").trim().split("\n").length : 0);
+    const ran = spawns();
+    await api(`/${PLUGIN}/models?harness=opencode`);
+    assert.equal(spawns(), ran, "a repeated read reuses the cached list");
+
+    // A harness with no models command has nothing to ask, and an unknown one is
+    // refused: the dropdown keeps the list the harness declares.
+    const none = await api(`/${PLUGIN}/models?harness=claude`);
+    assert.deepEqual(none.data, { models: [], source: null });
+    assert.equal((await api(`/${PLUGIN}/models?harness=nope`)).res.status, 400);
   });
 
   test("reports each harness's models and which capabilities it can be given", async () => {
@@ -1182,6 +1238,40 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal(argv[argv.indexOf("--model") + 1], "gemini-2.5-flash");
   });
 
+  test("keeps a harness's escape sequences and split characters out of its message", async () => {
+    const solo = path.join(tmpDir, "ws-escapes");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+
+    // A harness writes bytes to a pipe the way opencode does: an SGR reset on a
+    // write of its own (`\u001b[91m\u001b[0m`), then the line it colours, then an
+    // em-dash whose three UTF-8 bytes are split across two writes — a read
+    // boundary can land inside a character just as easily as between lines.
+    const command =
+      "printf '\\033[91m\\033[0m'; sleep 0.3; " +
+      "printf '\\342'; sleep 0.3; printf '\\200\\224 done\\033[0m\\n'";
+    const upd = await act("updateNode", { id: agent.id, name: "escapey", config: {
+      harness: "custom", command, prompt: "{task}",
+    } }, solo);
+    assert.ok(upd.res.ok, upd.data?.error);
+
+    const started = await runApi("start", { task: "escape check" }, solo);
+    assert.ok(started.res.ok, started.data?.error);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+
+    // The messages sidebar reads one row per line of output: the harness wrote
+    // one sentence, so the node has one row holding that sentence — not a row of
+    // nothing but escape bytes, and not a half-written fragment — and the
+    // em-dash decodes as an em-dash instead of as a replacement character.
+    const rows = run.log.filter((l) => l.nodeId === agent.id && l.stream === "stdout").map((l) => l.text);
+    assert.deepEqual(rows, ["\u2014 done"]);
+    assert.equal(run.nodes[agent.id].outputTail, "\u2014 done\n");
+    assert.ok(!JSON.stringify(run).includes("\u001b"), "no escape sequence reaches the view");
+    assert.ok(!JSON.stringify(run).includes("\ufffd"), "no character was cut in half");
+  });
+
   test("resolves a Pi node's skills against the agent dir, reporting what is missing", async () => {
     const s = await snapshot(ws5);
     const agent = s.nodes.find((n) => n.type === "agent");
@@ -1534,6 +1624,35 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal(list2[0].id, run2.id, "newest first");
     assert.ok(list2.some((h) => h.id === run.id), "the older run is still there");
     assert.equal((await api(`/${PLUGIN}/history?cwd=${enc(solo)}&id=nope`)).res.status, 404);
+  });
+
+  test("reopens a run recorded before the cleanup without its escape junk", async () => {
+    const solo = path.join(tmpDir, "ws-legacy-record");
+    fs.mkdirSync(path.join(solo, ".pi-scope", "plugins", ".data"), { recursive: true });
+    // A record as an older build wrote it: the harness's bytes kept raw, so the
+    // agent's answer begins with a bare `\u001b[0m` (which a reader sees as
+    // `[0m` in front of the first word).
+    const legacy = {
+      id: "run_legacy", status: "done", task: "old",
+      startedAt: 1, finishedAt: 2, seq: 3, interrupted: false, concurrency: 4,
+      nodes: { n1: { status: "done", outputTail: "\u001b[0m\u2014 done\n" } },
+      log: [
+        { seq: 1, ts: 1, nodeId: "n1", stream: "stderr", text: "\u001b[0m" },
+        { seq: 2, ts: 2, nodeId: "n1", stream: "stdout", text: "\u001b[0m\u25c8 Web Search" },
+      ],
+    };
+    fs.writeFileSync(storePath(solo), JSON.stringify({ runs: { [solo]: [legacy] } }, null, 2));
+
+    const list = await api(`/${PLUGIN}/history?cwd=${enc(solo)}`);
+    assert.ok(list.res.ok, list.data?.error);
+    assert.equal(list.data.history.length, 1, "the stored record is listed");
+
+    const detail = await api(`/${PLUGIN}/history?cwd=${enc(solo)}&id=run_legacy`);
+    assert.ok(detail.res.ok, detail.data?.error);
+    const run = detail.data.run;
+    assert.equal(run.nodes.n1.outputTail, "\u2014 done\n");
+    assert.deepEqual(run.log.map((l) => l.text), ["\u25c8 Web Search"],
+      "the empty escape row is dropped and the rest reads as text");
   });
 
   test("caps the stored history and trims a chatty run's log", async () => {
@@ -2987,6 +3106,44 @@ describe("subagent workflow plugin (client)", () => {
     await page.click("#sw-tr-save");
     await page.waitForFunction(() => !/trigger armed/.test(document.querySelector("#sw-status")?.textContent || ""));
     assert.equal((await api(`/${PLUGIN}/triggers?cwd=${enc(solo)}`)).data.triggers.armed, false);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("a node's Model dropdown asks its provider's CLI for the list", async () => {
+    const solo = path.join(tmpDir, "ws-cli-models-ui");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    assert.ok((await act("updateNode", { id: agent.id, name: "picker", config: {
+      harness: "opencode", model: "", prompt: "{input}",
+    } }, solo)).res.ok);
+
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-f-harness");
+    // The curated list is there at once; the provider's own catalogue arrives a
+    // round trip later and is folded into the same dropdown.
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll("#sw-f-model option")).some((o) => o.value === "local/qwen3"),
+      null, { timeout: 15_000 });
+    const values = await page.$$eval("#sw-f-model option", (o) => o.map((x) => x.value));
+    for (const id of ["zen/deepseek-v4.1-flash", "zen/gpt-5", "local/qwen3"]) {
+      assert.ok(values.includes(id), `${id} was offered (${values.slice(0, 6).join(", ")}…)`);
+    }
+    assert.ok(values.includes("__custom__"), "and a way to name a model of one's own");
+    // Grouped by provider: the provider half is part of what opencode is handed.
+    assert.ok((await page.$$eval("#sw-f-model optgroup", (o) => o.map((x) => x.label))).includes("local"));
+    assert.match(await page.textContent("#sw-model-wrap .sw-hint"), /opencode models/,
+      "the field says where the list came from");
+
+    // A model of one's own stays with this node — it is not added to the shared
+    // provider list, which is what makes trying a new id cheap.
+    await page.selectOption("#sw-f-model", "__custom__");
+    await page.fill("#sw-f-model-custom", "local/muse-glimmer-30b");
+    await page.click("#sw-save");
+    await page.waitForTimeout(400);
+    assert.equal((await snapshot(solo)).nodes.find((n) => n.id === agent.id).config.model, "local/muse-glimmer-30b");
     assert.deepEqual(errors, []);
     await context.close();
   });

@@ -120,6 +120,18 @@
   /** This workspace's triggers (schedule + event watch), as the server sees them. */
   let triggers = null;
   let harnesses = [];
+  /**
+   * What a provider's own CLI reported for its models (`opencode models`), by
+   * harness id, plus the ids being asked right now. A node's Model dropdown
+   * offers these after the list the harness declares: the tool installed on this
+   * machine knows the models the user signed it up for, which no list baked into
+   * this bundle can.
+   */
+  const cliModels = new Map();
+  const cliPending = new Set();
+  /** Bumped whenever the Model block asks its provider, so a late answer only
+   *  repaints a form that is still showing that provider. */
+  let modelAsk = 0;
   /** The server's OS (`"win32"` on Windows), as `/harnesses` reports it. It
    *  decides only presentation: a custom command's variables are `%SW_PROMPT%`
    *  there and `$SW_PROMPT` everywhere else (see customVar). */
@@ -1124,12 +1136,31 @@
       : opts;
   }
 
-  /** The models a harness offers: Pi's are the app's whole model catalogue
-   *  (`<provider>/<id>`, served with the harness list), a CLI's are the curated
-   *  suggestions on its registry entry. */
+  /** The models a provider offers: Pi's are the app's whole model catalogue
+   *  (`<provider>/<id>`, served with the harness list), a CLI's start from the
+   *  curated suggestions on its registry entry — then whatever its own CLI
+   *  reported, deduped and after the declared ones, so a live answer only ever
+   *  adds to the list. */
   function harnessModels(hid) {
     const meta = harnessMeta(hid);
-    return meta && Array.isArray(meta.models) ? meta.models : [];
+    const declared = meta && Array.isArray(meta.models) ? meta.models : [];
+    const reported = cliModels.get(hid) || [];
+    if (!reported.length) return declared;
+    const seen = new Set(declared);
+    return declared.concat(reported.filter((m) => !seen.has(m)));
+  }
+  /** The command a provider can be asked for its own model list, as the field's
+   *  hint spells it — `opencode models` — or "" when it has none. */
+  function modelsCommandOf(hid) {
+    const meta = harnessMeta(hid);
+    if (!meta || !Array.isArray(meta.modelsArgs) || !meta.modelsArgs.length) return "";
+    return `${meta.bin || hid} ${meta.modelsArgs.join(" ")}`.trim();
+  }
+  /** A list whose every entry is `provider/id`: the provider half is part of the
+   *  value, so its options group by it (the shape a Pi node's catalogue gets).
+   *  A thousand opencode models in one flat run of options cannot be read. */
+  function providerKeyed(list) {
+    return list.length > 1 && list.every((k) => /^[^/\s]+\/.+$/.test(String(k)));
   }
   const MODEL_CUSTOM = "__custom__";
   const modelId = (key) => String(key).split("/").slice(1).join("/");
@@ -1185,22 +1216,36 @@
     }
     const pi = hid === "pi";
     const list = harnessModels(hid);
+    // Group the options by provider whenever the entries are `provider/id` keys —
+    // always for Pi, and for a harness whose CLI reports its own catalogue (one
+    // optgroup per provider keeps a thousand opencode ids navigable).
+    const grouped = pi || providerKeyed(list);
     // What the select shows as chosen: for Pi the catalogue key the stored value
     // resolves to, otherwise the stored value itself when the list knows it.
     const resolved = pi ? resolveModelKey(list, value) : (list.includes(value) ? value : "");
     const known = !!resolved;
     const opts = [`<option value=""${value ? "" : " selected"}>${pi ? "— agent default —" : "— harness default —"}</option>`]
-      .concat(pi
+      .concat(grouped
         ? modelOptionGroups(list, resolved)
         : list.map((m) => `<option value="${escAttr(m)}"${m === resolved ? " selected" : ""}>${esc(m)}</option>`))
       .concat([`<option value="${MODEL_CUSTOM}"${known || !value ? "" : " selected"}>Custom…</option>`])
       .join("");
     const meta = harnessMeta(hid) || {};
+    // What the provider's own CLI answered (or is still answering): the list is
+    // the tool's, not this bundle's, so say where it came from.
+    const reported = cliModels.get(hid) || [];
+    const cmd = modelsCommandOf(hid);
+    const cliNote = !cmd ? ""
+      : cliPending.has(hid) ? ` Asking <code>${esc(cmd)}</code> for its list…`
+      : reported.length ? ` ${reported.length} of them reported by <code>${esc(cmd)}</code>.`
+      : "";
     const hint = pi
       ? `Every model this app can run, grouped by provider — pi is given <code>provider/model</code>, so two providers offering the same name never clash. <b>Custom…</b> takes anything else.`
-      : list.length
-        ? `Models this harness documents — or <b>Custom…</b> for anything else.`
-        : "No model list known for this harness — use <b>Custom…</b>.";
+      : reported.length
+        ? `The models <code>${esc(cmd)}</code> reports for this provider. <b>Custom…</b> takes a model of your own — it is kept with this node.`
+        : list.length
+          ? `Models this harness documents — or <b>Custom…</b> for a model of your own, kept with this node.${cliNote}`
+          : `No model list known for this harness — use <b>Custom…</b>.${cliNote}`;
     // A stored model the catalogue cannot pin down (unknown, or offered by
     // several providers) stays exactly as it is, and says why.
     const bare = pi && value && !known ? list.filter((key) => modelId(key) === value) : [];
@@ -1224,6 +1269,46 @@
     if (el.value !== MODEL_CUSTOM) return el.value;
     return dlgEl.querySelector("#sw-f-model-custom")?.value.trim() || "";
   }
+  /**
+   * Ask the selected provider's own CLI for its model list and fold the answer
+   * into the Model dropdown. Only the Model block is rewritten when it arrives:
+   * the rest of the form may hold edits the user has not saved yet.
+   *
+   * The server caches the command's answer for a few minutes, so opening node
+   * after node does not spawn a CLI each time — the round trip still happens, so a
+   * model added to the CLI shows up the next time a node is opened.
+   */
+  async function askCliModels(n) {
+    const hid = dlgEl.querySelector("#sw-f-harness")?.value || n.config?.harness || "";
+    const cmd = modelsCommandOf(hid);
+    if (!cmd) return;
+    const token = ++modelAsk;
+    // A first answer for this provider shows the wait; a list already in hand
+    // stays put until the fresh one replaces it.
+    if (!cliModels.has(hid)) { cliPending.add(hid); repaintModelField(); }
+    let models = [];
+    try {
+      const data = await getJson("/subagent-workflow/models", { harness: hid });
+      models = Array.isArray(data.models) ? data.models : [];
+    } catch { models = []; }
+    cliPending.delete(hid);
+    if (models.length) cliModels.set(hid, models); else cliModels.delete(hid);
+    if (token !== modelAsk) return;                        // a newer open owns the form
+    if ((dlgEl.querySelector("#sw-f-harness")?.value || "") !== hid) return;
+    if (!dlgEl.querySelector("#sw-f-model")) return;       // the provider changed field kind
+    repaintModelField();
+  }
+
+  /** Rewrite just the Model block of an open form, keeping what it is showing. */
+  function repaintModelField() {
+    const wrap = dlgEl.querySelector("#sw-model-wrap");
+    const sel = dlgEl.querySelector("#sw-f-harness");
+    if (!wrap || !sel) return;
+    const current = readModelField();
+    wrap.innerHTML = modelFieldHtml(sel.value, current);
+    bindModelField();
+  }
+
   /** Wire "Custom…" on the model select to its free-text box. */
   function bindModelField() {
     const sel = dlgEl.querySelector("#sw-f-model");
@@ -1487,8 +1572,12 @@
         dlgEl.querySelector("#sw-model-wrap").innerHTML = modelFieldHtml(harnessSel.value, model);
         bindModelField();
         syncCustom();
+        // The new provider's list may be its CLI's to report — ask it (the field
+        // already offers what the harness declares while the answer is on its way).
+        void askCliModels(n);
       });
       syncCustom();
+      void askCliModels(n);
     }
   }
 

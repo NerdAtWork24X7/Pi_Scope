@@ -23,6 +23,7 @@ const ROOT = path.resolve(HERE, "..", "..", "..");
 const INSTALLER = path.join(ROOT, "apps", "scope-desktop", "pi-bundle-install.mjs");
 const EXTENSION = path.join(ROOT, "extension", "pi-scope.ts");
 const PKG = "@earendil-works/pi-coding-agent";
+const SERVER_PACKAGES = ["node-pty", "ws"];
 
 let tmpDir;
 
@@ -34,34 +35,59 @@ function install(args, env = {}) {
   return { status: res.status, out: res.stdout || "", err: res.stderr || "" };
 }
 
-/** A source tree shaped like the repo template: manifest + an installed agent. */
+/** Write an installed package (`node_modules/<spec>/…`) under `root`. */
+function writeInstalled(root, spec, version, { cli = false } = {}) {
+  const dir = path.join(root, "node_modules", ...spec.split("/"));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: spec, version }));
+  if (cli) {
+    fs.mkdirSync(path.join(dir, "dist", "bundle"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "dist", "bundle", "cli.js"), "// stub cli\n");
+  }
+}
+
+/** A source tree shaped like the repo template: manifest + the installed project. */
 function makeSource(name, { withModules = true, withLock = true } = {}) {
   const root = path.join(tmpDir, name);
   fs.mkdirSync(root, { recursive: true });
+  // The server's own packages live in the bundle too (see pi-deps.ts).
+  const dependencies = { [PKG]: "1.2.3", "node-pty": "^1.1.0", ws: "^8.18.0" };
   fs.writeFileSync(path.join(root, "package.json"),
-    JSON.stringify({ name: "pi-scope-pi-bundle", private: true, dependencies: { [PKG]: "1.2.3" } }, null, 2));
+    JSON.stringify({ name: "pi-scope-pi-bundle", private: true, dependencies }, null, 2));
   if (withLock) fs.writeFileSync(path.join(root, "package-lock.json"), JSON.stringify({ name: "pi-scope-pi-bundle", lockfileVersion: 3 }));
   if (withModules) {
-    const pkg = path.join(root, "node_modules", ...PKG.split("/"));
-    fs.mkdirSync(path.join(pkg, "dist", "bundle"), { recursive: true });
-    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: PKG, version: "1.2.3" }));
-    fs.writeFileSync(path.join(pkg, "dist", "bundle", "cli.js"), "// stub cli\n");
+    writeInstalled(root, PKG, "1.2.3", { cli: true });
+    for (const spec of SERVER_PACKAGES) writeInstalled(root, spec, "1.0.0");
   }
   return root;
 }
 
-/** A stub package manager: records its cwd and creates a fake installed agent. */
-function makeNpmStub(name, { fail = false } = {}) {
+/** An install from before the server's packages moved into the bundle: agent only. */
+function makeLegacyInstall(name) {
+  const root = path.join(tmpDir, name);
+  fs.mkdirSync(root, { recursive: true });
+  writeInstalled(root, PKG, "4.5.6", { cli: true });
+  fs.writeFileSync(path.join(root, "package.json"),
+    JSON.stringify({ name: "pi-scope-pi-bundle", private: true, dependencies: { [PKG]: "4.5.6" } }, null, 2));
+  return root;
+}
+
+/**
+ * A stub package manager: records its cwd and creates whatever is not installed
+ * yet — like npm, it leaves a package the manifest already resolved alone.
+ */
+function makeNpmStub(name, { fail = false, packages = [PKG, ...SERVER_PACKAGES] } = {}) {
   const stub = path.join(tmpDir, name);
-  fs.writeFileSync(stub, [
-    "#!/bin/sh",
-    fail ? "exit 3" : "",
-    `printf '%s' "$PWD" > npm-cwd.txt`,
-    `mkdir -p "node_modules/${PKG}/dist/bundle"`,
-    `printf '{"name":"${PKG}","version":"9.9.9"}' > "node_modules/${PKG}/package.json"`,
-    `: > "node_modules/${PKG}/dist/bundle/cli.js"`,
-    "",
-  ].join("\n"));
+  const lines = ["#!/bin/sh", fail ? "exit 3" : "", `printf '%s' "$PWD" > npm-cwd.txt`];
+  for (const spec of packages) {
+    lines.push(
+      `[ -f "node_modules/${spec}/package.json" ] || mkdir -p "node_modules/${spec}/dist/bundle"`,
+      `[ -f "node_modules/${spec}/package.json" ] || printf '{"name":"${spec}","version":"9.9.9"}' > "node_modules/${spec}/package.json"`,
+      `[ -f "node_modules/${spec}/dist/bundle/cli.js" ] || : > "node_modules/${spec}/dist/bundle/cli.js"`,
+    );
+  }
+  lines.push("");
+  fs.writeFileSync(stub, lines.join("\n"));
   fs.chmodSync(stub, 0o755);
   return stub;
 }
@@ -114,6 +140,25 @@ describe("pi bundle installer: seeding from an installed source", () => {
     assert.equal(second.status, 0);
     assert.match(second.out, /already installed/, second.out);
     assert.equal(fs.statSync(marker).mtimeMs, before, "the install is not rewritten");
+  });
+
+  test("an older install gains the server's packages without rolling the agent back", () => {
+    const src = makeSource("complete-src");
+    const tgt = makeLegacyInstall("complete-tgt");
+    const stub = makeNpmStub("npm-complete.sh");
+
+    const { status, out } = install(["--from", src, "--target", tgt], { SCOPE_NPM_BIN: stub });
+    assert.equal(status, 0, out);
+    assert.match(out, /adding node-pty, ws/, out);
+    // Settings → Update may have moved the agent past the seed's version; the
+    // migration must top up the packages, not re-seed the agent.
+    assert.equal(versionOf(tgt), "4.5.6");
+    for (const spec of SERVER_PACKAGES) {
+      assert.ok(fs.existsSync(path.join(tgt, "node_modules", ...spec.split("/"), "package.json")), `${spec} was installed`);
+    }
+    const manifest = JSON.parse(fs.readFileSync(path.join(tgt, "package.json"), "utf8"));
+    assert.equal(manifest.dependencies[PKG], "4.5.6", "the installed agent version is preserved");
+    assert.equal(fs.readFileSync(path.join(tgt, "npm-cwd.txt"), "utf8"), fs.realpathSync(tgt), "npm ran in the install");
   });
 
   test("an incomplete target is replaced, not trusted", () => {

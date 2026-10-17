@@ -178,18 +178,47 @@ function ensureDeps(needElectron) {
     info("installing dependencies (first run only)…");
     if (!runNpm(["install", "--no-audit", "--no-fund"], ROOT)) die(`npm install failed — run it manually in ${ROOT}`);
   }
-  // The bundled Pi coding agent is installed into the user's own data dir
-  // (~/.pi-scope/pi) by a standalone installer — never into this checkout, so a
-  // re-install or an app update never re-downloads it, and Settings → Update can
-  // replace it. `--move` migrates a bundle an older layout left in
-  // apps/scope-desktop/pi-bundle instead of fetching it again. A failure here is
-  // not fatal: Chat falls back to a `pi` on PATH.
+  // The bundled Pi coding agent — together with the server's own runtime
+  // packages (node-pty, ws, see apps/scope-server/pi-deps.ts) — is installed
+  // into the user's own data dir (~/.pi-scope/pi) by a standalone installer,
+  // never into this checkout, so a re-install or an app update never
+  // re-downloads it, and Settings → Update can replace it. `--move` migrates a
+  // bundle an older layout left in apps/scope-desktop/pi-bundle instead of
+  // fetching it again. A failure here is not fatal: Chat falls back to a `pi` on
+  // PATH, and the terminal needs the bundle's node-pty.
   const installer = path.join(DESKTOP_DIR, "pi-bundle-install.mjs");
   if (fs.existsSync(installer)) {
     const res = spawnSync(process.execPath, [installer, "--move"], { cwd: ROOT, stdio: "inherit" });
     if (res.status !== 0) {
       info("the bundled Pi agent could not be installed — Chat will fall back to a pi on PATH.");
     }
+  }
+  runExtensionDeps();
+}
+
+/**
+ * Install the npm dependencies of the extensions pi has available, in the
+ * background (see apps/scope-desktop/pi-extensions-install.mjs).
+ *
+ * Detached on purpose: on a first run this can be a real download — the
+ * `browser` extension's playwright — and the window must not wait minutes for
+ * it. Nothing is blocked by it being late either: an extension whose packages
+ * are still missing reports exactly that when it runs, and the next launch
+ * finds them installed. Output lands in tmp/pi-extensions-install.log.
+ */
+function runExtensionDeps() {
+  const installer = path.join(DESKTOP_DIR, "pi-extensions-install.mjs");
+  if (!fs.existsSync(installer)) return;
+  try {
+    fs.mkdirSync(RUN_DIR, { recursive: true });
+    const log = fs.openSync(path.join(RUN_DIR, "pi-extensions-install.log"), "a");
+    // The shipped manifest is the declaration for an agent dir that predates it
+    // (those dirs are seeded once and never re-seeded); the installer ignores
+    // the path when it is not there.
+    const seed = path.join(ROOT, "examples", "pi_local", "agent", "extensions", "package.json");
+    spawn(process.execPath, [installer, "--seed-manifest", seed], { detached: true, stdio: ["ignore", log, log] }).unref();
+  } catch (err) {
+    info(`the extension dependency install could not be started: ${err.message}`);
   }
 }
 

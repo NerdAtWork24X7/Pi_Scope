@@ -35,6 +35,8 @@
  *   GET  /subagent-workflow/harnesses                  → harness list + availability,
  *                                                        and the model catalogue
  *                                                        the app's own runner offers
+ *   GET  /subagent-workflow/models?harness=<id>        → the models that harness's own
+ *                                                        CLI reports (`opencode models`)
  *   POST /subagent-workflow/harness-paths { harness,   → set/clear one harness's
  *     path }                                             binary override
  *   POST /subagent-workflow/user-harnesses { action,   → define / edit / remove a
@@ -191,6 +193,49 @@ const RUN_LOG_LINE_MAX = 2000;
 const RUN_OUTPUT_MAX = 200_000;
 const RUN_INPUT_MAX = 20_000;
 
+/**
+ * Control sequences a coding harness writes to a pipe: SGR colours and resets
+ * (`\u001b[0m`, `\u001b[91m`), cursor moves, an erase-in-line, an OSC window
+ * title. A run's output is shown as *prose* — the messages sidebar prints it a
+ * line at a time, an approval gate's brief and the end node's answer read it as
+ * text, and a downstream node is handed it as `{input}` — so a sequence has to
+ * be stripped as the harness's bytes enter the run. Otherwise the view shows a
+ * control character plus its literal `[0m` tail in the middle of a sentence:
+ * `\u001b[0m◈ \u001b[0mWeb Search …` in place of `◈ Web Search …`. The host's
+ * chat pipeline strips the same sequences out of a print-mode pi run (see
+ * `ANSI_RE` in chat.ts).
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
+
+/**
+ * Harness output as run text: escape sequences gone, and the control characters
+ * a terminal would *act* on (a bell, a backspace, a bare carriage return from a
+ * progress redraw) dropped rather than shown as a box in the browser. Tabs and
+ * newlines stay — the sidebar renders both.
+ */
+function cleanRunText(text: unknown): string {
+  return String(text ?? "")
+    .replace(ANSI_RE, "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+}
+
+/**
+ * Keep at most `max` characters of `text` — its tail when `fromEnd` — without
+ * cutting a surrogate pair in half. Half an emoji is not a character a browser
+ * can draw: it comes out as `�`, which is exactly the kind of stray glyph this
+ * file works to keep out of a message.
+ */
+function clipText(text: string, max: number, fromEnd = false): string {
+  if (text.length <= max) return text;
+  let cut = fromEnd ? text.slice(-max) : text.slice(0, max);
+  const first = cut.charCodeAt(0), last = cut.charCodeAt(cut.length - 1);
+  if (first >= 0xdc00 && first <= 0xdfff) cut = cut.slice(1);       // a cut left the low half
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);     // …or the high half
+  return cut;
+}
+
 const collapse = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
 /** A stable id slug from a harness name (`"DeepSeek CLI"` → `"deepseek-cli"`). */
 const slug = (v) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
@@ -298,6 +343,11 @@ const HARNESSES: Record<string, any> = {
   opencode: {
     label: "opencode", bin: "opencode", args: (p: string) => ["run", p], modelFlag: "--model",
     models: ["anthropic/claude-sonnet-4-5", "openai/gpt-5", "google/gemini-2.5-pro"],
+    // opencode can print its own catalogue — every provider/model it is set up for
+    // on this machine, one per line — which is a far better Model list than any
+    // short list baked in here (see `cliModelsFor`). Verified against
+    // `opencode models`: `provider/model` per line, exit 0, no network needed.
+    modelsArgs: ["models"],
     capabilities: { tools: null, skills: null, extensions: null },
   },
   aider: {
@@ -1092,6 +1142,10 @@ export function activate(api: any): void {
       // or — for the app's own runner — the whole model catalogue, each key
       // carrying its provider.
       models: id === "pi" ? piModelKeys() : (Array.isArray(h.models) ? h.models : []),
+      // The CLI's own models command, when it has one (see `cliModelsFor`). The
+      // node's Model dropdown asks the binary for the rest of its list itself, so
+      // this says *what* to ask and lets the form say so while it waits.
+      modelsArgs: Array.isArray(h.modelsArgs) && h.modelsArgs.length ? h.modelsArgs : null,
       // Which of skills / tools / extensions this harness can be told about,
       // and the flag each maps to — `null` means "no such flag".
       capabilities: {
@@ -1105,6 +1159,95 @@ export function activate(api: any): void {
     return list;
   }
 
+  // ─── A provider's own model list ─────────────────────────────────────────
+  //
+  // A node's Model field is not limited to what this plugin knows: a harness that
+  // can print its catalogue is asked, so the list is what the tool on *this*
+  // machine actually offers — the models the user signed that CLI up for, not the
+  // handful of names baked into `HARNESSES`.
+
+  /** How long a CLI's answer is reused, and how long it may take to arrive. */
+  const CLI_MODELS_TTL_MS = 5 * 60 * 1000;
+  const CLI_MODELS_TIMEOUT_MS = 20_000;
+  const CLI_MODELS_MAX = 4000;
+  const cliModelsCache = new Map<string, { at: number; models: string[] }>();
+
+  /**
+   * A models command's stdout as a list: one model per line, and only lines that
+   * are a bare id — a CLI that also prints a banner, a warning or a progress line
+   * (anything with whitespace in it) contributes that as no model. Deduped, in the
+   * CLI's own order, capped.
+   */
+  function parseModelLines(raw: string): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const line of cleanRunText(raw).split("\n")) {
+      const id = line.trim();
+      if (!id || /\s/.test(id) || id.length > 120 || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+      if (out.length >= CLI_MODELS_MAX) break;
+    }
+    return out;
+  }
+
+  /**
+   * What `harness`'s own CLI says its models are (`opencode models`), cached for
+   * a few minutes so opening two nodes — or the same node twice — asks it once,
+   * while a model the user has just added to their CLI shows up on the next open
+   * rather than the next restart.
+   *
+   * `source` is the command line that answered (for the form's hint), and `null`
+   * for a harness that has no models command at all (`custom`, or any harness that
+   * only documents a fixed list). A failure is not cached: a missing binary or a
+   * broken install can be fixed without restarting the server.
+   */
+  async function cliModelsFor(id: string): Promise<{ models: string[]; source: string | null; error?: string }> {
+    const spec = allHarnesses()[id];
+    if (!spec || !spec.bin || !Array.isArray(spec.modelsArgs) || !spec.modelsArgs.length) {
+      return { models: [], source: null };
+    }
+    const source = `${spec.bin} ${spec.modelsArgs.join(" ")}`;
+    const cmd = resolveHarness(id, spec);
+    if (!cmd) return { models: [], source, error: `${spec.bin} was not found on PATH` };
+    const key = `${id}\u0000${cmd}`;
+    const hit = cliModelsCache.get(key);
+    if (hit && Date.now() - hit.at < CLI_MODELS_TTL_MS) return { models: hit.models, source };
+    // stdout only: a CLI that prints its list to stderr as well would otherwise
+    // contribute its single-word notices as "models" (opencode's own update
+    // chatter goes to stderr, which is why a run sees it as a red line).
+    const raw = await new Promise<string>((resolve) => {
+      const decoder = new TextDecoder();
+      let out = "";
+      let settled = false;
+      const finish = (text: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { killTree(child); } catch { /* already gone */ }
+        resolve(text);
+      };
+      let child: any;
+      try {
+        child = spawnCli(cmd, spec.modelsArgs.slice(), { stdio: ["ignore", "pipe", "pipe"] });
+      } catch {
+        resolve("");
+        return;
+      }
+      const timer = setTimeout(() => finish(out), CLI_MODELS_TIMEOUT_MS);
+      child.stdout?.on("data", (d: Buffer) => { out = (out + decoder.decode(d, { stream: true })).slice(-400_000); });
+      // Drained so the child never blocks on a full stderr pipe; its content is
+      // not a model list.
+      child.stderr?.resume?.();
+      child.on("error", () => finish(out));
+      child.on("close", () => finish(out));
+    });
+    const models = parseModelLines(raw);
+    if (!models.length) return { models: [], source, error: `${source} reported no models` };
+    cliModelsCache.set(key, { at: Date.now(), models });
+    return { models, source };
+  }
+
   // ─── The run engine ─────────────────────────────────────────────────────
 
   /** Live runs, keyed by workspace. One run per workspace at a time. */
@@ -1113,10 +1256,13 @@ export function activate(api: any): void {
   let triggerTimer: any = null;
 
   function logLine(run: any, nodeId: string | null, stream: string, text: string) {
-    const clean = String(text ?? "").replace(/\r/g, "");
-    if (!clean) return;
+    // A bare escape sequence is a whole "line" to a harness that writes it on its
+    // own (`\u001b[0m`, then the text that follows): once it is stripped the line
+    // is empty, and an empty row in the messages sidebar is not a message.
+    const clean = clipText(cleanRunText(text), RUN_LOG_LINE_MAX);
+    if (!clean.trim()) return;
     run.seq++;
-    run.log.push({ seq: run.seq, ts: Date.now(), nodeId, stream, text: clean.slice(0, RUN_LOG_LINE_MAX) });
+    run.log.push({ seq: run.seq, ts: Date.now(), nodeId, stream, text: clean });
     if (run.log.length > RUN_LOG_MAX) run.log.splice(0, run.log.length - RUN_LOG_MAX);
   }
 
@@ -1158,7 +1304,7 @@ export function activate(api: any): void {
       // A node that is still running streams through the log anyway, so its
       // (partial) tail stays out of the incremental payload.
       const final = s.status === "done" || s.status === "error" || s.status === "skipped" || s.status === "stopped";
-      if (!incremental || final) nodes[id].outputTail = s.output ? String(s.output).slice(-4000) : "";
+      if (!incremental || final) nodes[id].outputTail = s.output ? clipText(cleanRunText(s.output), 4000, true) : "";
     }
     return {
       id: run.id, status: run.status, task: run.task,
@@ -1194,7 +1340,7 @@ export function activate(api: any): void {
       status: interrupted ? "interrupted" : full.status,
       log: (full.log || [])
         .slice(-HISTORY_LOG_MAX)
-        .map((l: any) => ({ seq: l.seq, ts: l.ts, nodeId: l.nodeId, stream: l.stream, text: String(l.text).slice(0, HISTORY_LOG_LINE_MAX) })),
+        .map((l: any) => ({ seq: l.seq, ts: l.ts, nodeId: l.nodeId, stream: l.stream, text: clipText(String(l.text), HISTORY_LOG_LINE_MAX) })),
       interrupted,
     };
   }
@@ -1211,6 +1357,36 @@ export function activate(api: any): void {
   }
 
   /**
+   * A stored record with the escape sequences an older build let through taken
+   * back out of its text. Harness output used to be kept raw, so a run recorded
+   * before this cleanup still reads as `\u001b[0m◈ \u001b[0mWeb Search …` —
+   * reopening it in the Workflow view is exactly when a reader notices. The
+   * record is cleaned as it is served; the next run writes a clean one.
+   */
+  function cleanRecord(rec: any): any {
+    if (!rec || typeof rec !== "object") return rec;
+    const log = Array.isArray(rec.log)
+      ? rec.log
+        .map((l: any) => (l && typeof l.text === "string"
+          ? { ...l, text: clipText(cleanRunText(l.text), HISTORY_LOG_LINE_MAX) }
+          : l))
+        // A row that held nothing but an escape sequence is not a line the run
+        // has to say — `logLine` never records one, and neither does a read.
+        .filter((l: any) => !(l && typeof l.text === "string") || l.text.trim())
+      : rec.log;
+    let nodes = rec.nodes;
+    if (nodes && typeof nodes === "object") {
+      nodes = { ...nodes };
+      for (const [id, state] of Object.entries(nodes) as [string, any][]) {
+        if (state && typeof state.outputTail === "string") {
+          nodes[id] = { ...state, outputTail: clipText(cleanRunText(state.outputTail), 4000, true) };
+        }
+      }
+    }
+    return { ...rec, log, nodes };
+  }
+
+  /**
    * The runs a workspace remembers. A record that was still `running` (or
    * `waiting` on a gate) when the last process stopped can never be resumed —
    * its child processes are gone — so it is surfaced as `interrupted` rather
@@ -1224,9 +1400,9 @@ export function activate(api: any): void {
     const fixed = list.map((rec) => {
       if (rec && (rec.status === "running" || rec.status === "waiting") && (!live || live.id !== rec.id)) {
         changed = true;
-        return { ...rec, status: "interrupted", interrupted: true };
+        return cleanRecord({ ...rec, status: "interrupted", interrupted: true });
       }
-      return rec;
+      return cleanRecord(rec);
     });
     if (changed) writeHistoryList(workspace, fixed);
     return fixed;
@@ -2089,26 +2265,63 @@ export function activate(api: any): void {
           ? setTimeout(() => { timedOut = true; killTree(child, "SIGKILL"); }, node.config.timeoutSec * 1000)
           : null;
 
-        const consume = (stream: string) => (data: Buffer) => {
-          const text = data.toString();
-          if (stream === "stderr") errBuf = (errBuf + text).slice(-8000);
-          s.output = (output = (output + text).slice(-RUN_OUTPUT_MAX));
-          for (const line of text.split("\n")) if (line.trim()) logLine(run, node.id, stream, line);
+        /**
+         * Read one of the child's readable streams as whole log lines.
+         *
+         * A harness writes *bytes*, not strings: one UTF-8 character (the em-dash
+         * in an agent's sentence, an emoji) can be cut in half by a chunk
+         * boundary, so the chunk goes through a streaming TextDecoder rather than
+         * `toString()` — otherwise the halves decode as `�` and the message shows
+         * a replacement character where the author wrote an em-dash. A *line* can
+         * be cut the same way, so the text after the last newline waits for the
+         * rest of its line instead of being logged as a fragment of one: opencode
+         * writes `\u001b[0m` and then `◈ Web Search …`, which used to land in the
+         * sidebar as a row holding nothing but an escape sequence and another
+         * starting mid-sentence.
+         */
+        const consume = (stream: string) => {
+          const decoder = new TextDecoder();
+          let pending = "";
+          const feed = (data: Buffer) => {
+            const text = decoder.decode(data, { stream: true });
+            if (stream === "stderr") errBuf = (errBuf + text).slice(-8000);
+            output = (output + text).slice(-RUN_OUTPUT_MAX);
+            s.output = cleanRunText(output);
+            pending += text;
+            let nl: number;
+            while ((nl = pending.indexOf("\n")) >= 0) {
+              logLine(run, node.id, stream, pending.slice(0, nl));
+              pending = pending.slice(nl + 1);
+            }
+          };
+          // A command that ends mid-line (`printf`, a harness killed on its last
+          // line) still reports that line — with any character or escape sequence
+          // the decoder was still holding.
+          const flush = () => {
+            const rest = pending + decoder.decode();
+            pending = "";
+            if (rest.trim()) logLine(run, node.id, stream, rest);
+          };
+          return { feed, flush };
         };
-        child.stdout?.on("data", consume("stdout"));
-        child.stderr?.on("data", consume("stderr"));
-        child.on("error", (err: any) => {
+        const out = consume("stdout"), err = consume("stderr");
+        child.stdout?.on("data", out.feed);
+        child.stderr?.on("data", err.feed);
+        const flush = () => { out.flush(); err.flush(); };
+        child.on("error", (fail: any) => {
           if (timer) clearTimeout(timer);
           run.children.delete(child);
-          resolve({ text: output, code: null, error: `failed to run ${cmd}: ${err?.message ?? err}` });
+          flush();
+          resolve({ text: cleanRunText(output), code: null, error: `failed to run ${cmd}: ${fail?.message ?? fail}` });
         });
         child.on("close", (code: number | null) => {
           if (timer) clearTimeout(timer);
           run.children.delete(child);
+          flush();
           const error = timedOut ? `timed out after ${node.config.timeoutSec}s`
             : code === 0 ? undefined
-            : (errBuf.trim() || `exited with code ${code}`);
-          resolve({ text: output, code, error });
+            : (cleanRunText(errBuf).trim() || `exited with code ${code}`);
+          resolve({ text: cleanRunText(output), code, error });
         });
       });
     }
@@ -2284,6 +2497,18 @@ export function activate(api: any): void {
   api.route("GET", "/subagent-workflow/harnesses", () => ({
     harnesses: harnessList(), platform: process.platform,
   }));
+
+  /**
+   * The models a provider's own CLI reports, for a node's Model dropdown (see
+   * `cliModelsFor`). A harness with no models command answers with an empty list
+   * and a null `source`: there is nothing to ask, and the dropdown keeps offering
+   * the list the harness declares.
+   */
+  api.route("GET", "/subagent-workflow/models", async (ctx: any) => {
+    const id = String(ctx.url.searchParams.get("harness") ?? "").trim();
+    if (!allHarnesses()[id]) return jsonResponse({ error: `unknown harness: ${id || "(none)"}` }, 400);
+    return cliModelsFor(id);
+  });
 
   /**
    * Point one harness at a binary, or clear the override. `path` is an absolute

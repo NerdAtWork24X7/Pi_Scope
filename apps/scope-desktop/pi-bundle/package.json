@@ -4,6 +4,11 @@
   "private": true,
   "description": "The Pi coding agent bundled with Pi Scope, so every pi process is launched from Pi Scope instead of a global pi install.",
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.3.0"
+    "@earendil-works/pi-coding-agent": "1.3.0",
+    "node-pty": "^1.1.0",
+    "ws": "^8.18.0"
+  },
+  "allowScripts": {
+    "node-pty": true
   }
 }

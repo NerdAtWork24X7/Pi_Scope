@@ -12,11 +12,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import net from "node:net";
 import { execFileSync } from "node:child_process";
-import pty from "node-pty";
-import { WebSocketServer, WebSocket } from "ws";
+import type { WebSocket as WsSocket, WebSocketServer as WsServer } from "ws";
+import { loadPiDep } from "./pi-deps.ts";
 import {
   shellQuote, resolveExecutable, interactiveShellCandidates, supportsPosixCommandSyntax,
 } from "../../shared/shell.ts";
+
+// node-pty and ws are installed with the bundled pi agent (~/.pi-scope/pi), not
+// with this app, so server and desktop never each carry their own copy. See
+// pi-deps.ts for the resolution order.
+const pty: typeof import("node-pty") = loadPiDep("node-pty");
+const { WebSocketServer, WebSocket } = loadPiDep<typeof import("ws")>("ws");
 
 interface TerminalConfig {
   port: number;
@@ -24,9 +30,9 @@ interface TerminalConfig {
   token: string;
   launchCwd: string;
   /** Called whenever the terminal's live cwd changes. */
-  onCwdChange?: (ws: WebSocket, cwd: string) => void;
+  onCwdChange?: (ws: WsSocket, cwd: string) => void;
   /** Called when a terminal connection closes. */
-  onClose?: (ws: WebSocket) => void;
+  onClose?: (ws: WsSocket) => void;
   /**
    * Plugin gate — when this returns false the Terminal feature plugin is
    * disabled and upgrade requests are refused. Absent means "always enabled".
@@ -121,7 +127,7 @@ function herdrFocusedCwd(): Promise<string | null> {
   });
 }
 
-export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketServer {
+export function attachTerminal(server: Server, cfg: TerminalConfig): WsServer {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -140,7 +146,7 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WebSocketSe
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
   });
 
-  wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+  wss.on("connection", (ws: WsSocket, req: IncomingMessage) => {
     const reqUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const shellParam = reqUrl.searchParams.get("shell");
     // Herdr is a POSIX terminal multiplexer: its socket, its `herdr` binary and

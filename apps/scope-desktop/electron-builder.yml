@@ -13,6 +13,10 @@ files:
   # Seeds the user's own copy of the bundled pi agent (~/.pi-scope/pi) from
   # resources/pi on first launch, so Settings → Update can replace it.
   - pi-bundle-install.mjs
+  # Installs the agent extensions' npm dependencies into that same copy; the
+  # manifest is the declaration for an agent dir seeded by an older release.
+  - pi-extensions-install.mjs
+  - agent-extensions.json
   - server-bundle/**/*
   - node_modules/**/*
 asar: false
@@ -20,10 +24,11 @@ publish: null
 extraResources:
   - from: node-portable
     to: node
-  # The Pi coding agent bundled with Pi Scope. The server installs a `pi` shim
-  # from here that every spawned process uses instead of a global pi install.
-  # On first launch scope-control.js seeds ~/.pi-scope/pi from this read-only
-  # copy and the server runs the seeded one instead.
+  # The Pi coding agent bundled with Pi Scope, plus the server's own runtime
+  # packages (node-pty, ws). The server installs a `pi` shim from here and loads
+  # those packages from the same install, so the app carries no second copy. On
+  # first launch scope-control.js seeds ~/.pi-scope/pi from this read-only copy
+  # and the server runs the seeded one instead.
   - from: pi-bundle
     to: pi
     filter:
@@ -37,9 +42,10 @@ linux:
   artifactName: Pi-Scope-${version}.AppImage
   executableName: pi-scope
 # Windows: an NSIS installer, built ON Windows (`npx electron-builder --win`
-# from this directory, with server-bundle/ populated) so node-pty and the
-# portable Node in node-portable/ match the host. after-pack.cjs is a no-op
-# there — the SUID-sandbox wrapper it writes is a Linux thing only.
+# from this directory, with server-bundle/ populated) so the node-pty prebuild
+# inside the pi-bundle seed and the portable Node in node-portable/ match the
+# host. after-pack.cjs is a no-op there — the SUID-sandbox wrapper it writes is
+# a Linux thing only.
 win:
   target:
     - nsis

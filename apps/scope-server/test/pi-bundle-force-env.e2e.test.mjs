@@ -115,6 +115,18 @@ describe("bundled pi: the force-loaded extension is named in the environment", {
     );
   });
 
+  test("the shim names the bundle as the extensions' module root", () => {
+    // Extensions that resolve their own npm packages at run time (the `browser`
+    // extension) look at PI_BROWSER_MODULE_ROOT, and pi-extensions-install.mjs
+    // installed those packages into this bundle's node_modules. Pointing at it
+    // here — rather than leaving the extension to fall back on cwd/$HOME — is
+    // what makes them findable however the agent was started.
+    assert.equal(process.env.PI_BROWSER_MODULE_ROOT, PI_BUNDLE.dir);
+    const shim = fs.readFileSync(PI_BUNDLE.bin, "utf8");
+    assert.ok(shim.includes("PI_BROWSER_MODULE_ROOT"), `the shim exports the module root:\n${shim}`);
+    assert.ok(shim.includes(PI_BUNDLE.dir), `the shim names the bundle (${PI_BUNDLE.dir}):\n${shim}`);
+  });
+
   test("the child really discovers extensions in the agent dir", async () => {
     // The control for the test below. A broken file pi finds on its own must be
     // reported, proving that the copy in the next test is loaded too — and that

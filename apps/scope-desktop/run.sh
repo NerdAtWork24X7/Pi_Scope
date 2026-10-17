@@ -38,7 +38,8 @@ mkdir -p "$APPS_DIR"
 #fi
 
 # Install dependencies on first run (idempotent). The workspace install runs at
-# the repo root; electron/node-pty/ws are hoisted there.
+# the repo root; electron is hoisted there. The server's runtime packages
+# (node-pty, ws) live in the pi bundle, installed below.
 if [ ! -d "$ROOT_DIR/node_modules/electron" ]; then
   ( cd "$ROOT_DIR" && npm install --no-audit --no-fund )
 fi

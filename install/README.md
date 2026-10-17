@@ -142,14 +142,28 @@ checkout you can equally run the command yourself:
 | Manager | Command | Notes |
 |---|---|---|
 | **npm** | `npm install` | the default |
-| **pnpm** | `pnpm install --no-ignore-scripts` | runs the dependency build scripts pnpm blocks by default (`node-pty`, `esbuild`, `ffmpeg-static`) |
+| **pnpm** | `pnpm install --no-ignore-scripts` | runs the dependency build scripts pnpm blocks by default (`esbuild`, `ffmpeg-static`, and `node-pty` in the pi bundle) |
 | **Bun** | `bun install` then `bun pm trust --all` | runs the same blocked scripts; trusting them may add a `trustedDependencies` field to `package.json` |
 
-Each channel also installs the bundled Pi coding agent — into the user's own
-data directory (`~/.pi-scope/pi`), not into the checkout, so Settings → Update
-can replace it and an update of the app never re-downloads it. An older release's
-install under `apps/scope-desktop/pi-bundle` is migrated instead of fetched
-again.
+Each channel also installs the bundled Pi coding agent — and with it the
+server's own runtime packages (`node-pty`, `ws`) — into the user's own data
+directory (`~/.pi-scope/pi`), not into the checkout, so Settings → Update can
+replace it and an update of the app never re-downloads it. One npm project means
+one copy of those packages: the server loads them from there
+(`apps/scope-server/pi-deps.ts`) and neither the server nor the desktop app keeps
+a duplicate. An install an older release left behind (agent only) — under
+`apps/scope-desktop/pi-bundle` or already in `~/.pi-scope/pi` — is completed in
+place rather than downloaded again.
+
+Finally, the extensions pi has available get their npm packages. Every extension
+in the agent dir (`~/.pi-scope/agent/extensions`, narrowed or extended by that
+dir's `settings.json`) is inspected, and the dependencies declared in its nearest
+`package.json` are installed into the same bundled pi project — the shipped ones
+live in `examples/pi_local/agent/extensions/package.json` (see
+`apps/scope-desktop/pi-extensions-install.mjs`). Pi Scope installs the
+dependencies of the extensions it ships; pi does the same for the packages it
+installed itself. A failure there is not fatal: the extension that needs a
+missing package reports it when it runs.
 
 Node.js 24+ is required regardless of package manager — the server runs its
 `.ts` sources directly and the bundled Pi agent runs on Node.

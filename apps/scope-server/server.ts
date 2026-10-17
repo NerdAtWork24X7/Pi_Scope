@@ -45,7 +45,7 @@ import {
 } from "../../shared/shell.ts";
 import { execFileSync, spawn } from "node:child_process";
 import * as crypto from "node:crypto";
-import { WebSocket } from "ws";
+import type { WebSocket as WsSocket } from "ws";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -1911,7 +1911,7 @@ const DEFAULT_FILE_ROOT = process.env.SCOPE_PACKAGED ? TERMINAL_CWD : path.dirna
 // Live current working directories reported by connected terminal sessions.
 // validateCwd uses these so the Files/Checkpoints views can follow the user
 // wherever the terminal navigates, without requiring SCOPE_FILE_ROOT.
-const liveTerminalCwds = new Map<WebSocket, string>();
+const liveTerminalCwds = new Map<WsSocket, string>();
 
 /**
  * Validate `cwd`: must exist as a real directory (symlinks resolved). When

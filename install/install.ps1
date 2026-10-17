@@ -276,15 +276,17 @@ if ($NoDeps) {
   Info "installing dependencies in $Dir with $Pm (this can take a minute)..."
   try { Invoke-PmInstall $Dir } catch { Die "$($_.Exception.Message) - run $Pm install manually in $Dir" }
 
-  # The bundled Pi coding agent installs into the user's own data dir
-  # (%USERPROFILE%\.pi-scope\pi) rather than into this checkout, so Settings →
-  # Update can replace it and the tree survives re-installing the app. `--move`
-  # migrates a bundle an older release left in apps\scope-desktop\pi-bundle
-  # instead of fetching it again. A failure here is not fatal: Chat falls back to
-  # a `pi` on PATH, and the server says which one it chose at boot.
+  # The bundled Pi coding agent - and with it the server's own runtime packages
+  # (node-pty, ws, see apps/scope-server/pi-deps.ts) - installs into the user's
+  # own data dir (%USERPROFILE%\.pi-scope\pi) rather than into this checkout, so
+  # Settings → Update can replace it and the tree survives re-installing the app.
+  # `--move` migrates a bundle an older release left in
+  # apps\scope-desktop\pi-bundle instead of fetching it again. A failure here is
+  # not fatal: Chat falls back to a `pi` on PATH, and the server says which one it
+  # chose at boot.
   $bundleInstaller = Join-Path $Dir "apps\scope-desktop\pi-bundle-install.mjs"
   if (Test-Path -LiteralPath $bundleInstaller) {
-    Info "installing the bundled Pi coding agent with $Pm..."
+    Info "installing the bundled Pi coding agent and server packages with $Pm..."
     # LASTEXITCODE is reset first so a stale 0 cannot mask a failure, and stderr
     # is discarded: npm writes progress and warnings there, and under
     # $ErrorActionPreference = "Stop" a native command writing to stderr can abort
@@ -318,6 +320,36 @@ if (Test-Path -LiteralPath $AgentDir) {
     Info "agent template installed in $AgentDir."
   } catch {
     Info "could not seed the agent template - Pi Scope creates its agent dir on first run."
+  }
+}
+
+# ── Extension dependencies ───────────────────────────────────────────────────
+
+# pi discovers extensions in the agent dir (its extensions\ directory plus
+# whatever settings.json adds or removes). A *local* extension's npm packages are
+# nobody's job but ours - pi only installs dependencies for the packages it
+# installed itself - so this walks every extension pi has available, reads the
+# dependencies each one declares in a nearby package.json, and installs the
+# missing ones into the bundled pi project (~/.pi-scope/pi), whose node_modules
+# the app, the agent and every extension already share.
+#
+# Not fatal: an extension whose packages are missing reports that itself when it
+# runs, so keep going and let the app start.
+# The manifest lives in the agent template, so a fresh agent dir already has it;
+# --seed-manifest covers a dir seeded by an older release, which is never
+# re-seeded and would otherwise declare nothing.
+$extInstaller = Join-Path $Dir "apps\scope-desktop\pi-extensions-install.mjs"
+$extManifest = Join-Path $Dir "examples\pi_local\agent\extensions\package.json"
+if (-not $NoDeps -and (Test-Path -LiteralPath $extInstaller)) {
+  try {
+    $global:LASTEXITCODE = 0
+    & $node.Source $extInstaller --pm $Pm --agent $AgentDir --seed-manifest $extManifest
+    if ($LASTEXITCODE -ne 0) {
+      Info "some extension dependencies could not be installed - the extensions needing them will say so at run time."
+      $global:LASTEXITCODE = 0
+    }
+  } catch {
+    Info "could not install the extension dependencies - the extensions needing them will say so at run time."
   }
 }
 

@@ -89,7 +89,8 @@ function waitForHealth(healthUrl, { timeoutMs = 20000, intervalMs = 300 } = {}) 
 
   // Resolve how to launch the SCOPE server.
   // Dev: `node apps/scope-server/server.ts`. Packaged: the bundled portable Node runs the
-  // compiled server bundle (node-pty/ws resolve from the app's node_modules).
+  // compiled server bundle (its node-pty/ws resolve from the seeded
+  // ~/.pi-scope/pi bundle — see apps/scope-server/pi-deps.ts).
   // The portable Node that ships inside the package: `bin/node` on Linux/macOS,
   // a bare `node.exe` at the root on Windows.
   function portableNodeBin() {
@@ -106,9 +107,51 @@ function waitForHealth(healthUrl, { timeoutMs = 20000, intervalMs = 300 } = {}) 
     return { bin: "node", args: ["server.ts"], cwd: SCOPE_DIR };
   }
 
-  /**
-   * Seed the user's own copy of the bundled Pi coding agent (~/.pi-scope/pi) from
-   * the read-only `resources/pi` this package ships.
+/**
+ * Install the npm dependencies of the extensions pi has available (see
+ * apps/scope-desktop/pi-extensions-install.mjs), detached so the window opens
+ * immediately.
+ *
+ * Detached on purpose: on a first run this can be a real download — the
+ * `browser` extension's playwright — and nobody waits on it. An extension whose
+ * packages are still missing reports exactly that when it runs, and the next
+ * launch finds them installed. Output lands in ~/.pi-scope/pi-extensions-install.log.
+ */
+function installExtensionDeps() {
+  const installer = path.join(__dirname, "pi-extensions-install.mjs");
+  if (!fs.existsSync(installer)) return;
+  // The shipped extensions manifest is the declaration for an agent dir that
+  // predates it: those dirs are seeded once and never re-seeded, so their
+  // extensions would otherwise declare nothing. A package has the copy
+  // build-release.sh placed beside the app; a checkout has the source (the same
+  // dev fallback main.js uses for its icon).
+  const seedManifest = [
+    path.join(__dirname, "agent-extensions.json"),
+    path.join(PROJECT_ROOT, "examples", "pi_local", "agent", "extensions", "package.json"),
+  ].find((file) => fs.existsSync(file));
+  const args = [installer, ...(seedManifest ? ["--seed-manifest", seedManifest] : [])];
+  const bin = app && app.isPackaged ? portableNodeBin() : process.execPath;
+  const dataDir = path.join(os.homedir(), ".pi-scope");
+  let out = "ignore";
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    out = fs.openSync(path.join(dataDir, "pi-extensions-install.log"), "a");
+  } catch { /* read-only home: the install still runs, just unlogged */ }
+  try {
+    const child = require("node:child_process").spawn(bin, args, {
+      detached: true,
+      stdio: ["ignore", out, out],
+      env: { ...process.env, HOME: process.env.HOME || os.homedir() },
+    });
+    child.unref();
+  } catch (err) {
+    console.error("[scope-control] could not start the extension dependency install:", err.message);
+  }
+}
+
+/**
+ * Seed the user's own copy of the bundled Pi coding agent (~/.pi-scope/pi) from
+ * the read-only `resources/pi` this package ships.
    *
    * Pi Scope runs `pi` from the user's data dir rather than from the package, so
    * Settings → Update can install a newer agent (a file inside an AppImage/NSIS
@@ -161,6 +204,7 @@ async function ensureServer({ timeoutMs = 20000 } = {}) {
       process.env.SCOPE_PI_BUNDLE_DIR = path.join(process.resourcesPath, "pi");
     }
   }
+  installExtensionDeps();
   const cfg = config();
   try {
     await waitForHealth(cfg.healthUrl, { timeoutMs: 3000 }); // already up?

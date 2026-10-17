@@ -168,15 +168,16 @@ else
   command -v "$PM" >/dev/null 2>&1 || die "$PM is required to install dependencies — install it and run this again"
   info "installing dependencies in $DIR with $PM (this can take a minute)…"
   pm_install "$DIR" || die "$PM install failed — run it manually in $DIR"
-  # The bundled Pi coding agent installs into the user's own data dir
-  # (~/.pi-scope/pi) rather than into this checkout, so Settings → Update can
-  # replace it and the tree survives re-installing the app. `--move` migrates a
-  # bundle an older release left in apps/scope-desktop/pi-bundle instead of
-  # fetching it again. A failure here is not fatal: Chat falls back to a `pi` on
-  # PATH, and the server says which one it chose at boot.
+  # The bundled Pi coding agent — and with it the server's own runtime packages
+  # (node-pty, ws, see apps/scope-server/pi-deps.ts) — installs into the user's
+  # own data dir (~/.pi-scope/pi) rather than into this checkout, so Settings →
+  # Update can replace it and the tree survives re-installing the app. `--move`
+  # migrates a bundle an older release left in apps/scope-desktop/pi-bundle
+  # instead of fetching it again. A failure here is not fatal: Chat falls back
+  # to a `pi` on PATH, and the server says which one it chose at boot.
   BUNDLE_INSTALLER="$DIR/apps/scope-desktop/pi-bundle-install.mjs"
   if [ -f "$BUNDLE_INSTALLER" ]; then
-    info "installing the bundled Pi coding agent with $PM…"
+    info "installing the bundled Pi coding agent and server packages with $PM…"
     node "$BUNDLE_INSTALLER" --pm "$PM" --move \
       || info "the bundled Pi agent could not be installed — Chat will fall back to a pi on PATH."
   fi
@@ -213,6 +214,29 @@ else
   else
     info "could not seed the agent template — Pi Scope creates its agent dir on first run."
   fi
+fi
+
+# ── Extension dependencies ───────────────────────────────────────────────────
+
+# pi discovers extensions in the agent dir (its `extensions/` directory plus
+# whatever settings.json adds or removes). A *local* extension's npm packages are
+# nobody's job but ours — pi only installs dependencies for the packages it
+# installed itself — so this walks every extension pi has available, reads the
+# dependencies each one declares in a nearby package.json, and installs the
+# missing ones into the bundled pi project (~/.pi-scope/pi), whose node_modules
+# the app, the agent and every extension already share.
+#
+# Not fatal: an extension whose packages are missing reports that itself when it
+# runs (the `browser` extension's message names the packages and
+# PI_BROWSER_MODULE_ROOT), so keep going and let the app start.
+# The manifest lives in the agent template, so a fresh agent dir already has it;
+# --seed-manifest covers a dir seeded by an older release, which is never
+# re-seeded and would otherwise declare nothing.
+EXT_INSTALLER="$DIR/apps/scope-desktop/pi-extensions-install.mjs"
+EXT_MANIFEST="$DIR/examples/pi_local/agent/extensions/package.json"
+if [ "$SKIP_DEPS" -eq 0 ] && [ -f "$EXT_INSTALLER" ]; then
+  node "$EXT_INSTALLER" --pm "$PM" --agent "$AGENT_DIR" --seed-manifest "$EXT_MANIFEST" \
+    || info "some extension dependencies could not be installed — the extensions needing them will say so at run time."
 fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────

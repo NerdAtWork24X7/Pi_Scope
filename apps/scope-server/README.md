@@ -15,6 +15,20 @@ node server.ts
 SCOPE_AUTH_TOKEN=my-secret-token node server.ts
 ```
 
+The server's own runtime packages — `node-pty` (the Terminal's PTY) and `ws` (its
+WebSockets) — are not installed here. They come from the bundled pi project in
+the user's data dir (`~/.pi-scope/pi`), which the launcher and installers seed on
+first run, so the server and the desktop app share one copy
+(`pi-deps.ts` holds the resolution rules). A checkout whose bundle is missing can
+seed it with `node apps/scope-desktop/pi-bundle-install.mjs`.
+
+Extension packages live in that same install: the extensions pi has available
+are inspected on every install/launch and their declared dependencies are
+installed there too (`apps/scope-desktop/pi-extensions-install.mjs`). Extensions
+that resolve their own packages at run time are pointed at it with
+`PI_BROWSER_MODULE_ROOT`, which the `pi` shim and the chat child environment set,
+so they find their packages wherever the agent was started from.
+
 ## Environment variables
 
 | Var | Default | Description |
