@@ -46,9 +46,12 @@ of them.
 
 ## Quick start
 
-**Linux — zero install.** Node 24 is bundled inside:
+**Linux — zero install.** Grab the AppImage from
+[Releases](https://github.com/NerdAtWork24X7/Pi_Scope/releases) (Node 24 is bundled inside):
 
 ```bash
+curl -fsSL -o Pi-Scope-1.0.0.AppImage \
+  https://github.com/NerdAtWork24X7/Pi_Scope/releases/download/V1.0.0/Pi-Scope-1.0.0.AppImage
 chmod +x Pi-Scope-1.0.0.AppImage && ./Pi-Scope-1.0.0.AppImage
 ```
 
@@ -57,6 +60,13 @@ chmod +x Pi-Scope-1.0.0.AppImage && ./Pi-Scope-1.0.0.AppImage
 ```bash
 git clone https://github.com/NerdAtWork24X7/Pi_Scope.git Pi_Scope && cd Pi_Scope
 ./pi-scope                         # desktop app; --web for a headless server, --server to stay put
+```
+
+No display (a server, container or SSH session)? The desktop window cannot open there —
+start the headless server instead:
+
+```bash
+./pi-scope --server
 ```
 
 ```powershell
@@ -81,10 +91,12 @@ node docs/seed-demo.mjs
 The dashboard comes alive when a `pi` agent feeds it — and Pi Scope **bundles its own**. Chat,
 the commit-message generator and the in-browser terminal all launch that copy with the Pi Scope
 extension force-loaded, in its own agent dir (`~/.pi-scope/agent`), so nothing to install and no
-interference with a global `pi`. Its agent dir is created empty on first launch — copy the
-starter config from `examples/pi_local/agent` (settings, skills, extensions) into it to start
-from something working; an existing agent dir is never touched. Any other tool can feed it too:
-just `POST` events to `/events`.
+interference with a global `pi`. On first launch Pi Scope seeds that agent dir from the starter
+config in `examples/pi_local/agent` (settings, skills, extensions) whenever it finds no
+`extensions/` yet — the tell that nothing has set it up. Once the dir has extensions it is left
+alone, and the launcher never overwrites an existing file, so seeding it alongside the server's own
+`auth.json` / `models-store.json` is harmless. Any other tool can feed it too: just `POST` events
+to `/events`.
 
 ## Documentation
 
@@ -105,9 +117,18 @@ The detail lives in the docs, not here — this file is the front door.
 thinking blocks, tool calls and results with exit codes, the LLM request arguments and system
 prompt, model changes, compactions and branch navigation.
 
-**Where does it live?** One SQLite file — `db/scope.db` in development, `~/.pi-scope/` when
-packaged — created mode `0600`. Delete a session from the sidebar, or `DELETE /sessions` for
-everything.
+**Where does it live?** One SQLite file — `db/scope.db` in a clone (resolved from the repo root,
+even though the server runs in `apps/scope-server/`), `~/.pi-scope/` when packaged — created mode
+`0600`. Delete a session from the sidebar, or `DELETE /sessions` for everything.
+
+**What does the first run download?** Beyond the workspace dependencies, the launcher fetches
+Electron (desktop mode) and Pi Scope's own `pi` coding agent into `~/.pi-scope/pi` (~220 MB). A full
+clone install is roughly 0.9 GB in the checkout (`node_modules`) plus ~0.2 GB in `~/.pi-scope/`.
+It happens once.
+
+**Uninstalling?** Delete the checkout, then remove `~/.pi-scope/` for a clean slate — the database,
+the agent dir and the bundled `pi` all live there. (A clone's database may also be at
+`db/scope.db` inside the checkout you are deleting.)
 
 ## Repository layout
 

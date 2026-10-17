@@ -304,15 +304,19 @@ if ($NoDeps) {
 
 # Pi Scope runs its bundled `pi` in its own agent dir (agent-dir.ts; default
 # ~/.pi-scope/agent). Give a fresh machine a starting template — settings,
-# skills and extensions — copied from the example agent. An existing agent dir
-# is never touched.
+# skills and extensions — copied from the example agent. "Already set up" is
+# decided by the extensions dir: if it holds any entries the dir is left
+# untouched; otherwise the template is seeded in (the launcher's first run makes
+# the same call, so an agent dir the server created but never seeded is caught
+# here too).
 $AgentDir = if ($env:SCOPE_AGENT_DIR) { $env:SCOPE_AGENT_DIR } else { Join-Path $HOME ".pi-scope\agent" }
 $Template = Join-Path $Dir "examples\pi_local\agent"
+$Extensions = Join-Path $AgentDir "extensions"
 
-if (Test-Path -LiteralPath $AgentDir) {
-  Info "agent dir already exists at $AgentDir - leaving it untouched."
-} elseif (-not (Test-Path -LiteralPath $Template)) {
+if (-not (Test-Path -LiteralPath $Template)) {
   Info "no agent template at $Template - skipping the initial agent setup."
+} elseif ((Get-ChildItem -LiteralPath $Extensions -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) {
+  Info "agent dir at $AgentDir already has extensions - leaving it untouched."
 } else {
   Info "seeding the agent template into $AgentDir..."
   try {

@@ -11,7 +11,8 @@
  *   pi-scope --web        headless server + open the WebUI in your browser
  *   pi-scope --server     headless server only, stays in the foreground
  *
- * Extra flags: --dev (server with --watch), --keep-server, --no-install,
+ * Extra flags: --dev (adds --watch to a server; pair with --server/--web),
+ * --keep-server, --no-install,
  * --port/--host/--db/--token. Node 24+ is required — the server runs its .ts
  * sources directly.
  *
@@ -22,6 +23,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -53,7 +55,7 @@ Flags:
   -d, --desktop         desktop app (default)
   -w, --web             headless server + open the browser
   -s, --server          headless server only
-      --dev             run the server with --watch
+      --dev             add --watch (pair with --server/--web)
       --keep-server     leave a started server running when this exits
       --no-install      do not auto-install missing dependencies
   -p, --port <n>        server port            [SCOPE_PORT, default 43190]
@@ -193,6 +195,9 @@ function ensureDeps(needElectron) {
       info("the bundled Pi agent could not be installed — Chat will fall back to a pi on PATH.");
     }
   }
+  // Give a fresh agent dir a working starting point before the extensions'
+  // dependencies are resolved (the template carries the extensions manifest).
+  seedAgentTemplate();
   runExtensionDeps();
 }
 
@@ -219,6 +224,52 @@ function runExtensionDeps() {
     spawn(process.execPath, [installer, "--seed-manifest", seed], { detached: true, stdio: ["ignore", log, log] }).unref();
   } catch (err) {
     info(`the extension dependency install could not be started: ${err.message}`);
+  }
+}
+
+/**
+ * Seed the agent template on first run.
+ *
+ * Pi Scope's bundled `pi` runs in its own agent dir (`~/.pi-scope/agent`, or
+ * SCOPE_AGENT_DIR). The server creates that dir on first boot but seeds nothing,
+ * so an **empty `extensions/` is the tell** that nobody has set it up yet: copy
+ * the shipped starter config (`examples/pi_local/agent`) in. Nothing is
+ * overwritten (an existing file wins), and a dir that already has any extension
+ * is left completely alone — so this is a no-op after the first run, and it
+ * never disturbs a dir the user or the installer already populated. The skills'
+ * large, platform-bound `.venv` and the obscura `*.tar.gz` bundles are skipped,
+ * as are session logs and `__pycache__`.
+ *
+ * install/install.sh and install/install.ps1 seed the same template under the
+ * same "extensions empty" rule, so every entry point ends up the same.
+ */
+function seedAgentTemplate() {
+  const agentDir = process.env.SCOPE_AGENT_DIR || path.join(os.homedir(), ".pi-scope", "agent");
+  const template = path.join(ROOT, "examples", "pi_local", "agent");
+  const extensions = path.join(agentDir, "extensions");
+
+  // A non-empty extensions dir means it is already set up (by the installer, by
+  // the user, or by a previous run). Missing or empty → seed.
+  try { if (fs.readdirSync(extensions).length > 0) return; } catch { /* missing → seed */ }
+  try { if (!fs.statSync(template).isDirectory()) return; } catch { return; }
+
+  const skipDirs = new Set([".venv", "sessions", "__pycache__"]);
+  const skipFile = (name) => name.endsWith(".tar.gz") || name.endsWith(".pyc");
+  try {
+    fs.cpSync(template, agentDir, {
+      recursive: true,
+      force: false,          // an existing file always wins
+      errorOnExist: false,   // ...and is skipped rather than raising
+      filter: (src) => {
+        const name = path.basename(src);
+        if (skipDirs.has(name)) return false;
+        try { if (fs.statSync(src).isDirectory()) return true; } catch { return false; }
+        return !skipFile(name);
+      },
+    });
+    info(`seeded the agent template into ${agentDir}`);
+  } catch (err) {
+    info(`could not seed the agent template into ${agentDir}: ${err.message}`);
   }
 }
 

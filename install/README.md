@@ -118,6 +118,11 @@ project and skips the download:
 
 Add `-ExecutionPolicy Bypass` if PowerShell blocks the file.
 
+> In a checkout, `npm install` may rewrite `package-lock.json` to bring it in step
+> with the workspace `package.json` files (a committed lockfile can drift from the
+> manifests), leaving the file modified in `git status`. That is expected, not a
+> failed install.
+
 ## Options
 
 `install.sh`:
@@ -145,6 +150,13 @@ checkout you can equally run the command yourself:
 | **pnpm** | `pnpm install --no-ignore-scripts` | runs the dependency build scripts pnpm blocks by default (`esbuild`, `ffmpeg-static`, and `node-pty` in the pi bundle) |
 | **Bun** | `bun install` then `bun pm trust --all` | runs the same blocked scripts; trusting them may add a `trustedDependencies` field to `package.json` |
 
+> **Modern npm and install scripts.** npm 11.19+ gates a dependency's install
+> scripts behind an `allowScripts` allow-list, so an install can print
+> `npm warn install-scripts … not yet covered by allowScripts` for packages such as
+> `esbuild`, `ffmpeg-static` and `protobufjs`. Those warnings are expected and are
+> **not** a failure — review them with `npm install-scripts ls`, and approve any
+> you want to run with `npm install-scripts approve <pkg>`.
+
 Each channel also installs the bundled Pi coding agent — and with it the
 server's own runtime packages (`node-pty`, `ws`) — into the user's own data
 directory (`~/.pi-scope/pi`), not into the checkout, so Settings → Update can
@@ -171,10 +183,15 @@ Node.js 24+ is required regardless of package manager — the server runs its
 ## Initial agent template
 
 Pi Scope runs its bundled `pi` in its own agent dir (`~/.pi-scope/agent`, see
-`SCOPE_AGENT_DIR`). On a fresh machine that dir is empty, so the installer seeds
-it from `examples/pi_local/agent` — settings, skills, extensions, agents and
-themes — giving the app a working starting point. An **existing agent dir is
-never touched**.
+`SCOPE_AGENT_DIR`). On a fresh machine the installer seeds it from
+`examples/pi_local/agent` — settings, skills, extensions, agents and themes —
+giving the app a working starting point.
+
+The tell for "already set up" is the **`extensions/` subdirectory**: if it holds
+any entries the dir is left untouched; otherwise the template is seeded in. The
+launcher (`./pi-scope`) applies the same rule on its first run, so an agent dir
+the server created on first boot (with a little state of its own, e.g.
+`auth.json`) is still seeded — and a configured agent dir is never disturbed.
 
 The skills' Python `.venv` and the obscura `*.tar.gz` bundles are skipped (large
 and platform-specific), as are `sessions/` and `__pycache__`.

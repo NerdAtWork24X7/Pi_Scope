@@ -187,15 +187,19 @@ fi
 
 # Pi Scope runs its bundled `pi` in its own agent dir (agent-dir.ts; default
 # ~/.pi-scope/agent). Give a fresh machine a starting template — settings,
-# skills and extensions — copied from the example agent. An existing agent dir
-# is never touched.
+# skills and extensions — copied from the example agent. "Already set up" is
+# decided by the extensions dir: if it holds any entries the dir is left
+# untouched; otherwise the template is seeded in (the launcher's first run makes
+# the same call, so an agent dir the server created but never seeded is caught
+# here too).
 AGENT_DIR="${SCOPE_AGENT_DIR:-$HOME/.pi-scope/agent}"
 TEMPLATE="$DIR/examples/pi_local/agent"
+EXTENSIONS="$AGENT_DIR/extensions"
 
-if [ -e "$AGENT_DIR" ]; then
-  info "agent dir already exists at $AGENT_DIR — leaving it untouched."
-elif [ ! -d "$TEMPLATE" ]; then
+if [ ! -d "$TEMPLATE" ]; then
   info "no agent template at $TEMPLATE — skipping the initial agent setup."
+elif [ -n "$(ls -A "$EXTENSIONS" 2>/dev/null || true)" ]; then
+  info "agent dir at $AGENT_DIR already has extensions — leaving it untouched."
 else
   info "seeding the agent template into $AGENT_DIR…"
   mkdir -p "$AGENT_DIR"

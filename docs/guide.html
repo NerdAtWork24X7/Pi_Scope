@@ -188,11 +188,13 @@ cd Pi_Scope &amp;&amp; ./pi-scope              # desktop app (Electron window)</
         Nothing to install first: <code>./pi-scope</code> is the cross-platform launcher
         (<code>.\pi-scope.cmd</code> on Windows) — one Node script, one shim per platform — and it
         fetches what it needs on first launch: the workspace dependencies, Electron for the desktop
-        window, and Pi Scope's own copy of the <code>pi</code> coding agent. Node 24+ is the only
-        prerequisite. Prefer the terminal or a server? The same launcher runs headless —
-        <code>./pi-scope --web</code> opens the WebUI in your browser,
-        <code>./pi-scope --server</code> stays in the foreground; every mode and flag is listed under
-        <a href="#launcher">Launcher flags</a>.
+        window, and Pi Scope's own copy of the <code>pi</code> coding agent (~220&nbsp;MB under
+        <code>~/.pi-scope/pi</code>). Node 24+ is the only prerequisite. Prefer the terminal or a
+        server? The same launcher runs headless — <code>./pi-scope --web</code> opens the WebUI in
+        your browser, <code>./pi-scope --server</code> stays in the foreground; every mode and flag
+        is listed under <a href="#launcher">Launcher flags</a>. On a machine with no display (a
+        server, container or SSH session) the desktop window cannot open, so start with
+        <code>./pi-scope --server</code>.
       </p>
 
       <h3 id="windows">Windows</h3>
@@ -209,12 +211,19 @@ cd Pi_Scope
       <h4 id="agent-template">First-run agent template</h4>
       <p>
         Pi Scope runs its bundled <code>pi</code> in its own agent dir
-        (<code>~/.pi-scope/agent</code>, or <code>SCOPE_AGENT_DIR</code>), created empty on first
-        launch. The repo ships a starter config — settings, skills, extensions, agents and themes —
-        in <code>examples/pi_local/agent</code>: copy its contents into that dir before the first
-        launch to start from a working setup instead of defaults. An existing agent dir is never
-        touched, and the skills' large, platform-specific <code>.venv</code> and the obscura
-        <code>*.tar.gz</code> bundles are not needed.
+        (<code>~/.pi-scope/agent</code>, or <code>SCOPE_AGENT_DIR</code>). The repo ships a starter
+        config — settings, skills, extensions, agents and themes — in
+        <code>examples/pi_local/agent</code>, and both install paths seed it the same way: the
+        template is copied in on first run whenever the agent dir has no
+        <code>extensions/</code> yet — the tell that nothing has set it up. The launcher
+        (<code>./pi-scope</code>) and the one-line installer (<code>install/install.sh</code>) apply
+        the same rule, so an agent dir the server created on first boot (with a little state of its
+        own, such as <code>auth.json</code>) is still seeded.
+      </p>
+      <p>
+        Once the dir has extensions it is left alone, so a configured agent dir is never disturbed,
+        and the launcher never overwrites an existing file. The skills' large, platform-specific
+        <code>.venv</code> and the obscura <code>*.tar.gz</code> bundles are skipped.
       </p>
 
       <h4>What is Windows-aware (and what is not)</h4>
@@ -251,10 +260,13 @@ cd Pi_Scope
       </ul>
 
       <h3 id="source">Running the server directly (developers)</h3>
-      <pre><code>./pi-scope --dev                        # server with --watch, no Electron window</code></pre>
+      <pre><code>./pi-scope --dev --server               # server with --watch, no Electron window</code></pre>
       <p>
-        Open the URL it prints (<code>http://127.0.0.1:43190/?token=&lt;uuid&gt;</code>) and you
-        are looking at a live (empty) dashboard. The DB defaults to <code>db/scope.db</code>;
+        <code>--dev</code> only adds <code>--watch</code>; it does not by itself leave desktop mode,
+        so pair it with <code>--server</code> (or <code>--web</code>) — on its own it still opens the
+        Electron window. Open the URL it prints
+        (<code>http://127.0.0.1:43190/?token=&lt;uuid&gt;</code>) and you are looking at a live
+        (empty) dashboard. The DB defaults to <code>db/scope.db</code> (relative to the repo root);
         override with <code>SCOPE_PORT</code>, <code>SCOPE_HOST</code>, <code>SCOPE_DB_PATH</code> or
         <code>SCOPE_AUTH_TOKEN</code>. Prefer the raw entry point? The server is
         <code>apps/scope-server/server.ts</code>, run under Node 24.
@@ -274,7 +286,7 @@ cd Pi_Scope
       <pre><code>./pi-scope                              # desktop app (Electron window, default)
 ./pi-scope --web                        # headless server + open the WebUI in a browser
 ./pi-scope --server                     # headless server only, stays in the foreground
-./pi-scope --dev                        # server with --watch
+./pi-scope --dev --server               # server with --watch (--dev needs --server/--web)
 ./pi-scope --keep-server                # leave the server up after the script exits
 ./pi-scope --port 8080 --host 0.0.0.0   # override the defaults
 ./pi-scope --db /path/to/scope.db --token my-token</code></pre>
@@ -282,7 +294,7 @@ cd Pi_Scope
       <pre><code>.\pi-scope.cmd                           # desktop app (Electron window, default)
 .\pi-scope.cmd --web                     # headless server + open the WebUI in a browser
 .\pi-scope.cmd --server                  # headless server only, stays in the foreground
-.\pi-scope.cmd --dev                     # server with --watch
+.\pi-scope.cmd --dev --server            # server with --watch (--dev needs --server/--web)
 .\pi-scope.cmd --keep-server             # leave the server up after the script exits
 .\pi-scope.cmd --port 8080 --host 0.0.0.0</code></pre>
       <p>
@@ -449,10 +461,8 @@ node docs/seed-demo.mjs</code></pre>
         walkthroughs are MP4s in the repo:
       </p>
       <ul>
-        <li><a href="video/Pi-Scope-5.0.0-features_1.mp4">Pi-Scope-5.0.0-features_1.mp4</a></li>
-        <li><a href="video/Pi-Scope-5.0.0-features_2.mp4">Pi-Scope-5.0.0-features_2.mp4</a></li>
-        <li><a href="video/Pi-Scope-5.0.0-features_3.mp4">Pi-Scope-5.0.0-features_3.mp4</a></li>
-        <li><a href="video/Pi-Scope-showcase.mp4">Pi-Scope-showcase.mp4</a></li>
+        <li><a href="video/Pi-Scope-showcase.mp4">Pi-Scope-showcase.mp4</a> — the full feature tour</li>
+        <li><a href="video/Pi-Scope.mp4">Pi-Scope.mp4</a> — a shorter walkthrough</li>
       </ul>
 
       <h2 id="environment">Server environment variables</h2>
@@ -667,8 +677,20 @@ node docs/seed-demo.mjs</code></pre>
 
       <h2 id="license">License &amp; bundled assets</h2>
       <p>
-        See <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/LICENSE">LICENSE</a>
-        <hr />
+        Pi Scope itself is <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/LICENSE">MIT
+        licensed</a>. A few third-party assets ship with it under their own terms:
+      </p>
+      <ul>
+        <li><strong>Webfonts</strong> — Clash Grotesk and Satoshi are self-hosted under the ITF Free
+          Font License; the terms are in
+          <a href="https://github.com/NerdAtWork24X7/Pi_Scope/blob/main/docs/assets/fonts/ITF-FFL.txt">docs/assets/fonts/ITF-FFL.txt</a>.</li>
+        <li><strong>Bundled agent</strong> — the <code>@earendil-works/pi-coding-agent</code> package
+          installed under <code>~/.pi-scope/pi</code> is MIT licensed.</li>
+        <li><strong>Desktop shell</strong> — Electron is MIT licensed.</li>
+        <li><strong>Build tooling</strong> — <code>ffmpeg-static</code> (GPL-3.0-or-later) is a
+          development dependency used only to transcode the showcase video; it is not part of the
+          installed app.</li>
+      </ul>
       <p>
         ← Back to the <a href="./">showcase</a>, or read the
         <a href="https://github.com/NerdAtWork24X7/Pi_Scope#readme">README on GitHub</a>.

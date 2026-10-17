@@ -62,7 +62,7 @@ node docs/make-showcase-video.mjs
 
 It boots the server on a fresh DB, seeds the demo inside its own scratch project
 (`tmp/video-demo/model-selector`), seeds a Workflow graph through the plugin's own API —
-offering only a harness this machine can actually run — then films all ten views with
+offering only a harness this machine can actually run — then films every view with
 Playwright at 1600×900, with a caption overlay, and transcodes the capture to H.264
 (`ffmpeg-static`, or the ffmpeg bundled with the Playwright browsers). The raw webm is kept
 in `tmp/video/`.
