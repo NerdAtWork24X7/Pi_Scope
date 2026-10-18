@@ -434,6 +434,39 @@ describe("the Kanban queue", () => {
     assert.equal((await task(id)).failedAt, undefined, "moving the task re-arms it");
   });
 
+  test("Waiting is a real column: it keeps the run it holds, and holds the lock", async () => {
+    // Clear whatever an earlier test left held, so the lock starts free.
+    for (const t of (await snapshot()).tasks) {
+      if (t.status === "in_progress" || t.status === "waiting") await post({ action: "moveTask", id: t.id, status: "done" });
+    }
+    await post({ action: "addTask", title: "needs an answer" });
+    const id = (await snapshot()).tasks.find((t) => t.title === "needs an answer").id;
+    await post({ action: "moveTask", id, status: "planned" });
+    assert.ok((await post({ action: "beginRun", id, sessionId: "sess-wait" })).res.ok);
+
+    // Parking the card in Waiting (what the read-time reconcile does on its own,
+    // and what the user can do by hand) keeps the recorded run: that run is live,
+    // it is only blocked on an answer.
+    assert.ok((await post({ action: "placeTask", id, status: "waiting", beforeId: "" })).res.ok);
+    const parked = await task(id);
+    assert.equal(parked.status, "waiting");
+    assert.equal(parked.runSessionId, "sess-wait", "the run record survives the move to Waiting");
+    assert.ok(parked.runStartedAt > 0, "and so does its start stamp");
+
+    // The blocked run still owns the orchestrator, so nothing else may start —
+    // not a dispatch, not a drag.
+    await post({ action: "addTask", title: "wants to run" });
+    const other = (await snapshot()).tasks.find((t) => t.title === "wants to run").id;
+    await post({ action: "moveTask", id: other, status: "planned" });
+    assert.equal((await post({ action: "beginRun", id: other, sessionId: "sess-second" })).res.status, 409, "a dispatch behind a Waiting task is refused");
+    assert.equal((await post({ action: "moveTask", id: other, status: "in_progress" })).res.status, 409, "and so is a drag into In Progress");
+    assert.equal((await task(other)).status, "planned", "the losing task is untouched");
+
+    // Leaving Waiting releases the run record, like leaving In Progress.
+    assert.ok((await post({ action: "moveTask", id, status: "planned" })).res.ok);
+    assert.equal((await task(id)).runSessionId, undefined, "leaving Waiting clears the run record");
+  });
+
   test("an unknown action is refused, not silently accepted", async () => {
     assert.equal((await post({ action: "notAnAction" })).res.status, 400);
   });
@@ -517,6 +550,63 @@ describe("read-time self-heal", () => {
       assert.equal(by("manual").status, "planned", "an old manual In Progress entry heals too");
       assert.equal(by("fresh").status, "in_progress", "a run only just starting is left alone");
       assert.equal(by("fresh").runSessionId, "starting-session", "with its session intact");
+    } finally {
+      proc.kill("SIGKILL");
+      await new Promise((r) => proc.once("exit", r));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a Waiting card stays where it is unless the run it holds is gone", async () => {
+    // Waiting is a legitimate resting place: a card the user parked there by hand
+    // has no run and must never be bounced back to Planned — but a card whose
+    // blocked run died with the server has to come back to the queue.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-office-wait-"));
+    const cwd = fs.realpathSync(dir);
+    const agentDir2 = path.join(dir, "agent");
+    const pluginsDir2 = path.join(dir, "plugins");
+    fs.mkdirSync(agentDir2, { recursive: true });
+    fs.mkdirSync(pluginsDir2, { recursive: true });
+    const past = Date.now() - 60_000;
+    fs.mkdirSync(path.join(cwd, ".pi-scope", "plugins", ".data"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".pi-scope", "plugins", ".data", "office.json"), JSON.stringify({
+      workspaces: {
+        [cwd]: {
+          runnerPaused: true,
+          tasks: [
+            { id: "byhand", title: "parked by the user", status: "waiting", createdAt: past, startedAt: past },
+            { id: "orphan", title: "blocked run that died", status: "waiting", createdAt: past, startedAt: past, runSessionId: "dead-session", runStartedAt: past },
+          ],
+        },
+      },
+    }, null, 2));
+
+    const port = await freePort();
+    const base2 = `http://127.0.0.1:${port}`;
+    const proc = spawn(process.execPath, [SERVER], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        SCOPE_PORT: String(port), SCOPE_HOST: "127.0.0.1",
+        SCOPE_DB_PATH: path.join(dir, "scope.db"), SCOPE_AUTH_TOKEN: "wait-token",
+        SCOPE_PLUGINS_DIR: pluginsDir2, SCOPE_FILE_ROOT: dir,
+        SCOPE_AGENT_DIR: agentDir2, SCOPE_PI_BIN: "/bin/true",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const start = Date.now();
+      for (;;) {
+        try { if ((await fetch(`${base2}/health`)).ok) break; } catch { /* not up */ }
+        if (Date.now() - start > 20_000) throw new Error("server did not start");
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      const res = await fetch(`${base2}/office?cwd=${encodeURIComponent(cwd)}`, { headers: { authorization: "Bearer wait-token" } });
+      const data = await res.json();
+      const by = (id) => data.tasks.find((t) => t.id === id);
+      assert.equal(by("byhand").status, "waiting", "a hand-parked card is left alone");
+      assert.equal(by("orphan").status, "planned", "a Waiting card whose run is gone returns to the queue");
+      assert.equal(by("orphan").runSessionId, undefined, "and its run record is cleared");
     } finally {
       proc.kill("SIGKILL");
       await new Promise((r) => proc.once("exit", r));

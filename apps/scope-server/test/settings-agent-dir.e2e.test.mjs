@@ -246,6 +246,44 @@ describe("agent-dir settings", () => {
     assert.deepEqual(cfg.web_fetch, { orchestrator: true, subagent: true });
   });
 
+  // The team harness needs BOTH the agent-team extension enabled (settings.json)
+  // and the agent-team-config.json `enabled` master switch on. The SubAgent tab's
+  // "Agent team enabled" toggle used to write only the master switch, so enabling
+  // teams left the extension off and the Chat agent rail fell back to the plain
+  // session list with no in-app way to re-enable it. They are linked now.
+  test("the agent-team master switch enables the extension, and the two stay linked", async () => {
+    const settingsPath = path.join(agentDir, "settings.json");
+    const readExts = () => JSON.parse(fs.readFileSync(settingsPath, "utf8")).extensions;
+    const entry = () => readExts().find((e) => /agent-team/.test(e));
+
+    // Enabling the team harness also enables the extension pi loads for it.
+    assert.ok((await postSettings("setTeamEnabled", true)).res.ok);
+    assert.equal(entry(), "+extensions/agent-team/index.ts", "enabling teams enables the extension");
+    const on = await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`);
+    assert.equal(on.data.agentConfigRaw.enabled, true);
+    assert.ok(on.data.extensions.some((e) => e.name === "agent-team" && e.enabled), "the extension is discovered and enabled");
+    // The other entries are untouched.
+    assert.ok(readExts().includes("+extensions/pi-scope.ts"));
+    assert.ok(readExts().includes("+extensions/web_fetch/index.ts"));
+
+    // Disabling the team harness disables the extension too.
+    assert.ok((await postSettings("setTeamEnabled", false)).res.ok);
+    assert.equal(entry(), "-extensions/agent-team/index.ts", "disabling teams disables the extension");
+    const off = await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`);
+    assert.equal(off.data.agentConfigRaw.enabled, false);
+    assert.equal(off.data.extensions.find((e) => e.name === "agent-team").enabled, false);
+
+    // The reverse direction: toggling the extension back on from the Chat rail
+    // turns the master switch back on, so the two never drift apart.
+    const { res } = await api("/agent-team", {
+      method: "POST",
+      body: JSON.stringify({ action: "toggleExtension", path: "extensions/agent-team/index.ts", cwd: tmpDir }),
+    });
+    assert.ok(res.ok);
+    assert.equal(entry(), "+extensions/agent-team/index.ts");
+    assert.equal((await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`)).data.agentConfigRaw.enabled, true);
+  });
+
   test("trust can be revoked", async () => {
     await postSettings("revokeTrust", "/trusted/one");
     const cfg = JSON.parse(fs.readFileSync(path.join(agentDir, "trust.json"), "utf8"));
@@ -593,6 +631,41 @@ describe("per-subagent tools", () => {
     assert.equal(readBeta(), before, "a rejected request never writes");
     assert.equal((await postSettings("setAgentDefTools", { file: "nope.md", tools: [] })).res.status, 404);
     fs.rmSync(betaPath());
+  });
+});
+
+// The SubAgent tab's Tool policy pickers. The dropdown sends the WHOLE list —
+// including any "Custom tool…" name the catalogue does not know — and the server
+// stores it verbatim in the project's agent-team-config.json, which is exactly
+// where the agent-team extension reads destructiveTools / skipOrchestratorTools
+// back from (they decide whether a subagent is writable, and which tools the
+// orchestrator never calls). The two lists are independent.
+describe("tool policy lists", () => {
+  const CONFIG = () => path.join(tmpDir, ".pi", "settings", "agent-team-config.json");
+  const readCfg = () => JSON.parse(fs.readFileSync(CONFIG(), "utf8"));
+  const snapshot = async () => (await api(`/settings?cwd=${encodeURIComponent(tmpDir)}`)).data;
+
+  test("destructive tools are stored as an array, custom names included", async () => {
+    const picked = ["write", "edit", "browser_eval"];
+    assert.ok((await postSettings("setDestructiveTools", picked)).res.ok);
+    assert.deepEqual(readCfg().destructiveTools, picked);
+    assert.deepEqual((await snapshot()).agentConfigRaw.destructiveTools, picked, "the snapshot feeds the picker back");
+
+    // Replacing the list overwrites it wholesale — removing a tool is a shorter array.
+    assert.ok((await postSettings("setDestructiveTools", ["write"])).res.ok);
+    assert.deepEqual(readCfg().destructiveTools, ["write"]);
+
+    // A non-array value can never reach the file as anything but an empty list.
+    assert.ok((await postSettings("setDestructiveTools", "write, edit")).res.ok);
+    assert.deepEqual(readCfg().destructiveTools, []);
+  });
+
+  test("skip-orchestrator tools are stored independently", async () => {
+    assert.ok((await postSettings("setDestructiveTools", ["write"])).res.ok);
+    assert.ok((await postSettings("setSkipOrchestratorTools", ["bash", "web_search"])).res.ok);
+    const raw = (await snapshot()).agentConfigRaw;
+    assert.deepEqual(raw.skipOrchestratorTools, ["bash", "web_search"]);
+    assert.deepEqual(raw.destructiveTools, ["write"], "writing one list leaves the other alone");
   });
 });
 

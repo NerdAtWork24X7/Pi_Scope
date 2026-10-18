@@ -290,7 +290,7 @@ cd Pi_Scope
 ./pi-scope --server                     # headless server only, stays in the foreground
 ./pi-scope --dev --server               # server with --watch (--dev needs --server/--web)
 ./pi-scope --keep-server                # leave the server up after the script exits
-./pi-scope --port 8080 --host 0.0.0.0   # override the defaults
+./pi-scope --port 8080 --host 127.0.0.1 # bind local-only (default is all interfaces)
 ./pi-scope --db /path/to/scope.db --token my-token</code></pre>
       <p>On Windows the same flags go to the launcher shim:</p>
       <pre><code>.\pi-scope.cmd                           # desktop app (Electron window, default)
@@ -298,7 +298,7 @@ cd Pi_Scope
 .\pi-scope.cmd --server                  # headless server only, stays in the foreground
 .\pi-scope.cmd --dev --server            # server with --watch (--dev needs --server/--web)
 .\pi-scope.cmd --keep-server             # leave the server up after the script exits
-.\pi-scope.cmd --port 8080 --host 0.0.0.0</code></pre>
+.\pi-scope.cmd --port 8080 --host 127.0.0.1</code></pre>
       <p>
         Per-machine defaults can live in <code>apps/scope-desktop/scope.env</code> (see
         <code>scope.env.example</code>); real environment variables always win. This matters for
@@ -415,22 +415,11 @@ node docs/seed-demo.mjs</code></pre>
 
       <h2 id="phone">Use it from your phone</h2>
       <p>
-        Pi Scope can bind every interface so a phone on the same Wi-Fi can open the
-        <strong>Chat</strong> view live, alongside the desktop.
+        Pi Scope binds every interface by default, so a phone on the same Wi-Fi can open the
+        <strong>Chat</strong> view live, alongside the desktop — no configuration needed.
       </p>
 
-      <h4>1. Bind to the LAN</h4>
-      <pre><code>cp apps/scope-desktop/scope.env.example apps/scope-desktop/scope.env
-# then uncomment:  SCOPE_HOST=0.0.0.0</code></pre>
-      <p>
-        <code>scope.env</code> is read at launch, so this works from the desktop icon too. Real
-        environment variables still win, so <code>SCOPE_HOST=0.0.0.0 ./run.sh</code> overrides the
-        file. Running the server yourself instead of through the launcher?
-        <code>SCOPE_HOST=0.0.0.0 node server.ts</code> in <code>apps/scope-server</code> works the
-        same way, and the boot banner prints the phone URL.
-      </p>
-
-      <h4>2. Scan the QR</h4>
+      <h4>1. Start it and scan the QR</h4>
       <p>
         Start Pi Scope and click the phone icon in the header. A QR appears — point your phone's
         camera at it and Pi Scope opens <strong>in a mobile layout</strong>, not a shrunk copy of
@@ -439,14 +428,29 @@ node docs/seed-demo.mjs</code></pre>
         docker), pick the address the phone can actually reach.
       </p>
 
+      <h4>Keep it on this machine only (optional)</h4>
+      <p>
+        The LAN bind is what makes the QR reachable. To go back to a this-machine-only bind, set
+        <code>SCOPE_HOST=127.0.0.1</code> — in <code>apps/scope-desktop/scope.env</code> (read at
+        launch, so it works from the desktop icon too), or in the environment
+        (<code>SCOPE_HOST=127.0.0.1 ./run.sh</code>, or
+        <code>SCOPE_HOST=127.0.0.1 node server.ts</code> in <code>apps/scope-server</code>). Real
+        environment variables always win over the file. With a loopback bind the phone panel
+        explains that a QR would open nothing rather than showing a dead one.
+      </p>
+
       <h4>What the mobile layout is</h4>
       <ul>
-        <li>A ☰ drawer of workspaces and sessions, with their live / waiting / stopped state.</li>
+        <li>A ☰ drawer of workspaces and sessions — each session named by its opening message —
+          with their live / waiting / stopped state.</li>
         <li>The selected session's transcript — recorded messages plus the live stream as pi works.</li>
         <li>A composer that sends prompts straight to pi; a question pi asks appears as an
-          answerable card, and <strong>Stop</strong> aborts the run.</li>
+          answerable card, and <strong>Stop</strong> aborts the run — or kills the pi when the
+          session is one running in your own terminal and its process id is known.</li>
         <li><strong>New session</strong> (the ＋ in the header) opens a sheet to pick the workspace,
           model, agent team and mode; the first message spawns pi with exactly those settings.</li>
+        <li>A ☀ / 🌙 toggle in the header switches light / dark. The choice is shared with the
+          desktop (same <code>scope-theme</code> key) and remembered per browser.</li>
         <li>A ✕ on each drawer row deletes that session, killing the pi subprocess behind it first.
           It asks for confirmation — the delete cannot be undone.</li>
         <li>The desktop views (Terminal, Files, Git, Checkpoints, Office) are deliberately absent,
@@ -486,12 +490,13 @@ node docs/seed-demo.mjs</code></pre>
 
       <div class="callout warn">
         <p>
-          <strong>This exposes a shell.</strong> With <code>SCOPE_HOST=0.0.0.0</code> anyone on
-          that network who knows the token can drive your agents. The mobile layout is smaller than
-          the desktop UI, not harmless: prompts run real commands on this host, it can retarget a
-          project's team/mode, and it can delete sessions — and the desktop layout (reachable with
-          <code>ui=desktop</code>) adds <strong>Terminal</strong>, a real shell, plus file edits and
-          git operations. Only do this on a network you trust. The token is minted randomly at boot;
+          <strong>This exposes a shell.</strong> Because Pi Scope binds every interface by default,
+          anyone on that network who knows the token can drive your agents. The mobile layout is
+          smaller than the desktop UI, not harmless: prompts run real commands on this host, it can
+          retarget a project's team/mode, and it can delete sessions — and the desktop layout
+          (reachable with <code>ui=desktop</code>) adds <strong>Terminal</strong>, a real shell, plus
+          file edits and git operations. Only run on a network you trust (or set
+          <code>SCOPE_HOST=127.0.0.1</code> to stay local). The token is minted randomly at boot;
           pin <code>SCOPE_AUTH_TOKEN</code> in <code>scope.env</code> if you want a stable URL.
         </p>
       </div>
@@ -524,8 +529,9 @@ node docs/seed-demo.mjs</code></pre>
             </tr>
             <tr>
               <th scope="row"><code>SCOPE_HOST</code></th>
-              <td style="text-align:left"><code>127.0.0.1</code></td>
-              <td style="text-align:left">Bind address. <code>0.0.0.0</code> also serves your LAN</td>
+              <td style="text-align:left"><code>0.0.0.0</code></td>
+              <td style="text-align:left">Bind address. Defaults to all interfaces (serves your LAN, so
+                the phone QR works); <code>127.0.0.1</code> keeps it local-only</td>
             </tr>
             <tr>
               <th scope="row"><code>SCOPE_DB_PATH</code></th>

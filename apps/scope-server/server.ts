@@ -31,8 +31,10 @@ import {
   shutdown as shutdownPlugins,
   storeFor,
 } from "./plugins.ts";
-import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatLiveRuns, attachChatRun } from "./chat.ts";
+import { startChat, startChatSession, killChatSession, stopChat, chatSessionPid, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatPendingDialog, chatLiveRuns, attachChatRun } from "./chat.ts";
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
+import { buildSessionSeed } from "./session-seed.ts";
+import { noteExternalProcess, externalProcessFor, killExternalProcess, findProcessBySessionFile } from "./external-process.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
 import { checkPiUpdate, updatePi, updateState } from "./pi-update.ts";
 import {
@@ -52,7 +54,12 @@ import type { WebSocket as WsSocket } from "ws";
 // ─── Config ─────────────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.SCOPE_PORT ?? "43190", 10);
-const HOST = process.env.SCOPE_HOST ?? "127.0.0.1";
+// Default to binding every interface so the header's phone button can render a
+// scannable QR with no setup: a QR is only useful if the phone can reach the
+// address it encodes, and a loopback bind has no such address. Every route
+// stays token-gated (the QR carries this run's token); to go back to a
+// this-machine-only bind, set SCOPE_HOST=127.0.0.1.
+const HOST = process.env.SCOPE_HOST ?? "0.0.0.0";
 // When THIS server process started. A session's OPEN turn (`last_turn_event ===
 // 'turn_start'`) can only still be running if it was announced to this run: pi
 // posts its events to whichever server is listening, so a turn that started
@@ -84,14 +91,18 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const AUTH_TOKEN = (process.env.SCOPE_AUTH_TOKEN ?? "").trim() || crypto.randomUUID();
 const VERSION = "0.1.0";
 const MAX_SSE_SUBSCRIBERS = 256;
+// A wildcard bind is not a usable browser target, so point the openable URL at
+// loopback while the server still listens on every interface.
+const DISPLAY_HOST = ["0.0.0.0", "::", "[::]"].includes(HOST) ? "127.0.0.1" : HOST;
 // Browser-openable UI URL with the token baked in. The UI's API + SSE calls are
 // auth-walled, so opening the bare host:port (no ?token=) yields a blank UI.
 // Print this so copy/paste straight from the boot banner just works.
-const OPEN_URL = `http://${HOST}:${PORT}/?token=${encodeURIComponent(AUTH_TOKEN)}`;
+const OPEN_URL = `http://${DISPLAY_HOST}:${PORT}/?token=${encodeURIComponent(AUTH_TOKEN)}`;
 
 // Restrict CORS to loopback origins that match this server. Prevents a remote
 // site from reading responses cross-origin (CSRF / data exfiltration).
 const ALLOWED_ORIGINS = new Set([
+  `http://${DISPLAY_HOST}:${PORT}`,
   `http://${HOST}:${PORT}`,
   `http://127.0.0.1:${PORT}`,
   `http://localhost:${PORT}`,
@@ -1185,6 +1196,33 @@ function updateSettingsJson(mutate: (cfg: any) => void): void {
   fs.writeFileSync(SETTINGS_JSON, JSON.stringify(cfg, null, 2) + "\n");
 }
 
+// The agent-team extension's settings.json entry, as pi's discovery names it. A
+// directory extension is named by its directory, so `extensions/agent-team` and
+// `extensions/agent-team/index.ts` are the same extension.
+const AGENT_TEAM_EXTENSION_ENTRY_RE = /^extensions\/agent-team(\/index\.[cm]?[jt]s)?$/;
+
+/** Enable or disable the agent-team extension in settings.json.
+ *
+ *  The team harness only runs when this extension is enabled AND
+ *  agent-team-config.json `enabled` is on, so the two switches are kept in step:
+ *  Settings → SubAgent → "Agent team enabled" writes both, and the Chat rail's
+ *  extension chip keeps the master switch in step when IT toggles agent-team
+ *  (see the /agent-team `toggleExtension` case). Without the link the two could
+ *  disagree — an enabled master switch with the extension off left the Chat
+ *  agent rail on the plain session list with no in-app way back. */
+function setAgentTeamExtensionEnabled(enabled: boolean): void {
+  updateSettingsJson((cfg) => {
+    const list: string[] = Array.isArray(cfg.extensions) ? cfg.extensions : (cfg.extensions = []);
+    const idx = list.findIndex((e) => {
+      const parsed = typeof e === "string" ? parseExtensionEntry(e) : null;
+      return !!parsed && AGENT_TEAM_EXTENSION_ENTRY_RE.test(parsed.path);
+    });
+    const entry = (enabled ? "+" : "-") + "extensions/agent-team/index.ts";
+    if (idx >= 0) list[idx] = entry;
+    else list.push(entry);
+  });
+}
+
 // ─── Chat footer (pi custom-footer port) ───────────────────────────────────
 // Mirrors the pi terminal's custom-footer extension in the Chat composer:
 // model/thinking, token stats, cost, context bar, elapsed, cwd, git branch,
@@ -1754,6 +1792,10 @@ function ingestEvent(event: ObsEvent, emit?: (e: ObsEvent) => void): string | nu
   // file, so a resumed session's turns never appear under a second session.
   const canonical = canonicalSessionId(q, event);
   let effective = canonical !== event.session_id ? { ...event, session_id: canonical } : event;
+  // Remember the writer's pid so a session running in the user's terminal can be
+  // stopped from the UI (see stopAgentSession / external-process.ts). Refreshed
+  // on every event, so a server restart re-learns it with the next one.
+  noteExternalProcess(effective.session_id, effective.pid, effective.pid_started_at);
   let result = q.insertEvent.run(toRow(effective));
 
   // A no-op insert means (session_id, seq) already exists. Two cases:
@@ -1818,6 +1860,56 @@ function ingestBatch(fn: (emit: (e: ObsEvent) => void) => void): void {
   for (const e of pending) broadcastEvent(e);
 }
 
+// ─── Stopping a pi that runs in the user's OWN terminal ────────────────────
+// Chat's subprocesses are signalled by session id (see chat.ts); a `pi` the
+// user started themselves has no subprocess handle here. Its extension stamps
+// every event with `process.pid`, so the server keeps the last one per session
+// and can signal it. The pid's safety checks (liveness, start-time match,
+// one-shot use) live in external-process.ts.
+
+/** The turn the killed pi could no longer record. Its extension is gone with
+ *  the process, so without this the session keeps `turn_start` as its last turn
+ *  event and every view reads it as still working. A `turn_end` is the truthful
+ *  record: the turn is over because the user stopped it, and a later resume's
+ *  `turn_start` takes the row green again. */
+function recordExternalStop(sessionId: string): void {
+  const maxRow: any = q.getMaxSeq.get({ $session_id: sessionId });
+  const maxSeq = typeof maxRow?.max_seq === "number" ? maxRow.max_seq : -1;
+  ingestEvent({
+    event_id: crypto.randomUUID(),
+    session_id: sessionId,
+    seq: maxSeq + 1,
+    ts: new Date().toISOString(),
+    type: "turn_end",
+    pool: "default",
+    tags: [],
+    payload: { turn_index: null, stopped_by: "pi-scope" },
+  });
+}
+
+/** Stop whatever is working a session: the chat subprocess this server owns
+ *  and/or the pi the user started in their terminal. A session can hold both
+ *  (an idle Chat subprocess plus a terminal run), so both are attempted; the
+ *  terminal pid is only signalled when it is NOT the chat subprocess Stop just
+ *  aborted. Returns what actually happened so the client can say so. */
+function stopAgentSession(sessionId: string): { ok: boolean; chat: boolean; external: boolean; pid?: number; reason?: string } {
+  if (!sessionId) return { ok: false, chat: false, external: false, reason: "missing sessionId" };
+  const chatPid = chatSessionPid(sessionId);
+  const chat = stopChat(sessionId);
+  const ext = externalProcessFor(sessionId);
+  let external = false;
+  let pid: number | undefined;
+  let reason: string | undefined;
+  if (ext && ext.pid !== chatPid) {
+    const killed = killExternalProcess(sessionId);
+    external = killed.ok;
+    pid = killed.pid;
+    reason = killed.reason;
+    if (external) recordExternalStop(sessionId);
+  }
+  return { ok: chat || external, chat, external, pid, reason };
+}
+
 // ─── Request body reader with size cap ─────────────────────────────────────
 
 async function readBody(req: Request): Promise<string> {
@@ -1843,6 +1935,27 @@ const MIME: Record<string, string> = {
   ".woff2": "font/woff2",
   ".map": "application/json",
 };
+
+// What GET /media will serve to the Chat view: a picture or video pi wrote to
+// the workspace and referenced by path. Restricted to media so the route can
+// never be used to read back arbitrary workspace files (a .env, a key) by URL.
+const MEDIA_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".svg": "image/svg+xml",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".ogv": "video/ogg",
+  ".ogg": "video/ogg",
+  ".mov": "video/quicktime",
+  ".m4v": "video/x-m4v",
+};
+const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
 
 /**
  * In-memory cache for static assets, validated per request by mtime + size.
@@ -2809,6 +2922,48 @@ async function handle(req: Request): Promise<Response> {
     }
   }
 
+  // ── Workspace media (Chat) ─────────────────────────────────────────────
+  // A picture or video pi references by PATH instead of URL — "saved to
+  // tmp/chart.png" — cannot be loaded by the browser directly, because the file
+  // is not under public/. This serves it from the SAME sandbox as /files/* (the
+  // request's cwd plus resolveWithinCwd), so only a file inside a workspace the
+  // user actually opened can be read, and only when its extension names media.
+  // It accepts ?token= because an <img>/<video> src cannot send an Authorization
+  // header.
+  if (pathname === "/media" && method === "GET") {
+    if (!checkAuth(req)) return textResponse("unauthorized", 401, "text/plain");
+    const cwd = validateCwd(url.searchParams.get("cwd") ?? "");
+    const rel = url.searchParams.get("path") ?? "";
+    if (!cwd || !rel) return textResponse("bad request", 400, "text/plain");
+    const abs = resolveWithinCwd(cwd, rel);
+    if (!abs) return textResponse("forbidden", 403, "text/plain");
+    const type = MEDIA_MIME[path.extname(abs).toLowerCase()];
+    if (!type) return textResponse("unsupported media type", 415, "text/plain");
+    let st: fs.Stats;
+    try { st = fs.statSync(abs); } catch { return textResponse("not found", 404, "text/plain"); }
+    if (!st.isFile()) return textResponse("not found", 404, "text/plain");
+    if (st.size > MAX_MEDIA_BYTES) return textResponse("too large", 413, "text/plain");
+    try {
+      const body = fs.readFileSync(abs);
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": type,
+          "content-length": String(body.byteLength),
+          // The file is a fresh artifact that can change between turns; validate
+          // each time rather than letting the browser reuse a stale picture.
+          "cache-control": "no-cache",
+          // Never let a workspace file run as a same-origin document — an SVG can
+          // carry script. Lock the bytes to a passive resource.
+          "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    } catch {
+      return textResponse("not found", 404, "text/plain");
+    }
+  }
+
   if (pathname.match(/\.(js|css|svg|png|ico|ttf|woff2?)$/)) {
     return serveStatic(pathname.replace(/^\//, ""), req) ?? textResponse("not found", 404, "text/plain");
   }
@@ -3422,6 +3577,10 @@ async function handle(req: Request): Promise<Response> {
         }
         case "setTeamEnabled":
           updateAgentConfig(proj, (cfg) => { cfg.enabled = !!value; });
+          // The team harness needs this extension too, so enabling the master
+          // switch enables it (and disabling turns it off) — keeping the two in
+          // step so the Chat agent rail's team UI actually renders.
+          setAgentTeamExtensionEnabled(!!value);
           break;
         case "setGridCols":
           updateAgentConfig(proj, (cfg) => { cfg.gridCols = Math.min(4, Math.max(1, Number(value) || 1)); });
@@ -3944,6 +4103,15 @@ async function handle(req: Request): Promise<Response> {
               if (parsed) cfg.extensions[idx] = (parsed.enabled ? "-" : "+") + parsed.path;
             }
           });
+          // The agent-team extension IS the team harness: mirror its new enable
+          // state onto the agent-team-config master switch, so toggling it off
+          // in the rail also turns the switch off (and vice versa — see
+          // setAgentTeamExtensionEnabled). Re-read the entry so the two can
+          // never drift apart.
+          const toggled = discoverExtensions().find((e) => e.path === entryPath);
+          if (toggled && AGENT_TEAM_EXTENSION_ENTRY_RE.test(toggled.path)) {
+            updateAgentConfig(proj, (cfg) => { cfg.enabled = toggled.enabled; });
+          }
           break;
         }
         case "toggleSkillSetting": {
@@ -4066,6 +4234,20 @@ async function handle(req: Request): Promise<Response> {
       for (const s of sessions) {
         const lastTs = typeof s.last_ts === "number" ? s.last_ts : Date.parse(s.last_ts);
         s.turn_live = s.last_turn_event === "turn_start" && lastTs >= SERVER_BOOT_TS;
+        // A pi running in the user's OWN terminal has no chat subprocess; this
+        // pid is the only handle the UI has to stop it. Absent for the server's
+        // own chat subprocesses (those stop by session id) and for older
+        // extensions that never stamped one.
+        let pid = externalProcessFor(s.session_id)?.pid;
+        if (!pid && s.turn_live && s.session_file) {
+          // An extension too old to stamp a pid, or events from before this
+          // server run: the pi still holds its session file open, so find it
+          // there. Without this an already-running terminal pi stayed watch-only
+          // until the user restarted it.
+          const found = findProcessBySessionFile(s.session_file);
+          if (found) { noteExternalProcess(s.session_id, found, 0); pid = found; }
+        }
+        if (pid) s.pid = pid;
       }
 
       // Annotate each session with the authoritative context window from the
@@ -4391,7 +4573,13 @@ const pluginKit = {
   // Chat run state, for plugins that own a background run (the Office queue):
   // a task's dispatch outlives the page that started it, so the plugin needs to
   // tell a still-running session from an orphan, and to stop it on Pause.
-  chatRunStatus, stopChat, startChat,
+  // `chatPendingDialog` answers the third question the queue asks: is the run
+  // blocked on something only a human can answer?
+  chatRunStatus, chatPendingDialog, stopChat, startChat,
+  // Stops the right process for a session: the chat subprocess this server owns
+  // and/or a pi the user started in their own terminal (see stopAgentSession in
+  // server.ts). The Chat plugin's Stop route uses this instead of stopChat.
+  stopAgentSession,
   // The Chat feature plugin owns the /chat routes; it needs the full subprocess
   // lifecycle + the STT machinery + the reference-library preamble.
   startChatSession, killChatSession, pushChatPrefs, answerChatUi,
@@ -4410,6 +4598,12 @@ const pluginKit = {
   onTerminalCwdChange: (ws: WsSocket, cwd: string) => liveTerminalCwds.set(ws, cwd),
   onTerminalClose: (ws: WsSocket) => liveTerminalCwds.delete(ws),
   libraryBlockFor: (cwd: string) => buildLibraryPrompt(readAgentConfig(cwd).library),
+  // The recorded conversation behind a pi session file, as a block a fresh
+  // session can be seeded with. Chat asks for it when that file is gone — the
+  // agent-team harness deletes its subagent logs when a dispatch ends — so
+  // continuing such a session still carries its content instead of starting
+  // empty-handed (see session-seed.ts).
+  sessionSeedBlock: (opts: { sessionFile?: string; sessionId?: string; reason?: string }) => buildSessionSeed(q, opts),
   // The agent dir the user's skills/ and extensions/ live in. A plugin that lets
   // a node pick skills or extensions needs it to resolve those names to real
   // paths — and it must be the host's value (SCOPE_AGENT_DIR-aware), never a

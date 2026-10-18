@@ -140,6 +140,8 @@ export function defaultTeam(opts = {}) {
     skills: [],
     tools: [],
     skipOrchestratorTools: [],
+    // The agent-team extension's built-in destructive-tool default (index.ts).
+    destructiveTools: ["custom_edit", "custom_write", "edit", "write", "web-fetch"],
     extensions: [
       { name: "agent-team", path: "/home/u/.pi/extensions/agent-team.ts", available: true, enabled: true },
     ],
@@ -365,6 +367,18 @@ export async function startMockBackend() {
     return {
       pi: {},
       settingsRaw: {},
+      // agent-team-config.json — the SubAgent tab's mode / master switch /
+      // concurrency fields (the real snapshot carries these in agentConfigRaw).
+      agentConfigRaw: {
+        enabled: state.team.enabled !== false,
+        mode: state.team.mode,
+        parallelDispatch: state.team.parallelDispatch,
+        maxParallel: state.team.maxParallel,
+        gridCols: state.team.gridCols,
+        debugLevel: state.team.debugLevel,
+        skipOrchestratorTools: state.team.skipOrchestratorTools,
+        destructiveTools: state.team.destructiveTools,
+      },
       modelsMeta: MODEL_META,
       agentDefaultTools: AGENT_DEFAULT_TOOLS,
       agentDefs: state.agentDefs,
@@ -446,6 +460,20 @@ export async function startMockBackend() {
         "cache-control": "no-store",
       });
       res.end(body);
+      return;
+    }
+
+    // ── Workspace media (GET /media) ───────────────────────────────────────
+    // The real host serves a picture or video pi wrote to the workspace from a
+    // sandboxed route (see server.ts). The tests only need that URL to resolve to
+    // a real image, so a fixed 1×1 PNG is returned for any request.
+    if (pathname === "/media") {
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=",
+        "base64"
+      );
+      res.writeHead(200, { "content-type": "image/png", "content-length": png.length, "cache-control": "no-cache" });
+      res.end(png);
       return;
     }
 
@@ -667,6 +695,9 @@ export async function startMockBackend() {
       } else if (action === "toggleExtension" && typeof body.path === "string") {
         const ex = (state.team.extensions || []).find((e) => e.path === body.path);
         if (ex) ex.enabled = ex.enabled === false;
+        // The agent-team extension IS the team harness: the real route keeps the
+        // master switch in step when it is toggled (see /settings setTeamEnabled).
+        if (ex && ex.name === "agent-team") state.team.enabled = ex.enabled;
       }
       return sendJSON(res, snapshotTeam());
     }
@@ -679,6 +710,12 @@ export async function startMockBackend() {
     if (pathname === "/chat/kill" || pathname === "/chat/stop") return sendJSON(res, { ok: true });
     if (pathname === "/chat/prefs") return sendJSON(res, { ok: true, sent: 2 });
     if (pathname === "/chat/ui") return sendJSON(res, { ok: true, sessionId: body.sessionId });
+    // The composer (browser or phone) uploads a picked file here and keeps the
+    // returned workspace-relative path; tests only need a deterministic path.
+    if (pathname === "/chat/attach" && method === "POST") {
+      const name = String(body.name || "file");
+      return sendJSON(res, { ok: true, path: `tmp/attachments/test-${name}`, name, bytes: 1 });
+    }
 
     // Which chat runs are live right now — the Chat view's recovery source
     // after a reload (see chat.js "Recovering a LIVE run").
@@ -768,6 +805,22 @@ export async function startMockBackend() {
       }
       // The Office's orchestrator picker writes the app's default model.
       if (body.action === "setDefaultModel") state.team.defaultModel = String(body.value || "");
+      // The SubAgent tab's "Agent team enabled" master switch is linked to the
+      // agent-team extension: enabling teams enables the extension (and vice
+      // versa), so the Chat agent rail's team UI actually renders — matching the
+      // real route.
+      if (body.action === "setTeamEnabled") {
+        state.team.enabled = !!body.value;
+        const ex = (state.team.extensions || []).find((e) => e.name === "agent-team");
+        if (ex) ex.enabled = !!body.value;
+      }
+      // The SubAgent tab's Tool policy pickers send the whole list; the real
+      // route stores an array verbatim (a Custom tool name included) and an
+      // empty list for anything else.
+      if (body.action === "setDestructiveTools" || body.action === "setSkipOrchestratorTools") {
+        const key = body.action === "setDestructiveTools" ? "destructiveTools" : "skipOrchestratorTools";
+        state.team[key] = Array.isArray(body.value) ? [...body.value] : [];
+      }
       if (body.action === "createAgentDefFile" && body.value && typeof body.value.file === "string") {
         const file = body.value.file;
         if (state.agentDefs.some((d) => d.file === file)) {
@@ -835,13 +888,13 @@ export async function startMockBackend() {
         const id = String(body.id || "").trim();
         const status = String(body.status || "");
         if (!id) return sendJSON(res, { error: "missing id" }, 400);
-        if (!["todo", "planned", "in_progress", "done"].includes(status)) {
+        if (!["todo", "planned", "in_progress", "waiting", "done"].includes(status)) {
           return sendJSON(res, { error: `invalid status: ${status}` }, 400);
         }
         const task = (bucket.tasks || []).find((t) => t.id === id);
         if (!task) return sendJSON(res, { error: "no such task" }, 404);
         // One task at a time: a move into a busy In Progress column is refused.
-        if (status === "in_progress" && (bucket.tasks || []).some((t) => t.status === "in_progress" && t.id !== id)) {
+        if (status === "in_progress" && (bucket.tasks || []).some((t) => (t.status === "in_progress" || t.status === "waiting") && t.id !== id)) {
           return sendJSON(res, { error: "another task is already running", code: "conflict" }, 409);
         }
         const at = Date.now();
@@ -851,8 +904,9 @@ export async function startMockBackend() {
         if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
         if (status === "in_progress") task.startedAt = task.startedAt || at;
         if (status === "done") task.finishedAt = at;
-        // Leaving In Progress ends any recorded run, like the real plugin.
-        if (status !== "in_progress") delete task.runSessionId;
+        // Leaving the run's own columns ends any recorded run, like the real
+        // plugin — Waiting keeps it (the run is live, just blocked on an answer).
+        if (status !== "in_progress" && status !== "waiting") delete task.runSessionId;
       } else if (action === "updateTask") {
         const id = String(body.id || "").trim();
         const title = collapse(body.title);
@@ -869,12 +923,12 @@ export async function startMockBackend() {
         const status = String(body.status || "");
         const beforeId = body.beforeId == null ? "" : String(body.beforeId).trim();
         if (!id) return sendJSON(res, { error: "missing id" }, 400);
-        if (!["todo", "planned", "in_progress", "done"].includes(status)) {
+        if (!["todo", "planned", "in_progress", "waiting", "done"].includes(status)) {
           return sendJSON(res, { error: `invalid status: ${status}` }, 400);
         }
         const task = (bucket.tasks || []).find((t) => t.id === id);
         if (!task) return sendJSON(res, { error: "no such task" }, 404);
-        if (status === "in_progress" && (bucket.tasks || []).some((t) => t.status === "in_progress" && t.id !== id)) {
+        if (status === "in_progress" && (bucket.tasks || []).some((t) => (t.status === "in_progress" || t.status === "waiting") && t.id !== id)) {
           return sendJSON(res, { error: "another task is already running", code: "conflict" }, 409);
         }
         const at = Date.now();
@@ -884,7 +938,7 @@ export async function startMockBackend() {
         if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
         if (status === "in_progress") task.startedAt = task.startedAt || at;
         if (status === "done") task.finishedAt = at;
-        if (status !== "in_progress") delete task.runSessionId;
+        if (status !== "in_progress" && status !== "waiting") delete task.runSessionId;
         if (status === "planned") {
           const queue = (bucket.tasks || [])
             .filter((t) => t.status === "planned" && t.id !== id)
@@ -902,7 +956,7 @@ export async function startMockBackend() {
         if (!sessionId) return sendJSON(res, { error: "missing sessionId" }, 400);
         // The single-runner lock, mirroring the real plugin: any task already In
         // Progress refuses a second dispatch (a racing tab / stale board).
-        if (state.beginRunConflict || (bucket.tasks || []).some((t) => t.status === "in_progress")) {
+        if (state.beginRunConflict || (bucket.tasks || []).some((t) => t.status === "in_progress" || t.status === "waiting")) {
           return sendJSON(res, { error: "another task is already running", code: "conflict" }, 409);
         }
         const task = (bucket.tasks || []).find((t) => t.id === id);

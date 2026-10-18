@@ -1457,7 +1457,7 @@ describe("office view", () => {
     );
   });
 
-  test("hovering a cubicle pops up that agent's recent messages", async () => {
+  test("hovering a cubicle pops up that agent's recent replies", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder", last_turn_event: "turn_start" })],
       events: {
@@ -1482,9 +1482,12 @@ describe("office view", () => {
     const text = await page.textContent("#office-pop");
     assert.match(text, /builder/, "names the agent");
     assert.match(text, /subagent/, "says which seat it holds");
-    assert.match(text, /\$ bash npm test/, "shows the tool call as a command line");
-    assert.match(text, /✓ bash {2}109 tests passed/, "shows the tool result");
     assert.match(text, /All green — shipping it\./, "shows the agent's reply");
+    // The popup is the agent's own voice: tool calls, results and prompts are
+    // activity on the desk's bubble, never lines in here.
+    assert.doesNotMatch(text, /npm test/, "no tool-call command line");
+    assert.doesNotMatch(text, /109 tests passed/, "no tool result");
+    assert.doesNotMatch(text, /make the office look real/, "no user prompt");
     assert.match(await counts(), /1\s*working/);
 
     // Moving off the cubicle closes it again.
@@ -2006,7 +2009,7 @@ describe("office view", () => {
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
-  test("the meeting room carries the board, and the full board lays out four columns", async () => {
+  test("the meeting room carries the board, and the full board lays out its five columns", async () => {
     await boot({
       sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder" })],
       office: {
@@ -2033,8 +2036,8 @@ describe("office view", () => {
     assert.equal(await page.locator('#office-pane .office-room[data-room="meeting"] #office-library-open').count(), 1, "and the shelf shares the room");
     assert.deepEqual(
       await sign.locator(".office-kmini-col").allTextContents(),
-      ["Todo1", "Planned0", "In Progress0", "Done1"],
-      "the sign counts every column",
+      ["Todo1", "Planned0", "In Progress0", "Waiting0", "Done1"],
+      "the sign counts every column, Waiting included",
     );
 
     // Clicking it opens the full-screen board.
@@ -2043,20 +2046,51 @@ describe("office view", () => {
     const panel = await page.locator("#office-board-backdrop .office-lib-panel").boundingBox();
     const view = page.viewportSize();
     assert.ok(panel.width >= view.width - 60, `the board is a full surface (${panel.width}px of ${view.width})`);
-    assert.ok(panel.height >= 400, `with room for four columns (${panel.height}px)`);
+    assert.ok(panel.height >= 400, `with room for five columns (${panel.height}px)`);
     assert.match(await board().locator(".office-lib-hd-title").textContent(), /Task board/);
 
-    // Four columns, left to right in workflow order, each headed and counted.
+    // Five columns, left to right in workflow order, each headed and counted.
     assert.deepEqual(
       await board().locator(".office-kcol-head span").allTextContents(),
-      ["Todo", "Planned", "In Progress", "Done"],
-      "the columns run Todo → Planned → In Progress → Done",
+      ["Todo", "Planned", "In Progress", "Waiting", "Done"],
+      "the columns run Todo → Planned → In Progress → Waiting → Done",
     );
-    const cols = await board().locator(".office-kcol").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().left));
-    assert.deepEqual([...cols].sort((a, b) => a - b), cols, "and are laid out in that order across the board");
+    const cols = await board().locator(".office-kcol").evaluateAll((els) => els.map((e) => {
+      const r = e.getBoundingClientRect();
+      return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) };
+    }));
+    assert.equal(cols.length, 5, "five columns are drawn");
+    assert.deepEqual([...cols.map((c) => c.left)].sort((a, b) => a - b), cols.map((c) => c.left), "laid out in order across the board");
+    assert.deepEqual([...new Set(cols.map((c) => c.top))].length, 1, "on one row");
+    assert.ok(Math.max(...cols.map((c) => c.right)) <= panel.x + panel.width, "and stay inside the panel");
+    // Every column is the same width — the board's grid shares the surface out.
+    const widths = cols.map((c) => c.right - c.left);
+    assert.ok(Math.max(...widths) - Math.min(...widths) <= 2, `the columns are equal width (${widths.join(", ")})`);
+
+    // The columns FILL the surface they are drawn on: each one runs down to the
+    // board's own padding edge instead of stopping after its own cards.
+    const grid = await board().locator("#office-board-cols").evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      return {
+        top: r.top + parseFloat(cs.paddingTop),
+        bottom: r.bottom - parseFloat(cs.paddingBottom),
+        scrolls: el.scrollHeight > el.clientHeight + 1,
+      };
+    });
+    const foot = await page.locator("#office-board-backdrop .office-board-foot").boundingBox();
+    for (const [i, c] of cols.entries()) {
+      assert.ok(Math.abs(c.top - grid.top) <= 2, `column ${i} starts at the top of the board's area (${c.top} vs ${grid.top})`);
+      assert.ok(Math.abs(c.bottom - grid.bottom) <= 2, `and runs to its bottom (${c.bottom} vs ${grid.bottom})`);
+    }
+    assert.ok(Math.abs(grid.bottom - foot.y) <= 16, "which is the whole height under the board's header");
+    assert.ok(cols[0].bottom - cols[0].top >= 300, `columns are tall enough for a real queue (${cols[0].bottom - cols[0].top}px)`);
+    assert.equal(grid.scrolls, false, "and the surface itself does not scroll — long lists scroll inside their column");
+
     assert.equal(await kcol("todo").locator(".office-task-title").textContent(), "draft the plan");
     assert.equal(await kcol("done").locator(".office-task-title").textContent(), "ship it");
     assert.equal(await kcol("planned").locator(".office-kcol-empty").count(), 1, "an empty column says so");
+    assert.equal(await kcol("waiting").locator(".office-kcol-empty").count(), 1, "Waiting is drawn even when nothing is in it");
 
     // Todo carries a New-task button — the task is written in a roomy popup,
     // not a cramped inline form.
@@ -2084,6 +2118,90 @@ describe("office view", () => {
     // Escape closes the board, as it does the other full-screen surfaces.
     await page.keyboard.press("Escape");
     await page.waitForSelector("#office-board-backdrop", { state: "detached" });
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("the In Progress card names the run the orchestrator is on, with a clock that counts", async () => {
+    const startedAt = Date.now() - 42_000;
+    // The live run the server knows about (chatRunStatus) — the card reads it, so
+    // a run started by a page that is long gone still shows.
+    mock.setRunStatus("live-run-1", { active: true });
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [
+          { id: "t-run", title: "fix the reconnect", status: "in_progress", createdAt: 1, startedAt, runSessionId: "live-run-1", runStartedAt: startedAt },
+        ],
+      },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
+
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop .office-task");
+    const card = kcol("in_progress").locator(".office-task");
+    assert.equal(await card.locator(".office-task-run").count(), 1, "the card the orchestrator holds says it is running");
+    assert.equal(await card.locator(".office-run-dot").count(), 1, "with the live dot");
+    const first = await card.locator(".office-run-time").textContent();
+    assert.match(first, /^0:4\d$/, `and the run's clock, counting from its start (${first})`);
+    assert.equal(await kcol("waiting").locator(".office-task-wait").count(), 0, "the running card is not also reported as waiting");
+
+    // The clock counts on its own — and it counts WITHOUT the board being rebuilt
+    // once a second (a rebuild would drop a focus or a drag that is in flight).
+    await page.evaluate(() => { window.__clock = document.querySelector("#office-board-cols .office-run-time"); });
+    await until(async () => (await card.locator(".office-run-time").textContent()) !== first, "the clock advances");
+    assert.ok(
+      await page.evaluate(() => window.__clock === document.querySelector("#office-board-cols .office-run-time") && window.__clock.isConnected),
+      "the ticking clock is the same node — the board was not rebuilt to count",
+    );
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#office-board-backdrop", { state: "detached" });
+  });
+
+  test("a task whose run asked a question is parked in Waiting, question and all", async () => {
+    const startedAt = Date.now() - 5000;
+    // The run is live and blocked on a host dialog — what ask_user_question does.
+    mock.setRunStatus("q-run-1", {
+      active: true,
+      pending: { id: "ui-1", kind: "select", title: "Which store should it use?", options: ["sqlite", "postgres"] },
+    });
+    await boot({
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "orchestrator" })],
+      office: {
+        runnerPaused: false,
+        tasks: [
+          { id: "t-ask", title: "migrate the store", status: "waiting", createdAt: 1, startedAt, runSessionId: "q-run-1", runStartedAt: startedAt },
+          { id: "t-next", title: "ship it", status: "planned", createdAt: 2, plannedAt: 2 },
+        ],
+      },
+    });
+    await page.waitForSelector('#office-pane .office-pod[data-key="orchestrator"]');
+
+    // The wall sign says the orchestrator is on hold, not on a task.
+    const sign = page.locator("#office-board-open");
+    assert.equal(await sign.locator(".office-kmini-col.waiting b").textContent(), "1", "the sign counts the Waiting column");
+    assert.match(await sign.locator(".office-kanban-now").textContent(), /waiting on you/);
+
+    await sign.click();
+    await page.waitForSelector("#office-board-backdrop .office-task");
+    const card = kcol("waiting").locator(".office-task");
+    assert.equal(await card.locator(".office-task-wait").textContent(), "waiting on you");
+    assert.equal(await card.locator(".office-task-run").count(), 0, "a waiting card is not a running one");
+    assert.equal(await card.locator(".office-task-q").textContent(), "Which store should it use?", "the card quotes the question it is blocked on");
+    // The foot says what to do about it.
+    const foot = await board().locator("#office-board-now").textContent();
+    assert.match(foot, /Waiting on you/, "the board names the blocked task");
+    assert.match(foot, /answer it/, "and says how to let it continue");
+
+    // The queue holds behind the blocked run: no second task is dispatched, and
+    // the parked card is left exactly where it is (this is the bug the column
+    // exists to prevent).
+    await page.waitForTimeout(1800);
+    const tasks = mock.officeState().tasks;
+    assert.equal(tasks.find((t) => t.id === "t-ask").status, "waiting", "the parked card is left in Waiting");
+    assert.equal(tasks.find((t) => t.id === "t-ask").runSessionId, "q-run-1", "with its live run still recorded");
+    assert.equal(tasks.find((t) => t.id === "t-next").status, "planned", "and planned work waits behind it");
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 

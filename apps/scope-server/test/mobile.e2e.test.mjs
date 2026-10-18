@@ -334,11 +334,69 @@ describe("the mobile layout", () => {
     await page.click("#m-menu");
     await page.waitForSelector("#m-drawer.open");
     assert.ok(await page.locator(".m-sess.active").count(), "the open session is highlighted");
-    assert.match(await page.locator("#m-sessions").textContent(), /orchestrator/, "the session is listed by agent name");
+    const drawerText = await page.locator("#m-sessions").textContent();
+    assert.match(drawerText, /hello from the phone/, "the session is listed by its opening message");
+    assert.doesNotMatch(drawerText, /orchestrator/, "not by the agent/subagent name");
     await page.click("#m-drawer-close");
     await page.waitForFunction(() => !document.querySelector("#m-drawer").classList.contains("open"));
     assert.equal(await page.getAttribute("#m-menu", "aria-expanded"), "false", "the drawer is announced as closed");
 
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("Stop kills a pi the terminal is running when its events carry a pid", async () => {
+    const sid = "mobile-ext-stop";
+    const pi = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    await new Promise((resolve, reject) => {
+      pi.once("spawn", resolve);
+      pi.once("error", reject);
+    });
+    try {
+      const now = new Date().toISOString();
+      const started = Date.now();
+      const seeded = await api("/events", {
+        method: "POST",
+        body: JSON.stringify([
+          { event_id: `${sid}-1`, session_id: sid, seq: 1, ts: now, type: "user_message", cwd: tmpDir, agent_name: "orchestrator", payload: { text: "terminal work" }, pid: pi.pid, pid_started_at: started },
+          { event_id: `${sid}-2`, session_id: sid, seq: 2, ts: now, type: "turn_start", cwd: tmpDir, agent_name: "orchestrator", payload: {}, pid: pi.pid, pid_started_at: started },
+        ]),
+      });
+      assert.ok(seeded.res.ok);
+
+      const { page, errors } = await openMobile(sid);
+      // The phone can only offer Stop because the row carries the pid now.
+      await page.waitForSelector("#m-stop:not([hidden])", { timeout: 15_000 });
+      await page.click("#m-stop");
+      await page.waitForFunction(() => /stopped/.test(document.querySelector("#m-hint")?.textContent || ""), null, { timeout: 15_000 });
+      if (pi.exitCode === null && pi.signalCode === null) {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("the pi process did not exit")), 5000);
+          pi.once("exit", () => { clearTimeout(timer); resolve(); });
+        });
+      }
+      assert.deepEqual(errors, []);
+      await page.close();
+    } finally {
+      try { if (pi.exitCode === null && pi.signalCode === null) pi.kill("SIGKILL"); } catch { /* gone */ }
+    }
+  });
+
+  test("a picture a tool result returns is drawn beside its text", async () => {
+    const sid = "mobile-image";
+    const now = new Date().toISOString();
+    const shot = "data:image/png;base64,iVBORw0KGgo=";
+    await api("/events", { method: "POST", body: JSON.stringify([
+      { event_id: `${sid}-1`, session_id: sid, seq: 1, ts: now, type: "assistant_message", cwd: tmpDir, agent_name: "orchestrator", payload: { text: "here it is" } },
+      { event_id: `${sid}-2`, session_id: sid, seq: 2, ts: now, type: "tool_call", cwd: tmpDir, agent_name: "orchestrator", payload: { tool_name: "screenshot", args: {} } },
+      { event_id: `${sid}-3`, session_id: sid, seq: 3, ts: now, type: "tool_result", cwd: tmpDir, agent_name: "orchestrator", payload: { tool_name: "screenshot", content_text: `shot: ${shot}` } },
+    ]) });
+    const { page, errors } = await openMobile(sid);
+
+    // The picture is a real <img> under the row's text, not a leftover string.
+    await page.waitForSelector("#m-transcript .m-tool .result-images img", { state: "attached", timeout: 15_000 });
+    assert.equal(await page.getAttribute("#m-transcript .m-tool .result-images img", "src"), shot);
+    assert.match(await page.locator("#m-transcript .m-tool:has(.result-images)").textContent(), /shot:/, "the raw text is kept");
     assert.deepEqual(errors, []);
     await page.close();
   });
@@ -366,6 +424,56 @@ describe("the mobile layout", () => {
     const { data } = await api("/chat/status");
     const run = (data.runs || []).find((r) => r.sessionId === SID);
     assert.ok(!run || !run.active, "the run is no longer in flight");
+
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("a file attached on the phone is stored in tmp/attachments and sent by path", async () => {
+    await seedSession(SID, { agent: "orchestrator" });
+    const { page, errors } = await openMobile(SID);
+    await page.waitForFunction(() => document.querySelector("#m-transcript")?.textContent?.includes("hi there"), null, { timeout: 15_000 });
+
+    // Attach a file the way the phone's file picker does (the input stays
+    // hidden; setting its files fires change).
+    await page.setInputFiles("#m-attach-input", {
+      name: "photo.png",
+      mimeType: "image/png",
+      buffer: Buffer.from("89504e470d0a1a0a", "hex"),
+    });
+    // The chip appears while the upload is in flight; Send arms only once it
+    // settles (a path, not an uploading placeholder, is what pi can receive).
+    await page.waitForSelector("#m-attachments .m-attach-chip:not(.uploading)");
+    assert.match(await page.locator("#m-attachments").textContent(), /photo\.png/);
+    await page.waitForSelector("#m-send:not([disabled])");
+    assert.equal(await page.isEnabled("#m-send"), true, "an attachment alone enables Send");
+
+    await page.click("#m-send");
+    await page.waitForFunction(() => document.querySelector("#m-stop").hidden === false, null, { timeout: 10_000 });
+
+    // While the run is in flight the server knows the prompt it was handed —
+    // the block, and only the PATH (never the bytes).
+    const { data } = await api("/chat/status");
+    const run = (data.runs || []).find((r) => r.sessionId === SID);
+    assert.ok(run, "the run is known to the server");
+    assert.match(String(run.prompt), /Attached files \(read each from its path\):/);
+    assert.match(String(run.prompt), /tmp\/attachments\/.+photo\.png/);
+
+    await page.waitForFunction(() => {
+      const nodes = [...document.querySelectorAll("#m-transcript .m-live .m-text")];
+      return nodes.length && nodes[nodes.length - 1].textContent === "alphabeta";
+    }, null, { timeout: 20_000 });
+    await page.waitForFunction(() => document.querySelector("#m-stop").hidden === true, null, { timeout: 20_000 });
+
+    // The sent bubble shows the file, and the composer is cleared.
+    assert.match(await page.locator("#m-transcript .m-user .m-msg-att").textContent(), /photo\.png/);
+    assert.equal(await page.locator("#m-attachments .m-attach-chip").count(), 0, "the composer cleared after sending");
+
+    // The bytes landed in the workspace's tmp/attachments/.
+    const dir = path.join(tmpDir, "tmp", "attachments");
+    const files = fs.readdirSync(dir);
+    assert.equal(files.length, 1, "one attachment stored");
+    assert.match(files[0], /photo\.png$/);
 
     assert.deepEqual(errors, []);
     await page.close();
@@ -420,6 +528,110 @@ describe("the mobile layout", () => {
     assert.match(shown, /42 tk/, "token usage is shown");
 
     await page.waitForFunction(() => document.querySelector("#m-stop").hidden === true, null, { timeout: 20_000 });
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("a continuation the server cannot resume is shown, and the reply still lands", async () => {
+    // A recorded row can point at a pi session file that is GONE — the
+    // agent-team dispatcher deletes a subagent's log when its run ends. The
+    // server refuses to switch onto it (that would recreate the path and answer
+    // from no context), seeds the fresh session with the recorded transcript
+    // instead, and says so mid-run, before the prompt it did send. A client that
+    // drops that event leaves the reader believing nothing was carried over.
+    const sid = "mobile-no-resume";
+    const gone = path.join(tmpDir, "agent-team-log", "image_analyzer-9.json");
+    fs.mkdirSync(path.dirname(gone), { recursive: true });
+    const now = new Date().toISOString();
+    const seeded = await api("/events", {
+      method: "POST",
+      body: JSON.stringify([
+        { event_id: `${sid}-1`, session_id: sid, seq: 1, ts: now, type: "session_start", cwd: tmpDir, agent_name: "image_analyzer", session_file: gone, payload: { reason: "start" } },
+        { event_id: `${sid}-2`, session_id: sid, seq: 2, ts: now, type: "user_message", cwd: tmpDir, agent_name: "image_analyzer", session_file: gone, payload: { text: "what is in this chart" } },
+        { event_id: `${sid}-3`, session_id: sid, seq: 3, ts: now, type: "assistant_message", cwd: tmpDir, agent_name: "image_analyzer", session_file: gone, model: "stub", payload: { text: "hi there — the chart is a bar series", usage: { total_tokens: 12 } } },
+      ]),
+    });
+    assert.ok(seeded.res.ok);
+    assert.equal(fs.existsSync(gone), false, "the fixture's pi session file is absent");
+
+    const { page, errors } = await openMobile(sid);
+    await page.waitForFunction(() => document.querySelector("#m-transcript")?.textContent?.includes("bar series"), null, { timeout: 15_000 });
+
+    await page.fill("#m-input", "continue please");
+    await page.click("#m-send");
+    await page.waitForFunction(() => {
+      const live = [...document.querySelectorAll("#m-transcript .m-live")].pop();
+      return !!live && live.textContent.includes("alpha");
+    }, null, { timeout: 20_000 });
+
+    const live = page.locator("#m-transcript .m-live").last();
+    const note = live.locator(".m-note.err");
+    assert.equal(await note.isHidden(), false, "the reason is on the live bubble, not swallowed");
+    assert.match(await note.textContent(), /cannot resume this session/);
+    assert.match(await note.textContent(), /pi session file is gone/);
+    assert.match(await note.textContent(), /recorded transcript was carried into this conversation instead/);
+    assert.match(await live.textContent(), /alpha/, "the reply the server did run still lands");
+    assert.equal(fs.existsSync(gone), false, "and the missing file was NOT recreated");
+
+    // The wording is the proof that the conversation was handed over: the server
+    // says "carried into this conversation" only when it had a transcript to seed
+    // with (the raw prompt is verified against pi itself in chat-resume's e2e).
+    assert.match(await note.textContent(), /recorded transcript was carried into this conversation instead/);
+
+    await page.waitForFunction(() => document.querySelector("#m-stop").hidden === true, null, { timeout: 20_000 });
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("the Markdown / Raw switch redraws an assistant reply and sticks", async () => {
+    // The phone offers the same reply-view switch as the desktop: Markdown
+    // parses pi's markdown, Raw shows the plain text unparsed. Only assistant
+    // text is affected.
+    const sid = "mobile-view-seed";
+    const now = new Date().toISOString();
+    await api("/events", {
+      method: "POST",
+      body: JSON.stringify([
+        { event_id: `${sid}-1`, session_id: sid, seq: 1, ts: now, type: "session_start", cwd: tmpDir, agent_name: "orchestrator", payload: { reason: "start" } },
+        { event_id: `${sid}-2`, session_id: sid, seq: 2, ts: now, type: "user_message", cwd: tmpDir, agent_name: "orchestrator", payload: { text: "what's up" } },
+        { event_id: `${sid}-3`, session_id: sid, seq: 3, ts: now, type: "assistant_message", cwd: tmpDir, agent_name: "orchestrator", payload: { text: "**bold** answer\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n![a dot](data:image/png;base64,iVBORw0KGgo=)" } },
+      ]),
+    });
+
+    const { page, errors } = await openMobile(sid);
+    const ai = "#m-transcript .m-msg.m-ai .m-text";
+    await page.waitForFunction(() => document.querySelector("#m-transcript")?.textContent?.includes("bold"), null, { timeout: 15_000 });
+
+    // Markdown is the default: the markdown became a <strong> and a real table.
+    await page.waitForSelector(`${ai}.m-md strong`);
+    assert.equal(await page.getAttribute('#m-view-toggle [data-view="markdown"]', "aria-pressed"), "true");
+    assert.equal(await page.locator(`${ai}.m-md strong`).count(), 1, "markdown parses the reply");
+    assert.equal(await page.locator(`${ai}.m-md table tbody tr`).count(), 1, "markdown renders the table");
+    assert.deepEqual(await page.locator(`${ai}.m-md table th`).allTextContents(), ["a", "b"]);
+    assert.equal(
+      await page.getAttribute(`${ai}.m-md img`, "alt"),
+      "a dot",
+      "markdown renders the image"
+    );
+    assert.equal(await page.locator(".m-msg.m-user .m-md").count(), 0, "the user's own row is untouched");
+
+    // Raw: the same text unparsed — literal asterisks/pipes, no <strong> or <img>.
+    await page.click('#m-view-toggle [data-view="raw"]');
+    await page.waitForSelector(`${ai}:not(.m-md)`);
+    assert.equal(await page.locator(`${ai} strong`).count(), 0, "raw does not parse the markdown");
+    assert.equal(await page.locator(`${ai} table`).count(), 0, "raw does not build a table");
+    assert.equal(await page.locator(`${ai} img`).count(), 0, "raw does not build an image");
+    assert.match(await page.textContent(ai), /\*\*bold\*\* answer/);
+    assert.match(await page.textContent(ai), /\| 1 \| 2 \|/);
+    assert.match(await page.textContent(ai), /!\[a dot\]\(data:image\/png;base64,iVBORw0KGgo=\)/);
+
+    // The choice is remembered per browser.
+    assert.equal(await page.evaluate(() => localStorage.getItem("scope-chat-view")), "raw");
+
+    // Back to Markdown reparses the text in place.
+    await page.click('#m-view-toggle [data-view="markdown"]');
+    await page.waitForSelector(`${ai}.m-md strong`);
+
     assert.deepEqual(errors, []);
     await page.close();
   });
@@ -811,6 +1023,42 @@ describe("the mobile skin (Amber Terminal Noir)", () => {
     await page.close();
   });
 
+  test("the header toggle flips the theme and remembers it", async () => {
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m?token=${TOKEN}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#m-transcript .m-empty");
+
+    // Dark is the default for a fresh visitor, and the button offers the switch.
+    assert.equal(await page.evaluate(() => document.body.hasAttribute("data-ds-dark-theme")), true, "dark by default");
+    assert.equal(await page.getAttribute("#m-theme", "aria-label"), "Switch to light theme");
+    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector("#m-theme .m-ic-moon")).display), "block", "the moon is the dark-state glyph");
+    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector("#m-theme .m-ic-sun")).display), "none", "the sun stays hidden in the dark");
+
+    await page.click("#m-theme");
+    assert.equal(await page.evaluate(() => document.body.hasAttribute("data-ds-dark-theme")), false, "the toggle reaches light");
+    assert.equal(await page.evaluate(() => localStorage.getItem("scope-theme")), "light", "the choice is remembered");
+    assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(244, 244, 245)", "the paper field paints");
+    assert.equal(await page.getAttribute("#m-theme", "aria-label"), "Switch to dark theme", "the label announces the next theme");
+    const glyphs = await page.evaluate(() => ({
+      moon: getComputedStyle(document.querySelector("#m-theme .m-ic-moon")).display,
+      sun: getComputedStyle(document.querySelector("#m-theme .m-ic-sun")).display,
+    }));
+    assert.equal(glyphs.moon, "none", "the moon yields");
+    assert.equal(glyphs.sun, "block", "the sun shows");
+
+    // The choice survives a reload: the inline bootstrap applies it before paint.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#m-theme");
+    assert.equal(await page.evaluate(() => document.body.hasAttribute("data-ds-dark-theme")), false, "the light choice reloads");
+
+    await page.click("#m-theme");
+    assert.equal(await page.evaluate(() => document.body.hasAttribute("data-ds-dark-theme")), true, "and back to dark");
+    assert.equal(await page.evaluate(() => localStorage.getItem("scope-theme")), "dark", "the new choice is remembered");
+
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
   test("motion settles slowly, gives snappy feedback, and yields to reduced-motion", async () => {
     const { page, errors } = await phonePage();
     await page.goto(`${base}/m?token=${TOKEN}`, { waitUntil: "domcontentloaded" });
@@ -1186,6 +1434,11 @@ describe("starting a session from the phone", () => {
       ]),
     });
     assert.ok(seeded.res.ok);
+    // The row names a REAL pi session file: a continuation whose target is gone
+    // is refused by the server (it would otherwise recreate the path and answer
+    // from no context — see chat-resume.e2e.test.mjs), so the fixture the resume
+    // is tested against has to exist.
+    fs.writeFileSync(FILE, `${JSON.stringify({ type: "session", version: 3, id: "adopt-1", timestamp: now, cwd: ws })}\n`);
 
     await page.waitForFunction(() => document.querySelector("#m-stop").hidden === true, null, { timeout: 25_000 });
 

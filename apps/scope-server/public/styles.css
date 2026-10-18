@@ -5860,6 +5860,42 @@
       background: var(--accent-soft);
       border-color: var(--accent);
     }
+    /* Markdown / Raw message-view switch (header) */
+    .chat-view-toggle {
+      display: inline-flex;
+      align-items: stretch;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: var(--r-btn);
+      background: transparent;
+      margin-right: 2px;
+    }
+    .chat-view-btn {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1;
+      letter-spacing: 0.1px;
+      padding: 0 8px;
+      height: 28px;
+      color: var(--muted);
+      transition: all 0.12s ease;
+    }
+    .chat-view-btn + .chat-view-btn {
+      border-left: 1px solid var(--border);
+    }
+    .chat-view-btn:hover {
+      color: var(--text);
+      background: var(--row-hover);
+    }
+    .chat-view-btn.on {
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
     .chat-live-dot {
       width: 9px;
       height: 9px;
@@ -6071,6 +6107,33 @@
     .chat-user .chat-bubble-text {
       font-size: 13.8px;
     }
+    /* Attachments on a sent user message: the same files the composer staged,
+       sitting on the amber bubble so they use a translucent overlay instead of
+       the composer chip's surface + border. */
+    .chat-bubble-atts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .chat-bubble-att {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      max-width: 220px;
+      padding: 2px 8px;
+      border-radius: var(--r-pill);
+      background: rgba(0, 0, 0, 0.16);
+      color: var(--on-accent);
+      font-size: 11.5px;
+      line-height: 1.5;
+    }
+    .chat-bubble-att svg { flex-shrink: 0; opacity: 0.9; }
+    .chat-bubble-att-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
     /* AI text + markdown */
     .chat-text {
@@ -6081,6 +6144,12 @@
     }
     .chat-text.chat-stream-text {
       white-space: pre-wrap;
+    }
+    /* Raw: the plain text, no markdown parsing, line breaks preserved. */
+    .chat-text.chat-view-raw {
+      white-space: pre-wrap;
+      font-size: 13.6px;
+      line-height: 1.65;
     }
     .chat-text p {
       margin: 0 0 11px;
@@ -6140,6 +6209,15 @@
     }
     .chat-text del {
       opacity: 0.7;
+    }
+    /* Images in a reply: never wider than the column. */
+    .chat-text img {
+      max-width: 100%;
+      height: auto;
+      margin: 6px 0;
+      border: 1px solid var(--border);
+      border-radius: var(--r-card);
+      vertical-align: middle;
     }
     .chat-text table {
       border-collapse: collapse;
@@ -6490,6 +6568,149 @@
     .chat-tool-call.ok .chat-tool-call-state { color: var(--green); }
     .chat-tool-call.err .chat-tool-call-state { color: var(--red); }
     .chat-tool-call.live .chat-tool-call-state { color: var(--accent); }
+    /* The media a result carries (screenshots, charts, generated images, video
+       links) is listed in a table — one row per item: a thumbnail, its name
+       (a link to the source), and its pixel size — ordered largest first by
+       hydrateMediaTables. A stand-alone item in an assistant reply uses the
+       same table. The block wears the same card as a Thought block and folds
+       behind its summary, so it reads and collapses the same way. */
+    .result-media {
+      margin: 2px 0 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-card);
+      overflow: hidden;
+      background: var(--surface);
+    }
+    .result-media > .result-media-sum {
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 11.5px;
+      color: var(--orange);
+      font-weight: 600;
+    }
+    .result-media > .result-media-sum::-webkit-details-marker { display: none; }
+    .result-media-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .result-media-label svg { color: var(--orange); }
+    .result-media > .result-media-sum::before {
+      content: "▸";
+      font-size: 10px;
+      transition: transform 0.15s ease;
+    }
+    .result-media[open] > .result-media-sum::before { transform: rotate(90deg); }
+    .result-media-count {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 5px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 10px;
+      letter-spacing: 0;
+    }
+    .result-media > .result-images {
+      margin-top: 0;
+      border-top: 1px solid var(--hairline);
+      padding: 6px 12px 8px;
+      background: var(--bg);
+    }
+    .result-images {
+      overflow-x: auto;
+    }
+    .image-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .image-table th,
+    .image-table td {
+      border-top: 1px solid var(--border);
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: middle;
+    }
+    .image-table thead th {
+      border-top: 0;
+      color: var(--text-2);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .image-table .img-cell-thumb { width: 1%; }
+    .image-table .img-cell-name {
+      max-width: 320px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .image-table .img-cell-name a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .image-table .img-cell-name a:hover { text-decoration: underline; }
+    .image-table .img-cell-size {
+      white-space: nowrap;
+      color: var(--text-2);
+      font-variant-numeric: tabular-nums;
+    }
+    .result-image {
+      position: relative;
+      display: block;
+      line-height: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--r-card);
+      overflow: hidden;
+      background: var(--surface-2);
+    }
+    .result-image img,
+    .result-image video {
+      display: block;
+      width: auto;
+      max-width: 160px;
+      max-height: 120px;
+      height: auto;
+      object-fit: contain;
+    }
+    .result-image video { background: #000; }
+    /* A play badge over a video's still frame — a CSS triangle so it never
+       depends on an emoji font. */
+    .result-video::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.18);
+      pointer-events: none;
+    }
+    .media-play {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+    .media-play::before {
+      content: "";
+      width: 0;
+      height: 0;
+      border-style: solid;
+      border-width: 10px 0 10px 16px;
+      border-color: transparent transparent transparent #fff;
+      filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.7));
+    }
 
     /* Ask/questionnaire cards — pi's ask_user_question dialog rendered inline */
     .chat-ask {
@@ -7245,6 +7466,90 @@
     @keyframes chat-listen-pulse {
       0%, 100% { box-shadow: 0 2px 8px rgba(239, 68, 68, 0.32); }
       50% { box-shadow: 0 0 0 5px rgba(239, 68, 68, 0.16); }
+    }
+    /* Attach button — a paperclip circle matching the dictation button's size.
+       On the desktop build it opens a native file dialog; in the browser it
+       opens the hidden file input. Either way the picked files become PATHS the
+       next prompt carries. */
+    .chat-attach {
+      width: 34px;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface-2);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      cursor: pointer;
+      flex-shrink: 0;
+      padding: 0;
+      transition: all 0.14s ease;
+    }
+    .chat-attach:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .chat-attach:focus-visible {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.16);
+      outline: none;
+    }
+    .chat-attach:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    /* Pending attachments, staged above the textarea. Each chip is one file
+       whose PATH the next message will carry; the name elides, the title shows
+       the whole path, and the ✕ drops it. */
+    .chat-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 10px 14px 0;
+    }
+    .chat-attachments[hidden] { display: none; }
+    .chat-attach-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 240px;
+      padding: 3px 4px 3px 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-pill);
+      background: var(--surface-2);
+      color: var(--text-2);
+      font-size: 11.5px;
+      line-height: 1.4;
+      animation: chat-msg-in 0.15s ease both;
+    }
+    .chat-attach-chip svg { color: var(--accent); flex-shrink: 0; }
+    .chat-attach-chip-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .chat-attach-chip.uploading { opacity: 0.6; }
+    .chat-attach-chip.err { border-color: color-mix(in srgb, var(--red) 45%, var(--border)); }
+    .chat-attach-chip-x {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .chat-attach-chip-x:hover {
+      background: color-mix(in srgb, var(--red) 18%, transparent);
+      color: var(--red);
     }
     /* Stop button — red circle, hidden until a prompt is streaming. It aborts
        the agent's current run without killing the session. */
@@ -8953,6 +9258,17 @@ body.layout-settings #sidebar-resizer {
 .set-chip.via-default { border-style: dashed; }
 .set-chip.via-default .set-chip-dot { background: var(--border-strong); }
 .set-chip-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Tool-policy list pickers (SubAgent → Tool policy): a dropdown of known tools
+   plus a Custom… entry, with the picked names shown as removable chips. */
+.set-toolpick { display: flex; flex-direction: column; gap: 8px; }
+.set-toolpick-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.set-toolpick-select { max-width: 320px; }
+.set-toolpick-chip { cursor: default; }
+.set-chip-x {
+  border: 0; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px;
+}
+.set-chip-x:hover { color: var(--red); }
 .set-skill-group { margin-bottom: 18px; }
 .set-skill-head {
   display: flex; align-items: center; justify-content: space-between;

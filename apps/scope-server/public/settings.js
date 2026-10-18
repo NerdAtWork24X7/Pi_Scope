@@ -619,6 +619,64 @@
     );
   }
 
+  // Tools whose name says they change the workspace (writes, edits, patches,
+  // deletes, renames, doc generation). Used to annotate the Destructive-tools
+  // picker so the "which tool modifies something" reference is visible — the
+  // agent-team extension uses this same list to decide a subagent is writable,
+  // which forces it to be dispatched on its own instead of in parallel.
+  const MODIFYING_TOOL_RE = /(^|[_.-])(write|edit|patch|create|delete|remove|move|rename|mkdir|rm|rmdir|chmod|doc_generator)([_.-]|$)/i;
+
+  // A tool-name list editor (agent-team-config.json destructiveTools /
+  // skipOrchestratorTools): a dropdown of the known catalogue — pi's built-ins
+  // and the tools extensions register — plus a "Custom tool…" entry for a name
+  // the catalogue does not know yet (stored verbatim). Every selected name shows
+  // as a removable chip, and custom/unknown names are marked as ghosts. Writes
+  // go through POST /settings, which re-renders from the fresh snapshot, so the
+  // Orchestrator card's tool chips (which edit the same lists) stay in sync.
+  function toolListPicker(key, values, allToolNames, toolExts) {
+    const selected = values.filter((v) => typeof v === "string" && v.trim());
+    const lower = new Set(selected.map((s) => s.toLowerCase()));
+    const known = allToolNames.filter((n) => !lower.has(n.toLowerCase()));
+    const option = (name) => {
+      const exts = toolExts(name);
+      const tag = key === "destructiveTools" && MODIFYING_TOOL_RE.test(name) ? " (modifies)" : "";
+      const from = exts.length ? ` — ${exts.join(", ")}` : "";
+      return `<option value="${esc(name)}">${esc(name)}${esc(tag)}${esc(from)}</option>`;
+    };
+    const builtins = known.filter((n) => !toolExts(n).length);
+    const extTools = known.filter((n) => toolExts(n).length);
+    const groups =
+      (builtins.length ? `<optgroup label="pi built-ins">${builtins.map(option).join("")}</optgroup>` : "") +
+      (extTools.length ? `<optgroup label="extension tools">${extTools.map(option).join("")}</optgroup>` : "");
+    const chip = (name) => {
+      const ghost = !allToolNames.some((n) => n.toLowerCase() === name.toLowerCase());
+      const mod = key === "destructiveTools" && MODIFYING_TOOL_RE.test(name);
+      const note = `${name}${mod ? " — modifies the workspace" : ""}${ghost ? " — not among the tools pi or its extensions register" : ""}`;
+      return (
+        `<span class="set-chip on set-toolpick-chip${ghost ? " ghost" : ""}" title="${esc(note)}">` +
+        `<span class="set-chip-dot"></span><span class="set-chip-name">${esc(name)}</span>` +
+        `<button type="button" class="set-chip-x" data-toolpick-remove="${esc(key)}" data-toolpick-value="${esc(name)}" ` +
+        `aria-label="Remove ${esc(name)}" title="Remove">&times;</button></span>`
+      );
+    };
+    return (
+      `<div class="set-toolpick" data-toolpick="${esc(key)}">` +
+      `<div class="set-chips set-toolpick-chips">` +
+      (selected.length ? selected.map(chip).join("") : `<span class="set-def-skills-empty">none selected</span>`) +
+      `</div>` +
+      `<div class="set-toolpick-add">` +
+      `<select class="set-input set-toolpick-select" data-toolpick-select="${esc(key)}" aria-label="Add a tool">` +
+      `<option value="">Add a tool…</option>` +
+      groups +
+      `<option value="__custom__">✎ Custom tool…</option>` +
+      `</select>` +
+      `<input type="text" class="set-input" data-toolpick-input="${esc(key)}" placeholder="custom tool name" ` +
+      `spellcheck="false" autocomplete="off" hidden>` +
+      `</div>` +
+      `</div>`
+    );
+  }
+
   // ─── Teams section ────────────────────────────────────────────────────────
   function renderTeams() {
     const teams = SET.teams || {};
@@ -850,11 +908,11 @@
         `</span>`) +
       `<div class="settings-group-div"></div>` +
       `<div class="settings-group-kicker">Tool policy</div>` +
-      `<div class="settings-intro">Tools the agent team may not invoke (left) and tools the orchestrator skips before dispatching to subagents (right). One comma-separated list each.</div>` +
-      field("Destructive tools", "blocked by name",
-        `<input type="text" class="set-input" value="${esc(strList(cr.destructiveTools).join(", "))}" data-act="setDestructiveTools">`) +
-      field("Skip orchestrator tools", "not run by the orchestrator",
-        `<input type="text" class="set-input" value="${esc(strList(cr.skipOrchestratorTools).join(", "))}" data-act="setSkipOrchestratorTools">`) +
+      `<div class="settings-intro">Pick tools from the catalogue, or add a custom name. <b>Destructive tools</b> are the ones that can modify your workspace (write, edit, delete, patches…): a subagent holding any of them is dispatched on its own, never in parallel. <b>Skip orchestrator tools</b> are dropped from the orchestrator's own tool list. These are the same lists the Orchestrator card below edits, so the two stay in sync.</div>` +
+      field("Destructive tools", "tools that can change your workspace",
+        toolListPicker("destructiveTools", strList(cr.destructiveTools), allToolNames, toolExts)) +
+      field("Skip orchestrator tools", "the orchestrator never calls these",
+        toolListPicker("skipOrchestratorTools", strList(cr.skipOrchestratorTools), allToolNames, toolExts)) +
       `<div class="settings-group-div"></div>` +
       `<div class="settings-group-kicker">Subagent definitions</div>` +
       `<div class="settings-intro">One row per <code>agents/*.md</code>, collapsed to the subagent's name — click the chevron (or the name) to open its <code>skills:</code> and <code>tools:</code> pickers. Each definition carries its own keys in that file — the only place a subagent's capabilities are set: pick the chips, or type a name into <b>add skill</b> / <b>add tool</b>. <b>None</b> writes an empty <code>skills:</code> key (the subagent gets no skills); <b>Default</b> removes the <code>tools:</code> key so the built-in default tool list applies. <b>Edit</b> opens the whole file (frontmatter + prompt) in a full-screen editor.</div>` +
@@ -2103,18 +2161,10 @@
       node.addEventListener("change", () => postSettings(node.dataset.act, node.value))
     );
 
-    // Text inputs. `setDestructiveTools` / `setSkipOrchestratorTools` are
-    // comma-separated lists rendered as text, so split their value into an
-    // array before posting (the server expects an array, not a string).
-    const LIST_ACTS = new Set(["setDestructiveTools", "setSkipOrchestratorTools"]);
+    // Text inputs post their (trimmed) value as a string.
     root.querySelectorAll('input[type="text"][data-act]').forEach((node) => {
       node.addEventListener("change", () => {
-        const act = node.dataset.act;
-        const raw = node.value.trim();
-        const value = LIST_ACTS.has(act)
-          ? raw.split(",").map((s) => s.trim()).filter(Boolean)
-          : raw;
-        postSettings(act, value);
+        postSettings(node.dataset.act, node.value.trim());
       });
       node.addEventListener("keydown", (e) => {
         // Enter saves immediately; blur so the single `change` handler fires
@@ -2124,12 +2174,60 @@
     });
   }
 
+  // The Tool policy list editors (SubAgent → Tool policy): destructiveTools /
+  // skipOrchestratorTools. The dropdown picks a known tool or reveals a custom
+  // name field; chips remove a name. Every write goes through POST /settings
+  // (the server stores the whole array) and the panel re-renders from the fresh
+  // snapshot, so these pickers and the Orchestrator card's tool chips never drift.
+  function wireToolPickers(panel) {
+    const ACT = { destructiveTools: "setDestructiveTools", skipOrchestratorTools: "setSkipOrchestratorTools" };
+    const listOf = (key) => strList((SET.agentConfigRaw || {})[key]);
+    const commit = (key, next) => void postSettings(ACT[key], next);
+    const add = (key, name) => {
+      const v = String(name || "").trim();
+      if (!v) return;
+      const cur = listOf(key);
+      if (cur.some((x) => String(x).toLowerCase() === v.toLowerCase())) return;
+      commit(key, [...cur, v]);
+    };
+
+    panel.querySelectorAll("[data-toolpick-select]").forEach((sel) =>
+      sel.addEventListener("change", () => {
+        const key = sel.dataset.toolpickSelect;
+        const value = sel.value;
+        sel.value = "";
+        if (!value) return;
+        if (value === "__custom__") {
+          const input = panel.querySelector(`[data-toolpick-input="${CSS.escape(key)}"]`);
+          if (input) { input.hidden = false; input.focus(); }
+          return;
+        }
+        add(key, value);
+      })
+    );
+
+    panel.querySelectorAll("[data-toolpick-input]").forEach((inp) => {
+      const key = inp.dataset.toolpickInput;
+      const submit = () => { const v = inp.value.trim(); if (v) add(key, v); };
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+      inp.addEventListener("change", submit);
+    });
+
+    panel.querySelectorAll("[data-toolpick-remove]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.toolpickRemove;
+        const value = String(btn.dataset.toolpickValue || "").toLowerCase();
+        commit(key, listOf(key).filter((x) => String(x).toLowerCase() !== value));
+      })
+    );
+  }
+
   function wireSection(sec) {
     const panel = el.content.querySelector(".settings-panel");
     if (!panel) return;
 
     if (sec === "keys") wireKeys(panel);
-    if (sec === "agent") wireTeams(panel);
+    if (sec === "agent") { wireTeams(panel); wireToolPickers(panel); }
     if (sec === "auth") wireAuth(panel);
     if (sec === "update") wireUpdate(panel);
     if (sec === "plugins") wirePlugins(panel);

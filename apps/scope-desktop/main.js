@@ -239,6 +239,26 @@ ipcMain.handle("pick-directory", async () => {
   }
 });
 
+// Native file picker for the Chat composer attachments. Files, images and
+// documents of any type, multi-select; returns the chosen absolute paths (an
+// empty array when cancelled). The composer sends these paths to pi, so the
+// file's bytes are never copied — pi reads each file where it already lives.
+ipcMain.handle("pick-files", async () => {
+  try {
+    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+    const result = await dialog.showOpenDialog(win, {
+      title: "Attach files",
+      properties: ["openFile", "multiSelections"],
+      filters: [{ name: "All Files", extensions: ["*"] }],
+    });
+    if (result.canceled || !result.filePaths.length) return [];
+    return result.filePaths;
+  } catch (err) {
+    console.error("[launcher] pick-files failed:", err.message);
+    return [];
+  }
+});
+
 app.whenReady().then(launch);
 // While booting, closing the port popup is not "the user quit" — launch() is
 // about to open the main window (or quits explicitly on its own).

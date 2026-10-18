@@ -26,6 +26,57 @@
   const esc = (s) => (typeof H.escapeHtml === "function" ? H.escapeHtml(s) : String(s ?? ""));
   const trunc = (s, n) => (typeof H.trunc === "function" ? H.trunc(s, n) : String(s ?? ""));
   const shortId = (id) => (typeof H.shortId === "function" ? H.shortId(id) : String(id || "?").slice(0, 8));
+  // The shared markdown parser (helpers.js); degrade to escaped text if an old
+  // cached helpers.js is in play. A local path pi printed ("saved to tmp/x.png")
+  // is resolved to a served URL by localMediaSrc, below.
+  const md = (raw, opts) => (typeof H.markdownHtml === "function" ? H.markdownHtml(raw, { resolve: localMediaSrc, ...(opts || {}) }) : esc(raw));
+  // Any picture or video a tool result carries, drawn under its text by the same
+  // shared extractor the desktop uses.
+  const resultMedia = (raw) => (typeof H.resultMediaHtml === "function" ? H.resultMediaHtml(raw, { resolve: localMediaSrc }) : "");
+  // The assistant's OWN reply: markdown images and URL pictures are drawn inline
+  // by the prose (see msgTextHTML), so only a bare local path — which the prose
+  // cannot resolve — gets a table row here. Without this the same picture would
+  // render twice.
+  const replyMedia = (raw) => (typeof H.resultMediaHtml === "function" ? H.resultMediaHtml(raw, { resolve: localMediaSrc, localOnly: true }) : "");
+  // Assistant-text render mode — the same Markdown / Raw switch the desktop
+  // Chat view offers, remembered per browser under the same key.
+  const VIEWS = ["markdown", "raw"];
+  const VIEW_KEY = "scope-chat-view";
+  function loadView() {
+    try { const v = localStorage.getItem(VIEW_KEY); if (VIEWS.includes(v)) return v; } catch { /* private mode */ }
+    return "markdown";
+  }
+
+  // Light / dark theme — the same choice the desktop header toggle makes, under
+  // the same localStorage key and honoured by the inline bootstrap in
+  // mobile.html. A phone has no desktop chrome to carry that toggle, so the
+  // header keeps one of its own.
+  const THEME_KEY = "scope-theme";
+  function setTheme(theme) {
+    const dark = theme !== "light";
+    if (dark) document.body.setAttribute("data-ds-dark-theme", "");
+    else document.body.removeAttribute("data-ds-dark-theme");
+    document.documentElement.style.colorScheme = dark ? "dark" : "light";
+    try { localStorage.setItem(THEME_KEY, dark ? "dark" : "light"); } catch { /* private mode */ }
+    syncThemeButton();
+  }
+  // The glyph mirrors the CURRENT theme (moon = dark, like the desktop's 🌙); the
+  // label announces the action so a screen reader hears "Switch to light theme".
+  function syncThemeButton() {
+    const btn = el.theme;
+    if (!btn) return;
+    const dark = document.body.hasAttribute("data-ds-dark-theme");
+    const next = dark ? "light" : "dark";
+    btn.setAttribute("aria-label", `Switch to ${next} theme`);
+    btn.setAttribute("title", `Switch to ${next} theme`);
+    // toggleAttribute, not `.hidden`: an inline <svg> is not an HTMLElement, so
+    // the `hidden` IDL property would only set an expando and never the
+    // attribute the stylesheet keys on.
+    const moon = btn.querySelector(".m-ic-moon");
+    const sun = btn.querySelector(".m-ic-sun");
+    if (moon) moon.toggleAttribute("hidden", !dark);
+    if (sun) sun.toggleAttribute("hidden", dark);
+  }
 
   // ─── Token + API ──────────────────────────────────────────────────────────
   // The token arrives in the URL (the QR carries it). It is also kept in
@@ -49,6 +100,24 @@
       if (v != null && v !== "") u.searchParams.set(k, String(v));
     }
     return u.toString();
+  }
+
+  // A local path pi printed ("saved to tmp/chart.png") is not under public/, so
+  // the browser cannot load it on its own. The server serves it from the same
+  // sandbox as the Files view (GET /media), keyed by the open session's cwd; the
+  // token rides in the query because an <img> cannot send an Authorization header.
+  // Only media extensions become URLs — anything else stays plain text.
+  const LOCAL_MEDIA_EXT_RE = /\.(png|jpe?g|gif|webp|avif|bmp|svg|mp4|webm|ogv|ogg|mov|m4v)$/i;
+  function localMediaSrc(p) {
+    const rel = String(p == null ? "" : p).trim();
+    if (!rel) return "";
+    if (/^[a-z][a-z0-9+.-]*:/i.test(rel)) return ""; // a URL, not a filesystem path
+    if (!LOCAL_MEDIA_EXT_RE.test(rel.split(/[?#]/)[0])) return "";
+    const cwd = (S.session && S.session.cwd) || (S.draft && S.draft.cwd) || S.ws || "";
+    if (!cwd) return "";
+    const q = new URLSearchParams({ cwd, path: rel });
+    if (TOKEN) q.set("token", TOKEN);
+    return `/media?${q.toString()}`;
   }
 
   /** fetch + JSON, the same contract as window.SCOPE.api in app.js. A 4th
@@ -97,6 +166,9 @@
     teamAt: 0,        // when /agent-team was last fetched (throttle)
     sheet: null,      // open sheet mode: "new" | "model" | null
     runKeys: new Map(), // session id → pi subprocess key this phone has driven
+    view: loadView(), // assistant-text render mode: "markdown" | "raw"
+    attachments: [],  // composer attachments: [{ id, name, path, kind }] — path is what pi receives
+    attachSeq: 0,     // id source for attachment chips
   };
   let LIVE = null;   // the in-flight assistant bubble being written to
   let es = null;     // EventSource for the selected session
@@ -109,6 +181,7 @@
     el.title = $("#m-title");
     el.sub = $("#m-sub");
     el.live = $("#m-live");
+    el.theme = $("#m-theme");
     el.desktop = $("#m-desktop");
     el.scrim = $("#m-scrim");
     el.drawer = $("#m-drawer");
@@ -121,7 +194,11 @@
     el.input = $("#m-input");
     el.send = $("#m-send");
     el.stop = $("#m-stop");
+    el.attach = $("#m-attach");
+    el.attachInput = $("#m-attach-input");
+    el.attachments = $("#m-attachments");
     el.modelChip = $("#m-model-chip");
+    el.viewToggle = $("#m-view-toggle");
     el.new = $("#m-new");
     el.drawerNew = $("#m-drawer-new");
     el.sheet = $("#m-sheet");
@@ -159,6 +236,38 @@
 
   function statusDot(s) {
     return typeof H.subagentStatus === "function" ? H.subagentStatus(s) : "orange";
+  }
+
+  /** A session the user's terminal is working right now: the server learned its
+   *  pid from the events its extension posts, and this phone is not driving a
+   *  stream of its own (that one has the normal Stop behaviour). */
+  function externalRunLive() {
+    const s = S.session;
+    return !!(s && !S.streaming && s.pid && statusDot(s) === "green");
+  }
+
+  /** The session id Stop should signal: the stream's own subprocess while we are
+   *  sending, else the pid-backed terminal run. "" when there is nothing. */
+  function stopTarget() {
+    if (S.streaming) return S.runKey || S.sid || "";
+    return externalRunLive() ? (S.sid || "") : "";
+  }
+
+  /** Settle the row after a terminal kill: the process is gone and the server
+   *  recorded a closing turn_end, so drop the dangling pid and flip the turn —
+   *  the header and the Stop button update now instead of after the next poll. */
+  function patchStoppedExternalRow(sid) {
+    const ts = new Date().toISOString();
+    for (const s of S.sessions) {
+      if (s.session_id !== sid) continue;
+      s.pid = undefined;
+      s.turn_live = false;
+      s.last_turn_event = "turn_end";
+      s.last_ts = ts;
+    }
+    renderSessions();
+    renderHeader();
+    refreshComposer();
   }
 
   /** provider/model, qualified only when the model is not already prefixed.
@@ -219,8 +328,11 @@
     const ready = !!S.session;
     el.input.disabled = !ready;
     el.input.placeholder = ready ? "Message pi…" : "Pick a session first";
-    el.send.disabled = !ready || S.streaming || !el.input.value.trim();
-    el.stop.hidden = !S.streaming;
+    el.send.disabled = !ready || S.streaming || (!el.input.value.trim() && !pendingAttachmentPaths().length);
+    el.stop.hidden = !S.streaming && !externalRunLive();
+    el.stop.title = S.streaming ? "Stop the agent" : "Stop the agent running in your terminal";
+    el.stop.setAttribute("aria-label", el.stop.title);
+    if (el.attach) el.attach.disabled = !ready;
     if (el.modelChip) {
       // The chip names what the next message runs with and opens the sheet to
       // change it — on a phone it is the only place the model is visible.
@@ -234,6 +346,147 @@
         ? "Change the model, or start a session in another workspace"
         : "";
     }
+  }
+
+  // ─── Composer attachments ─────────────────────────────────────────────────
+  // Files, images and documents attached on the phone are uploaded into the
+  // workspace's `tmp/attachments/` (POST /chat/attach) — a phone has no real
+  // path to hand over — and only the returned PATH is sent to pi: the bytes
+  // never enter the prompt. The block format is the shared one
+  // (H.attachmentsBlock), so a conversation started here reads the same
+  // everywhere and a file stays usable by reference afterwards.
+  const ATTACH_IMAGE_RE = /\.(png|jpe?g|gif|webp|avif|bmp|svg|ico|heic|heif|tiff?)$/i;
+  const ATTACH_ICON_IMAGE =
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>';
+  const ATTACH_ICON_FILE =
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
+  const ATTACH_BLOCK_HEAD = "Attached files (read each from its path):";
+
+  function attachKind(name) { return ATTACH_IMAGE_RE.test(String(name || "")) ? "image" : "file"; }
+  function attachIcon(kind) { return kind === "image" ? ATTACH_ICON_IMAGE : ATTACH_ICON_FILE; }
+  function attachBasename(p) {
+    const parts = String(p == null ? "" : p).replace(/\\/g, "/").split("/").filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : String(p == null ? "" : p);
+  }
+
+  /** Split a prompt pi was handed back into the typed text + attached paths, so
+   *  a recorded or reconnected turn shows the same chips the composer staged. */
+  function splitAttachments(text) {
+    const t = String(text == null ? "" : text);
+    const i = t.indexOf(ATTACH_BLOCK_HEAD);
+    if (i < 0) return { text: t, paths: [] };
+    const body = t.slice(0, i).replace(/\s+$/, "");
+    const paths = t.slice(i).split("\n").slice(1)
+      .map((l) => l.replace(/^\s*-\s*/, "").trim())
+      .filter(Boolean);
+    return { text: body, paths };
+  }
+
+  function attachChipsRow(paths) {
+    const row = document.createElement("div");
+    row.className = "m-msg-atts";
+    for (const p of paths) {
+      const chip = document.createElement("span");
+      chip.className = "m-msg-att";
+      chip.title = String(p);
+      chip.innerHTML = attachIcon(attachKind(p)) +
+        `<span class="m-msg-att-name">${esc(attachBasename(p))}</span>`;
+      row.appendChild(chip);
+    }
+    return row;
+  }
+
+  function renderAttachments() {
+    if (!el.attachments) return;
+    const list = S.attachments;
+    if (!list.length) { el.attachments.hidden = true; el.attachments.textContent = ""; return; }
+    el.attachments.hidden = false;
+    el.attachments.textContent = "";
+    for (const a of list) {
+      const chip = document.createElement("span");
+      chip.className = "m-attach-chip" + (a.uploading ? " uploading" : "") + (a.err ? " err" : "");
+      chip.title = a.err || a.path || a.name || "";
+      const label = a.uploading ? `${a.name} — uploading…` : (a.err || a.name);
+      chip.innerHTML = attachIcon(a.kind) + `<span class="m-attach-name">${esc(label)}</span>`;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "m-attach-x";
+      x.setAttribute("aria-label", "Remove attachment");
+      x.textContent = "✕";
+      x.addEventListener("click", () => removeAttachment(a.id));
+      chip.appendChild(x);
+      el.attachments.appendChild(chip);
+    }
+  }
+
+  function removeAttachment(id) {
+    const i = S.attachments.findIndex((a) => a.id === id);
+    if (i >= 0) { S.attachments.splice(i, 1); renderAttachments(); refreshComposer(); }
+  }
+
+  function clearAttachments() {
+    if (!S.attachments.length) return;
+    S.attachments = [];
+    renderAttachments();
+  }
+
+  // The paths to send: everything settled (a failed upload is dropped rather
+  // than sent as a broken reference).
+  function pendingAttachmentPaths() {
+    return S.attachments.filter((a) => !a.uploading && !a.err && a.path).map((a) => a.path);
+  }
+  function attachmentsUploading() { return S.attachments.some((a) => a.uploading); }
+
+  function withAttachmentBlock(text, paths) {
+    const block = typeof H.attachmentsBlock === "function" ? H.attachmentsBlock(paths) : "";
+    const t = String(text == null ? "" : text).trim();
+    if (!block) return t;
+    return t ? `${t}\n\n${block}` : block;
+  }
+
+  function readFileBase64(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result || "").replace(/^data:[^;]*;base64,/, ""));
+      r.onerror = () => reject(r.error || new Error("could not read file"));
+      r.readAsDataURL(file);
+    });
+  }
+
+  // Upload each picked file into the workspace and keep the returned relative
+  // path. The chip appears the moment it is queued, so a large photo is
+  // visibly in flight rather than the tap appearing to do nothing.
+  async function addAttachmentFiles(files) {
+    const list = [...(files || [])];
+    if (!list.length) return;
+    const cwd = (S.session && S.session.cwd) || (S.draft && S.draft.cwd) || S.ws || "";
+    if (!cwd) { hint("Pick a session first", "err"); return; }
+    for (const file of list) {
+      const id = ++S.attachSeq;
+      S.attachments.push({ id, name: file.name, kind: attachKind(file.name), uploading: true });
+      renderAttachments();
+      refreshComposer();
+      try {
+        const data = await readFileBase64(file);
+        const { res, data: out } = await api("/chat/attach", {}, { cwd, name: file.name, data });
+        const chip = S.attachments.find((a) => a.id === id);
+        if (!chip) continue; // removed while the upload was in flight
+        if (!res.ok || !out || !out.ok) throw new Error((out && out.error) || `HTTP ${res.status}`);
+        chip.uploading = false;
+        chip.path = out.path;
+        chip.name = out.name || file.name;
+      } catch (err) {
+        const chip = S.attachments.find((a) => a.id === id);
+        if (chip) { chip.uploading = false; chip.err = `failed — ${(err && err.message) || err}`; }
+      }
+      renderAttachments();
+      refreshComposer();
+    }
+  }
+
+  function pickAttachments() {
+    if (!S.session) { hint("Pick a session first", "err"); return; }
+    if (el.attachInput) el.attachInput.click();
   }
 
   function autoGrow() {
@@ -281,6 +534,13 @@
   // Every row carries a mono lead label ("you" / "pi") — the design system's
   // eyebrow — and the prose itself stays in the body face.
   function userRow(text) {
+    // The prompt pi was handed can carry two things that are not what the user
+    // typed: the attachment block (a recorded turn, or a run reconnected
+    // mid-flight) and — when this session's own pi file is gone — the seeded
+    // transcript the server prepended so the conversation could continue at all.
+    // Show the prose and the files, and neither block.
+    const own = typeof H.stripSessionSeed === "function" ? H.stripSessionSeed(text) : text;
+    const { text: body, paths } = splitAttachments(own);
     const msg = document.createElement("div");
     msg.className = "m-msg m-user";
 
@@ -291,24 +551,97 @@
     head.className = "m-ai-head m-user-head";
     head.textContent = "you";
 
-    const pre = document.createElement("pre");
-    pre.className = "m-text";
-    pre.textContent = text || "";
-
     bubble.appendChild(head);
-    bubble.appendChild(pre);
+    if (body) {
+      const pre = document.createElement("pre");
+      pre.className = "m-text";
+      pre.textContent = body;
+      bubble.appendChild(pre);
+    }
+    if (paths.length) bubble.appendChild(attachChipsRow(paths));
     msg.appendChild(bubble);
     return msg;
   }
 
+  // Fenced code inside a Markdown reply (see the shared parser in helpers.js).
+  function mobileCodeBlock(lang, code) {
+    return `<div class="m-code">` +
+      `<div class="m-code-head"><span class="m-code-lang">${esc(lang || "code")}</span>` +
+      `<button type="button" class="m-code-copy" data-copy="${esc(code)}">Copy</button></div>` +
+      `<pre><code>${esc(code)}</code></pre></div>`;
+  }
+
+  // The assistant's reply drawn in the current view: rendered markdown
+  // (Markdown) or plain text (Raw). `data-raw` keeps the source so a later
+  // view switch can redraw every row in place.
+  function msgTextHTML(text) {
+    const raw = text || "";
+    const attr = esc(raw);
+    if (S.view === "markdown") {
+      // Pictures stay IN the prose here (no dropImages): on a phone an inline
+      // image is what a reply expects, and it is what the Markdown/Raw switch
+      // has to add and remove. Tool results still draw their media in a table.
+      return `<div class="m-text m-md" data-raw="${attr}">${md(raw, { codeBlock: mobileCodeBlock })}</div>`;
+    }
+    return `<pre class="m-text" data-raw="${attr}">${esc(raw)}</pre>`;
+  }
+
+  function copyText(text) {
+    if (!text) return;
+    if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(text).catch(() => {}); return; }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    } catch { /* ignore */ }
+  }
+
+  // Redraw every rendered assistant body in place (recorded rows and a finished
+  // live bubble) from its stored source, without a server round-trip.
+  function applyViewInPlace() {
+    for (const node of el.transcript.querySelectorAll("[data-raw]")) {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = msgTextHTML(node.dataset.raw);
+      node.replaceWith(wrap.firstElementChild);
+    }
+    if (typeof H.hydrateMediaTables === "function") H.hydrateMediaTables(el.transcript);
+  }
+
+  function updateViewToggle() {
+    const box = el.viewToggle;
+    if (!box) return;
+    box.querySelectorAll("[data-view]").forEach((b) => {
+      const on = b.dataset.view === S.view;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+
+  function setView(view) {
+    if (!VIEWS.includes(view) || view === S.view) return;
+    S.view = view;
+    try { localStorage.setItem(VIEW_KEY, view); } catch { /* private mode */ }
+    updateViewToggle();
+    if (S.streaming) return; // the live bubble adopts the mode when it seals
+    applyViewInPlace();
+  }
+
   function assistantRow(p) {
     const head = `<div class="m-ai-head">pi</div>`;
-    const text = p.text ? `<pre class="m-text">${esc(p.text)}</pre>` : "";
+    const text = p.text ? msgTextHTML(p.text) : "";
+    // A bare local path in the reply ("saved to tmp/chart.png") has no inline
+    // form, so it is listed in a dimension table underneath, largest first.
+    const pics = p.text ? replyMedia(p.text) : "";
     const think = p.thinking
       ? `<details class="m-think"><summary>thinking</summary><pre>${esc(p.thinking)}</pre></details>`
       : "";
     const empty = !p.text && !p.thinking ? `<div class="m-note">tool call only</div>` : "";
-    return `<div class="m-msg m-ai"><div class="m-bubble">${head}${text}${think}${empty}${usageChips(p.usage)}</div></div>`;
+    return `<div class="m-msg m-ai"><div class="m-bubble">${head}${text}${pics}${think}${empty}${usageChips(p.usage)}</div></div>`;
   }
 
   function toolRow(evt) {
@@ -324,40 +657,67 @@
       <summary><span class="m-tool-name">${result ? "←" : "→"} ${esc(name)}</span>
       ${failed ? '<span class="m-badge err">error</span>' : exit ? `<span class="m-badge">exit ${esc(exit)}</span>` : ""}</summary>
       <pre>${esc(trunc(body, 6000))}</pre>
+      ${result ? resultMedia(body) : ""}
     </details>`;
   }
 
-  /** One recorded event → its transcript markup ("" for noise we don't show). */
-  function renderEventHTML(evt) {
+  /** Wrap an HTML fragment in a single element node (null for empty markup). */
+  function htmlNode(html) {
+    if (!html) return null;
+    const wrap = document.createElement("div");
+    wrap.innerHTML = html;
+    return wrap.firstElementChild;
+  }
+
+  /** One recorded event → its transcript row node (null for noise we don't
+   *  show). User rows are built as DOM (untrusted text never re-enters HTML);
+   *  the agent's own markup is escaped markup. */
+  function renderEventNode(evt) {
     const p = evt.payload || {};
     switch (evt.type) {
       case "user_message": return userRow(p.text);
-      case "assistant_message": return assistantRow(p);
+      case "assistant_message": return htmlNode(assistantRow(p));
       case "tool_call":
-      case "tool_result": return toolRow(evt);
-      case "error": return `<div class="m-note err">✗ ${esc(p.message || "error")}</div>`;
-      default: return "";
+      case "tool_result": return htmlNode(toolRow(evt));
+      case "error": return htmlNode(`<div class="m-note err">✗ ${esc(p.message || "error")}</div>`);
+      default: return null;
     }
   }
 
-  function renderedHTML(events) {
-    return events.map(renderEventHTML).join("");
-  }
-
   function renderTranscript() {
-    const html = renderedHTML(S.events);
-    el.transcript.innerHTML = html || `<div class="m-empty">No messages recorded yet</div>`;
+    el.transcript.textContent = "";
+    let any = false;
+    for (const evt of S.events) {
+      const row = renderEventNode(evt);
+      if (row) { el.transcript.appendChild(row); any = true; }
+    }
+    if (!any) el.transcript.innerHTML = `<div class="m-empty">No messages recorded yet</div>`;
+    if (typeof H.hydrateMediaTables === "function") H.hydrateMediaTables(el.transcript);
     scrollToBottom(true);
   }
 
   // ─── Sessions drawer ──────────────────────────────────────────────────────
 
+  /** The drawer row's label: the conversation's opening prompt, exactly like
+   *  the desktop Chat rail's session rows — not the agent's (subagent) name.
+   *  Falls back to the agent name for a session that has not recorded an opening
+   *  message yet. A seeded session's first text IS the seed block, so it is
+   *  stripped first (the shared helper the desktop rail uses). */
+  function sessionLabel(s) {
+    const raw = s.first_msg ? String(s.first_msg) : "";
+    const first = typeof H.stripSessionSeed === "function" ? H.stripSessionSeed(raw) : raw;
+    const oneLine = String(first || "").replace(/\s+/g, " ").trim();
+    if (oneLine) return trunc(oneLine, 64);
+    // Same fallbacks as the desktop rail's session row.
+    return s.agent_name || (s.cwd ? s.cwd.split("/").filter(Boolean).pop() : "") || `session ${shortId(s.session_id)}`;
+  }
+
   function sessionRowHTML(s) {
-    const name = s.agent_name || `session ${shortId(s.session_id)}`;
+    const name = sessionLabel(s);
     // The delete affordance is a SIBLING of the row button (a button cannot
     // contain one) and always visible: touch has no hover to reveal it.
     return `<div class="m-sess-row">
-      <button class="m-sess${s.session_id === S.sid ? " active" : ""}" type="button" data-sid="${esc(s.session_id)}">
+      <button class="m-sess${s.session_id === S.sid ? " active" : ""}" type="button" data-sid="${esc(s.session_id)}" title="${esc(name)}">
         <span class="m-dot ${statusDot(s)}"></span>
         <span class="m-sess-main">
           <span class="m-sess-name">${esc(name)}</span>
@@ -434,12 +794,22 @@
 
   // ─── Drawer ───────────────────────────────────────────────────────────────
 
+  // Set while a closed drawer is sliding out; the box is taken out of flow when
+  // it lands so the hidden panel is not laid out (see the #m-drawer rule).
+  let drawerHideTimer = null;
+
   function openDrawer() {
-    el.drawer.classList.add("open");
+    clearTimeout(drawerHideTimer);
+    // Render off-screen first so adding `.open` on the next frame still animates
+    // the slide-in (a `display:none` → `.open` change would land in one frame).
+    el.drawer.style.display = "flex";
     el.drawer.setAttribute("aria-hidden", "false");
     el.menu.setAttribute("aria-expanded", "true");
     el.scrim.hidden = false;
-    requestAnimationFrame(() => el.scrim.classList.add("shown"));
+    requestAnimationFrame(() => {
+      el.drawer.classList.add("open");
+      el.scrim.classList.add("shown");
+    });
   }
 
   function closeDrawer() {
@@ -447,7 +817,14 @@
     el.drawer.setAttribute("aria-hidden", "true");
     el.menu.setAttribute("aria-expanded", "false");
     el.scrim.classList.remove("shown");
-    setTimeout(() => { if (!el.drawer.classList.contains("open")) el.scrim.hidden = true; }, 200);
+    // 300ms slide + a little slack, matching the reduced-motion path where the
+    // transition is off and this timer is the only thing that hides the box.
+    clearTimeout(drawerHideTimer);
+    drawerHideTimer = setTimeout(() => {
+      if (el.drawer.classList.contains("open")) return;
+      el.drawer.style.display = "none";
+      el.scrim.hidden = true;
+    }, 320);
   }
 
   /** Drop a deleted session from this phone: forget the row, and if it was the
@@ -540,19 +917,28 @@
       S.lastSeq = evt.seq;
     }
     if (S.streaming) return; // our own run renders its deltas; the mirror would duplicate them
-    const html = renderEventHTML(evt);
-    if (!html) {
+    const row = renderEventNode(evt);
+    if (!row) {
       if (evt.type === "turn_start" || evt.type === "turn_end" || evt.type === "session_shutdown") {
         const prev = S.session;
         if (prev) {
           prev.last_turn_event = evt.type === "turn_start" ? "turn_start" : evt.type === "turn_end" ? "turn_end" : prev.last_turn_event;
           if (evt.type === "session_shutdown") prev.has_shutdown = true;
+          // Keep the row's pid handle fresh: the extension stamps every event
+          // with it, so a terminal run can be stopped the moment it starts
+          // working, without waiting for the 15s /sessions poll.
+          if (typeof evt.pid === "number") prev.pid = evt.pid;
           renderHeader();
+          refreshComposer();
+          // A terminal run with no pid yet (an older extension): fetch the
+          // session list, where the server resolves it from the session file,
+          // so Stop appears without the user waiting out the 15s poll.
+          if (evt.type === "turn_start" && !prev.pid) void fetchSessions();
         }
       }
       return;
     }
-    el.transcript.insertAdjacentHTML("beforeend", html);
+    el.transcript.appendChild(row);
     follow();
   }
 
@@ -603,6 +989,14 @@
     if (error && LIVE.err) {
       LIVE.err.hidden = false;
       LIVE.err.textContent = error;
+    }
+    // The deltas streamed as plain text; redraw the sealed bubble in the chosen
+    // view now the message is whole (Markdown parses it, Raw shows the source).
+    if (LIVE.text && LIVE.textEl) {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = msgTextHTML(LIVE.text);
+      LIVE.textEl.replaceWith(wrap.firstElementChild);
+      if (typeof H.hydrateMediaTables === "function") H.hydrateMediaTables(LIVE.node);
     }
     LIVE = null;
   }
@@ -774,6 +1168,20 @@
         }
         break;
 
+      case "error":
+        // A mid-run error does NOT end the stream — the turn carries on and the
+        // reply still arrives. Put it on the live bubble so the phone is told
+        // instead of answering in silence: a continuation the server could not
+        // resume (its pi session file is gone) reaches the client exactly here.
+        if (LIVE && LIVE.err) {
+          LIVE.err.hidden = false;
+          LIVE.err.textContent = ev.message || "error";
+        } else {
+          hint(ev.message || "error", "err");
+        }
+        follow();
+        break;
+
       case "done":
         onRunDone(ev);
         break;
@@ -884,6 +1292,7 @@
     S.streaming = false;
     S.asks = new Set();
     S.temp = [];
+    clearAttachments(); // staged files belonged to the previous conversation
     LIVE = null;
     closeLive();
     renderSessions();
@@ -897,9 +1306,7 @@
     if (run) {
       hint("reconnected to the running turn", "");
       if (run.prompt) {
-        const node = document.createElement("div");
-        node.innerHTML = userRow(run.prompt);
-        const userNode = node.firstElementChild;
+        const userNode = userRow(run.prompt);
         el.transcript.appendChild(userNode);
         S.temp.push(userNode);
       }
@@ -915,19 +1322,25 @@
 
   async function sendPrompt() {
     const text = el.input.value.trim();
-    if (!text || S.streaming) return;
+    if (S.streaming) return;
     if (!S.session || !S.session.cwd) { hint("Pick a session first", "err"); return; }
+    if (attachmentsUploading()) { hint("finishing attachment upload…", "warn"); return; }
+    // Attachments alone are a valid message: the paths ARE the ask.
+    const attPaths = pendingAttachmentPaths();
+    if (!text && !attPaths.length) return;
+    const prompt = withAttachmentBlock(text, attPaths);
 
     el.input.value = "";
     autoGrow();
+    clearAttachments();
     refreshComposer();
     hint("", "");
 
     // The draft's row is matched by this opening line (pi records it as
     // first_msg) and by when the recording started, which is now.
-    if (S.draft) { S.draft.prompt = S.draft.prompt || text; S.draft.at = Date.now(); }
+    if (S.draft) { S.draft.prompt = S.draft.prompt || prompt; S.draft.at = Date.now(); }
 
-    const userNode = userRow(text);
+    const userNode = userRow(prompt);
     el.transcript.appendChild(userNode);
     S.temp.push(userNode);
     beginLiveTurn();
@@ -939,7 +1352,7 @@
         body: JSON.stringify({
           cwd: S.session.cwd,
           model: currentModel(),
-          prompt: text,
+          prompt,
           // No sessionId/sessionFile ⇒ the server spawns a fresh pi session,
           // which IS "new conversation". An open chat reuses the subprocess it
           // already owns, or resumes the recorded session's own file.
@@ -973,13 +1386,22 @@
   }
 
   async function stopRun() {
-    // A brand-new conversation has no recorded id yet: Stop targets the
-    // subprocess the server announced for this stream.
-    const key = S.runKey || S.sid;
+    // Stop targets the subprocess this stream owns, or — when the phone is only
+    // WATCHING a pi running in the user's terminal — that pi's pid, which the
+    // server tracked from the session's recorded events.
+    const externalSid = !S.streaming && externalRunLive() ? (S.sid || "") : "";
+    const key = stopTarget();
     if (!key) return;
-    hint("stopping…", "");
-    const { res } = await api("/chat/stop", {}, { sessionId: key });
-    if (!res.ok) hint("could not stop the agent", "err");
+    hint(externalSid ? "stopping the agent running in your terminal…" : "stopping…", "");
+    const { res, data } = await api("/chat/stop", {}, { sessionId: key });
+    if (!res.ok || !data || !data.ok) {
+      hint((data && (data.reason || data.error)) || "could not stop the agent", "err");
+      return;
+    }
+    if (externalSid) {
+      patchStoppedExternalRow(externalSid);
+      hint("stopped the agent running in your terminal", "");
+    }
   }
 
   // ─── Workspaces, models and the session sheet ─────────────────────────────
@@ -1287,6 +1709,7 @@
     S.streaming = false;
     S.asks = new Set();
     S.temp = [];
+    clearAttachments(); // a new conversation starts with a clean composer
     LIVE = null;
     rememberWs(cwd);
     renderSessions();
@@ -1405,11 +1828,24 @@
     el.new.addEventListener("click", () => openSheet("new"));
     el.drawerNew.addEventListener("click", () => { closeDrawer(); openSheet("new"); });
     el.transcript.addEventListener("click", (e) => {
+      const copy = e.target.closest("[data-copy]");
+      if (copy) { copyText(copy.dataset.copy); return; }
       if (e.target.closest("[data-new]")) openSheet("new");
+    });
+
+    // Light / dark theme, remembered across visits (see setTheme).
+    if (el.theme) el.theme.addEventListener("click", () => {
+      setTheme(document.body.hasAttribute("data-ds-dark-theme") ? "light" : "dark");
     });
 
     // The model chip re-points the open chat at another model.
     el.modelChip.addEventListener("click", () => openSheet("model"));
+
+    // The Markdown / Raw switch for assistant replies.
+    if (el.viewToggle) el.viewToggle.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-view]");
+      if (btn) setView(btn.dataset.view);
+    });
 
     // Sheet interactions. The workspace list is re-rendered on every pick, so
     // its options are handled by delegation.
@@ -1463,6 +1899,14 @@
     });
     el.send.addEventListener("click", () => void sendPrompt());
     el.stop.addEventListener("click", () => void stopRun());
+    el.attach.addEventListener("click", () => pickAttachments());
+    // Snapshot the FileList BEFORE clearing the input value: `files` is live, so
+    // resetting value would empty it out from under us.
+    el.attachInput.addEventListener("change", () => {
+      const files = [...(el.attachInput.files || [])];
+      el.attachInput.value = ""; // let the same file be picked again
+      void addAttachmentFiles(files);
+    });
     el.jump.addEventListener("click", () => scrollToBottom(true));
 
     el.transcript.addEventListener("scroll", () => {
@@ -1499,6 +1943,10 @@
   async function boot() {
     cache();
     wire();
+    // The inline bootstrap already applied the stored theme; sync the button's
+    // glyph/label to whatever it chose.
+    syncThemeButton();
+    updateViewToggle();
     refreshComposer();
     renderHeader();
     await fetchSessions();

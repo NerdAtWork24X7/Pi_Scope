@@ -12,17 +12,45 @@
  * server-owned state the chat module does not carry.
  */
 
+// Where a composer attachment picked in a BROWSER or on a PHONE is written:
+// inside the workspace the chat runs in, under `tmp/attachments/`, so both the
+// folder the user sees and pi (which reads the file by path) agree on where it
+// lives. A native (Electron) pick hands over a real path instead and never
+// reaches this directory.
+const ATTACH_DIR = "tmp/attachments";
+// A single attachment cap. The bytes arrive base64 in a JSON body, so this also
+// bounds the request size; a real coding agent reads files by path, not bytes.
+const ATTACH_MAX_BYTES = 25 * 1024 * 1024;
+
+/** A filesystem-safe base name for a stored attachment (no directory, no
+ *  traversal, no control characters). Empty when nothing usable is left. */
+function safeAttachName(raw: string): string {
+  const base = raw.replace(/\\/g, "/").split("/").pop() || "";
+  const cleaned = base
+    .replace(/[\u0000-\u001f\u007f]+/g, "")
+    .replace(/[^\w.\-() ]+/g, "_")
+    .replace(/^\.+/, "")
+    .trim()
+    .slice(0, 120);
+  return cleaned && cleaned !== "." && cleaned !== ".." ? cleaned : "";
+}
+
 export function activate(api: any): void {
   const {
+    fs,
+    path,
     jsonResponse,
     jsonBody,
     requireCwd,
     validateCwd,
+    resolveWithinCwd,
     terminalCwd,
     libraryBlockFor,
+    sessionSeedBlock,
     startChat,
     startChatSession,
     stopChat,
+    stopAgentSession,
     killChatSession,
     pushChatPrefs,
     answerChatUi,
@@ -87,19 +115,74 @@ export function activate(api: any): void {
       prompt: typeof parsed.prompt === "string" ? parsed.prompt : "",
       sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
       sessionFile: typeof parsed.sessionFile === "string" ? parsed.sessionFile : "",
+      // Only consulted when that session file cannot be resumed (it is gone, or
+      // it is not a pi session): the recorded conversation is then handed to the
+      // fresh session as a preamble, so the reply continues the work instead of
+      // starting from nothing. Lazy — a real resume pays nothing for it.
+      resumeSeed: (file: string, sid: string, reason: string) => sessionSeedBlock({ sessionFile: file, sessionId: sid, reason }),
       streamingBehavior: typeof parsed.streamingBehavior === "string" ? parsed.streamingBehavior : "",
     });
   });
 
+  // ── POST /chat/attach (store a composer attachment in the workspace) ────
+  // A browser or phone cannot hand the page a real path for a picked file, so
+  // the bytes are uploaded here and written into the workspace under
+  // `tmp/attachments/`; the RELATIVE path is returned and that is what the
+  // prompt sends pi. A native pick (Electron) never calls this — it has the
+  // real path already. Only the workspace sandbox is writable (requireCwd +
+  // resolveWithinCwd), same rules as /files/save.
+  api.route("POST", "/chat/attach", async (ctx) => {
+    const { value: parsed, error } = await jsonBody(ctx.req);
+    if (error) return error;
+    const absCwd = requireCwd(parsed?.cwd);
+    if (absCwd instanceof Response) return absCwd;
+    const rawName = typeof parsed?.name === "string" ? parsed.name : "";
+    const data = typeof parsed?.data === "string" ? parsed.data : "";
+    if (!rawName || !data) return jsonResponse({ error: "missing name or data" }, 400);
+    const name = safeAttachName(rawName);
+    if (!name) return jsonResponse({ error: "invalid file name" }, 400);
+    // Accept a bare base64 string or a full data: URL; decode defensively.
+    const b64 = data.replace(/^data:[^;,]*;base64,/, "").replace(/\s+/g, "");
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(b64, "base64");
+    } catch {
+      return jsonResponse({ error: "invalid file data" }, 400);
+    }
+    if (!bytes.length) return jsonResponse({ error: "empty file" }, 400);
+    if (bytes.length > ATTACH_MAX_BYTES) {
+      return jsonResponse({ error: `file too large (max ${Math.floor(ATTACH_MAX_BYTES / (1024 * 1024))} MB)` }, 413);
+    }
+    // A timestamp prefix keeps two files of the same name from clobbering each
+    // other within a workspace. Forward slashes so the returned path is stable
+    // across platforms.
+    const rel = `${ATTACH_DIR}/${Date.now().toString(36)}-${name}`;
+    const abs = resolveWithinCwd(absCwd, rel);
+    if (!abs) return jsonResponse({ error: "invalid path" }, 400);
+    try {
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, bytes);
+    } catch (err: any) {
+      return jsonResponse({ error: String(err?.message ?? err) }, 500);
+    }
+    return jsonResponse({ ok: true, path: rel, name, bytes: bytes.length });
+  });
+
   // ── POST /chat/stop (abort the agent's current run, keep the session) ────
-  // Unlike /chat/kill, this sends `clear_queue` + `abort` to the live pi
-  // subprocess so the current run stops but the conversation context survives.
+  // A chat subprocess is aborted with `clear_queue` + `abort` so the
+  // conversation context survives. A pi the user started in their OWN terminal
+  // has no such channel — and no subprocess handle here — so it is signalled
+  // through the pid its events carried (see stopAgentSession in server.ts).
+  // `chat`/`external` say which of the two actually happened.
   api.route("POST", "/chat/stop", async (ctx) => {
     const { value: parsed, error } = await jsonBody(ctx.req);
     if (error) return error;
     const sessionId = typeof parsed?.sessionId === "string" ? parsed.sessionId.trim() : "";
-    const ok = sessionId ? stopChat(sessionId) : false;
-    return jsonResponse({ ok, sessionId });
+    if (!sessionId) return jsonResponse({ ok: false, sessionId, reason: "missing sessionId" }, 400);
+    // Feature-detect: an older host kit has only stopChat (chat subprocesses).
+    if (typeof stopAgentSession === "function") return jsonResponse({ sessionId, ...stopAgentSession(sessionId) });
+    const ok = stopChat(sessionId);
+    return jsonResponse({ ok, sessionId, chat: ok, external: false });
   });
 
   // ── POST /chat/kill (stop a chat subprocess by session id) ─────────────

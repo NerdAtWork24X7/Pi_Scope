@@ -889,11 +889,31 @@ body[data-ds-dark-theme] {
 .office-kmini-col { display: inline-flex; align-items: baseline; gap: 4px; flex: 0 0 auto; font-size: 11px; white-space: nowrap; color: var(--muted); }
 .office-kmini-col b { color: var(--text); }
 .office-kmini-col.in_progress { color: var(--green); }
+.office-kmini-col.waiting { color: var(--orange); }
 .office-kmini-col.done { color: var(--accent); }
 .office-kanban-now {
   font-family: var(--font-body); font-size: 11px;
   color: var(--muted);
   max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.office-kanban-now.wait { color: var(--orange); }
+
+/* The live marks: a breathing dot for the run the orchestrator is on, and the
+   same dot in the waiting colour for a run that is blocked on an answer. Both
+   read at a glance on the wall sign and on the card — the one piece of motion on
+   the board, and it means something. */
+.office-run-dot,
+.office-wait-dot {
+  display: inline-block; vertical-align: middle;
+  width: 6px; height: 6px; margin-right: 5px;
+  border-radius: 50%;
+  animation: office-breathe 1.8s var(--ease-std) infinite;
+}
+.office-run-dot { background: var(--green); }
+.office-wait-dot { background: var(--orange); }
+@keyframes office-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .35; transform: scale(.78); }
 }
 
 /* The reference library: a drawn shelf of books, one button. */
@@ -1152,9 +1172,17 @@ body[data-ds-dark-theme] {
 
 .office-board-cols {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* Every column the board has, fitted across the panel. `auto-fit` with a
+     minimum track means all five share the width on a normal screen and wrap to
+     a second row only when the panel is genuinely too narrow for them (a phone),
+     instead of squeezing each column down to a sliver. */
+  grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
   gap: 12px;
-  align-items: start;
+  /* Columns fill the surface they are drawn on (the board is full-height): the
+     rows share the height, and a long list scrolls INSIDE its column — so the
+     panel itself never grows a scrollbar. */
+  align-content: stretch;
+  align-items: stretch;
   flex: 1 1 auto;
   padding: 16px;
   overflow: auto;
@@ -1170,6 +1198,9 @@ body[data-ds-dark-theme] {
   transition: border-color var(--dur-fast) var(--ease-std), background var(--dur-fast) var(--ease-std);
 }
 .office-kcol.in_progress { border-style: solid; border-color: var(--green); }
+/* Waiting is the same "the orchestrator owns it" state as In Progress, held for
+   a human: it wears the app's waiting colour (see subagentStatus). */
+.office-kcol.waiting { border-style: solid; border-color: var(--orange); }
 .office-kcol.done { border-style: solid; border-color: var(--accent); }
 .office-kcol.drag-over { border-style: solid; border-color: var(--accent); background: var(--accent-hover); }
 .office-kcol-head {
@@ -1179,7 +1210,9 @@ body[data-ds-dark-theme] {
   color: var(--muted);
 }
 .office-kcol-head b { color: var(--text); }
-.office-kcol-body { display: flex; flex-direction: column; gap: 8px; min-height: 24px; }
+/* The body takes the column's remaining height and scrolls there, so a long list
+   never pushes the column (or the New-task button under Todo) out of the panel. */
+.office-kcol-body { display: flex; flex-direction: column; gap: 8px; min-height: 24px; flex: 1 1 auto; overflow-y: auto; }
 .office-kcol-empty { color: var(--text-subtle); opacity: .7; }
 .office-kadd { margin-top: auto; }
 
@@ -1202,6 +1235,22 @@ body[data-ds-dark-theme] {
 .office-task.drop-after { box-shadow: 0 3px 0 0 var(--accent); border-color: var(--accent); }
 .office-task-title { grid-column: 1; font-family: var(--font-display); font-size: 13px; font-weight: 600; letter-spacing: -.2px; color: var(--text); overflow-wrap: anywhere; }
 .office-task-failed { grid-column: 1; font-family: var(--mono); font-size: 11px; color: var(--red); }
+/* What the orchestrator is doing with the card it holds: working it, with the
+   clock its run has been going, or blocked on a question only a human can
+   answer (the question itself, quoted below the label). */
+.office-task-run,
+.office-task-wait { grid-column: 1; font-family: var(--mono); font-size: 11px; letter-spacing: .2px; }
+.office-task-run { color: var(--green); }
+.office-task-wait { color: var(--orange); }
+.office-run-time { margin-left: 6px; color: var(--text-subtle); font-variant-numeric: tabular-nums; }
+.office-task-q {
+  grid-column: 1;
+  padding-left: 7px;
+  border-left: 1px solid var(--orange);
+  font-family: var(--font-body); font-size: 12px; line-height: 1.5;
+  color: var(--text-subtle);
+  overflow-wrap: anywhere;
+}
 .office-task-note { grid-column: 1; font-family: var(--font-body); font-size: 12px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
 .office-task-acts { grid-column: 2; grid-row: 1 / span 3; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
 .office-task-del,
@@ -1446,5 +1495,7 @@ body[data-ds-dark-theme] {
   .office-lib-backdrop,
   .office-lib-panel,
   .office-dialog,
+  .office-run-dot,
+  .office-wait-dot,
   .office-hand { animation: none !important; }
 }

@@ -113,6 +113,7 @@ interface ChatSession {
   thinkingLevel: string | null; // last thinking level pushed to this subprocess (null = pi's boot default)
   resumedFile: string | null; // pi session file this subprocess is currently on
   resumeCallback: (() => void) | null; // prompt write deferred until a pending switch_session/new_session resolves
+  resumeWarned: string | null; // resume target (pi session file) already reported as unusable — warn once per file
   stopRequested: boolean; // a /chat/stop abort was issued for the current run
   fresh: boolean; // pre-spawned "new conversation" subprocess (vs bound to a recorded session)
   librarySent: boolean; // the reference-library block has been injected into this conversation
@@ -666,6 +667,50 @@ export function chatSpawnArgs(model: string, extras: ChatSpawnExtras = {}): stri
   return args;
 }
 
+/**
+ * Why a recorded session file cannot be continued, or "" when it can.
+ *
+ * Continuing a session means pointing pi at that conversation's own pi session
+ * file (`switch_session`). pi OPENS the path and, when it is not there, silently
+ * starts a brand-new EMPTY session IN THAT FILE: the reply would have no memory
+ * of the transcript the Chat view is showing, and a path the app does not own
+ * would be created behind another tool's back. That is not hypothetical — the
+ * agent-team harness writes its subagent logs into the workspace and DELETES
+ * them when a dispatch ends (`wipeSessionFile`), so continuing such a session
+ * recreated a file the next dispatch would then resume as its own conversation.
+ * An existing but empty or non-pi file fails the same way, so it is refused too.
+ * Exported for the unit tests; `startChat` is the only caller in production.
+ */
+export function resumeTargetProblem(sessionFile: string): string {
+  const file = sessionFile.trim();
+  let size: number;
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile()) return `${file} is not a file`;
+    size = st.size;
+  } catch {
+    return `its pi session file is gone (${file})`;
+  }
+  if (!size) return `its pi session file is empty (${file})`;
+  try {
+    const fd = fs.openSync(file, "r");
+    try {
+      const buf = Buffer.allocUnsafe(512);
+      const read = fs.readSync(fd, buf, 0, buf.length, 0);
+      // A pi session file opens with its session header; anything else (a log,
+      // a stray file at that path) would make pi fail or start over.
+      if (!/^\s*\{\s*"type"\s*:\s*"session"/.test(buf.subarray(0, read).toString("utf8"))) {
+        return `${file} is not a pi session file`;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return `its pi session file cannot be read (${file})`;
+  }
+  return "";
+}
+
 function spawnChat(id: string, cwd: string, model: string, fresh = false, extras: ChatSpawnExtras = {}): ChatSession {
   const args = chatSpawnArgs(model, extras);
   // PI_OFFLINE=1 tells pi (and its pi-updater extension) to skip startup network
@@ -719,7 +764,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
     out = proc.stdout as NodeJS.ReadableStream;
   }
 
-  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", run: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, stopRequested: false, fresh, librarySent: false, runState: null, lastRun: null };
+  const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", run: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, resumeWarned: null, stopRequested: false, fresh, librarySent: false, runState: null, lastRun: null };
 
   out.on("data", (d: Buffer) => {
     sess.buffer += d.toString();
@@ -771,7 +816,7 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
  *  after the agent settles) and a JSON `{ queued: true }` response is returned
  *  instead of a stream — the in-flight stream keeps delivering events to the
  *  client. */
-export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string; libraryBlock?: string } & ChatSpawnExtras): Response {
+export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string; libraryBlock?: string; resumeSeed?: (sessionFile: string, sessionId: string, reason: string) => string } & ChatSpawnExtras): Response {
   const { cwd, prompt } = opts;
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   if (!prompt || !prompt.trim()) {
@@ -876,14 +921,30 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
         }
       };
       writePrefCommands(false);
-      // The workspace's reference library is a preamble for a NEW conversation
-      // only: a resumed session already received it, a second turn must not
-      // repeat it, and a subprocess told to start a fresh session gets it again.
+      // The transcript block for a conversation whose own pi session file is
+      // gone (see the refusal below). Set on the turn that could not resume and
+      // consumed by the prompt of that SAME run — every later turn of this
+      // subprocess already carries it in the session's history.
+      let seedBlock = "";
+      // The exact text pi receives for this run, composed once: a preflight
+      // retry must resend the same message, seed and reference library
+      // included.
+      let messageForSend = "";
       const promptForSend = () => {
+        if (messageForSend) return messageForSend;
+        const pre: string[] = [];
+        if (seedBlock) pre.push(seedBlock);
+        // The workspace's reference library is a preamble for a NEW conversation
+        // only: a resumed session already received it, a second turn must not
+        // repeat it, and a subprocess told to start a fresh session gets it again.
         const block = (opts.libraryBlock || "").trim();
-        if (!block || sessionFile || sess!.librarySent) return prompt;
-        sess!.librarySent = true;
-        return `${block}\n\n${prompt}`;
+        if (block && !sessionFile && !sess!.librarySent) {
+          sess!.librarySent = true;
+          pre.push(block);
+        }
+        pre.push(prompt);
+        messageForSend = pre.join("\n\n");
+        return messageForSend;
       };
       // A write into a dead subprocess ends the run immediately (pi never got
       // the prompt, so no agent_settled will ever arrive).
@@ -919,11 +980,44 @@ export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: s
         }
       };
       if (sessionFile) {
-        if (sess!.resumedFile !== sessionFile) {
-          sess!.resumedFile = sessionFile;
-          queueResume({ type: "switch_session", sessionPath: sessionFile });
-        } else {
+        if (sess!.resumedFile === sessionFile) {
           sendPrompt(); // already on this session file — just continue
+        } else {
+          // A resume only ever points pi at a file that is really there: pi
+          // OPENS the path and, when it is missing, starts a brand-new EMPTY
+          // session IN THAT FILE. The reply would have no memory of the
+          // transcript the canvas is showing, and a path this app has no
+          // business touching would be created behind another tool's back (the
+          // agent-team harness writes its subagent logs there and deletes them
+          // when a dispatch ends — see resumeTargetProblem). Refuse instead,
+          // keep the subprocess on its own session, and say why — once per
+          // target, so a second turn in the same thread is not nagged.
+          const problem = resumeTargetProblem(sessionFile);
+          if (problem) {
+            if (sess!.resumeWarned !== sessionFile) {
+              sess!.resumeWarned = sessionFile;
+              // The conversation cannot be resumed by pi, but Pi Scope still
+              // holds it: hand the recorded transcript to this fresh session so
+              // the reply continues the work instead of starting from nothing.
+              // A host that cannot build the block (an older kit) simply leaves
+              // the reply unseeded — the message below says so either way.
+              try {
+                seedBlock = (opts.resumeSeed?.(sessionFile, sid, problem) || "").trim();
+              } catch {
+                seedBlock = "";
+              }
+              runEmit(run, {
+                type: "error",
+                message: seedBlock
+                  ? `cannot resume this session — ${problem}; its recorded transcript was carried into this conversation instead`
+                  : `cannot resume this session — ${problem}; this reply starts a fresh conversation`,
+              });
+            }
+            sendPrompt();
+          } else {
+            sess!.resumedFile = sessionFile;
+            queueResume({ type: "switch_session", sessionPath: sessionFile });
+          }
         }
       } else if (sess!.resumedFile) {
         // Fresh conversation on a subprocess that was previously pointed at a
@@ -987,6 +1081,28 @@ export function chatRunStatus(id: string): { present: boolean; active: boolean; 
   const sess = sessions.get(id);
   if (!sess) return { present: false, active: false, outcome: null };
   return { present: true, active: sess.runState === "running" && !sess.dead, outcome: sess.lastRun?.outcome ?? null };
+}
+
+/** The host dialog a RUN is blocked on right now, or null.
+ *
+ *  A `select`/`input` request (what `ask_user_question` renders) stops pi dead:
+ *  the run stays *active* but can make no progress until a human answers it. A
+ *  plugin that owns a background run (the Office queue) parks its task on this —
+ *  that is the difference between "the orchestrator is working" and "the
+ *  orchestrator is waiting on you". */
+export function chatPendingDialog(id: string): { id: string; kind: "select" | "input"; title: string; options: string[] } | null {
+  const sess = sessions.get(id);
+  const run = sess?.run;
+  if (!sess || sess.dead || !run || sess.runState !== "running") return null;
+  for (const dlg of run.openUi.values()) {
+    return {
+      id: String(dlg.id || ""),
+      kind: dlg.type === "ui_input" ? "input" : "select",
+      title: String(dlg.title || ""),
+      options: Array.isArray(dlg.options) ? dlg.options.map((o: any) => String(o)) : [],
+    };
+  }
+  return null;
 }
 
 /** Everything a page needs to pick a live run back up after it lost its stream
@@ -1070,6 +1186,17 @@ export function killChatSession(id: string): void {
   if (!sess) return;
   try { sess.proc.kill(); } catch { /* already dead */ }
   sessions.delete(id);
+}
+
+/** The OS pid of the live chat subprocess serving a session, or null when this
+ *  server owns none (the run came from the user's terminal). The external-kill
+ *  path compares it with the pid the session's events carry, so stopping a
+ *  session never signals the very subprocess Stop is already aborting. */
+export function chatSessionPid(id: string): number | null {
+  const sess = sessions.get(id);
+  if (!sess || sess.dead || sess.proc.exitCode !== null) return null;
+  const pid = Number(sess.proc.pid);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
 /** Push the requested model + thinking level into a *live* chat subprocess via

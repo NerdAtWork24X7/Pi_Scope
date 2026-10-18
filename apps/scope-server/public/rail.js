@@ -127,16 +127,23 @@
     const stMeta = piStatusMeta(st);
     const stats = (state().sessionStats || {})[s.session_id];
     const hasErr = (stats?.error_count || 0) > 0;
-    const row1 = s.first_msg ? S.trunc(s.first_msg, 46) : name;
+    // A session the server had to CONTINUE by seeding a fresh conversation (its
+    // own pi session file was gone) opens its record with that seeded transcript:
+    // name the row after what the user typed, not after the block
+    // (helpers.stripSessionSeed; a stale helpers.js simply leaves it in place).
+    const firstRaw = s.first_msg ? String(s.first_msg) : "";
+    const firstMsg = typeof S.stripSessionSeed === "function" ? S.stripSessionSeed(firstRaw) : firstRaw;
+    const label = firstMsg || name;
+    const row1 = firstMsg ? S.trunc(firstMsg, 46) : name;
     const statusText = stMeta.word + (hasErr ? " ⚠ needs review" : "");
-    const tip = (s.first_msg ? s.first_msg : name) + (statusText ? " — " + statusText : "") +
+    const tip = label + (statusText ? " — " + statusText : "") +
       (nested && s.parent_session_id ? " — spawned by session " + S.shortId(s.parent_session_id) : "");
     const selected = o.selectedSid === s.session_id ? " selected" : "";
     return (
       `<div class="ws-sess${nested ? " ws-sess-sub" : ""}${selected}" data-sid="${esc(s.session_id)}" title="${esc(tip)}">` +
       `<span class="status-dot ${st}"></span>` +
       `<div class="ws-sess-body">` +
-      `<div class="ws-sess-name" title="${s.first_msg ? esc(s.first_msg) : esc(name)}">${esc(row1)}</div>` +
+      `<div class="ws-sess-name" title="${esc(label)}">${esc(row1)}</div>` +
       `</div>` +
       `<span class="ws-sess-del" data-del="${esc(s.session_id)}" title="Delete this session">&times;</span>` +
       `</div>`

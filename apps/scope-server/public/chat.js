@@ -46,6 +46,21 @@
   function loadBool(key, dflt) {
     try { const v = localStorage.getItem(key); return v === null ? dflt : v === "1"; } catch { return dflt; }
   }
+  // Assistant-message render mode (the Markdown / Raw switch in the header):
+  // how pi's replies are drawn in the transcript.
+  //   "markdown" — pi's markdown rendered (headings, lists, fenced code) — the default
+  //   "raw"      — the plain text exactly as it streamed, no markdown parsing
+  // Only the message TEXT changes; thinking blocks, tool calls and usage rows
+  // are unaffected. Remembered per browser, like the other Chat toggles.
+  const CHAT_VIEWS = ["markdown", "raw"];
+  const CHAT_VIEW_KEY = "scope-chat-view";
+  function loadChatView() {
+    try {
+      const v = localStorage.getItem(CHAT_VIEW_KEY);
+      if (CHAT_VIEWS.includes(v)) return v;
+    } catch { /* private mode */ }
+    return "markdown";
+  }
   function saveCollapsedSecs() {
     try { localStorage.setItem("scope-chat-team-collapsed", JSON.stringify([...CH.collapsedSecs])); } catch {}
   }
@@ -126,6 +141,7 @@
     footerFetchedAt: 0,
     thinkingLevel: null,   // selected thinking level (defaults to footer.thinking)
     showThinking: loadBool("scope-chat-show-thinking", false), // global fold/unfold of thought blocks
+    view: loadChatView(), // assistant-text render mode: "markdown" | "raw"
     thoughtAutoScroll: loadBool("scope-chat-thought-autoscroll", true), // keep the open Thought block pinned to its newest line
     expandTools: loadBool("scope-chat-expand-tools", false),   // compact chips vs. folded per-call rows (click to open)
     steer: loadBool("scope-chat-steer", false), // send next message mid-run (steer) vs queue until done
@@ -139,6 +155,8 @@
     sttFetching: false,
     listenBase: "",     // composer text before the dictated span
     listenTail: "",     // composer text after the dictated span
+    attachments: [],    // composer attachments: [{ id, name, path, kind }] — path is what the prompt sends
+    attachSeq: 0,       // monotonic id source for attachment chips
     customWs: loadCustomWs(), // union of chat workspaces seen across projects (sidebar display cache)
     threads: new Map(),   // thread id → thread (one per chat conversation, keyed by session id or "free:<cwd>")
     curId: null,          // id of the thread currently shown in the canvas
@@ -432,6 +450,9 @@
     el.stop = $("#chat-stop");
     el.extRun = $("#chat-ext-run");
     el.listen = $("#chat-listen");
+    el.attach = $("#chat-attach");
+    el.attachInput = $("#chat-attach-input");
+    el.attachments = $("#chat-attachments");
   }
 
   // ─── Selectors / data ─────────────────────────────────────────────────────
@@ -726,8 +747,6 @@
         if (tool) { postTeam({ action: "toggleTool", tool: tool.dataset.tool }, { liveConfig: true }); return; }
         const skill = e.target.closest(".at-chip[data-dir]");
         if (skill) { postTeam({ action: "toggleSkill", dir: skill.dataset.dir }); return; }
-        const ext = e.target.closest(".at-chip[data-path]");
-        if (ext) { postTeam({ action: "toggleExtension", path: ext.dataset.path }); return; }
         const sub = e.target.closest(".at-chip.sub[data-agent]");
         if (sub) {
           const name = sub.dataset.agent || "";
@@ -914,6 +933,7 @@
       CH.workspace = null;
       CH.curId = null;
       CH.chatHistory = [];
+      clearAttachments();
       CH.chatSessionId = null;
       CH.resumeFile = null;
       CH.chatBusy = false;
@@ -1258,23 +1278,6 @@
     subBody = `<div class="at-chips">` + subBody + `</div>`;
     html += atSection("subagents", "Subagents", subBody, { count: members.length });
 
-    // Only show extensions that are both active and actually available on disk
-    // (the server marks entries whose file exists); disabled or missing-file
-    // extensions stay in the Settings page, where they can be re-enabled.
-    const exts = (td.extensions || []).filter((ex) => ex.enabled && ex.available);
-    let extBody = "";
-    if (!exts.length) extBody = `<div class="at-dim">none enabled</div>`;
-    else {
-      for (const ex of exts) {
-        extBody +=
-          `<div class="at-chip on" data-path="${esc(ex.path)}" title="${esc(ex.path)}">` +
-          `<span class="at-chip-dot"></span>` +
-          `<span class="at-chip-name">${esc(ex.name)}</span>` +
-          `</div>`;
-      }
-    }
-    html += atSection("extensions", "Extensions", `<div class="at-chips">` + extBody + `</div>`, { count: exts.length });
-
     if (agentsRailHtml === html) return; // same markup — keep the live DOM
     agentsRailHtml = html;
     el.agents.innerHTML = html;
@@ -1314,6 +1317,7 @@
   // ─── Selection ────────────────────────────────────────────────────────────
   async function selectWorkspace(cwd) {
     CH.workspace = cwd;
+    clearAttachments(); // staged files belonged to the previous workspace
     CH.team = null;
     CH.expandedWs.add(cwd);
     saveExpandedWs();
@@ -1669,6 +1673,35 @@
     return Date.now() - ts <= EXTERNAL_RUN_STALE_MS;
   }
 
+  // A terminal run we CAN stop: the server learned its pid from the events its
+  // extension posts (`pid` on GET /sessions). Without one (an older extension,
+  // or a server that restarted since the last event) the run stays watch-only —
+  // see the terminal marker in updateHeader.
+  function externalStopSid() {
+    if (CH.chatBusy) return null;
+    const row = visibleSessionRow();
+    return row && row.pid && externalRunLive() ? row.session_id : null;
+  }
+
+  // Settle the row after a terminal kill: the process is gone and the server
+  // recorded a closing turn_end, so clear the (now dangling) pid and flip the
+  // turn to ended locally — the header and rail settle now instead of after the
+  // next poll.
+  function patchStoppedExternalRow(sid) {
+    const ts = new Date().toISOString();
+    for (const list of [CH.sessions, state.sessions || []]) {
+      const row = list.find((s) => s.session_id === sid);
+      if (!row) continue;
+      row.pid = undefined;
+      row.turn_live = false;
+      row.last_turn_event = "turn_end";
+      row.last_ts = ts;
+    }
+    updateHeader();
+    renderWorkspaces();
+    renderAgents();
+  }
+
   // Take over a run that is already in flight: show the working state, then
   // stream the run's events (replayed from its start) into a live bubble.
   async function adoptLiveRun(t, run) {
@@ -1880,114 +1913,20 @@
   }
 
   // ─── Rendering helpers: markdown-lite ─────────────────────────────────────
+  // The parser itself lives in helpers.js (S.markdownHtml) so the phone layout
+  // shares it. Chat supplies its own fenced-code block — the language label and
+  // the Copy button — while the block/inline grammar stays identical.
 
-  // Inline formatting on ALREADY-ESCAPED text. Inline code / links / bold /
-  // italic are pulled out in order so one formatter can't inject into another
-  // (code and links are protected first).
-  function fmtInline(text) {
-    const prot = [];
-    const stash = (html) => { prot.push(html); return "\x01" + (prot.length - 1) + "\x01"; };
-    text = text.replace(/`([^`\n]+)`/g, (m, c) => stash(`<code>${c}</code>`));
-    text = text.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, l, u) => stash(`<a href="${u}" target="_blank" rel="noopener noreferrer">${l}</a>`));
-    text = text.replace(/\*\*([^*\n]+)\*\*/g, (m, t) => stash(`<strong>${t}</strong>`));
-    text = text.replace(/~~([^~\n]+)~~/g, (m, t) => stash(`<del>${t}</del>`));
-    text = text.replace(/\*([^*\n]+)\*/g, (m, t) => stash(`<em>${t}</em>`));
-    return text.replace(/\x01(\d+)\x01/g, (m, i) => prot[+i] || "");
+  function chatCodeBlock(lang, code) {
+    return (
+      `<div class="chat-code">` +
+      `<div class="chat-code-head"><span class="chat-code-lang">${esc(lang || "code")}</span>` +
+      `<button type="button" class="chat-copy-btn" data-copy="${esc(code)}" title="Copy code">${ico(ICON_COPY, 12)} Copy</button></div>` +
+      `<pre><code>${esc(code)}</code></pre></div>`
+    );
   }
 
-  // Full assistant-message formatter: fenced code blocks, then block structure
-  // (headings / lists / quotes / paragraphs) with inline formatting inside.
-  function fmtMarkdown(raw) {
-    const fences = [];
-    let text = String(raw || "").replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (m, lang, code) => {
-      fences.push({ lang: (lang || "").trim(), code: code.replace(/\n\s*$/, "") });
-      return "\x00F" + (fences.length - 1) + "\x00";
-    });
-    text = fmtInline(S.escapeHtml(text));
-
-    const lines = text.split("\n");
-    const blocks = [];
-    let i = 0;
-    const flush = (cur) => {
-      if (cur) {
-        if (cur.lines && cur.lines.join("").trim()) blocks.push(cur);
-        else if (cur.type !== "p") blocks.push(cur);
-      }
-    };
-    let cur = null;
-    while (i < lines.length) {
-      const ln = lines[i];
-      const fm = ln.match(/^\x00F(\d+)\x00$/);
-      if (fm) { flush(cur); cur = null; blocks.push({ type: "code", idx: +fm[1] }); i++; continue; }
-      const hm = ln.match(/^(#{1,4})\s+(.*)$/);
-      if (hm) { flush(cur); cur = null; blocks.push({ type: "head", level: hm[1].length, html: hm[2] }); i++; continue; }
-      if (/^\s*(---|\*\*\*)\s*$/.test(ln)) { flush(cur); cur = null; blocks.push({ type: "hr" }); i++; continue; }
-      if (!ln.trim()) { flush(cur); cur = null; i++; continue; }
-      const lm = ln.match(/^\s*[-*•]\s+(.*)$/);
-      if (lm) {
-        flush(cur); cur = null;
-        const items = [];
-        while (i < lines.length) {
-          const s = lines[i].trim();
-          if (!s) break;
-          const it = s.match(/^[-*•]\s+(.*)$/);
-          if (!it) break;
-          items.push(it[1]); i++;
-        }
-        blocks.push({ type: "ul", items });
-        continue;
-      }
-      const om = ln.match(/^\s*\d+[.)]\s+(.*)$/);
-      if (om) {
-        flush(cur); cur = null;
-        const items = [];
-        while (i < lines.length) {
-          const s = lines[i].trim();
-          if (!s) break;
-          const it = s.match(/^\d+[.)]\s+(.*)$/);
-          if (!it) break;
-          items.push(it[1]); i++;
-        }
-        blocks.push({ type: "ol", items });
-        continue;
-      }
-      if (/^&gt;\s?/.test(ln)) {
-        flush(cur); cur = null;
-        const q = [];
-        while (i < lines.length && /^&gt;\s?/.test(lines[i])) { q.push(lines[i].replace(/^&gt;\s?/, "")); i++; }
-        blocks.push({ type: "quote", lines: q });
-        continue;
-      }
-      if (!cur) cur = { type: "p", lines: [] };
-      cur.lines.push(ln);
-      i++;
-    }
-    flush(cur);
-
-    const h = [];
-    for (const b of blocks) {
-      if (b.type === "code") {
-        const f = fences[b.idx];
-        if (!f) continue;
-        h.push(
-          `<div class="chat-code">` +
-          `<div class="chat-code-head"><span class="chat-code-lang">${esc(f.lang || "code")}</span>` +
-          `<button type="button" class="chat-copy-btn" data-copy="${esc(f.code)}" title="Copy code">${ico(ICON_COPY, 12)} Copy</button></div>` +
-          `<pre><code>${esc(f.code)}</code></pre></div>`
-        );
-        continue;
-      }
-      if (b.type === "hr") { h.push("<hr>"); continue; }
-      if (b.type === "head") { const tag = b.level <= 2 ? "h3" : "h4"; h.push(`<${tag}>${b.html}</${tag}>`); continue; }
-      if (b.type === "ul") { h.push("<ul>" + b.items.map((x) => `<li>${x}</li>`).join("") + "</ul>"); continue; }
-      if (b.type === "ol") { h.push("<ol>" + b.items.map((x) => `<li>${x}</li>`).join("") + "</ol>"); continue; }
-      if (b.type === "quote") { h.push("<blockquote>" + b.lines.map((x) => `<p>${x}</p>`).join("") + "</blockquote>"); continue; }
-      h.push("<p>" + b.lines.join("<br>") + "</p>");
-    }
-    return h.join("");
-  }
-
-  // Bounded memo for fmtMarkdown. The canvas re-renders the WHOLE transcript on
+  // Bounded memo for the shared formatter. The canvas re-renders the WHOLE transcript on
   // a workspace switch, on every session re-fetch (the poll refetches a viewed
   // session as it grows), and on each turn's finalize — without this, every
   // unchanged message pays the full regex + block-parse cost again. Keyed by
@@ -1995,14 +1934,63 @@
   // wholesale once it gets large, so memory stays bounded with no bookkeeping.
   const MD_CACHE_MAX = 512;
   const mdCache = new Map();
+
+  // A local path pi printed ("saved to tmp/chart.png") is not under public/, so
+  // the browser cannot load it on its own. The server serves it from the same
+  // sandbox as the Files view (see GET /media), keyed by this chat's workspace;
+  // the token rides in the query because an <img> cannot send an Authorization
+  // header. Only media extensions are turned into URLs — anything else is left
+  // as plain text.
+  const LOCAL_MEDIA_EXT_RE = /\.(png|jpe?g|gif|webp|avif|bmp|svg|mp4|webm|ogv|ogg|mov|m4v)$/i;
+  function localMediaSrc(p) {
+    const rel = String(p == null ? "" : p).trim();
+    if (!rel || !CH.workspace) return "";
+    if (/^[a-z][a-z0-9+.-]*:/i.test(rel)) return ""; // a URL, not a filesystem path
+    if (!LOCAL_MEDIA_EXT_RE.test(rel.split(/[?#]/)[0])) return "";
+    const q = new URLSearchParams({ cwd: CH.workspace, path: rel });
+    const token = window.__SCOPE_STATE && window.__SCOPE_STATE.token;
+    if (token) q.set("token", token);
+    return `/media?${q.toString()}`;
+  }
+  const mediaOpts = { resolve: localMediaSrc };
+
   function markdownHtml(raw) {
-    const src = String(raw == null ? "" : raw);
-    const hit = mdCache.get(src);
+    // Keyed by the raw text AND the workspace: a resolved local path embeds the
+    // workspace's cwd, so the same text read in another workspace must not reuse
+    // the previous workspace's URL.
+    const source = String(raw == null ? "" : raw);
+    const key = (CH.workspace || "") + "\u0000" + source;
+    const hit = mdCache.get(key);
     if (hit !== undefined) return hit;
-    const html = fmtMarkdown(src);
+    const html = S.markdownHtml(source, { codeBlock: chatCodeBlock, dropImages: true, resolve: localMediaSrc });
     if (mdCache.size >= MD_CACHE_MAX) mdCache.clear();
-    mdCache.set(src, html);
+    mdCache.set(key, html);
     return html;
+  }
+
+  // ─── Markdown / Raw message view ──────────────────────────────────────────
+  // The assistant's text is drawn one of two ways (CH.view). Both keep the
+  // `.chat-text` wrapper so the live stream and the tool-row refresh keep
+  // resolving their anchor selectors. Markdown renders pi's markdown; raw shows
+  // the plain text with line breaks preserved (see the `.chat-view-raw` style).
+  function viewTextClass() {
+    if (CH.view === "raw") return " chat-view-raw";
+    return "";
+  }
+  // A finished assistant message's text in the current view. Any pictures the
+  // reply references are held OUT of the prose (dropImages) and drawn in a
+  // dimension table underneath, largest first.
+  function msgTextHtml(m) {
+    const raw = m.text || "";
+    const cls = "chat-text" + viewTextClass();
+    const text = CH.view === "markdown" ? markdownHtml(raw) : esc(raw);
+    return `<div class="${cls}">${text}</div>${S.mediaTableHtml(S.mediaInText(raw, mediaOpts))}`;
+  }
+  // The IN-FLIGHT bubble's text: always plain escaped text so streamed deltas
+  // can be appended to it, whatever the view (markdown parses on the final render).
+  function liveTextHtml(m) {
+    const cls = "chat-text chat-stream-text" + viewTextClass();
+    return `<div class="${cls}">${esc(m.text || "")}</div>`;
   }
 
   // Inline line icons (24px viewBox, stroke = currentColor) so every icon on
@@ -2102,7 +2090,7 @@
       `<div class="chat-tool-call-body">` +
       (args ? `<div class="chat-tool-call-args"><div class="chat-tool-call-k">Args</div><pre>${esc(args)}</pre></div>` : "") +
       (hasResult
-        ? `<div class="chat-tool-call-result ${resultCls}"><div class="chat-tool-call-k">Result</div><pre>${esc(t.result)}</pre></div>`
+        ? `<div class="chat-tool-call-result ${resultCls}"><div class="chat-tool-call-k">Result</div><pre>${esc(t.result)}</pre>${S.resultMediaHtml(t.result, mediaOpts)}</div>`
         : (st.cls === "live" ? `<div class="chat-tool-call-live"><span class="chat-tool-call-k">Running…</span></div>` : "")) +
       `</div>`;
     return (
@@ -2153,6 +2141,27 @@
         ? "Tool call rows — click one to see its args & result"
         : "Tool call chips — click for expandable rows";
     }
+  }
+
+  // The Markdown / Raw switch: which drawing the assistant's replies use.
+  // Keeps the header buttons showing the active mode.
+  function updateViewToggle() {
+    const box = document.getElementById("chat-view-toggle");
+    if (!box) return;
+    box.querySelectorAll("[data-view]").forEach((b) => {
+      const on = b.dataset.view === CH.view;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+  function setChatView(view) {
+    if (!CHAT_VIEWS.includes(view) || view === CH.view) return;
+    CH.view = view;
+    try { localStorage.setItem(CHAT_VIEW_KEY, view); } catch { /* private mode */ }
+    updateViewToggle();
+    // Re-render the transcript in the new mode. renderChat re-attaches a live
+    // stream to the rebuilt DOM, so a running turn keeps streaming into it.
+    renderChat();
   }
 
   function updateSteerToggle() {
@@ -2268,6 +2277,7 @@
       }
     });
     updateToggleButtons();
+    S.hydrateMediaTables(el.msg);
   }
 
   function toggleTools() {
@@ -2336,10 +2346,16 @@
   function renderChatMsg(m, i) {
     if (m.role === "user") {
       const copyAttr = esc(m.text || "");
+      const atts = (m.attachments && m.attachments.length)
+        ? `<div class="chat-bubble-atts">` + m.attachments.map((p) =>
+            `<span class="chat-bubble-att" title="${esc(p)}">${attachIcon(attachKind(p))}<span class="chat-bubble-att-name">${esc(attachBasename(p))}</span></span>`
+          ).join("") + `</div>`
+        : "";
       return (
         `<div class="chat-msg chat-user" data-i="${i}">` +
         `<div class="chat-msg-body">` +
         `<div class="chat-bubble chat-bubble-user"><div class="chat-bubble-text">${esc(m.text || "")}</div>` +
+        atts +
         (m.cancelled ? `<div class="chat-msg-cancelled">cancelled</div>` : "") +
         `</div>` +
         `<div class="chat-msg-top">` +
@@ -2355,7 +2371,7 @@
       ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span>${thoughtScrollBtn()}</summary><pre>${esc(m.thinking)}</pre></details>`
       : "";
     const body = m.text
-      ? `<div class="chat-text">${markdownHtml(m.text)}</div>`
+      ? msgTextHtml(m)
       : (!m.streaming && !m.thinking && !(m.tools || []).length && !m.errorNote
           ? `<div class="chat-msg-time">(no text response)</div>`
           : "");
@@ -2484,6 +2500,7 @@
         `</span></div>`;
     }
     el.msg.innerHTML = html;
+    S.hydrateMediaTables(el.msg);
     if (stickBottom) scrollToBottom(true);
     else if (prevHeight > 1) el.msg.scrollTop = Math.round((prevTop / prevHeight) * el.msg.scrollHeight);
     // Rebuilding the canvas detaches every node the live stream was writing
@@ -2514,7 +2531,7 @@
       ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span>${thoughtScrollBtn()}</summary><pre>${esc(m.thinking)}</pre></details>`
       : "";
     const tools = renderToolsHtml(m);
-    const text = m.text ? `<div class="chat-text chat-stream-text">${esc(m.text)}</div>` : "";
+    const text = m.text ? liveTextHtml(m) : "";
     return (
       `<div class="chat-msg chat-ai chat-ai-live" data-i="${dataIdx}">` +
       `<div class="chat-msg-avatar">π</div>` +
@@ -2635,7 +2652,7 @@
     let t = body.querySelector(".chat-text.chat-stream-text");
     if (!t) {
       t = document.createElement("div");
-      t.className = "chat-text chat-stream-text";
+      t.className = "chat-text chat-stream-text" + viewTextClass();
       // Above the usage row and the run pill, so a bubble whose usage snapshot
       // arrived early still reads text-then-usage (as the final render does).
       livePrependTextNode(body, t, ".chat-usage, .chat-live-run");
@@ -3202,23 +3219,30 @@
     el.model.disabled = !on;
     if (el.thinking) el.thinking.disabled = !on;
     if (el.steer) el.steer.disabled = !on;
+    if (el.attach) el.attach.disabled = !on;
     // Keep Send enabled while a turn streams so the user can steer / queue a
     // follow-up; the stop button appears in its place of action.
     el.send.disabled = !on;
     // Losing the composer (workspace cleared) must not leave the host mic open.
     if (!on && CH.listening) void finishListening();
     updateListenButton();
-    if (el.stop) el.stop.classList.toggle("show", CH.chatBusy);
+    if (el.stop) el.stop.classList.toggle("show", CH.chatBusy || !!externalStopSid());
     if (el.input) el.input.placeholder = "Message the pi coding agent…";
   }
 
   function updateHeader() {
-    // The Stop button is shown while the VISIBLE thread is streaming. It used
-    // to be toggled only inside setComposerEnabled, which sendPrompt calls
-    // before CH.chatBusy is synced — so the button never appeared during the
-    // first turn (nothing else re-ran it mid-stream). Keep it in lockstep here;
-    // updateHeader runs at turn start and on every poll.
-    if (el.stop) el.stop.classList.toggle("show", CH.chatBusy);
+    // The Stop button serves the VISIBLE thread's stream AND a terminal run the
+    // server gave us a pid for. It used to be toggled only inside
+    // setComposerEnabled, which sendPrompt calls before CH.chatBusy is synced —
+    // so the button never appeared during the first turn (nothing else re-ran it
+    // mid-stream). Keep it in lockstep here; updateHeader runs at turn start and
+    // on every poll.
+    const extStop = externalStopSid();
+    if (el.stop) {
+      el.stop.classList.toggle("show", CH.chatBusy || !!extStop);
+      el.stop.title = extStop ? "Stop the agent running in your terminal" : "Stop the agent";
+      el.stop.setAttribute("aria-label", el.stop.title);
+    }
     if (!el.name) return;
     const base = currentWorkspaceName();
     if (!CH.workspace) {
@@ -3249,7 +3273,9 @@
       el.state.hidden = false;
       el.state.textContent = stateTxt;
       el.state.className = "chat-header-state " + stateCls;
-      el.state.title = extLive ? "this session runs in your terminal — stop it there" : "";
+      el.state.title = extLive
+        ? (extStop ? "this session runs in your terminal — Stop signals that pi" : "this session runs in your terminal — stop it there")
+        : "";
     }
     if (el.liveDot) {
       el.liveDot.className = "chat-live-dot " + (busy ? "green" : st);
@@ -3258,10 +3284,10 @@
         : busy ? "pi is working…" : st === "green" ? "agent running" : "idle";
     }
     // Where the Stop button would be: an honest marker for a run this page
-    // cannot stop (see externalRunLive).
+    // cannot stop (no pid from its events — see externalRunLive/externalStopSid).
     if (el.extRun) {
-      el.extRun.hidden = !extLive;
-      el.extRun.title = "This session runs in your own terminal — Pi Scope watches it, but stopping it happens there.";
+      el.extRun.hidden = !(extLive && !extStop);
+      el.extRun.title = "This session runs in your own terminal — Pi Scope watches it and can stop it once its events carry a process id.";
     }
     if (el.btnNew) {
       // "Start a new session" is available whenever a workspace is open and no
@@ -3801,6 +3827,138 @@
     autoGrow(el.input);
   }
 
+  // ─── Composer attachments ─────────────────────────────────────────────────
+  // Files, images and documents the user stages in the composer. Only the PATH
+  // is carried into the prompt (see SCOPE.attachmentsBlock) — pi reads each file
+  // with its own tools, the bytes never enter the prompt. On the desktop build a
+  // native dialog hands over real paths; in a browser the bytes are uploaded to
+  // the workspace (POST /chat/attach) and the workspace-relative path comes back.
+  const ICON_ATT_IMAGE =
+    `<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>`;
+  const ICON_ATT_FILE =
+    `<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>`;
+  const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|avif|bmp|svg|ico|heic|heif|tiff?)$/i;
+
+  function attachKind(name) { return IMAGE_EXT_RE.test(String(name || "")) ? "image" : "file"; }
+  function attachIcon(kind) { return ico(kind === "image" ? ICON_ATT_IMAGE : ICON_ATT_FILE, 13); }
+  function attachBasename(p) {
+    const parts = String(p || "").replace(/\\/g, "/").split("/").filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : String(p || "");
+  }
+
+  function renderAttachments() {
+    if (!el.attachments) return;
+    const list = CH.attachments;
+    if (!list.length) { el.attachments.hidden = true; el.attachments.innerHTML = ""; return; }
+    el.attachments.hidden = false;
+    el.attachments.innerHTML = list.map((a) =>
+      `<span class="chat-attach-chip${a.uploading ? " uploading" : ""}${a.err ? " err" : ""}" data-att-id="${esc(String(a.id))}" title="${esc(a.err || a.path || a.name || "")}">` +
+        attachIcon(a.kind) +
+        `<span class="chat-attach-chip-name">${esc(a.uploading ? `${a.name} — uploading…` : (a.err || a.name))}</span>` +
+        `<button type="button" class="chat-attach-chip-x" data-att-remove="${esc(String(a.id))}" title="Remove attachment" aria-label="Remove attachment">✕</button>` +
+      `</span>`
+    ).join("");
+  }
+
+  function removeAttachment(id) {
+    const i = CH.attachments.findIndex((a) => String(a.id) === String(id));
+    if (i >= 0) { CH.attachments.splice(i, 1); renderAttachments(); }
+  }
+
+  function clearAttachments() {
+    if (!CH.attachments.length) return;
+    CH.attachments = [];
+    renderAttachments();
+  }
+
+  // The paths to send: everything settled (an in-flight upload has no path yet,
+  // a failed one is dropped rather than sent as a broken reference).
+  function pendingAttachmentPaths() {
+    return CH.attachments.filter((a) => !a.uploading && !a.err && a.path).map((a) => a.path);
+  }
+  function attachmentsUploading() { return CH.attachments.some((a) => a.uploading); }
+
+  // The message text with the attachment block appended (only when there is
+  // something attached). `paths` is captured before the composer clears so the
+  // SENT prompt and the SAVED user bubble agree.
+  function withAttachmentBlock(text, paths) {
+    const block = (typeof S.attachmentsBlock === "function") ? S.attachmentsBlock(paths) : "";
+    const t = String(text == null ? "" : text).trim();
+    if (!block) return t;
+    return t ? `${t}\n\n${block}` : block;
+  }
+
+  // A workspace-relative path when the file lives inside the workspace pi runs
+  // in (it reads it as-is), else the absolute path.
+  function relForPrompt(abs) {
+    const cwd = String(CH.workspace || "").replace(/[/\\]+$/, "");
+    if (!cwd) return abs;
+    const norm = (p) => String(p).replace(/\\/g, "/");
+    const a = norm(abs), c = norm(cwd);
+    if (a === c) return ".";
+    if (a.startsWith(c + "/")) return a.slice(c.length + 1);
+    return abs;
+  }
+
+  function addAttachmentPath(absPath) {
+    const p = String(absPath || "").trim();
+    if (!p) return;
+    const name = attachBasename(p) || p;
+    CH.attachments.push({ id: ++CH.attachSeq, name, path: relForPrompt(p), kind: attachKind(name) });
+  }
+
+  function readFileBase64(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result || "").replace(/^data:[^;]*;base64,/, ""));
+      r.onerror = () => reject(r.error || new Error("could not read file"));
+      r.readAsDataURL(file);
+    });
+  }
+
+  // Browser fallback: upload each picked file into the workspace and keep the
+  // returned relative path. Shown as a chip the moment it is queued, so a large
+  // file is visibly in flight rather than the click appearing to do nothing.
+  async function addAttachmentFiles(files) {
+    const list = [...(files || [])];
+    if (!list.length) return;
+    for (const file of list) {
+      const id = ++CH.attachSeq;
+      CH.attachments.push({ id, name: file.name, kind: attachKind(file.name), uploading: true });
+      renderAttachments();
+      try {
+        const data = await readFileBase64(file);
+        const { res, data: out } = await window.SCOPE.api("/chat/attach", {}, { cwd: CH.workspace, name: file.name, data });
+        const chip = CH.attachments.find((a) => a.id === id);
+        if (!chip) continue; // removed while the upload was in flight
+        if (!res.ok || !out?.ok) throw new Error(out?.error || `HTTP ${res.status}`);
+        chip.uploading = false;
+        chip.path = out.path;
+        chip.name = out.name || file.name;
+      } catch (err) {
+        const chip = CH.attachments.find((a) => a.id === id);
+        if (chip) { chip.uploading = false; chip.err = `failed — ${String(err?.message || err)}`; }
+      }
+      renderAttachments();
+    }
+  }
+
+  // Attach: a native dialog when the desktop bridge is present (real paths, no
+  // upload), else the hidden file input (uploaded into the workspace).
+  async function pickAttachments() {
+    if (!CH.workspace) { setHint("choose a workspace first", "err"); return; }
+    if (typeof window.scopeNative?.pickFiles === "function") {
+      let paths = [];
+      try { paths = await window.scopeNative.pickFiles(); } catch { paths = []; }
+      for (const p of (paths || [])) addAttachmentPath(p);
+      if (el.attachments) { renderAttachments(); }
+      if (paths && paths.length) setHint(`${paths.length} file${paths.length === 1 ? "" : "s"} attached`, "");
+      return;
+    }
+    el.attachInput?.click();
+  }
+
+
   async function startListening() {
     if (CH.listening || CH.sttInFlight || !CH.workspace || !sttExtensionOn()) return;
     const input = el.input;
@@ -3997,7 +4155,9 @@
     if (!t) return;
     const model = CH.chatModel || defaultChatModel();
     const streamingBehavior = CH.steer ? "steer" : "followUp";
-    const userMsg = { role: "user", text, ts: Date.now() };
+    const attPaths = pendingAttachmentPaths();
+    const prompt = withAttachmentBlock(text, attPaths);
+    const userMsg = { role: "user", text, attachments: attPaths.slice(), ts: Date.now() };
     t.history.push(userMsg);
     // Same bound as a fresh turn so a long steer-heavy conversation can't grow
     // without limit in RAM.
@@ -4006,12 +4166,13 @@
     }
     syncCurThread();
     el.input.value = "";
+    clearAttachments();
     autoGrow(el.input);
     try {
       const res = await fetch(window.apiUrl("/chat"), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd: CH.workspace, model, thinkingLevel: CH.thinkingLevel || "", prompt: text, sessionId: t.key || (t.kind === "session" ? t.sid : "") || "", sessionFile: t.resumeFile || "", streamingBehavior }),
+        body: JSON.stringify({ cwd: CH.workspace, model, thinkingLevel: CH.thinkingLevel || "", prompt, sessionId: t.key || (t.kind === "session" ? t.sid : "") || "", sessionFile: t.resumeFile || "", streamingBehavior }),
       });
       const ct = res.headers.get("content-type") || "";
       if (res.ok && ct.includes("ndjson")) {
@@ -4025,6 +4186,7 @@
         syncCurThread();
         el.msg.innerHTML = t.history.slice(0, -1).map((m, i) => renderChatMsg(m, i)).join("") +
           renderChatMsgLivePlaceholder(aiMsg);
+        S.hydrateMediaTables(el.msg);
         t.live = {
           body: el.msg.querySelector(".chat-msg.chat-ai-live .chat-msg-body"),
           m: aiMsg,
@@ -4075,7 +4237,10 @@
     // instead of sending a half-spoken message. Checked before the empty-value
     // guard so Enter always ends an in-progress recording.
     if (CH.listening) { void finishListening(); return; }
-    if (!text) return;
+    if (attachmentsUploading()) { setHint("finishing attachment upload…", "busy"); return; }
+    // Attachments alone (no text) are a valid message: the paths ARE the ask.
+    const attPaths = pendingAttachmentPaths();
+    if (!text && !attPaths.length) return;
     if (!CH.workspace) { el.input.focus(); return; }
     let t = curThread();
     if (!t) {
@@ -4094,6 +4259,7 @@
     t.openSid = null;
 
     const model = CH.chatModel || defaultChatModel();
+    const prompt = withAttachmentBlock(text, attPaths);
     const gen = ++t.gen;
     const beforeIdx = t.history.length; // rollback point if the server refuses
     t.busy = true;
@@ -4102,7 +4268,7 @@
     setComposerEnabled(true);
     setHint("pi is thinking…", "busy");
 
-    const userMsg = { role: "user", text, ts: Date.now() };
+    const userMsg = { role: "user", text, attachments: attPaths.slice(), ts: Date.now() };
     const aiMsg = { role: "assistant", text: "", thinking: "", tools: [], usage: null, model, ts: Date.now(), streaming: true };
     t.history.push(userMsg);
     t.history.push(aiMsg);
@@ -4116,6 +4282,7 @@
 
     el.msg.innerHTML = t.history.slice(0, -1).map((m, i) => renderChatMsg(m, i)).join("") +
       renderChatMsgLivePlaceholder(aiMsg);
+    S.hydrateMediaTables(el.msg);
     t.live = {
       body: el.msg.querySelector(".chat-msg.chat-ai-live .chat-msg-body"),
       m: aiMsg,
@@ -4127,6 +4294,7 @@
     scrollToBottom(true);
 
     el.input.value = "";
+    clearAttachments();
     autoGrow(el.input);
 
     try {
@@ -4137,7 +4305,7 @@
           cwd: CH.workspace,
           model,
           thinkingLevel: CH.thinkingLevel || "",
-          prompt: text,
+          prompt,
           // A recorded-session thread resumes its own pi session file: the
           // server keys a subprocess per session id and switch_session onto the
           // file. A free thread uses its pre-spawn key (or lets the server
@@ -4369,7 +4537,11 @@
       const p = ev.payload || {};
       const evSid = sid || ev.session_id || null;
       if (ev.type === "user_message") {
-        const text = p.text || "";
+        // A continued session's first prompt carries the seeded transcript the
+        // server prepended (its own pi session file was gone): context for the
+        // agent, not something the user typed.
+        const raw = p.text || "";
+        const text = (typeof S.stripSessionSeed === "function" ? S.stripSessionSeed(raw) : raw);
         if (text) msgs.push({ role: "user", text, ts: ev.ts, recorded: true, sid: evSid });
       } else if (ev.type === "assistant_message") {
         const thinking = p.thinking || pendingThinking || "";
@@ -4593,6 +4765,12 @@
     if (el.btnNew) el.btnNew.addEventListener("click", newSession);
     if (el.btnOpen) el.btnOpen.addEventListener("click", openCurrentSessionTimeline);
 
+    const viewTog = document.getElementById("chat-view-toggle");
+    if (viewTog) viewTog.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-view]");
+      if (btn) setChatView(btn.dataset.view);
+    });
+
     const tThink = document.getElementById("chat-toggle-thinking");
     if (tThink) tThink.addEventListener("click", toggleThinking);
     const tTools = document.getElementById("chat-toggle-tools");
@@ -4644,6 +4822,18 @@
       el.listen.addEventListener("click", () => (CH.listening ? void finishListening() : void startListening()));
       renderSttButton();
     }
+    if (el.attach) el.attach.addEventListener("click", () => void pickAttachments());
+    if (el.attachInput) el.attachInput.addEventListener("change", () => {
+      // Snapshot the FileList BEFORE clearing the input value: `files` is live,
+      // so resetting value would empty it out from under us.
+      const files = [...(el.attachInput.files || [])];
+      el.attachInput.value = ""; // let the same file be picked again
+      void addAttachmentFiles(files);
+    });
+    if (el.attachments) el.attachments.addEventListener("click", (e) => {
+      const btn = e.target.closest?.("[data-att-remove]");
+      if (btn) { e.preventDefault(); removeAttachment(btn.dataset.attRemove); }
+    });
     if (el.steer) {
       el.steer.addEventListener("click", () => {
         CH.steer = !CH.steer;
@@ -4654,13 +4844,20 @@
     }
     if (el.stop) {
       el.stop.addEventListener("click", () => {
-        if (!CH.chatSessionId) return;
-        setHint("stopping pi…", "busy");
-        fetch(window.apiUrl("/chat/stop"), {
-          method: "POST",
-          headers: { ...window.authHeaders(), "content-type": "application/json" },
-          body: JSON.stringify({ sessionId: CH.chatSessionId }),
-        }).catch(() => { /* server unreachable — the stream will still settle */ });
+        // The visible thread's subprocess, or a pi running in the user's terminal
+        // (the server maps its pid, see externalStopSid).
+        const externalSid = externalStopSid();
+        const target = CH.chatBusy ? CH.chatSessionId : externalSid;
+        if (!target) return;
+        setHint(externalSid ? "stopping the agent running in your terminal…" : "stopping pi…", "busy");
+        window.SCOPE.api("/chat/stop", {}, { sessionId: target }).then(({ res, data }) => {
+          if (!externalSid) return; // an in-app stop settles through its own stream
+          // The process is gone either way: clear the row's pid so Stop stops
+          // being offered, and settle the header/rail without waiting for a poll.
+          patchStoppedExternalRow(externalSid);
+          if (res.ok && data && data.ok) setHint("stopped the agent running in your terminal", "");
+          else setHint((data && (data.reason || data.error)) || "could not stop the terminal agent", "err");
+        }).catch(() => { /* server unreachable — the next poll still settles it */ });
       });
     }
     if (el.input) {
@@ -4696,6 +4893,7 @@
     renderComposerModel();
     renderChat();
     updateToggleButtons();
+    updateViewToggle();
     updateSteerToggle();
     attemptRestore();
     fetchChatFooter(true);

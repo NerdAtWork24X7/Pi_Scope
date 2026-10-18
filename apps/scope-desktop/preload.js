@@ -15,6 +15,13 @@ contextBridge.exposeInMainWorld("scopeNative", {
   pickDirectory: () => ipcRenderer.invoke("pick-directory"),
 
   /**
+   * Open a native "select files" dialog (files, images, documents — any type,
+   * multi-select). Resolves to an array of absolute paths ([] when cancelled).
+   * The Chat composer attaches these by path, so no upload is needed.
+   */
+  pickFiles: () => ipcRenderer.invoke("pick-files"),
+
+  /**
    * The pre-launch port-conflict popup's bridge (see main.js / port-conflict.html).
    * `details()` describes the busy port and `ports()` lists every active Pi Scope
    * server; `checkPort(n)` validates a candidate; `killPort(n)` frees a port and

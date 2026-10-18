@@ -43,7 +43,13 @@ process.stdin.on("data", (d) => {
       const msg = String(ev.message || "");
       if (/FAIL/.test(msg)) process.exit(1);
       if (/SLOW/.test(msg)) setTimeout(finish, 30000);
+      // ASK: pi raises a host dialog (what \`ask_user_question\` does) and stays
+      // blocked on it — no more output until the host answers. The run is still
+      // live, which is exactly the state the office parks in Waiting.
+      else if (/ASK/.test(msg)) send({ type: "extension_ui_request", id: "ui-office-1", method: "select", title: "Which store should it use?", options: ["1. sqlite", "2. postgres"] });
       else finish();
+    } else if (ev.type === "extension_ui_response") {
+      finish();   // answered — the run moves on
     } else if (ev.type === "abort") {
       send({ type: "agent_settled" });
       process.exit(0);
@@ -225,6 +231,53 @@ describe("the server-side queue runner", () => {
     assert.ok((await api("/plugins", { method: "POST", body: JSON.stringify({ action: "enable", id: "office" }) })).res.ok);
     await post({ action: "setRunnerPaused", paused: true });
     await until(async () => byTitle(await snapshot(), "SLOW dispose").status === "planned", "the resumed run is stopped again");
+  });
+
+  test("a run that asks a question parks its task in Waiting, and the queue holds behind it", async () => {
+    await clearBoard();
+    // Two tasks: the first stops to ask something. The second must not start
+    // while the question is unanswered — the blocked run still owns the
+    // orchestrator, it is live, it is just waiting on a human.
+    await planTask("ASK which store");
+    await planTask("next in line");
+    await post({ action: "setRunnerPaused", paused: false });
+
+    await until(async () => byTitle(await snapshot(), "ASK which store").status === "waiting", "the blocked run is parked in Waiting");
+    const s = await snapshot();
+    const parked = byTitle(s, "ASK which store");
+    assert.ok(parked.runSessionId, "the run record stays — the run is live, not finished");
+    const rs = s.runStates[parked.id];
+    assert.equal(rs.active, true, "the run is still active");
+    assert.equal(rs.pending.id, "ui-office-1", "the snapshot names the dialog it is blocked on");
+    assert.match(rs.pending.title, /Which store/, "with the question the agent asked");
+    assert.deepEqual(rs.pending.options, ["1. sqlite", "2. postgres"], "and the answers it offered");
+    assert.equal(byTitle(s, "next in line").status, "planned", "the queue waits behind the blocked run");
+
+    // Answering releases it: the run continues, the task returns to In Progress
+    // on its own, and the board settles it when the run ends.
+    const answered = await api("/chat/ui", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: parked.runSessionId, id: "ui-office-1", value: "1. sqlite" }),
+    });
+    assert.equal(answered.res.ok, true, "the answer is accepted");
+    await until(async () => byTitle(await snapshot(), "ASK which store").status === "done", "the answered run finishes");
+    await until(async () => byTitle(await snapshot(), "next in line").status === "done", "and the queue moves on to the next task");
+  });
+
+  test("Pause stops a run that is blocked on a question, and its task returns to Planned", async () => {
+    await clearBoard();
+    await planTask("ASK and pause");
+    await post({ action: "setRunnerPaused", paused: false });
+    await until(async () => byTitle(await snapshot(), "ASK and pause").status === "waiting", "the run parks in Waiting");
+
+    // Waiting is a resting place, not a trap: Pause aborts the blocked run.
+    await post({ action: "setRunnerPaused", paused: true });
+    await until(async () => {
+      const t = byTitle(await snapshot(), "ASK and pause");
+      return t.status === "planned" && !t.runSessionId;
+    }, "Pause stops the blocked run and returns its task to Planned");
+    const t = byTitle(await snapshot(), "ASK and pause");
+    assert.equal(t.failedAt, undefined, "a paused run is not a failure");
   });
 
   test("resumes a queue left running when the server restarts", async () => {

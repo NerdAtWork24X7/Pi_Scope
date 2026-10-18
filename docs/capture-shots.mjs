@@ -482,13 +482,25 @@ async function captureOffice() {
     mock.setStats("s2", { total_tokens: 12_345, total_cost: 0.042 });
     mock.setStats("s3", { total_tokens: 4_500, total_cost: 0.008 });
     mock.setStats("s4", { total_tokens: 31_200, total_cost: 0.611 });
+    // The board is seeded in every state the view can show: a run in flight (the
+    // In Progress card's clock), a run parked in Waiting on a question only a
+    // human can answer, work queued, and work done — so the shot documents the
+    // whole column set, Waiting included.
+    const runStart = Date.now() - 12 * 60_000 - 4000;
+    mock.setRunStatus("run-1", { active: true });
+    mock.setRunStatus("run-2", {
+      active: true,
+      pending: { id: "ui-shot-1", kind: "select", title: "Rename the flag, or keep it?", options: ["1. rename", "2. keep"] },
+    });
     mock.setOffice({
       officeName: "Model Selector",
       runnerPaused: true,
       tasks: [
-        { id: "t1", title: "draft the API surface", status: "planned", createdAt: 1, plannedAt: 2 },
-        { id: "t2", title: "document the board", status: "todo", createdAt: 3 },
-        { id: "t3", title: "set up the workspace", status: "done", createdAt: 4, finishedAt: 5 },
+        { id: "t1", title: "draft the API surface", status: "in_progress", createdAt: 1, startedAt: runStart, runSessionId: "run-1", runStartedAt: runStart },
+        { id: "t2", title: "wire the retry backoff", status: "waiting", createdAt: 2, startedAt: runStart, runSessionId: "run-2", runStartedAt: runStart },
+        { id: "t3", title: "document the board", status: "todo", createdAt: 3 },
+        { id: "t4", title: "polish the README", status: "planned", createdAt: 4, plannedAt: 5, note: "screenshots + the board" },
+        { id: "t5", title: "set up the workspace", status: "done", createdAt: 6, finishedAt: 7 },
       ],
     });
     mock.broadcastSSE({

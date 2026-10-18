@@ -13,7 +13,7 @@
  * can be resumed at boot, and any pre-move `workspaces` bucket is migrated into
  * the project's own file on first read and removed from the global file.
  *
- *   GET  /office?cwd=<workspace>  → { officeName, tasks, runnerPaused }
+ *   GET  /office?cwd=<workspace>  → { officeName, tasks, runnerPaused, runStates? }
  *   POST /office { action, cwd, … } → the same snapshot, after the write
  *
  * Actions: `setOfficeName`, `addTask`, `updateTask`, `moveTask`, `placeTask`,
@@ -21,8 +21,14 @@
  * single-runner lock + run-session record), `stopRun` (abort a live run) and
  * `failTask` (persist a failed dispatch so it is not retried). Validation is
  * unchanged from the core handlers (collapsed
- * whitespace, 60-char name, 200-char title, 4000-char brief, 200 tasks, the four
+ * whitespace, 60-char name, 200-char title, 4000-char brief, 200 tasks, the five
  * columns) so the board cannot be corrupted by a hand-edited store either.
+ *
+ * `runStates` is the derived half of the snapshot (never stored): the live chat
+ * status of every task that dispatched a run, plus the `pending` host dialog a
+ * blocked run is sitting on. A run blocked on a question parks its task in the
+ * **Waiting** column (see `reconcile`), where the board shows it until a human
+ * answers and the run moves on.
  *
  * Disabled → `disabledPluginForRoute()` refuses `/office` with a 403, exactly
  * like the other feature plugins' routes.
@@ -36,8 +42,17 @@
 
 import * as path from "node:path";
 
-/** Columns, in board order: a planned task is worked FIFO by `plannedAt`. */
-const TASK_STATUSES = ["todo", "planned", "in_progress", "done"];
+/** Columns, in board order: a planned task is worked FIFO by `plannedAt`.
+ *
+ *  `waiting` is where a running task PARKS itself while its run is blocked on a
+ *  host dialog (`ask_user_question`): the run is still live — so it still holds
+ *  the one-at-a-time runner — but nothing can move until a human answers. It is
+ *  never dispatched TO (only `reconcile` writes it, and the user may drag a card
+ *  there); answering the question moves the task back to In Progress. */
+const TASK_STATUSES = ["todo", "planned", "in_progress", "waiting", "done"];
+/** The columns a live run owns: at most ONE task may sit in either. */
+const HELD_STATUSES = new Set(["in_progress", "waiting"]);
+const isHeld = (t: any) => HELD_STATUSES.has(String(t?.status ?? ""));
 const TASK_MAX = 200;
 const TASK_NOTE_MAX = 4000;
 const NAME_MAX = 60;
@@ -160,13 +175,31 @@ export function activate(api: any): void {
     return seeded;
   }
 
+  /** The host dialog a task's run is blocked on, or null. Feature-detected: a
+   *  host that predates the hook simply has no Waiting column (its tasks never
+   *  leave In Progress), instead of the plugin failing to load. */
+  function pendingDialogFor(sessionId: any): { id: string; kind: string; title: string; options: string[] } | null {
+    const pending = api.kit.chatPendingDialog;
+    if (typeof pending !== "function" || !sessionId) return null;
+    try { return pending(String(sessionId)) || null; } catch { return null; }
+  }
+
   /** Live run status (from the chat manager) for every task that dispatched one.
-   *  Feature-detected so the plugin still runs on a host that predates the hook. */
+   *  Feature-detected so the plugin still runs on a host that predates the hook.
+   *  A run blocked on a question carries that question as `pending`, so the board
+   *  can say WHAT the orchestrator is waiting on, not just that it is waiting. */
   function runStates(state: any): Record<string, any> {
     const status = api.kit.chatRunStatus;
     const out: Record<string, any> = {};
     if (typeof status !== "function") return out;
-    for (const t of state.tasks || []) if (t && t.runSessionId) out[t.id] = status(String(t.runSessionId));
+    for (const t of state.tasks || []) {
+      if (!t || !t.runSessionId) continue;
+      const id = String(t.runSessionId);
+      const rs = status(id);
+      const pending = pendingDialogFor(id);
+      if (pending) rs.pending = pending;
+      out[t.id] = rs;
+    }
     return out;
   }
 
@@ -205,6 +238,12 @@ export function activate(api: any): void {
    * with the server, or an old/manual board entry. Reconcile it here so a stale
    * board heals on any read, with no page needed to recover it.
    *
+   * It is also what MOVES a task between In Progress and Waiting: a live run
+   * blocked on a host dialog (`ask_user_question`) is parked in Waiting, and the
+   * moment the answer lands the run is unblocked and the task returns to In
+   * Progress. Both are reads of the same run state, so the board tells the truth
+   * on any poll — including for a run started by a page that is no longer open.
+   *
    * Only unambiguous cases are touched, and only once past the grace window:
    * a fresh dispatch (or a fresh drag) is always left alone.
    */
@@ -215,16 +254,26 @@ export function activate(api: any): void {
     const now = Date.now();
     let changed = false;
     for (const t of state.tasks) {
-      if (t.status !== "in_progress") continue;
+      const held = isHeld(t);
+      if (!held) continue;
       const runAge = now - Number(t.runStartedAt || t.startedAt || 0);
       if (!t.runSessionId) {
-        // No dispatch recorded (a manual move, or a board from before the run
-        // session was tracked). Heal it once it is clearly not a fresh drag.
-        if (runAge > RUN_GRACE_MS) { t.status = "planned"; t.plannedAt = t.plannedAt || now; changed = true; }
+        // No dispatch recorded. On In Progress that is a leftover (a manual move,
+        // or a board from before the run session was tracked): heal it once it is
+        // clearly not a fresh drag. Waiting is a legitimate resting place for a
+        // card the user put there themselves, so it is left where it is.
+        if (t.status === "in_progress" && runAge > RUN_GRACE_MS) { t.status = "planned"; t.plannedAt = t.plannedAt || now; changed = true; }
         continue;
       }
       const rs = status(String(t.runSessionId));
-      if (rs.active) continue;                 // live — leave it alone
+      if (rs.active) {
+        // Live. Blocked on a question → Waiting; otherwise it is being worked on
+        // → In Progress. This one line is the whole auto-move, in both
+        // directions: answering the question flips it back.
+        const want = pendingDialogFor(t.runSessionId) ? "waiting" : "in_progress";
+        if (t.status !== want) { t.status = want; changed = true; }
+        continue;
+      }
       if (rs.present && rs.outcome) {
         // Finished while nobody was watching: settle from the recorded outcome.
         if (rs.outcome === "done") {
@@ -322,7 +371,7 @@ export function activate(api: any): void {
     if (RUNNERS.has(workspace)) return;                        // a run is already live
     const state = readState(workspace);
     if (state.runnerPaused !== false) return;                  // the runner is held
-    if (state.tasks.some((t: any) => t.status === "in_progress")) return; // reconcile owns it
+    if (state.tasks.some(isHeld)) return;                     // a task holds the run: reconcile owns it
     const next = state.tasks
       .filter((t: any) => t.status === "planned" && !t.failedAt)
       .sort((a: any, b: any) => (a.plannedAt || a.createdAt || 0) - (b.plannedAt || b.createdAt || 0))[0];
@@ -428,10 +477,10 @@ export function activate(api: any): void {
         const state = commit(workspace, (current) => {
           const task = current.tasks.find((t: any) => t.id === id);
           if (!task) return current;
-          // At most one task may sit In Progress (the runner owns it). A manual
-          // move into a busy In Progress column is refused, so it cannot wedge
-          // the runner behind a second "running" task.
-          if (status === "in_progress" && current.tasks.some((t: any) => t.status === "in_progress" && t.id !== id)) {
+          // At most one task may hold the runner (In Progress or Waiting for an
+          // answer). A manual move into a busy In Progress column is refused, so
+          // it cannot wedge the runner behind a second "running" task.
+          if (status === "in_progress" && current.tasks.some((t: any) => isHeld(t) && t.id !== id)) {
             busy = true; return current;
           }
           found = true;
@@ -446,9 +495,10 @@ export function activate(api: any): void {
           if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
           if (status === "in_progress") task.startedAt = task.startedAt || at;
           if (status === "done") task.finishedAt = at;
-          // Leaving In Progress ends any recorded run: the task is no longer
-          // owned by a chat session.
-          if (status !== "in_progress") { delete task.runSessionId; delete task.runStartedAt; }
+          // Leaving the run's own columns ends any recorded run: the task is no
+          // longer owned by a chat session. Waiting keeps it — the run is still
+          // live, just blocked on an answer.
+          if (!HELD_STATUSES.has(status)) { delete task.runSessionId; delete task.runStartedAt; }
           return current;
         });
         if (busy) return jsonResponse({ error: "another task is already running", code: "conflict" }, 409);
@@ -496,7 +546,7 @@ export function activate(api: any): void {
           if (!task) return current;
           // Same one-at-a-time guard as `moveTask`: a drag onto a busy In
           // Progress column is refused rather than starting a second run.
-          if (status === "in_progress" && current.tasks.some((t: any) => t.status === "in_progress" && t.id !== id)) {
+          if (status === "in_progress" && current.tasks.some((t: any) => isHeld(t) && t.id !== id)) {
             busy = true; return current;
           }
           found = true;
@@ -508,9 +558,9 @@ export function activate(api: any): void {
           if (status === "todo") { delete task.plannedAt; delete task.startedAt; delete task.finishedAt; }
           if (status === "in_progress") task.startedAt = task.startedAt || at;
           if (status === "done") task.finishedAt = at;
-          // Leaving In Progress ends any recorded run: the task is no longer
-          // owned by a chat session.
-          if (status !== "in_progress") { delete task.runSessionId; delete task.runStartedAt; }
+          // Leaving the run's own columns ends any recorded run: the task is no
+          // longer owned by a chat session (Waiting keeps it — see `moveTask`).
+          if (!HELD_STATUSES.has(status)) { delete task.runSessionId; delete task.runStartedAt; }
           if (status === "planned") {
             const queue = current.tasks
               .filter((t: any) => t.status === "planned")
@@ -545,7 +595,7 @@ export function activate(api: any): void {
         let found = false;
         let busy = false;
         const state = commit(workspace, (current) => {
-          if (current.tasks.some((t: any) => t.status === "in_progress")) { busy = true; return current; }
+          if (current.tasks.some(isHeld)) { busy = true; return current; }
           const task = current.tasks.find((t: any) => t.id === id);
           if (!task) return current;
           found = true;

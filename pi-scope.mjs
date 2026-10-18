@@ -59,7 +59,7 @@ Flags:
       --keep-server     leave a started server running when this exits
       --no-install      do not auto-install missing dependencies
   -p, --port <n>        server port            [SCOPE_PORT, default 43190]
-  -H, --host <addr>     bind address           [SCOPE_HOST, default 127.0.0.1]
+  -H, --host <addr>     bind address           [SCOPE_HOST, default 0.0.0.0]
   -D, --db <path>       SQLite database path   [SCOPE_DB_PATH]
   -t, --token <value>   auth token             [SCOPE_AUTH_TOKEN]
   -h, --help            this text
@@ -134,7 +134,9 @@ function readTokenFile() {
 function config() {
   const pick = (key, override) => override || process.env[key] || FILE_ENV[key];
   const port = parseInt(pick("SCOPE_PORT", opts.port ? String(opts.port) : "") || "43190", 10);
-  const host = pick("SCOPE_HOST", opts.host) || "127.0.0.1";
+  // Bind every interface by default so the phone QR works with no setup (see
+  // scope-control.js). SCOPE_HOST=127.0.0.1 restores a this-machine-only bind.
+  const host = pick("SCOPE_HOST", opts.host) || "0.0.0.0";
   const db = pick("SCOPE_DB_PATH", opts.db) || "";
   // Never fall back to a fixed token: it gates the /terminal WebSocket, i.e. a
   // full shell on this machine. A re-launch adopts the running server's token

@@ -241,8 +241,13 @@ describe("reference library", () => {
     assert.equal(prompts().pop(), "and again", "the second turn is the user's text alone");
 
     // Continuing a recorded session: the block was already delivered when that
-    // conversation started, so a resume must not re-inject it.
-    await chat({ sessionId: sid, sessionFile: path.join(ws, "recorded.jsonl"), prompt: "resumed" });
+    // conversation started, so a resume must not re-inject it. The target is a
+    // REAL pi session file: a resume the server cannot honour (a file that is
+    // gone) is refused — with a reason on the stream — instead of being handed
+    // to pi (see chat-resume.e2e.test.mjs).
+    const recorded = path.join(ws, "recorded.jsonl");
+    fs.writeFileSync(recorded, `${JSON.stringify({ type: "session", version: 3, id: "recorded-1", timestamp: new Date().toISOString(), cwd: ws })}\n`);
+    await chat({ sessionId: sid, sessionFile: recorded, prompt: "resumed" });
     assert.equal(prompts().pop(), "resumed");
 
     // Starting a NEW conversation on the same subprocess: injected again.

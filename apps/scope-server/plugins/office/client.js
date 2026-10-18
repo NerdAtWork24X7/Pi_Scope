@@ -40,10 +40,10 @@
  * doorway, a handover beat at the desk, then back — see the errand section below.
  *
  * Hovering a desk (or tabbing to it) opens a popup with that agent's recent
- * messages — the tool calls, results and assistant text it produced, newest
- * last, the way they would scroll past in a terminal. Live lines arrive from the
- * SSE stream the host fans out to the active view; the back-history comes from
- * `GET /sessions/<sid>/events` for the agent's own session.
+ * replies — the assistant text it produced, newest last, the way it would read
+ * as a conversation. Live lines arrive from the SSE stream the host fans out to
+ * the active view; the back-history comes from `GET /sessions/<sid>/events` for
+ * the agent's own session.
  *
  * Data comes from the same sources the rest of the app uses:
  *   • `window.__SCOPE_STATE.sessions` — the session list, kept live by app.js's
@@ -500,54 +500,18 @@
     return t.length > max ? t.slice(0, max - 1) + "…" : t;
   }
 
-  /** The most useful argument of a tool call, for the `$ tool <arg>` line. */
-  const ARG_KEYS = ["command", "cmd", "path", "file_path", "file", "pattern", "query", "url", "prompt", "agent", "name", "message"];
-  function argPreview(args) {
-    if (!args || typeof args !== "object") return "";
-    for (const k of ARG_KEYS) {
-      const v = args[k];
-      if (typeof v === "string" && v.trim()) return oneLine(v, 90);
-      if (v != null && typeof v !== "object") return oneLine(String(v), 90);
-    }
-    const keys = Object.keys(args);
-    if (!keys.length) return "";
-    try { return oneLine(JSON.stringify(args), 90); } catch { return ""; }
-  }
-
   /**
-   * One cmdline-ish line for an event — the shape of what the agent saw or said,
-   * or null for events with nothing to show (turn markers, timing, …).
+   * One line for an event, when it is something the agent SAID. The popup is a
+   * view of the agent's own words — its assistant replies — not of the tool
+   * traffic around them: a $ command or a tool result is activity, and it
+   * already reads on the desk's bubble (see eventText). Everything else returns
+   * null so it never reaches the log.
    */
   function eventLine(evt) {
-    const p = (evt && evt.payload) || {};
-    switch (evt && evt.type) {
-      case "tool_call": {
-        const a = argPreview(p.args);
-        return { kind: "cmd", text: `$ ${p.tool_name || "tool"}${a ? ` ${a}` : ""}` };
-      }
-      case "tool_result": {
-        const bad = S.isToolResultError ? S.isToolResultError(p) : p.is_error === true;
-        const out = oneLine(p.content_text, 110);
-        return { kind: bad ? "err" : "ok", text: `${bad ? "✗" : "✓"} ${p.tool_name || "tool"}${out ? `  ${out}` : ""}` };
-      }
-      case "assistant_message": {
-        const t = oneLine(p.text);
-        return t ? { kind: "say", text: t } : null;
-      }
-      case "agent_end": {
-        const t = oneLine(p.final_response);
-        return t ? { kind: "say", text: t } : null;
-      }
-      case "user_message": {
-        const t = oneLine(p.text);
-        return t ? { kind: "user", text: t } : null;
-      }
-      case "thinking": {
-        const t = oneLine(p.thinking || p.text);
-        return t ? { kind: "think", text: t } : null;
-      }
-      default: return null;
-    }
+    if (!evt || evt.type !== "assistant_message") return null;
+    const p = evt.payload || {};
+    const t = oneLine(p.text);
+    return t ? { kind: "say", text: t } : null;
   }
 
   /** Short label for the tool an event belongs to. */
@@ -662,7 +626,7 @@
               `<span class="office-pop-time">${esc(S.fmtRel ? S.fmtRel(l.at) : "")}</span>` +
               `<span class="office-pop-text">${esc(l.text)}</span>` +
             `</div>`).join("") + `</div>`
-        : `<div class="office-pop-empty">${seat.disabled ? "Off duty — no activity." : "No messages yet."}</div>`);
+        : `<div class="office-pop-empty">${seat.disabled ? "Off duty — no activity." : "No replies yet."}</div>`);
   }
 
   function placePop() {
@@ -935,6 +899,7 @@
     { id: "todo", label: "Todo" },
     { id: "planned", label: "Planned" },
     { id: "in_progress", label: "In Progress" },
+    { id: "waiting", label: "Waiting" },
     { id: "done", label: "Done" },
   ];
 
@@ -957,6 +922,51 @@
   /** The task the orchestrator is on right now, if any. */
   function currentTask() {
     return tasksIn("in_progress")[0] || null;
+  }
+
+  /** The task parked in Waiting: its run is blocked on a question only a human
+   *  can answer. The run is still live, so this card holds the queue exactly like
+   *  `currentTask()` does. */
+  function waitingTask() {
+    return tasksIn("waiting")[0] || null;
+  }
+
+  /** The task the orchestrator holds right now — running it, or waiting on an
+   *  answer. The runner works one task at a time, so both count as "busy". */
+  function heldTask() {
+    return currentTask() || waitingTask();
+  }
+
+  /** mm:ss (h:mm:ss past the hour) since a run started, or "" when unknown. */
+  function runClock(startedAt) {
+    const t0 = Number(startedAt) || 0;
+    if (!t0) return "";
+    const s = Math.max(0, Math.floor((Date.now() - t0) / 1000));
+    const h = Math.floor(s / 3600);
+    const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+    const ss = String(s % 60).padStart(2, "0");
+    return h ? `${h}:${mm}:${ss}` : `${Math.floor(s / 60)}:${ss}`;
+  }
+
+  /** Is a live chat run driving this card right now? A card the user dragged into
+   *  In Progress by hand has no run, and must not claim to be one. */
+  function taskLive(task) {
+    if (!task) return false;
+    const rs = runStateOf(task.id);
+    if (rs) return !!rs.active;
+    return !!(task.runSessionId || activeRunTaskId === task.id);
+  }
+
+  /** The breathing dot a live run wears — or nothing, when it is not live. */
+  function liveDot(task) {
+    return taskLive(task) ? `<span class="office-run-dot"></span>` : "";
+  }
+
+  /** The question a blocked run is sitting on (the snapshot's `pending`), or null. */
+  function taskPending(task) {
+    const rs = task ? runStateOf(task.id) : null;
+    const pending = rs && rs.pending;
+    return pending && typeof pending === "object" ? pending : null;
   }
 
   // ─── The orchestrator's model ─────────────────────────────────────────────
@@ -1093,17 +1103,28 @@
    *  orchestrator is on. Clicking it opens the full-screen board. */
   function kanbanMiniHtml() {
     const running = currentTask();
+    const waiting = waitingTask();
     const queued = tasksIn("planned").length;
+    // The run's clock is left blank here and filled by tickRunClocks(): its text
+    // would otherwise change every second and defeat the sign's rebuild guard.
+    const now = waiting
+      ? `<span class="office-kanban-now wait"><span class="office-wait-dot"></span>` +
+        `${taskLive(waiting) ? "waiting on you" : "waiting"}${waiting.title ? ` — ${esc(oneLine(waiting.title, 24))}` : ""}</span>`
+      : running
+        ? `<span class="office-kanban-now">${liveDot(running)}${esc(oneLine(running.title, 34))}` +
+          (taskLive(running) ? `<span class="office-run-time" data-start="${escAttr(running.runStartedAt || running.startedAt || 0)}"></span>` : "") +
+          `</span>`
+        : `<span class="office-kanban-now">${queued ? "queue ready" : "idle"}</span>`;
     return (
       `<button class="office-kanban-mini" id="office-board-open" type="button" ` +
-        `title="Open the task board — Todo → Planned → In Progress → Done" aria-label="Open the task board">` +
+        `title="Open the task board — Todo → Planned → In Progress → Waiting → Done" aria-label="Open the task board">` +
         `<span class="office-kanban-head">Kanban</span>` +
         `<span class="office-kanban-state ${runnerPaused() ? "paused" : "running"}">${runnerPaused() ? "⏸ paused" : "▶ running"}</span>` +
         `<span class="office-kanban-cols">` +
           TASK_COLUMNS.map((c) =>
             `<span class="office-kmini-col ${c.id}">${esc(c.label)}<b>${tasksIn(c.id).length}</b></span>`).join("") +
         `</span>` +
-        `<span class="office-kanban-now">${running ? esc(oneLine(running.title, 34)) : queued ? "queue ready" : "idle"}</span>` +
+        now +
       `</button>`
     );
   }
@@ -1112,7 +1133,12 @@
    *  The card is draggable — dragging it to another column moves it, and
    *  dropping it into Planned at a position resequences the queue — so the board
    *  carries no move/sequence arrows any more. Keyboard users reorder with the
-   *  arrow keys (see onCardKey). */
+   *  arrow keys (see onCardKey).
+   *
+   *  A card the orchestrator holds also says what it is doing with it: the run in
+   *  flight with its clock (In Progress), or the question it is blocked on
+   *  (Waiting). Both are read from the snapshot's derived run state, so a run
+   *  started by a page that is long gone still shows. */
   function kanbanRowHtml(task, status) {
     // A Todo task is still being written, so it can be edited (title + brief)
     // until it moves on to Planned.
@@ -1124,11 +1150,31 @@
     const failed = task.failedAt
       ? `<span class="office-task-failed" title="This run could not complete — move the card to retry it">⚠ failed</span>`
       : "";
+    // …and what the orchestrator is doing right now, on the card it is holding.
+    // All of it is read from the derived run state, so a run started by a page
+    // that is long gone still shows; a card the user dragged in by hand has no
+    // run, and must not pretend it is one.
+    const pending = status === "waiting" ? taskPending(task) : null;
+    const parked = status === "waiting" && taskLive(task);
+    const live = status === "in_progress" && taskLive(task)
+      ? `<span class="office-task-run" title="The orchestrator is working this task right now">` +
+          `<span class="office-run-dot"></span>running` +
+          `<span class="office-run-time" data-start="${escAttr(task.runStartedAt || task.startedAt || 0)}"></span>` +
+        `</span>`
+      : "";
+    const waiting = status === "waiting"
+      ? `<span class="office-task-wait" title="${escAttr(parked ? "The orchestrator is blocked on a question here until you answer it" : "Parked in Waiting — the runner works one task at a time")}">` +
+          `<span class="office-wait-dot"></span>${parked ? "waiting on you" : "waiting"}` +
+        `</span>` +
+        (pending && pending.title ? `<span class="office-task-q">${esc(oneLine(pending.title, 120))}</span>` : "")
+      : "";
     return (
       `<div class="office-task${task.failedAt ? " failed" : ""}" data-id="${escAttr(task.id)}" data-status="${escAttr(status)}" ` +
         `draggable="true" tabindex="0" role="listitem" ` +
         `title="Drag to another column — or focus it and use ← → to move, ↑ ↓ to resequence">` +
         `<span class="office-task-title" title="${escAttr(task.title)}">${esc(task.title)}</span>` +
+        live +
+        waiting +
         failed +
         (task.note ? `<span class="office-task-note" title="${escAttr(task.note)}">${esc(task.note)}</span>` : "") +
         `<span class="office-task-acts">` +
@@ -1139,7 +1185,19 @@
     );
   }
 
-  /** The board's four columns. Todo carries the New-task button; the task
+  /** Keep every running card's clock honest WITHOUT rebuilding the board: the
+   *  columns are only repainted when their markup actually changes (so a poll
+   *  cannot drop focus or a drag mid-flight), which means the seconds are written
+   *  straight into the nodes that are already on screen. One pass over the handful
+   *  of clocks that exist — at most one on the board, one on the wall sign. */
+  function tickRunClocks() {
+    for (const el of document.querySelectorAll(".office-run-time[data-start]")) {
+      const next = runClock(el.dataset.start);
+      if (next && el.textContent !== next) el.textContent = next;
+    }
+  }
+
+  /** The board's five columns. Todo carries the New-task button; the task
    *  itself is written in the roomy popup editor (openTaskDialog). */
   function kanbanColumnsHtml() {
     return TASK_COLUMNS.map((c) => {
@@ -1695,6 +1753,7 @@
       const html = kanbanMiniHtml();
       if (signHost.innerHTML !== html) signHost.innerHTML = html;
     }
+    tickRunClocks();   // the sign's stack of clocks is rebuilt blank (see above)
 
     // Keep the desks' token/cost totals fresh, and keep the queue moving: a task
     // in Planned belongs to the orchestrator, and nothing else picks it up.
@@ -2477,6 +2536,9 @@
         cols.innerHTML = html;
       }
     }
+    // The running card's clock counts seconds: it is written into the node the
+    // rebuild left behind rather than into the markup, so it never forces one.
+    tickRunClocks();
     const paused = runnerPaused();
     const run = overlay.querySelector("#office-run-toggle");
     if (run) {
@@ -2489,28 +2551,32 @@
     const now = overlay.querySelector("#office-board-now");
     if (now) {
       const running = currentTask();
+      const waiting = waitingTask();
       const planned = tasksIn("planned");
       const runnable = planned.filter((t) => !t.failedAt).length;
-      now.textContent = paused
-        ? (planned.length || running
-          ? "Paused — press ▶ Run to work the queue."
-          : "The queue is empty — add a task, then move it to Planned.")
-        : running
-          ? `The orchestrator is on “${running.title}” — the next planned task starts when it finishes.`
-          : runnable
-            ? "A planned task is waiting; it starts as soon as the orchestrator is free."
-            : planned.length
-              ? "Every planned task failed — move one to retry it."
-              : "The queue is empty — add a task, then move it to Planned.";
+      now.textContent = waiting
+        ? `Waiting on you: “${waiting.title}” stopped to ask something — answer it to let the run continue, or press Pause to stop it.`
+        : paused
+          ? (planned.length || running
+            ? "Paused — press ▶ Run to work the queue."
+            : "The queue is empty — add a task, then move it to Planned.")
+          : running
+            ? `The orchestrator is on “${running.title}” — the next planned task starts when it finishes.`
+            : runnable
+              ? "A planned task is waiting; it starts as soon as the orchestrator is free."
+              : planned.length
+                ? "Every planned task failed — move one to retry it."
+                : "The queue is empty — add a task, then move it to Planned.";
     }
   }
 
   /**
-   * Open the task board full-screen: four columns (Todo, Planned, In Progress,
-   * Done) and the add form under Todo. Cards are dragged between columns and,
-   * within Planned, dropped at a position to resequence the queue the runner
-   * reads; the runner below hands the queue to the orchestrator one task at a
-   * time.
+   * Open the task board full-screen: five columns (Todo, Planned, In Progress,
+   * Waiting, Done) with the add form under Todo. Cards are dragged between
+   * columns and, within Planned, dropped at a position to resequence the queue
+   * the runner reads; the runner below hands the queue to the orchestrator one
+   * task at a time. A task the orchestrator's run parks in Waiting is one that
+   * asked a question and cannot go on without an answer.
    */
   function openKanban() {
     closeKanban();
@@ -2521,7 +2587,7 @@
       `<div class="office-lib-panel office-board-panel" role="dialog" aria-modal="true" aria-label="Task board">` +
         `<div class="office-lib-head">` +
           `<span class="office-lib-hd-title">Task board</span>` +
-          `<span class="office-lib-hd-sub">Todo → Planned → In Progress → Done. Drag a card to another column (or focus it and use ← →); drop it into Planned at a position to resequence the queue. Planned tasks run one at a time when the runner is running.</span>` +
+          `<span class="office-lib-hd-sub">Todo → Planned → In Progress → Waiting → Done. Drag a card to another column (or focus it and use ← →); drop it into Planned at a position to resequence the queue. Planned tasks run one at a time when the runner is running — a task whose run asks you a question parks in Waiting until you answer it.</span>` +
           `<span class="office-lib-hd-spacer"></span>` +
           // The runner starts paused; this is where the queue is started or held.
           `<button class="btn-sm office-run-toggle" id="office-run-toggle" type="button"></button>` +
@@ -2752,6 +2818,9 @@
       pauseAbort = true;
       const ids = new Set(adopted);
       if (activeRunTaskId) ids.add(activeRunTaskId);
+      // A task parked in Waiting holds a run too (it is blocked on a question, not
+      // finished): Pause must stop that one as well.
+      for (const t of tasksIn("waiting")) ids.add(t.id);
       adopted.clear();
       for (const id of ids) inFlight.delete(id);
       for (const id of ids) {
@@ -2968,13 +3037,14 @@
    *  if its run has finished, or leave it (still live) for the next poll.
    *
    *  Recovery is only ever for a task that is STILL waiting on that run: a task
-   *  that has left In Progress (the owner finished it, another tab moved it) has
-   *  already been settled and its run record cleared, so "no recorded run" there
-   *  means "done", not "the session vanished". Without this guard a poll that
-   *  fired just after the run was settled reopened the finished task and
-   *  dispatched it a second time. */
+   *  that has left the run's own columns (the owner finished it, another tab
+   *  moved it) has already been settled and its run record cleared, so "no
+   *  recorded run" there means "done", not "the session vanished". Without this
+   *  guard a poll that fired just after the run was settled reopened the finished
+   *  task and dispatched it a second time. Waiting counts as still-waiting: its
+   *  run is live, just blocked on an answer, so the poll keeps watching. */
   async function checkAdopted(task) {
-    if (task.status && task.status !== "in_progress") {
+    if (task.status && task.status !== "in_progress" && task.status !== "waiting") {
       adopted.delete(task.id);
       inFlight.delete(task.id);
       return;
@@ -3005,8 +3075,9 @@
     if (adoptTimer || !adopted.size) return;
     adoptTimer = setTimeout(async () => {
       adoptTimer = null;
-      // Drop ids whose task left In Progress (deleted, or moved by the user).
-      const live = new Set(tasksIn("in_progress").map((t) => t.id));
+      // Drop ids whose task left the columns a live run owns (deleted, or moved
+      // by the user) — a run parked in Waiting is still ours to settle.
+      const live = new Set([...tasksIn("in_progress"), ...tasksIn("waiting")].map((t) => t.id));
       for (const id of [...adopted]) if (!live.has(id)) { adopted.delete(id); inFlight.delete(id); }
       if (!adopted.size) return;
       await refreshOffice(true);
@@ -3034,31 +3105,38 @@
     // risk a duplicate dispatch against the server's own run.
     if (!office || office.serverRunner) return;
     const running = currentTask();
-    if (running) {
+    const waiting = waitingTask();
+    if (running || waiting) {
+      const held = running || waiting;
       // This page already owns (or adopted) the run: leave it be.
-      if (inFlight.has(running.id)) { scheduleAdoptPoll(); return; }
-      const rs = runStateOf(running.id);
+      if (inFlight.has(held.id)) { scheduleAdoptPoll(); return; }
+      const rs = runStateOf(held.id);
       // A task with a recorded run session: while that run is still live — even
       // though the page that dispatched it may have reloaded away — ADOPT it
       // instead of starting a duplicate. If it already finished while we were
       // elsewhere, settle it from the outcome the server recorded. Either way the
       // id is marked in flight so no render can schedule it twice, and the poll
-      // watches until the run settles.
-      if (running.runSessionId && rs) {
-        inFlight.add(running.id);
-        adopted.add(running.id);
-        void checkAdopted(running);
+      // watches until the run settles. Waiting is the same situation with the run
+      // blocked on a question: it still owns the orchestrator, so nothing else
+      // may be dispatched behind it.
+      if (held.runSessionId && rs) {
+        inFlight.add(held.id);
+        adopted.add(held.id);
+        void checkAdopted(held);
         scheduleAdoptPoll();
         return;
       }
+      // A card the user parked in Waiting by hand has no run of its own: leave it
+      // where they put it (it holds the queue, exactly like a task being worked).
+      if (held.status !== "in_progress") return;
       // A task left In Progress with no live run — an earlier page that crashed
       // before dispatch, another tab, a run whose session is gone — is not being
       // worked on: put it back at the head of the queue rather than stalling the
       // board. Marking it in flight first keeps repeated renders during the write
       // from scheduling it twice.
-      inFlight.add(running.id);
-      void moveTask(running.id, "planned", true).then((moved) => {
-        inFlight.delete(running.id);
+      inFlight.add(held.id);
+      void moveTask(held.id, "planned", true).then((moved) => {
+        inFlight.delete(held.id);
         if (moved && !runnerPaused()) void pumpTasks();
       });
       return;                           // the orchestrator is already on a task
@@ -3895,6 +3973,9 @@
       if (office && office.serverRunner && !runnerPaused()) void refreshOffice(true);
       // Time-based statuses (the 10s activity window) and expiring labels.
       scheduleRender();
+      // …and the running task's clock, which counts in seconds rather than on a
+      // state change (the board is not rebuilt to move it on).
+      tickRunClocks();
       if (lastActivitySeen && Date.now() - lastActivitySeen > ACTIVITY_TTL_MS) lastActivitySeen = 0;
     }, TICK_MS);
   }

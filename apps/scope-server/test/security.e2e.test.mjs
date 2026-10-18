@@ -275,3 +275,40 @@ describe("sandbox escapes via symlink", () => {
     assert.equal(fs.readFileSync(path.join(repoDir, "sub", "ok.txt"), "utf8"), "hello");
   });
 });
+
+// GET /media serves a picture or video pi wrote to the workspace and referenced
+// by path (the Chat view turns "saved to tmp/chart.png" into one of these URLs).
+// It must ride the same sandbox as /files/* or it becomes a way to read back any
+// file the server can.
+describe("workspace media (GET /media)", () => {
+  const mediaUrl = (p, { token = TOKEN } = {}) =>
+    `${base}/media?token=${token}&cwd=${encodeURIComponent(repoDir)}&path=${encodeURIComponent(p)}`;
+
+  test("serves an in-workspace picture as itself", async () => {
+    fs.writeFileSync(path.join(repoDir, "shot.png"), "PNGDATA");
+    const res = await fetch(mediaUrl("shot.png"));
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "image/png");
+    assert.equal(await res.text(), "PNGDATA");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  });
+
+  test("refuses a path that leaves the workspace, through .. or a symlink", async () => {
+    fs.writeFileSync(path.join(outsideDir, "secret.png"), "SECRET");
+    const dotdot = await fetch(mediaUrl(`../${path.basename(outsideDir)}/secret.png`));
+    assert.ok(dotdot.status >= 400, `.. escape: got ${dotdot.status}`);
+    const symlink = await fetch(mediaUrl("escape/secret.png"));
+    assert.ok(symlink.status >= 400, `symlink escape: got ${symlink.status}`);
+  });
+
+  test("never serves a non-media file, even inside the workspace", async () => {
+    fs.writeFileSync(path.join(repoDir, "notes.txt"), "private");
+    const res = await fetch(mediaUrl("notes.txt"));
+    assert.equal(res.status, 415);
+  });
+
+  test("requires a token", async () => {
+    const res = await fetch(`${base}/media?cwd=${encodeURIComponent(repoDir)}&path=shot.png`);
+    assert.equal(res.status, 401);
+  });
+});

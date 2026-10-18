@@ -868,6 +868,86 @@ describe("chat streaming", () => {
     assert.equal(await page.$eval(".chat-tool-call", (d) => d.open), false, "turning Tools on folds every call");
   });
 
+  test("the Markdown / Raw switch redraws an assistant reply and sticks", async () => {
+    // Markdown (the default) parses pi's markdown into real elements; Raw shows
+    // the plain text unparsed. Only assistant text is affected — user bubbles
+    // and the rest are untouched.
+    await selectA();
+    const turn = await send(page, mock, "work");
+    turn.send({ type: "session", sessionId: "live-view" });
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "text", delta: "**bold** answer" });
+    turn.send({ type: "final", text: "**bold** answer" });
+    turn.send({ type: "done", sessionId: "live-view" });
+    turn.end();
+
+    // Markdown is the default: the markdown became a <strong>, not literal asterisks.
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live) .chat-text strong");
+    assert.equal(await page.getAttribute('#chat-view-toggle [data-view="markdown"]', "aria-pressed"), "true");
+
+    // Raw: the same text unparsed — literal asterisks, no <strong>.
+    await page.click('#chat-view-toggle [data-view="raw"]');
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live) .chat-text.chat-view-raw");
+    assert.equal(await page.locator(".chat-ai .chat-text strong").count(), 0, "raw does not parse the markdown");
+    assert.match(await page.textContent(".chat-ai:not(.chat-ai-live) .chat-text"), /\*\*bold\*\* answer/);
+
+    // The choice is remembered per browser.
+    assert.equal(await page.evaluate(() => localStorage.getItem("scope-chat-view")), "raw");
+
+    // Back to Markdown reparses the text.
+    await page.click('#chat-view-toggle [data-view="markdown"]');
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live) .chat-text strong");
+    assert.equal(await page.getAttribute('#chat-view-toggle [data-view="markdown"]', "aria-pressed"), "true");
+  });
+
+  test("Markdown view renders a GFM table and images; Raw leaves them literal", async () => {
+    await selectA();
+    const doc =
+      "| Name | Qty |\n| --- | ---: |\n| apple | 3 |\n| pear | 10 |\n\n" +
+      "![a dot](data:image/png;base64,iVBORw0KGgo=)";
+    const turn = await send(page, mock, "table please");
+    turn.send({ type: "session", sessionId: "live-table" });
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "final", text: doc });
+    turn.send({ type: "done", sessionId: "live-table" });
+    turn.end();
+
+    // Markdown: a real table with a header row and aligned cells.
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live) .chat-text table");
+    const cells = await page.evaluate(() =>
+      [...document.querySelectorAll(".chat-ai:not(.chat-ai-live) .chat-text table tr")].map((tr) =>
+        [...tr.children].map((c) => ({ tag: c.tagName, text: c.textContent, align: c.style.textAlign }))
+      )
+    );
+    assert.deepEqual(cells[0], [
+      { tag: "TH", text: "Name", align: "" },
+      { tag: "TH", text: "Qty", align: "right" },
+    ]);
+    assert.equal(cells.length, 3, "one header row and two body rows");
+    assert.deepEqual(cells[2].map((c) => c.text), ["pear", "10"]);
+
+    // …and the image markdown became a row in the size table (kept out of the
+    // prose), with its alt text standing in as the picture's name. The table
+    // starts folded, so open it first.
+    await page.click(".chat-ai:not(.chat-ai-live) .result-media > summary");
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live) .result-images img");
+    const img = await page.$eval(".chat-ai:not(.chat-ai-live) .result-images img", (el) => ({
+      src: el.getAttribute("src"),
+      alt: el.getAttribute("alt"),
+    }));
+    assert.deepEqual(img, { src: "data:image/png;base64,iVBORw0KGgo=", alt: "a dot" });
+    assert.match(await page.textContent(".chat-ai:not(.chat-ai-live) .result-images"), /a dot/);
+
+    // Raw: no table or image element, the source is shown verbatim.
+    await page.click('#chat-view-toggle [data-view="raw"]');
+    await page.waitForSelector(".chat-ai:not(.chat-ai-live) .chat-text.chat-view-raw");
+    assert.equal(await page.locator(".chat-ai .chat-text table").count(), 0, "raw does not build a table");
+    assert.equal(await page.locator(".chat-ai .chat-text img").count(), 0, "raw does not build an image");
+    const raw = await page.textContent(".chat-ai:not(.chat-ai-live) .chat-text");
+    assert.match(raw, /\| apple \| 3 \|/);
+    assert.match(raw, /!\[a dot\]\(data:image\/png;base64,iVBORw0KGgo=\)/);
+  });
+
   test("each assistant message shows input, output, cache tokens and cost — live and after the turn", async () => {
     await selectA();
     const turn = await send(page, mock, "do work");
@@ -1147,6 +1227,80 @@ describe("session resume", () => {
     assert.ok(!(await canvas()).includes("second reply"), "resuming s1 must not show the new conversation");
   });
 
+  test("the reply a server refused to resume is explained on the live bubble", async () => {
+    // The server only points pi at a session file that is really there: a resume
+    // target that is gone (the agent-team dispatcher deletes a subagent's log
+    // when its run ends) would otherwise answer from no context at all. It
+    // reports what it did as an error event BEFORE the prompt it did send, so the
+    // turn still streams — losing the note left the reader believing the
+    // transcript above had been continued.
+    await boot({ sessions: [makeSession(S1)], events: { s1: S1_EVENTS }, team: defaultTeam({ chatWorkspaces: [WS_A] }) });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "s1").click();
+    await page.waitForFunction(
+      () => document.getElementById("chat-messages").textContent.includes("RECORDED-FROM-S1"),
+      undefined, { timeout: 4000 }
+    );
+
+    const turnP = mock.nextTurn();
+    await page.fill("#chat-input", "continue please");
+    await page.click("#chat-send");
+    const turn = await turnP;
+    turn.send({ type: "session", sessionId: "s1" });
+    turn.send({ type: "error", message: "cannot resume this session — its pi session file is gone (/tmp/gone.json); its recorded transcript was carried into this conversation instead" });
+    turn.send({ type: "msg_start" });
+    turn.send({ type: "text", delta: "fresh answer" });
+    turn.send({ type: "final", text: "fresh answer" });
+    turn.send({ type: "done", sessionId: "s1" });
+    turn.end();
+
+    await page.waitForFunction(
+      () => document.getElementById("chat-messages").textContent.includes("fresh answer"),
+      undefined, { timeout: 4000 }
+    );
+    const text = await canvas();
+    assert.match(text, /cannot resume this session/, "the reason is on screen");
+    assert.match(text, /recorded transcript was carried into this conversation instead/, "and what the reply is instead");
+  });
+
+  test("a seeded transcript stays out of the user's own bubble", async () => {
+    // The server prepends the recorded conversation to the prompt of a session it
+    // could not resume, and pi records that whole prompt as the turn's
+    // user_message. Refetching the transcript must show what the user typed —
+    // not a wall of seeded context.
+    const seed = [
+      "[Continued session transcript — its pi session file is gone (/tmp/subagent.json)]",
+      "This is the only record of this conversation. Treat it as your memory of the work done",
+      "so far: continue from where it ended and do not repeat what it reports as finished.",
+      "",
+      "### user",
+      "chart the revenue by quarter",
+      "### assistant",
+      "Chart written to tmp/chart.png.",
+      "[End of continued session transcript]",
+    ].join("\n");
+    await boot({
+      sessions: [makeSession({ ...S1, session_file: "/tmp/subagent.json" })],
+      events: {
+        s1: [
+          { type: "user_message", ts: 1, payload: { text: `${seed}\n\ncontinue please` } },
+          { type: "assistant_message", ts: 2, payload: { text: "continued from the transcript" } },
+        ],
+      },
+      team: defaultTeam({ chatWorkspaces: [WS_A] }),
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "s1").click();
+    await page.waitForFunction(
+      () => document.getElementById("chat-messages").textContent.includes("continued from the transcript"),
+      undefined, { timeout: 4000 }
+    );
+    const text = await canvas();
+    assert.match(text, /continue please/, "the user's own message is shown");
+    assert.ok(!text.includes("End of continued session transcript"), "the seeded block is not");
+    assert.ok(!text.includes("chart the revenue by quarter"), "nor its contents");
+  });
+
   test("REGRESSION: a resumed session sends to its own session, not the workspace conversation", async () => {
     await startNewAfterRecorded();
     await sessRow(page, "s1").click();
@@ -1291,6 +1445,197 @@ describe("session resume", () => {
       undefined, { timeout: 4000 }
     );
     assert.ok(!(await canvas()).includes("fresh live reply"), "the ancient transcript is shown, not the live conversation");
+  });
+});
+
+// ─── Media a result carries ─────────────────────────────────────────────────
+// pi can answer with a picture — a screenshot a tool returned, a chart it drew,
+// an inline data: URI — or a video link. The Chat view lists those in a size
+// table instead of leaving the source as prose; any other URL is still a link.
+
+describe("result media", () => {
+  const WITH_IMAGE = [
+    { type: "user_message", ts: 1, payload: { text: "screenshot please" } },
+    { type: "tool_call", ts: 2, payload: { tool_call_id: "c1", tool_name: "screenshot", args: {} } },
+    { type: "tool_result", ts: 3, payload: {
+      tool_call_id: "c1",
+      tool_name: "screenshot",
+      content_text:
+        "saved to https://cdn.example.com/shot.png\n" +
+        "inline: data:image/png;base64,iVBORw0KGgo=\n" +
+        "also see https://example.com/report.pdf",
+    } },
+    { type: "assistant_message", ts: 4, payload: { text: "here it is" } },
+  ];
+
+  test("a tool result's images render beside its text; a plain link does not", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: "img-1", cwd: WS_A, agent_name: "orchestrator", first_msg: "screenshot please" })],
+      events: { "img-1": WITH_IMAGE },
+      seed: { "scope-chat-expand-tools": "1" },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "img-1").click();
+    // The cross-origin image never loads under test, so a 0×0 <img> is "hidden";
+    // wait for it to be attached — the assertions below are about its markup.
+    await page.waitForSelector(".chat-tool-call-result .result-images img", { state: "attached" });
+
+    const imgs = await page.$$eval(".chat-tool-call-result .result-images img", (els) =>
+      els.map((e) => ({ src: e.getAttribute("src"), alt: e.getAttribute("alt") }))
+    );
+    assert.deepEqual(imgs.map((i) => i.src), [
+      "https://cdn.example.com/shot.png",
+      "data:image/png;base64,iVBORw0KGgo=",
+    ]);
+    assert.equal(imgs.length, 2, "the .pdf link is not drawn as a picture");
+    assert.match(await page.textContent(".chat-tool-call-result"), /saved to/, "the raw text is kept");
+  });
+
+  test("an assistant reply's images render in a size table, and its URLs are links", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: "img-2", cwd: WS_A, agent_name: "orchestrator", first_msg: "draw" })],
+      events: { "img-2": [
+        { type: "user_message", ts: 1, payload: { text: "draw" } },
+        { type: "assistant_message", ts: 2, payload: { text: "here: https://cdn.example.com/pic.jpg\nsee https://example.com/report.pdf" } },
+      ] },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "img-2").click();
+    // As above: the remote image is 0×0 (unloaded), so wait for attachment.
+    await page.waitForSelector(".chat-ai .result-images img", { state: "attached" });
+    assert.equal(await page.getAttribute(".chat-ai .result-images img", "src"), "https://cdn.example.com/pic.jpg");
+    // The picture is in the table, not inlined in the prose…
+    assert.equal(await page.locator(".chat-ai .chat-text img").count(), 0, "the prose holds no inline image");
+    // …while every URL pi printed is a clickable link.
+    assert.equal(await page.getAttribute('.chat-ai .chat-text a[href="https://example.com/report.pdf"]', "href"), "https://example.com/report.pdf");
+    assert.equal(await page.getAttribute('.chat-ai .result-images a[href="https://cdn.example.com/pic.jpg"]', "href"), "https://cdn.example.com/pic.jpg");
+    // The table folds behind its summary: it starts collapsed, and the summary
+    // expands and re-collapses it.
+    assert.equal(await page.getAttribute(".chat-ai .result-media", "open"), null, "the media table starts collapsed");
+    await page.click(".chat-ai .result-media > summary");
+    assert.equal(await page.getAttribute(".chat-ai .result-media", "open"), "", "clicking the summary expands it");
+    await page.click(".chat-ai .result-media > summary");
+    assert.equal(await page.getAttribute(".chat-ai .result-media", "open"), null, "clicking again collapses it");
+  });
+
+  test("a video link renders a still with a play badge, linking to the video", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: "vid-1", cwd: WS_A, agent_name: "orchestrator", first_msg: "clip" })],
+      events: { "vid-1": [
+        { type: "user_message", ts: 1, payload: { text: "clip" } },
+        { type: "assistant_message", ts: 2, payload: { text: "watch https://youtu.be/dQw4w9WgXcQ" } },
+      ] },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "vid-1").click();
+    // The media table starts folded; open it to inspect the video row.
+    await page.click(".chat-ai .result-media > summary");
+    await page.waitForSelector('.chat-ai .result-images tr[data-kind="video"]');
+    assert.equal(
+      await page.getAttribute('.chat-ai .result-images tr[data-kind="video"] img', "src"),
+      "https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg",
+      "the still frame is derived from the YouTube id"
+    );
+    assert.equal(await page.locator(".chat-ai .result-images .media-play").count(), 1, "a play badge marks it a video");
+    assert.equal(
+      await page.getAttribute('.chat-ai .result-images tr[data-kind="video"] .img-cell-name a', "href"),
+      "https://youtu.be/dQw4w9WgXcQ",
+      "the name links to the video"
+    );
+  });
+
+  test("a picture pi saved to the workspace renders from the served media URL", async () => {
+    await boot({
+      sessions: [makeSession({ session_id: "img-3", cwd: WS_A, agent_name: "orchestrator", first_msg: "shot" })],
+      events: { "img-3": [
+        { type: "user_message", ts: 1, payload: { text: "shot" } },
+        { type: "assistant_message", ts: 2, payload: { text: "saved to tmp/chart.png" } },
+      ] },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "img-3").click();
+    // The media table starts folded; open it to inspect the row.
+    await page.click(".chat-ai .result-media > summary");
+    await page.waitForSelector('.chat-ai .result-images tr[data-local="1"] img');
+    const src = await page.getAttribute('.chat-ai .result-images tr[data-local="1"] img', "src");
+    assert.match(src, /^\/media\?/, "a local path is served through /media");
+    assert.match(src, /path=tmp%2Fchart\.png/, "the original path travels in the query");
+    // The row is labelled with the path, not the opaque /media URL.
+    assert.equal(
+      await page.getAttribute('.chat-ai .result-images tr[data-local="1"] .img-cell-name a', "title"),
+      "tmp/chart.png"
+    );
+  });
+});
+
+// ─── Composer attachments ───────────────────────────────────────────────────
+// Files, images and documents staged in the composer reach pi as PATHS (never
+// bytes). A browser cannot hand the page a real path, so it uploads the file
+// into the workspace (POST /chat/attach) and keeps the returned relative path;
+// the desktop build's native picker hands over the real path with no upload.
+
+describe("composer attachments", () => {
+  test("a browser-picked file is uploaded and its path rides the prompt", async () => {
+    await boot({ sessions: [makeSession(SESS_A)] });
+    await wsRow(page, WS_A).click();
+    await page.waitForSelector("#chat-composer", { state: "visible" });
+
+    await page.setInputFiles("#chat-attach-input", {
+      name: "chart.png",
+      mimeType: "image/png",
+      buffer: Buffer.from("89504e470d0a1a0a", "hex"),
+    });
+    await page.waitForSelector(".chat-attach-chip");
+    assert.match(await page.textContent(".chat-attach-chip"), /chart\.png/);
+    assert.equal(mock.requestsFor("/chat/attach", "POST").length, 1, "the bytes were uploaded once");
+
+    const t = await send(page, mock, "what is this?");
+    const sent = mock.requestsFor("/chat", "POST").at(-1).body.prompt;
+    assert.match(sent, /^what is this\?/, "the typed text leads the prompt");
+    assert.match(sent, /Attached files \(read each from its path\):/);
+    assert.match(sent, /- tmp\/attachments\/test-chart\.png/, "the uploaded path is sent");
+    assert.equal(await page.locator(".chat-attach-chip").count(), 0, "the composer clears after sending");
+    assert.match(await page.textContent(".chat-bubble-atts"), /chart\.png/, "the sent bubble shows the attachment");
+    await reply(t, "a chart");
+  });
+
+  test("a native pick sends the real path with no upload, relative to the workspace", async () => {
+    await boot({ sessions: [makeSession(SESS_A)] });
+    await wsRow(page, WS_A).click();
+    await page.waitForSelector("#chat-composer", { state: "visible" });
+    // Stand in for the Electron bridge the desktop build exposes.
+    await page.evaluate(() => {
+      window.scopeNative = { pickFiles: async () => ["/tmp/pi-scope-e2e/alpha/notes.md"] };
+    });
+
+    await page.click("#chat-attach");
+    await page.waitForSelector(".chat-attach-chip");
+    assert.match(await page.textContent(".chat-attach-chip"), /notes\.md/);
+    assert.equal(mock.requestsFor("/chat/attach", "POST").length, 0, "a native path is not uploaded");
+
+    const t = await send(page, mock, "read this");
+    const sent = mock.requestsFor("/chat", "POST").at(-1).body.prompt;
+    assert.match(sent, /- notes\.md/, "the path is workspace-relative");
+    await reply(t, "ok");
+  });
+
+  test("removing a staged attachment drops it from the prompt", async () => {
+    await boot({ sessions: [makeSession(SESS_A)] });
+    await wsRow(page, WS_A).click();
+    await page.waitForSelector("#chat-composer", { state: "visible" });
+
+    await page.setInputFiles("#chat-attach-input", {
+      name: "drop.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("x"),
+    });
+    await page.waitForSelector(".chat-attach-chip");
+    await page.click(".chat-attach-chip-x");
+    await page.waitForFunction(() => document.getElementById("chat-attachments").hidden === true);
+
+    const t = await send(page, mock, "no files");
+    assert.doesNotMatch(mock.requestsFor("/chat", "POST").at(-1).body.prompt, /Attached files/);
+    await reply(t, "ok");
   });
 });
 
@@ -1745,11 +2090,12 @@ describe("live-run recovery", () => {
   });
 });
 
-// ─── A pi running in the user's TERMINAL (observable, not stoppable) ───────
-// Pi Scope watches such a session through the events its extension posts, but
-// there is no channel back into that pi process. Chat must still show that it is
-// working (and surface its errors) — with no Stop button, because there is
-// nothing here that could stop it.
+// ─── A pi running in the user's TERMINAL ──────────────────────────────────
+// Pi Scope watches such a session through the events its extension posts. Every
+// event is stamped with the writer's pid, so Chat can offer Stop and signal that
+// pi — but only while the server still tracks the pid (an older extension, or a
+// server that restarted since the last event, leaves the run watch-only, with
+// the terminal marker in Stop's place).
 describe("a session running in the terminal", () => {
   const now = new Date().toISOString();
   const EXT = (extra = {}) => makeSession({
@@ -1782,6 +2128,31 @@ describe("a session running in the terminal", () => {
     await page.waitForFunction(() => document.getElementById("chat-header-state").textContent !== "working");
     await page.waitForFunction(() => document.querySelectorAll(".chat-ext-live").length === 0, undefined, { timeout: 4000 });
     assert.equal(await page.locator("#chat-ext-run").isVisible(), false);
+  });
+
+  test("Chat offers Stop for a terminal run once its events carry a pid", async () => {
+    await boot({
+      sessions: [EXT({ last_turn_event: "turn_start", pid: 4242 })],
+      events: { "ext-1": [
+        { type: "user_message", ts: now, payload: { text: "terminal work" } },
+        { type: "turn_start", ts: now, payload: {} },
+      ] },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "ext-1").click();
+    await page.waitForSelector("#chat-stop.show", { state: "visible" });
+    assert.equal(await page.locator("#chat-ext-run").isVisible(), false, "Stop replaces the terminal marker");
+    assert.match(await page.getAttribute("#chat-stop", "title"), /terminal/i);
+
+    await page.click("#chat-stop");
+    const stop = mock.requestsFor("/chat/stop", "POST").at(-1);
+    assert.ok(stop, "Stop posts to the server");
+    assert.equal(stop.body.sessionId, "ext-1", "Stop targets the terminal session, not a subprocess key");
+    // The server killed the pid and recorded a closing turn_end: the row's pid
+    // is dropped and the header settles without waiting for a poll.
+    await page.waitForFunction(() => !document.getElementById("chat-stop").classList.contains("show"));
+    await page.waitForFunction(() => document.getElementById("chat-header-state").textContent !== "working");
+    assert.equal(await page.locator("#chat-ext-run").isVisible(), false, "and no marker comes back");
   });
 
   test("a live event flips the indicator immediately (no wait for the poll)", async () => {

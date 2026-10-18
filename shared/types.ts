@@ -22,6 +22,14 @@ export interface ObsEvent {
   /** Set on events from a spawned subagent: the pi session that spawned it.
    *  Passed by the harness via the SCOPE_PARENT_SESSION env var. */
   parent_session_id?: string;
+  /** Process id of the pi that produced this event (the extension stamps
+   *  `process.pid`). Lets the server stop a pi the user started in their OWN
+   *  terminal, which has no chat subprocess to signal (see external-process.ts). */
+  pid?: number;
+  /** Approximate epoch ms at which that process started (`Date.now() -
+   *  process.uptime() * 1000`). A guard against pid reuse: a kill is refused
+   *  when the live process at `pid` did not start when the event said it did. */
+  pid_started_at?: number;
 }
 
 /** Summary row for a session as returned by the DB layer. */
@@ -62,4 +70,10 @@ export interface SessionSummary {
    *  unknown — the client then falls back to its own heuristic table. Used as
    *  the denominator for the Single-view context-utilization bar. */
   context_window?: number;
+  /** Process id of the pi behind this session, annotated by the server while it
+   *  still tracks one (a session running in the user's own terminal). Chat uses
+   *  its presence to offer Stop on a run it otherwise could only watch; absent
+   *  for a chat-owned subprocess (that one is stopped by session id) and for a
+   *  server that restarted since the last event. */
+  pid?: number;
 }

@@ -1219,6 +1219,9 @@ function patchSessionFromSSE(evt) {
       has_shutdown: false,
       event_count: 1,
       tags: Array.isArray(evt.tags) ? evt.tags : [],
+      // The writer's pid, so a session running in the user's terminal can offer
+      // Stop the moment its first event lands (see chat.js externalStopSid).
+      pid: typeof evt.pid === "number" ? evt.pid : undefined,
     };
     STATE.sessions.unshift(session);
     STATE.sessionsSig = ""; // force sidebar rebuild
@@ -1230,6 +1233,8 @@ function patchSessionFromSSE(evt) {
   // Track the turn lifecycle so a session reads "running" from turn_start
   // until turn_end, then "waiting" — see subagentStatus().
   if (evt.type === "turn_start" || evt.type === "turn_end") session.last_turn_event = evt.type;
+  // A terminal pi stamps every event with its pid; keep the row's handle fresh.
+  if (typeof evt.pid === "number") session.pid = evt.pid;
   // Advance last_ts so the subagentStatus() green window stays current.
   if (evt.ts) session.last_ts = evt.ts;
 }

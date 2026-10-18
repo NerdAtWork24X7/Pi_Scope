@@ -536,9 +536,525 @@
     _toastEl.classList.add("show");
     _toastTimer = setTimeout(() => _toastEl.classList.remove("show"), 3200);
   }
+  // ─── Markdown rendering ────────────────────────────────────────────────────
+  // A small, dependency-free markdown renderer shared by the desktop Chat view
+  // and the phone layout: fenced code blocks, headings, lists, quotes,
+  // bold/italic/strikethrough, inline code and links. Callers pass a
+  // `codeBlock(lang, code)` to draw fenced code their own way (the desktop adds
+  // a copy button, the phone a compact header), so the parse itself stays
+  // identical across clients. Input is escaped first, then inline forms are
+  // pulled out in order so one can't inject into another.
+
+  // ─── Media in message / result text ───────────────────────────────────────
+  // pi can hand back a picture — a screenshot, a chart, a generated diagram, a
+  // pasted data: URI — or a video (a direct file, or a YouTube link) as a
+  // markdown image, a bare URL, or a raw data: URI. These find those sources so
+  // a view can DRAW them, and gate each one to a scheme a browser may safely
+  // load (never a javascript:/vbscript: smuggled in as an image/video source).
+  const IMAGE_MD_RE = /!\[([^\]\n]*)\]\(([^)\s]+)\)/g;
+  const IMAGE_DATA_RE = /data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi;
+  const IMAGE_URL_RE = /https?:\/\/[^\s"'<>()]+/gi;
+  // A URL that names a picture file (optionally with a ?query / #fragment tail).
+  const IMAGE_FILE_RE = /\.(png|jpe?g|gif|webp|avif|bmp|svg)(?:[?#][^\s"'<>)]*)?$/i;
+  // A direct video file, and YouTube, whose still frame we can derive from the
+  // link alone (…/watch?v=ID, youtu.be/ID, /shorts/ID, /embed/ID, /live/ID).
+  const VIDEO_FILE_RE = /\.(mp4|webm|ogv|ogg|mov|m4v)(?:[?#][^\s"'<>)]*)?$/i;
+  const VIDEO_HOST_RE = /(?:youtube\.com\/(?:watch\?(?:[^\s#]*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/i;
+  // A filesystem path pi printed in place of a URL — "saved to tmp/chart.png",
+  // "./shot.jpg", "/home/me/clip.mp4". pi can hand back a picture it wrote to
+  // disk instead of an http link, and the browser cannot load that on its own;
+  // the view turns it into a served URL via a caller-supplied resolver (see
+  // mediaInText's opts.resolve). The lookahead keeps a real URL (which has
+  // "://") out of the match — those are found by IMAGE_URL_RE above. `[` is NOT a
+  // boundary, so a markdown link's label ("[chart.png](…)") is never mistaken for
+  // a path — only its parenthesised target is, via `(`.
+  const LOCAL_MEDIA_RE = /(^|[\s`"'\(])((?![a-z][a-z0-9+.-]*:\/\/)[\w.@~+-]*(?:\/[\w.@~+-]+)*\.(?:png|jpe?g|gif|webp|avif|bmp|svg|mp4|webm|ogv|ogg|mov|m4v))(?![\w-])/gi;
+  // A single result can carry a whole deck of media; cap what we paint so a
+  // pathological payload can't stretch the page (or the DOM) without bound.
+  const MAX_RESULT_MEDIA = 12;
+
+  function mediaSrcAllowed(u) {
+    const scheme = String(u).match(/^([a-z][a-z0-9+.-]*):/i);
+    if (scheme && !/^(https?|data)$/i.test(scheme[1])) return false;
+    if (/^data:/i.test(u) && !/^data:image\//i.test(u)) return false;
+    return true;
+  }
+
+  // "image" or "video" — decided from the source alone.
+  function mediaKind(src) {
+    if (VIDEO_FILE_RE.test(src) || VIDEO_HOST_RE.test(src)) return "video";
+    return "image";
+  }
+
+  // A still frame for a video we cannot download ourselves: YouTube exposes one
+  // per id, keyed off the link alone.
+  function videoPoster(src) {
+    const yt = String(src).match(VIDEO_HOST_RE);
+    if (yt) return `https://img.youtube.com/vi/${yt[1]}/mqdefault.jpg`;
+    return "";
+  }
+
+  // The URL a view should actually load for `u`. http(s)/inline data sources pass
+  // through unchanged; a local path is handed to the caller's `opts.resolve`, which
+  // returns a servable URL (the Chat views build a sandboxed /media link) or "" —
+  // and "" means we cannot show it, so the reference is left as plain text.
+  function mediaSrc(u, opts) {
+    const s = String(u == null ? "" : u);
+    if (!s) return "";
+    if (/^(?:https?:|data:)/i.test(s)) return s;
+    const resolve = opts && typeof opts.resolve === "function" ? opts.resolve : null;
+    return resolve ? String(resolve(s) || "") : "";
+  }
+
+  // Every picture or video `raw` references, in the order the text mentions them,
+  // de-duplicated and capped. `alt` carries the markdown alt text when the source
+  // had one; `kind` is "image" | "video"; a video's `poster` is a still frame
+  // when one can be derived without fetching the video. A source that is a local
+  // path (not a URL) is only kept when `opts.resolve` can serve it; its row then
+  // carries `local: true` and `name` (the original path, for the label).
+  function mediaInText(raw, opts) {
+    const text = String(raw == null ? "" : raw);
+    const found = [];
+    const add = (src, alt, at) => { if (src) found.push({ src: String(src).replace(/\s+$/, ""), alt: alt || "", at }); };
+    for (const m of text.matchAll(IMAGE_MD_RE)) add(m[2], m[1], m.index);
+    for (const m of text.matchAll(IMAGE_DATA_RE)) add(m[0], "", m.index);
+    for (const m of text.matchAll(IMAGE_URL_RE)) {
+      const u = m[0].replace(/[.,;:!?]+$/, "");
+      if (IMAGE_FILE_RE.test(u) || VIDEO_FILE_RE.test(u) || VIDEO_HOST_RE.test(u)) add(u, "", m.index);
+    }
+    // A path pi wrote to instead of a link ("saved to tmp/chart.png"). Only
+    // searched when the caller can serve it, so a view with no workspace context
+    // never invents rows it cannot load.
+    if (opts && typeof opts.resolve === "function") {
+      for (const m of text.matchAll(LOCAL_MEDIA_RE)) add(m[2], "", m.index);
+    }
+    found.sort((a, b) => a.at - b.at);
+    const out = [];
+    const seen = new Set();
+    for (const f of found) {
+      if (out.length >= MAX_RESULT_MEDIA) break;
+      if (!mediaSrcAllowed(f.src)) continue;
+      const key = f.src.length + ":" + f.src.slice(0, 64);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // http(s)/data flow straight through; a local path must resolve to a real
+      // source or it is dropped (nothing to draw).
+      const isUrl = /^(?:https?:|data:)/i.test(f.src);
+      let src = f.src;
+      let name = "";
+      let local = false;
+      if (!isUrl) {
+        const served = opts && typeof opts.resolve === "function" ? String(opts.resolve(f.src) || "") : "";
+        if (!served || !mediaSrcAllowed(served)) continue;
+        src = served; name = f.src; local = true;
+      }
+      const kind = mediaKind(f.src);
+      out.push({ src, alt: f.alt, kind, local, name, poster: kind === "video" ? videoPoster(f.src) : "" });
+    }
+    // `localOnly` is for a caller that draws markdown/URL pictures INLINE in the
+    // prose: the only reference it cannot draw itself is a bare local path
+    // ("saved to tmp/chart.png"), so the table is narrowed to exactly those and
+    // a picture never appears twice.
+    return opts && opts.localOnly ? out.filter((m) => m.local) : out;
+  }
+
+  // A short label for the table's Name column: a YouTube id, the last path
+  // segment of a URL, or the media type of an inline data: URI.
+  function mediaFileName(src) {
+    const s = String(src || "");
+    const yt = s.match(VIDEO_HOST_RE);
+    if (yt) return `youtube.com — ${yt[1]}`;
+    if (/^data:/i.test(s)) {
+      const m = s.match(/^data:((?:image|video)\/[a-z0-9.+-]+);/i);
+      return m ? `inline ${m[1].replace(/^(?:image|video)\//, "")}` : "inline media";
+    }
+    // Drop any ?query / #fragment, then take the last path segment.
+    const seg = s.split(/[?#]/)[0].split("/").filter(Boolean).pop() || "";
+    if (!seg) return "media";
+    try { return decodeURIComponent(seg); } catch { return seg; }
+  }
+
+  // Order a table's rows biggest item first. Run once every row has been
+  // measured (or failed), so the order follows real pixel area rather than the
+  // order the text happened to mention them.
+  function sortMediaRows(tbody) {
+    if (!tbody) return;
+    const rows = [...tbody.querySelectorAll("tr.img-row")];
+    rows.sort((a, b) => (Number(b.dataset.imgArea) || 0) - (Number(a.dataset.imgArea) || 0));
+    for (const r of rows) tbody.appendChild(r);
+  }
+
+  // The thumbnail cell for one item. An image is drawn directly; a video gets a
+  // play badge over either its still frame (a poster, when we can derive one) or
+  // a muted <video> that shows its own first frame. Either way the whole cell is
+  // a link to the source.
+  function mediaThumbHtml(im) {
+    const src = escapeHtml(im.src);
+    const alt = escapeHtml(im.alt);
+    const link = (inner) =>
+      `<a class="result-image${im.kind === "video" ? " result-video" : ""}" href="${src}" target="_blank" rel="noopener noreferrer">` +
+      `${inner}${im.kind === "video" ? `<span class="media-play" aria-hidden="true"></span>` : ""}</a>`;
+    if (im.kind === "video") {
+      return im.poster
+        ? link(`<img src="${escapeHtml(im.poster)}" alt="${alt}" loading="lazy" decoding="async">`)
+        : link(`<video src="${src}" preload="metadata" muted playsinline></video>`);
+    }
+    return link(`<img src="${src}" alt="${alt}" loading="lazy" decoding="async">`);
+  }
+
+  // The table every picture or video a result references is drawn in — one row
+  // per item: a thumbnail, its name (a link to the source), and its pixel
+  // dimensions. The size cell starts as a placeholder; hydrateMediaTables fills
+  // it and re-orders the rows. A thumbnail is lazy so a transcript full of them
+  // only loads what is on screen.
+  //
+  // The whole table folds behind a <summary> that reads like a Thought block's
+  // header — an accent label with a line icon and a ▸ caret — so a deck of media
+  // collapses the same way a thought does. It starts COLLAPSED to keep a result
+  // scannable; the count badge on the summary keeps the media discoverable while
+  // folded.
+  function mediaTableHtml(items) {
+    if (!items || !items.length) return "";
+    const count = items.length;
+    const icon =
+      `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+      `<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>`;
+    const rows = items.map((im) => {
+      const name = im.alt || im.name || mediaFileName(im.src);
+      const href = escapeHtml(im.src);
+      return (
+        `<tr class="img-row" data-kind="${im.kind}"${im.local ? ' data-local="1"' : ""}>` +
+        `<td class="img-cell img-cell-thumb">${mediaThumbHtml(im)}</td>` +
+        `<td class="img-cell img-cell-name"><a href="${href}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(name)}">${escapeHtml(name)}</a></td>` +
+        `<td class="img-cell img-cell-size" data-img-size>measuring…</td>` +
+        `</tr>`
+      );
+    }).join("");
+    return (
+      `<details class="result-media">` +
+      `<summary class="result-media-sum">` +
+      `<span class="result-media-label">${icon}Media</span>` +
+      `<span class="result-media-count">${count}</span>` +
+      `</summary>` +
+      `<div class="result-images img-gallery"><table class="image-table">` +
+      `<thead><tr><th class="img-cell img-cell-thumb">Media</th><th class="img-cell img-cell-name">Name</th><th class="img-cell img-cell-size">Size</th></tr></thead>` +
+      `<tbody>${rows}</tbody></table></div>` +
+      `</details>`
+    );
+  }
+  function resultMediaHtml(raw, opts) {
+    return mediaTableHtml(mediaInText(raw, opts));
+  }
+
+  // Measure every rendered media table under `root` (a DOM node), filling each
+  // row's size cell from the loaded image's natural dimensions (or the video's
+  // intrinsic size) and putting the rows in largest-first order. Idempotent: a
+  // table already measured is skipped, and an item still in flight re-orders the
+  // rows when it lands.
+  function hydrateMediaTables(root) {
+    const scope = root || (typeof document !== "undefined" ? document : null);
+    if (!scope || typeof scope.querySelectorAll !== "function") return;
+    for (const table of scope.querySelectorAll("table.image-table")) {
+      if (table.dataset.measured === "1") continue;
+      table.dataset.measured = "1";
+      const tbody = table.querySelector("tbody");
+      const rows = tbody ? [...tbody.querySelectorAll("tr.img-row")] : [];
+      let pending = rows.length;
+      // Drop rows that referenced a local path which turned out not to exist — a
+      // 404'd thumbnail is worse than no row at all — and remove the whole table
+      // (its wrapper) once no row is left.
+      const finalize = () => {
+        if (tbody && !tbody.querySelectorAll("tr.img-row").length) {
+          const node =
+            (table.closest ? table.closest(".result-media") : null) ||
+            (table.closest ? table.closest(".result-images") : null) ||
+            table;
+          if (node.remove) node.remove();
+          return;
+        }
+        sortMediaRows(tbody);
+      };
+      const done = () => { if (--pending <= 0) finalize(); };
+      const settle = (row, el) => {
+        const w = el.naturalWidth || el.videoWidth || 0;
+        const h = el.naturalHeight || el.videoHeight || 0;
+        const cell = row.querySelector("[data-img-size]");
+        if (w && h) {
+          row.dataset.imgArea = String(w * h);
+          if (cell) cell.textContent = `${w} × ${h}`;
+        } else if (cell) {
+          cell.textContent = "unavailable";
+        }
+      };
+      for (const row of rows) {
+        const el = row.querySelector("img, video");
+        if (!el) { done(); continue; }
+        const isVideo = typeof el.videoWidth === "number";
+        const ready = isVideo ? el.readyState >= 1 : !!el.complete;
+        const broken = isVideo ? !!el.error : (el.complete && el.naturalWidth === 0);
+        const isLocal = row.dataset && row.dataset.local === "1";
+        if (ready) {
+          // Already errored before we attached (a cached/instant failure): a local
+          // path is dropped, anything else is labelled unavailable.
+          if (broken && isLocal) row.remove();
+          else settle(row, el);
+          done();
+        } else {
+          const ev = isVideo ? "loadedmetadata" : "load";
+          el.addEventListener(ev, () => { settle(row, el); done(); }, { once: true });
+          el.addEventListener("error", () => {
+            if (isLocal) row.remove();
+            else settle(row, el);
+            done();
+          }, { once: true });
+        }
+      }
+      if (!pending) finalize();
+    }
+  }
+
+  // Inline formatting on ALREADY-ESCAPED text. `opts.dropImages` keeps a picture
+  // out of the text flow — a markdown embed is dropped, a link that points at one
+  // still reads as a link — because the Chat views draw the media themselves, in
+  // a thumbnail table (see mediaTableHtml). Any other bare URL is turned into a
+  // link either way, so a URL pi prints is always clickable.
+  function markdownInline(text, opts) {
+    const dropImages = !!(opts && opts.dropImages);
+    const prot = [];
+    const stash = (html) => { prot.push(html); return "\x01" + (prot.length - 1) + "\x01"; };
+    text = text.replace(/`([^`\n]+)`/g, (m, c) => stash(`<code>${c}</code>`));
+    // Images first, so the link rule below doesn't eat the "[alt](url)" part.
+    text = text.replace(/!\[([^\]\n]*)\]\(([^)\s]+)\)/g, (m, alt, u) => {
+      // Only http(s), inline data images, or a local path the caller can serve —
+      // never a javascript:/vbscript: style scheme smuggled in as an image source.
+      if (!mediaSrcAllowed(u)) return m;
+      const src = mediaSrc(u, opts);
+      if (!src) return m;
+      if (dropImages) return "";
+      return stash(`<a href="${src}" target="_blank" rel="noopener noreferrer"><img src="${src}" alt="${alt}" loading="lazy" decoding="async"></a>`);
+    });
+    // A link to a picture is drawn AS the picture — pi commonly returns an image
+    // as `[name.jpg](https://…/name.jpg)`, and a bare link leaves the reader with
+    // a filename instead of the photo. A link to a local media file
+    // (`[chart](tmp/chart.png)`) is resolved to a servable URL when the caller
+    // can, and otherwise left as literal text. With dropImages a picture link
+    // stays a plain link, and the photo is drawn in the table instead.
+    text = text.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, l, u) => {
+      const isHttp = /^https?:\/\//i.test(u);
+      // Only an http(s) link or a local media path is handled here; a data:,
+      // mailto: or javascript: target is left as literal text.
+      const isLocalMedia =
+        !isHttp && !/^[a-z][a-z0-9+.-]*:/i.test(u) && (IMAGE_FILE_RE.test(u) || VIDEO_FILE_RE.test(u));
+      if (!isHttp && !isLocalMedia) return m;
+      const url = mediaSrc(u, opts);
+      if (!url) return m;
+      return (!dropImages && IMAGE_FILE_RE.test(u))
+        ? stash(`<a href="${url}" target="_blank" rel="noopener noreferrer"><img src="${url}" alt="${l}" loading="lazy" decoding="async"></a>`)
+        : stash(`<a href="${url}" target="_blank" rel="noopener noreferrer">${l}</a>`);
+    });
+    // A bare image source with no markdown around it — pi sometimes returns just
+    // the URL, or a data: URI — is drawn as a picture too. Runs after the link
+    // rule, so a "[label](url)" link is already stashed and left alone.
+    text = text.replace(/(^|[\s(])(data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/[^\s<>()"']+)/gi, (m, pre, u) => {
+      const clean = u.replace(/[.,;:!?]+$/, "");
+      const tail = u.slice(clean.length);
+      if (!/^data:image\//i.test(clean) && !IMAGE_FILE_RE.test(clean)) return m;
+      if (dropImages) return m;
+      return pre + stash(`<img src="${clean}" alt="" loading="lazy" decoding="async">`) + tail;
+    });
+    // Any remaining bare URL — a plain link pi printed, a video page, a path with
+    // no picture or video extension — becomes a real link, so a URL in a result
+    // is always clickable. Markdown links and the sources above are already
+    // stashed as placeholders, so only a truly bare URL reaches here.
+    text = text.replace(/(^|[\s(])(https?:\/\/[^\s<>()"']+)/gi, (m, pre, u) => {
+      const clean = u.replace(/[.,;:!?]+$/, "");
+      const tail = u.slice(clean.length);
+      return pre + stash(`<a href="${clean}" target="_blank" rel="noopener noreferrer">${clean}</a>`) + tail;
+    });
+    text = text.replace(/\*\*([^*\n]+)\*\*/g, (m, t) => stash(`<strong>${t}</strong>`));
+    text = text.replace(/~~([^~\n]+)~~/g, (m, t) => stash(`<del>${t}</del>`));
+    text = text.replace(/\*([^*\n]+)\*/g, (m, t) => stash(`<em>${t}</em>`));
+    return text.replace(/\x01(\d+)\x01/g, (m, i) => prot[+i] || "");
+  }
+
+  function defaultCodeBlock(lang, code) {
+    return `<pre class="md-code"><code>${escapeHtml(code)}</code></pre>`;
+  }
+
+  // A table row: `| a | b |` → ["a", "b"] (outer pipes optional).
+  function mdRow(line) {
+    let s = line.trim();
+    if (s.startsWith("|")) s = s.slice(1);
+    if (s.endsWith("|")) s = s.slice(0, -1);
+    return s.split("|").map((c) => c.trim());
+  }
+  // The `|---|---|` divider that turns the line above it into a table header.
+  function mdTableSep(line) {
+    if (!line.includes("|") || !line.includes("-")) return false;
+    return mdRow(line).every((c) => /^:?-+:?$/.test(c));
+  }
+  // `:--` left, `--:` right, `:-:` centre, `---` default.
+  function mdAlign(cell) {
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    return left && right ? "center" : right ? "right" : left ? "left" : "";
+  }
+
+  // Render `raw` markdown to HTML. `opts.codeBlock(lang, code)` overrides how a
+  // fenced block is drawn (default: a bare <pre><code>).
+  function markdownHtml(raw, opts) {
+    const codeBlock = (opts && typeof opts.codeBlock === "function") ? opts.codeBlock : defaultCodeBlock;
+    const fences = [];
+    let text = String(raw == null ? "" : raw).replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+      fences.push({ lang: (lang || "").trim(), code: code.replace(/\n\s*$/, "") });
+      return "\x00F" + (fences.length - 1) + "\x00";
+    });
+    text = markdownInline(escapeHtml(text), opts);
+
+    const lines = text.split("\n");
+    const blocks = [];
+    let i = 0;
+    const flush = (cur) => {
+      if (cur) {
+        if (cur.lines && cur.lines.join("").trim()) blocks.push(cur);
+        else if (cur.type !== "p") blocks.push(cur);
+      }
+    };
+    let cur = null;
+    while (i < lines.length) {
+      const ln = lines[i];
+      const fm = ln.match(/^\x00F(\d+)\x00$/);
+      if (fm) { flush(cur); cur = null; blocks.push({ type: "code", idx: +fm[1] }); i++; continue; }
+      const hm = ln.match(/^(#{1,4})\s+(.*)$/);
+      if (hm) { flush(cur); cur = null; blocks.push({ type: "head", level: hm[1].length, html: hm[2] }); i++; continue; }
+      if (/^\s*(---|\*\*\*)\s*$/.test(ln)) { flush(cur); cur = null; blocks.push({ type: "hr" }); i++; continue; }
+      if (!ln.trim()) { flush(cur); cur = null; i++; continue; }
+      // Table: a header row with pipes, then a |---| alignment row.
+      if (ln.includes("|") && i + 1 < lines.length && mdTableSep(lines[i + 1])) {
+        flush(cur); cur = null;
+        const header = mdRow(ln);
+        const align = mdRow(lines[i + 1]).map(mdAlign);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+          rows.push(mdRow(lines[i]));
+          i++;
+        }
+        blocks.push({ type: "table", header, align, rows });
+        continue;
+      }
+      const lm = ln.match(/^\s*[-*•]\s+(.*)$/);
+      if (lm) {
+        flush(cur); cur = null;
+        const items = [];
+        while (i < lines.length) {
+          const s = lines[i].trim();
+          if (!s) break;
+          const it = s.match(/^[-*•]\s+(.*)$/);
+          if (!it) break;
+          items.push(it[1]); i++;
+        }
+        blocks.push({ type: "ul", items });
+        continue;
+      }
+      const om = ln.match(/^\s*\d+[.)]\s+(.*)$/);
+      if (om) {
+        flush(cur); cur = null;
+        const items = [];
+        while (i < lines.length) {
+          const s = lines[i].trim();
+          if (!s) break;
+          const it = s.match(/^\d+[.)]\s+(.*)$/);
+          if (!it) break;
+          items.push(it[1]); i++;
+        }
+        blocks.push({ type: "ol", items });
+        continue;
+      }
+      if (/^&gt;\s?/.test(ln)) {
+        flush(cur); cur = null;
+        const q = [];
+        while (i < lines.length && /^&gt;\s?/.test(lines[i])) { q.push(lines[i].replace(/^&gt;\s?/, "")); i++; }
+        blocks.push({ type: "quote", lines: q });
+        continue;
+      }
+      if (!cur) cur = { type: "p", lines: [] };
+      cur.lines.push(ln);
+      i++;
+    }
+    flush(cur);
+
+    const h = [];
+    for (const b of blocks) {
+      if (b.type === "code") {
+        const f = fences[b.idx];
+        if (!f) continue;
+        h.push(codeBlock(f.lang, f.code));
+        continue;
+      }
+      if (b.type === "hr") { h.push("<hr>"); continue; }
+      if (b.type === "head") { const tag = b.level <= 2 ? "h3" : "h4"; h.push(`<${tag}>${b.html}</${tag}>`); continue; }
+      if (b.type === "ul") { h.push("<ul>" + b.items.map((x) => `<li>${x}</li>`).join("") + "</ul>"); continue; }
+      if (b.type === "ol") { h.push("<ol>" + b.items.map((x) => `<li>${x}</li>`).join("") + "</ol>"); continue; }
+      if (b.type === "quote") { h.push("<blockquote>" + b.lines.map((x) => `<p>${x}</p>`).join("") + "</blockquote>"); continue; }
+      if (b.type === "table") {
+        const cell = (tag, c, k) => {
+          const a = b.align[k];
+          return `<${tag}${a ? ` style="text-align:${a}"` : ""}>${c}</${tag}>`;
+        };
+        const head = "<tr>" + b.header.map((c, k) => cell("th", c, k)).join("") + "</tr>";
+        const body = b.rows.map((r) => "<tr>" + r.map((c, k) => cell("td", c, k)).join("") + "</tr>").join("");
+        h.push(`<table><thead>${head}</thead>${body ? `<tbody>${body}</tbody>` : ""}</table>`);
+        continue;
+      }
+      h.push("<p>" + b.lines.join("<br>") + "</p>");
+    }
+    return h.join("");
+  }
+
+  // The block appended to a Chat prompt so pi is told which files the user
+  // attached and the exact paths to read them from. Only the PATHS travel — the
+  // bytes never enter the prompt — and pi reads each file with its own tools.
+  // Empty (so the prompt is unchanged) when nothing is attached.
+  function attachmentsBlock(paths) {
+    const list = (paths || []).map((p) => String(p == null ? "" : p).trim()).filter(Boolean);
+    if (!list.length) return "";
+    return "Attached files (read each from its path):\n" + list.map((p) => `- ${p}`).join("\n");
+  }
+
+  // The markers of the transcript block the server prepends when a recorded
+  // session's own pi session file is gone and its conversation has to be seeded
+  // into a fresh one instead (see session-seed.ts — keep these in sync). pi
+  // records the WHOLE prompt as the turn's user_message, so a refetched
+  // transcript would otherwise show that block as something the user typed.
+  const SEED_HEAD = "[Continued session transcript";
+  const SEED_TAIL = "[End of continued session transcript]";
+
+  /** The user's own message, with any seeded-transcript block removed. A record
+   *  that lost its tail (a truncated snapshot) is left untouched: showing the
+   *  block is better than showing nothing. */
+  function stripSessionSeed(text) {
+    const t = String(text == null ? "" : text);
+    const head = t.indexOf(SEED_HEAD);
+    if (head < 0) return t;
+    const tail = t.indexOf(SEED_TAIL);
+    if (tail < 0) return t;
+    return t.slice(tail + SEED_TAIL.length).replace(/^\s+/, "");
+  }
+
   const HELPERS = {
     fmtTs,
     fmtRel,
+    markdownHtml,
+    mediaInText,
+    mediaKind,
+    videoPoster,
+    mediaFileName,
+    mediaTableHtml,
+    hydrateMediaTables,
+    resultMediaHtml,
+    attachmentsBlock,
+    stripSessionSeed,
     fmtTokens,
     trunc,
     shortId,

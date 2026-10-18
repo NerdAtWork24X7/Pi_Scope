@@ -54,7 +54,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_session_file ON sessions(session_file);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-interface PreparedQueries {
+/** Prepared statements over the scope DB (see `prepare`). Exported so a module
+ *  that reads the store directly — session-seed.ts — can take them as a
+ *  dependency instead of opening the file itself. */
+export interface PreparedQueries {
   insertEvent: StatementSync;
   upsertSession: StatementSync;
   listSessions: StatementSync;

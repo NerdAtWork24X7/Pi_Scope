@@ -60,7 +60,11 @@ function resolvePort(overrides = {}) {
 
 function config(overrides = {}) {
   const port = resolvePort(overrides);
-  const host = setting("SCOPE_HOST", overrides, process.env.SCOPE_HOST) ?? "127.0.0.1";
+  // Bind every interface by default so the phone button in the header can show a
+  // scannable QR without editing scope.env: the QR must point at a LAN-reachable
+  // address, which a loopback bind cannot provide. Access stays token-gated. Set
+  // SCOPE_HOST=127.0.0.1 to keep this machine the only one that can connect.
+  const host = setting("SCOPE_HOST", overrides, process.env.SCOPE_HOST) ?? "0.0.0.0";
   // Never fall back to a hardcoded token: it gates the /terminal WebSocket,
   // i.e. a full shell on this machine. When the server is LAN-bound that is
   // reachable by anything on the Wi-Fi, so mint a random one per run instead.
