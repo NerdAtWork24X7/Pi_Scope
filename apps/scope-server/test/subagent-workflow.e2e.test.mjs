@@ -2320,10 +2320,18 @@ describe("subagent workflow plugin (client)", () => {
     assert.match(endCard, /A2\[A1\[world\]\]/);
     assert.match(endCard, /A3\[A1\[world\]\]/);
     await page.click(".sw-node.sw-t-end .sw-node-config");
-    await page.waitForSelector("#sw-final-body .sw-final-pre");
-    const final = await page.textContent("#sw-final-body .sw-final-pre");
+    // The output renders as markdown by default, and the Markdown / Raw switch
+    // flips it to the exact bytes the run produced.
+    await page.waitForSelector("#sw-final-body .sw-final-md");
+    const final = await page.textContent("#sw-final-body .sw-final-md");
     assert.match(final, /A2\[A1\[world\]\]/);
     assert.match(final, /A3\[A1\[world\]\]/);
+    await page.click('#sw-final-body [data-out-view="raw"]');
+    await page.waitForSelector("#sw-final-body .sw-final-pre");
+    assert.match(await page.textContent("#sw-final-body .sw-final-pre"), /A2\[A1\[world\]\]/);
+    assert.match(await page.textContent("#sw-final-body .sw-final-pre"), /A3\[A1\[world\]\]/);
+    await page.click('#sw-final-body [data-out-view="markdown"]');
+    await page.waitForSelector("#sw-final-body .sw-final-md");
     assert.match(await page.textContent(".sw-final-meta"), /\d+ lines? · \d+ chars/);
     assert.equal(await page.locator("#sw-final-copy").count(), 1, "the output can be copied");
     assert.deepEqual(errors, []);
@@ -2770,8 +2778,8 @@ describe("subagent workflow plugin (client)", () => {
     // the end node's card and, in full, in its panel.
     assert.match(await page.textContent(".sw-node.sw-t-end .sw-node-final"), /A2\[A1\[first\]\]/);
     await page.click(".sw-node.sw-t-end .sw-node-config");
-    await page.waitForSelector("#sw-final-body .sw-final-pre");
-    assert.match(await page.textContent("#sw-final-body .sw-final-pre"), /A3\[A1\[first\]\]/);
+    await page.waitForSelector("#sw-final-body .sw-final-md");
+    assert.match(await page.textContent("#sw-final-body .sw-final-md"), /A3\[A1\[first\]\]/);
 
     // …and back to the live view.
     await page.selectOption("#sw-history", "");

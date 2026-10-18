@@ -42,7 +42,9 @@
  * full height, because a node's references, the model catalogue and the end
  * node's final output all need the room while the canvas they belong to stays
  * visible around it: a node, a connection and the triggers are all edited in
- * that one modal, over the canvas.
+ * that one modal, over the canvas. A node's own output is read there too, with a
+ * **Markdown / Raw** switch — the agent's prose rendered, or the bytes exactly as
+ * they streamed (the end node's final output offers the same switch).
  *
  * A **standalone plugin**: this bundle, its stylesheet (client.css) and its
  * server half (server.ts) all live in apps/scope-server/plugins/subagent-workflow/,
@@ -138,6 +140,16 @@
   let serverPlatform = "";
   let cwd = "";
   let selected = null;
+  /**
+   * How an agent's output is read in its settings popup: `"markdown"` renders the
+   * prose it wrote (the default), `"raw"` shows the bytes exactly as they
+   * streamed. One preference covers every output panel — a node's own result and
+   * the end node's final output — and is remembered per browser, like the app's
+   * other panel toggles.
+   */
+  const OUT_VIEW_KEY = "scope-sw-out-view";
+  let outView = "markdown";
+  try { if (localStorage.getItem(OUT_VIEW_KEY) === "raw") outView = "raw"; } catch { /* private mode */ }
   /**
    * The settings popup: what it is open on — `{ kind: "node", id }`,
    * `{ kind: "edge", id }` or `{ kind: "triggers" }` — or null while closed.
@@ -705,6 +717,164 @@
     return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
   }
 
+  // ─── Markdown-lite: an agent's output rendered as prose ───────────────────
+  //
+  // Agents write markdown — headings, lists, fenced code, bold and links — so a
+  // node's output reads far better rendered than as plain text. There is no
+  // markdown library in this bundle (the plugin is self-contained), and the
+  // constructs an agent actually emits are few, so a compact formatter lives
+  // here. It mirrors the Chat view's own markdown-lite (public/chat.js) under
+  // this view's class names, so both renderings of the same text agree.
+
+  // Inline formatting on ALREADY-ESCAPED text. Code and links are stashed first
+  // so one formatter's markers can never be reprocessed by another.
+  function mdInline(text) {
+    const prot = [];
+    const stash = (html) => { prot.push(html); return "\u0001" + (prot.length - 1) + "\u0001"; };
+    text = text.replace(/`([^`\n]+)`/g, (m, c) => stash(`<code>${c}</code>`));
+    text = text.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, l, u) => stash(`<a href="${u}" target="_blank" rel="noopener noreferrer">${l}</a>`));
+    text = text.replace(/\*\*([^*\n]+)\*\*/g, (m, t) => stash(`<strong>${t}</strong>`));
+    text = text.replace(/~~([^~\n]+)~~/g, (m, t) => stash(`<del>${t}</del>`));
+    text = text.replace(/\*([^*\n]+)\*/g, (m, t) => stash(`<em>${t}</em>`));
+    return text.replace(/\u0001(\d+)\u0001/g, (m, i) => prot[+i] || "");
+  }
+
+  // The full formatter: fenced code pulled out first, then block structure
+  // (headings / lists / quotes / rules / paragraphs) with inline formatting
+  // inside. Returns HTML — every piece of the raw text was escaped on the way in.
+  function mdFormat(raw) {
+    const fences = [];
+    let text = String(raw || "").replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+      fences.push({ lang: (lang || "").trim(), code: code.replace(/\n\s*$/, "") });
+      return "\u0000F" + (fences.length - 1) + "\u0000";
+    });
+    text = mdInline(esc(text));
+
+    const lines = text.split("\n");
+    const blocks = [];
+    let i = 0;
+    const flush = (cur) => {
+      if (!cur) return;
+      if (cur.lines && cur.lines.join("").trim()) blocks.push(cur);
+      else if (cur.type !== "p") blocks.push(cur);
+    };
+    let cur = null;
+    while (i < lines.length) {
+      const ln = lines[i];
+      const fm = ln.match(/^\u0000F(\d+)\u0000$/);
+      if (fm) { flush(cur); cur = null; blocks.push({ type: "code", idx: +fm[1] }); i++; continue; }
+      const hm = ln.match(/^(#{1,4})\s+(.*)$/);
+      if (hm) { flush(cur); cur = null; blocks.push({ type: "head", level: hm[1].length, html: hm[2] }); i++; continue; }
+      if (/^\s*(---|\*\*\*)\s*$/.test(ln)) { flush(cur); cur = null; blocks.push({ type: "hr" }); i++; continue; }
+      if (!ln.trim()) { flush(cur); cur = null; i++; continue; }
+      const lm = ln.match(/^\s*[-*•]\s+(.*)$/);
+      if (lm) {
+        flush(cur); cur = null;
+        const items = [];
+        while (i < lines.length) {
+          const it = lines[i].trim().match(/^[-*•]\s+(.*)$/);
+          if (!it) break;
+          items.push(it[1]); i++;
+        }
+        blocks.push({ type: "ul", items });
+        continue;
+      }
+      const om = ln.match(/^\s*\d+[.)]\s+(.*)$/);
+      if (om) {
+        flush(cur); cur = null;
+        const items = [];
+        while (i < lines.length) {
+          const it = lines[i].trim().match(/^\d+[.)]\s+(.*)$/);
+          if (!it) break;
+          items.push(it[1]); i++;
+        }
+        blocks.push({ type: "ol", items });
+        continue;
+      }
+      if (/^&gt;\s?/.test(ln)) {
+        flush(cur); cur = null;
+        const q = [];
+        while (i < lines.length && /^&gt;\s?/.test(lines[i])) { q.push(lines[i].replace(/^&gt;\s?/, "")); i++; }
+        blocks.push({ type: "quote", lines: q });
+        continue;
+      }
+      if (!cur) cur = { type: "p", lines: [] };
+      cur.lines.push(ln);
+      i++;
+    }
+    flush(cur);
+
+    const h = [];
+    for (const b of blocks) {
+      if (b.type === "code") {
+        const f = fences[b.idx];
+        if (!f) continue;
+        h.push(
+          `<div class="sw-md-code">` +
+          `<div class="sw-md-code-head"><span class="sw-md-code-lang">${esc(f.lang || "code")}</span>` +
+          `<button type="button" class="sw-md-copy" data-md-copy="${escAttr(f.code)}" title="Copy code">Copy</button></div>` +
+          `<pre><code>${esc(f.code)}</code></pre></div>`
+        );
+        continue;
+      }
+      if (b.type === "hr") { h.push("<hr>"); continue; }
+      if (b.type === "head") { const tag = b.level <= 2 ? "h3" : "h4"; h.push(`<${tag}>${b.html}</${tag}>`); continue; }
+      if (b.type === "ul") { h.push("<ul>" + b.items.map((x) => `<li>${x}</li>`).join("") + "</ul>"); continue; }
+      if (b.type === "ol") { h.push("<ol>" + b.items.map((x) => `<li>${x}</li>`).join("") + "</ol>"); continue; }
+      if (b.type === "quote") { h.push("<blockquote>" + b.lines.map((x) => `<p>${x}</p>`).join("") + "</blockquote>"); continue; }
+      h.push("<p>" + b.lines.join("<br>") + "</p>");
+    }
+    return h.join("");
+  }
+
+  // A bounded memo: a live run repaints a node's output every poll, and the
+  // text below the newest line is unchanged, so the same parse is reused until
+  // the output actually moves. Dropped wholesale once it gets large.
+  const MD_CACHE_MAX = 64;
+  const mdCache = new Map();
+  function markdownHtml(raw) {
+    const src = String(raw == null ? "" : raw);
+    const hit = mdCache.get(src);
+    if (hit !== undefined) return hit;
+    const html = mdFormat(src);
+    if (mdCache.size >= MD_CACHE_MAX) mdCache.clear();
+    mdCache.set(src, html);
+    return html;
+  }
+
+  /** The Markdown / Raw switch shown on every output panel's head. */
+  function outViewToggle() {
+    const btn = (v, label) =>
+      `<button type="button" class="sw-view-btn${outView === v ? " on" : ""}" ` +
+      `data-out-view="${v}" aria-pressed="${outView === v ? "true" : "false"}">${label}</button>`;
+    return `<span class="sw-view-toggle" role="group" aria-label="Output view">` +
+      btn("markdown", "Markdown") + btn("raw", "Raw") + `</span>`;
+  }
+
+  /** An output panel's body in the current view: rendered prose, or raw text. */
+  function outBodyHtml(text, preClass, mdClass) {
+    if (outView === "raw") return `<pre class="${preClass}">${esc(text)}</pre>`;
+    return `<div class="${mdClass} sw-md">${markdownHtml(text)}</div>`;
+  }
+
+  /**
+   * Switch every open output panel between rendered markdown and raw text, and
+   * remember the choice. The panels are repainted in place (their change
+   * signature is cleared first) so the switch takes effect without waiting for
+   * the next live tick.
+   */
+  function setOutView(view) {
+    if (view !== "markdown" && view !== "raw") return;
+    outView = view;
+    try { localStorage.setItem(OUT_VIEW_KEY, view); } catch { /* private mode */ }
+    const outBox = dlgEl?.querySelector("#sw-node-out");
+    if (outBox) outBox.dataset.sig = "";
+    const finalBox = dlgEl?.querySelector("#sw-final-body");
+    if (finalBox) finalBox.dataset.text = "";
+    syncNodeOutput();
+    syncFinalOutput();
+  }
+
   /**
    * The end node's panel body: the workflow's final output, whole (the server
    * keeps the last 4000 characters), with what it belongs to and a Copy button.
@@ -720,8 +890,9 @@
     return `<div class="sw-final-head">` +
         `<span class="sw-final-title">Final output</span>` +
         `<span class="sw-final-meta">${lines} line${lines === 1 ? "" : "s"} · ${text.length} chars</span>` +
+        outViewToggle() +
         `<button class="btn-sm" id="sw-final-copy" type="button" title="Copy the final output">Copy</button></div>` +
-      `<pre class="sw-final-pre">${esc(text)}</pre>` +
+      outBodyHtml(text, "sw-final-pre", "sw-final-md") +
       `<div class="sw-hint">The joined output of this node's incoming connections${status ? `, from the ${esc(status)} run` : ""}.</div>`;
   }
 
@@ -747,8 +918,9 @@
         `<span class="sw-out-title">Output</span>` +
         statusPill(n.id) +
         `<span class="sw-out-meta">${lines} line${lines === 1 ? "" : "s"} · ${text.length} chars</span>` +
+        outViewToggle() +
         `<button class="btn-sm" id="sw-out-copy" type="button" title="Copy this node's output">Copy</button></div>` +
-      `<pre class="sw-out-pre">${esc(text)}</pre>` +
+      outBodyHtml(text, "sw-out-pre", "sw-out-md") +
       `<div class="sw-hint">${status === "running" ? "Live — the agent is still writing." : "What this node produced in the run being read."}</div>`;
   }
 
@@ -2720,6 +2892,16 @@
     // are rewritten as the output grows (and for a reopened past run).
     dlgEl.addEventListener("click", (e) => {
       if (e.target.closest?.("#sw-close-x")) { e.preventDefault(); closeDialog(); return; }
+      const viewBtn = e.target.closest?.("[data-out-view]");
+      if (viewBtn) { e.preventDefault(); setOutView(viewBtn.dataset.outView); return; }
+      const mdCopy = e.target.closest?.("[data-md-copy]");
+      if (mdCopy) {
+        e.preventDefault();
+        Promise.resolve(navigator.clipboard?.writeText(mdCopy.dataset.mdCopy || ""))
+          .then(() => S.toast?.("Code copied"))
+          .catch(() => S.toast?.("Could not copy the code", "err"));
+        return;
+      }
       if (e.target.closest?.("#sw-out-copy")) {
         const n = dlg?.kind === "node" ? nodeById(dlg.id) : null;
         const text = n ? nodeOutputText(n.id) : "";

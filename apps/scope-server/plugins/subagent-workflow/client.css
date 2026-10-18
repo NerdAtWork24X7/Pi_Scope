@@ -498,7 +498,8 @@
 /* Auto-growing, so the panel's height decides how much message is readable at
    once: the box fills its field instead of stopping at five rows. */
 .sw-dlg-agent .sw-fld-prompt .sw-textarea { flex: 1 1 auto; min-height: 120px; resize: none; }
-.sw-dlg-agent .sw-fld-out .sw-out-pre { flex: 1 1 auto; max-height: none; }
+.sw-dlg-agent .sw-fld-out .sw-out-pre,
+.sw-dlg-agent .sw-fld-out .sw-out-md { flex: 1 1 auto; max-height: none; }
 
 @container (min-width: 760px) {
   .sw-dlg-agent .sw-dlg-body {
@@ -520,7 +521,8 @@
     min-height: 0; padding-left: 18px;
     border-left: 1px solid var(--hairline);
   }
-  .sw-dlg-agent .sw-fld-out .sw-out-pre { flex: 1 1 auto; min-height: 0; max-height: none; }
+  .sw-dlg-agent .sw-fld-out .sw-out-pre,
+  .sw-dlg-agent .sw-fld-out .sw-out-md { flex: 1 1 auto; min-height: 0; max-height: none; }
   /* The references own their row, so their list scrolls instead of pushing the
      form past the window. */
   .sw-dlg-agent .sw-fld-refs { min-height: 0; }
@@ -539,7 +541,8 @@
 .sw-dlg-approval .sw-fld-prompt .sw-textarea,
 .sw-dlg-start .sw-fld-prompt .sw-textarea { flex: 1 1 auto; min-height: 140px; resize: none; }
 .sw-dlg-end .sw-fld-final { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.sw-dlg-end .sw-final-pre { flex: 1 1 auto; min-height: 120px; max-height: none; }
+.sw-dlg-end .sw-final-pre,
+.sw-dlg-end .sw-final-md { flex: 1 1 auto; min-height: 120px; max-height: none; }
 /* A loop's pass count is a single small number, not a field-wide value. */
 .sw-count-input { width: 120px; font-family: var(--mono), var(--emoji); }
 /* Only the custom-command provider renders this field. */
@@ -684,6 +687,65 @@
   font-family: monospace, var(--emoji); font-size: 11.5px; line-height: 1.5; color: var(--text);
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-control); padding: 8px 10px;
 }
+
+/* ── The Markdown / Raw switch on an output panel ───────────────────────── */
+
+.sw-view-toggle {
+  flex: 0 0 auto; display: inline-flex; align-items: stretch; overflow: hidden;
+  border: 1px solid var(--border); border-radius: var(--r-control); background: var(--surface);
+}
+.sw-view-btn {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  font-family: inherit; font-size: 11px; line-height: 1; padding: 4px 8px; color: var(--muted);
+}
+.sw-view-btn + .sw-view-btn { border-left: 1px solid var(--border); }
+.sw-view-btn:hover { color: var(--text); background: var(--surface-2); }
+.sw-view-btn.on { color: var(--text); background: var(--accent-soft); }
+
+/* ── An agent's output rendered as markdown ─────────────────────────────── */
+
+.sw-md {
+  margin: 0 0 8px; max-height: 320px; overflow: auto; overflow-wrap: anywhere;
+  font-size: 12px; line-height: 1.55; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-control); padding: 8px 10px;
+}
+.sw-md > :first-child { margin-top: 0; }
+.sw-md > :last-child { margin-bottom: 0; }
+.sw-md p { margin: 0 0 8px; }
+.sw-md h3 { margin: 12px 0 6px; font-family: var(--font-display); font-size: 13px; }
+.sw-md h4 { margin: 10px 0 5px; font-size: 12px; }
+.sw-md ul, .sw-md ol { margin: 0 0 8px; padding-left: 20px; }
+.sw-md li { margin: 2px 0; }
+.sw-md blockquote {
+  margin: 0 0 8px; padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--border-strong); color: var(--text-subtle);
+}
+.sw-md code {
+  font-family: monospace, var(--emoji); font-size: 11.5px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px;
+}
+.sw-md a { color: var(--accent); }
+.sw-md hr { border: 0; border-top: 1px solid var(--hairline); margin: 10px 0; }
+.sw-md-code {
+  margin: 0 0 8px; overflow: hidden;
+  border: 1px solid var(--border); border-radius: var(--r-control); background: var(--surface-2);
+}
+.sw-md-code-head {
+  display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+  border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.sw-md-code-lang {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+}
+.sw-md-code pre { margin: 0; padding: 8px 10px; overflow: auto; white-space: pre; }
+.sw-md-code code { background: none; border: 0; border-radius: 0; padding: 0; font-size: 11.5px; }
+.sw-md-copy {
+  appearance: none; flex: 0 0 auto; cursor: pointer;
+  font-family: inherit; font-size: 10.5px; padding: 2px 6px; border-radius: var(--r-control);
+  color: var(--muted); background: var(--surface-2); border: 1px solid var(--border);
+}
+.sw-md-copy:hover { color: var(--text); }
 
 /* ── The model dropdown ──────────────────────────────────────────────────── */
 

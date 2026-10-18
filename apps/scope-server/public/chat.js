@@ -2015,10 +2015,11 @@
     `<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>`;
   const ICON_THOUGHT =
     `<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/>`;
-  // "Follow the newest line" — an arrow onto a baseline. Doubles as the icon for
-  // the Thought block's auto-scroll toggle.
+  // "Follow the newest line" — paired chevrons pointing down, the conventional
+  // scroll-to-bottom mark. A single arrow onto a baseline read as *download*, so
+  // the baseline is gone and the two chevrons keep it clearly a scroll affordance.
   const ICON_SCROLL_DOWN =
-    `<path d="M12 4v13"/><polyline points="6.5 11.5 12 17 17.5 11.5"/><line x1="5" y1="21" x2="19" y2="21"/>`;
+    `<polyline points="7 6 12 11 17 6"/><polyline points="7 12 12 17 17 12"/>`;
   const TOOL_ICONS = {
     file: `<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>`,
     edit: `<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>`,
