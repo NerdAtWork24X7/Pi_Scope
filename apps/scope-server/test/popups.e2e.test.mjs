@@ -3,7 +3,8 @@
 // shadow), one title ramp, one close button, one stacking ladder — with the
 // markdown editor as the single, deliberate full-bleed variant. The workflow's
 // settings modal is an 80%-wide panel (so the canvas stays visible around it),
-// and the head, body and actions of that panel share one content column.
+// and its form fills that panel: one shared content gutter, two columns on a
+// wide panel, and prose boxes that grow into the height the fields leave.
 //
 // A real server is booted with a git repo, so the popups under test are the real
 // ones (a dynamically built Git confirm, the Settings plugin popup, the agent
@@ -238,7 +239,7 @@ describe("popup design system (superdesign-alpha)", () => {
     assert.deepEqual(errors, []);
   });
 
-  test("the full-bleed editor, the 80% workflow panel, and the one column inside it", async () => {
+  test("the full-bleed editor, the 80% workflow panel, and the form that fills it", async () => {
     // The markdown editor (Settings → SubAgent → Edit) is the app's one
     // full-bleed surface: square, borderless, shadowless, exactly viewport-sized.
     const { page, context, errors } = await openView("settings");
@@ -303,27 +304,120 @@ describe("popup design system (superdesign-alpha)", () => {
     assert.ok(Math.abs(wfBox.bw - wfBox.vw) <= 20 && Math.abs(wfBox.bh - wfBox.vh) <= 20, "the scrim is the viewport");
     assert.ok(Math.abs(wfBox.w / wfBox.vw - 0.8) < 0.005, `the panel is 80% of the window wide (got ${wfBox.w} of ${wfBox.vw})`);
     assert.ok(Math.abs(wfBox.h - wfBox.availV) <= 2, `and full height, inset by the scrim's padding (got ${wfBox.h}/${wfBox.availV})`);
-    // A node's own settings reuse that exact panel — and its name field sits on
-    // the same column as the settings below it (the head, body and actions row
-    // all pad by --sw-col-x), so it does not stretch out past them.
+    // A node's own settings reuse that exact panel — and the form fills it: the
+    // head holds the name field with the close ✕ outside it on the top-right
+    // corner, while the body splits into two sides on a panel this wide (provider
+    // and model on top, the message and the references under it on the left, the
+    // node's output on the right) and lets the message box take the height the
+    // fixed fields leave.
     await wf.page.keyboard.press("Escape");
-    await wf.page.click("#subagent-workflow-pane .sw-node .sw-node-config");
+    await wf.page.click("#subagent-workflow-pane .sw-node.sw-t-agent .sw-node-config");
     await wf.page.waitForSelector(".sw-modal-backdrop:not([hidden]) .sw-dlg-name");
+    await wf.page.waitForSelector("#sw-f-prompt");
     const nodeDlg = await chromeOf(wf.page, ".sw-modal-backdrop:not([hidden])", ".sw-modal", null);
     assert.equal(nodeDlg.radius, wfTokens.radius, "a node's settings open the same panel");
     assert.equal(nodeDlg.scrim, wfTokens.scrim, "over the same scrim");
-    const align = await wf.page.evaluate(() => {
-      const box = document.querySelector(".sw-dlg-head .sw-dlg-name-wrap").getBoundingClientRect();
-      const field = document.querySelector(".sw-dlg-body .sw-field").getBoundingClientRect();
+    const layout = await wf.page.evaluate(() => {
+      const rect = (sel) => document.querySelector(sel).getBoundingClientRect();
+      const bodyEl = document.querySelector(".sw-dlg-body");
+      const bcs = getComputedStyle(bodyEl);
+      const box = rect(".sw-dlg-head .sw-dlg-name-wrap");
+      const closeX = rect(".sw-dlg-head #sw-close-x");
+      const body = bodyEl.getBoundingClientRect();
+      const provider = rect(".sw-dlg-body .sw-fld-provider");
+      const model = rect(".sw-dlg-body .sw-fld-model");
+      const prompt = rect(".sw-dlg-body .sw-fld-prompt");
+      const textarea = rect("#sw-f-prompt");
+      const refs = rect(".sw-dlg-body .sw-fld-refs");
+      const out = rect(".sw-dlg-body .sw-fld-out");
+      const actions = rect(".sw-dlg-actions");
       return {
-        boxLeft: Math.round(box.left), fieldLeft: Math.round(field.left),
-        boxRight: Math.round(box.right), fieldRight: Math.round(field.right),
+        boxLeft: Math.round(box.left), boxRight: Math.round(box.right),
+        closeLeft: Math.round(closeX.left), closeRight: Math.round(closeX.right),
+        contentLeft: Math.round(body.left + parseFloat(bcs.paddingLeft)),
+        contentRight: Math.round(body.right - parseFloat(bcs.paddingRight)),
+        providerLeft: Math.round(provider.left), providerRight: Math.round(provider.right),
+        providerTop: Math.round(provider.top), modelLeft: Math.round(model.left), modelTop: Math.round(model.top),
+        promptLeft: Math.round(prompt.left), promptRight: Math.round(prompt.right),
+        promptTop: Math.round(prompt.top), promptBottom: Math.round(prompt.bottom),
+        textareaHeight: Math.round(textarea.height),
+        refsLeft: Math.round(refs.left), refsTop: Math.round(refs.top), refsRight: Math.round(refs.right),
+        outLeft: Math.round(out.left), outTop: Math.round(out.top), outRight: Math.round(out.right),
+        bodyBottom: Math.round(body.bottom), actionsTop: Math.round(actions.top),
       };
     });
-    assert.equal(align.boxLeft, align.fieldLeft, "the node's name field starts on the body's column");
-    // ...and ends on it: the close control is nested *inside* the name box, so
-    // the box — not a button parked beside it — is what spans the column.
-    assert.equal(align.boxRight, align.fieldRight, "and ends on it — not short of the fields below");
+    assert.equal(layout.boxLeft, layout.contentLeft, "the node's name field starts on the body's column");
+    assert.ok(layout.boxRight < layout.closeLeft, "the close ✕ sits outside the name field");
+    assert.equal(layout.closeRight, layout.contentRight, "at the head's right edge");
+    assert.equal(layout.providerLeft, layout.contentLeft, "the first field starts there too");
+    assert.equal(layout.providerTop, layout.modelTop, "on a wide panel provider and model share a row");
+    assert.ok(layout.modelLeft > layout.providerRight, "as two columns, not one stretched field");
+    assert.ok(layout.refsTop >= layout.promptBottom - 1, "the references sit under the message");
+    assert.equal(layout.refsLeft, layout.promptLeft, "in the same left column");
+    assert.equal(layout.refsRight, layout.promptRight, "and line up with its right edge");
+    assert.ok(layout.outLeft > layout.refsRight, "the node's output is the right-hand column");
+    assert.equal(layout.outRight, layout.contentRight, "which ends on the content edge");
+    assert.equal(layout.outTop, layout.providerTop, "and starts on the first row");
+    assert.ok(layout.textareaHeight >= 140, `the message box takes the height left by the fields (${layout.textareaHeight}px)`);
+    assert.ok(layout.bodyBottom - layout.actionsTop <= 1, "the body fills the space down to the actions row");
+
+    // The trigger form fills the same panel: schedule and its timing field side
+    // by side, the task box taking the height below them.
+    await wf.page.keyboard.press("Escape");
+    await wf.page.click("#sw-triggers");
+    await wf.page.waitForSelector("#sw-tr-task");
+    await wf.page.selectOption("#sw-tr-mode", "interval");
+    const trg = await wf.page.evaluate(() => {
+      const bodyEl = document.querySelector(".sw-dlg-body");
+      const bcs = getComputedStyle(bodyEl);
+      const body = bodyEl.getBoundingClientRect();
+      const r = (sel) => document.querySelector(sel).getBoundingClientRect();
+      const schedule = r(".sw-tr-schedule");
+      const every = r("#sw-tr-interval");
+      const task = r("#sw-tr-task");
+      return {
+        overflowX: bodyEl.scrollWidth - bodyEl.clientWidth,
+        contentRight: Math.round(body.right - parseFloat(bcs.paddingRight)),
+        scheduleTop: Math.round(schedule.top), scheduleRight: Math.round(schedule.right),
+        everyTop: Math.round(every.top), everyLeft: Math.round(every.left),
+        taskHeight: Math.round(task.height), taskRight: Math.round(task.right),
+      };
+    });
+    assert.ok(trg.overflowX <= 1, `the trigger form stays inside the panel (${trg.overflowX}px)`);
+    assert.equal(trg.everyTop, trg.scheduleTop, "schedule and its timing field share a row");
+    assert.ok(trg.everyLeft > trg.scheduleRight, "as two columns, not one stretched field");
+    assert.ok(trg.taskHeight >= 150, `and the task box takes the height below (${trg.taskHeight}px)`);
+    assert.equal(trg.taskRight, trg.contentRight, "the task box ends on the panel's content edge");
+
+    // A connection has no fields: its two endpoints span the panel as a flow,
+    // with the note and the mono readout under it.
+    await wf.page.keyboard.press("Escape");
+    await wf.page.evaluate(() => {
+      document.querySelector("#subagent-workflow-pane path.sw-edge")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await wf.page.waitForSelector(".sw-conn-flow");
+    const conn = await wf.page.evaluate(() => {
+      const bodyEl = document.querySelector(".sw-dlg-body");
+      const bcs = getComputedStyle(bodyEl);
+      const body = bodyEl.getBoundingClientRect();
+      const flow = document.querySelector(".sw-conn-flow");
+      const notes = document.querySelector(".sw-conn-notes").getBoundingClientRect();
+      const ends = [...document.querySelectorAll(".sw-conn-end")].map((el) => el.getBoundingClientRect());
+      return {
+        overflowX: bodyEl.scrollWidth - bodyEl.clientWidth,
+        contentRight: Math.round(body.right - parseFloat(bcs.paddingRight)),
+        columns: getComputedStyle(flow).gridTemplateColumns.split(" ").length,
+        notesRight: Math.round(notes.right),
+        ends: ends.length,
+        endsInside: ends.every((b) => b.left >= body.left && b.right <= body.right),
+      };
+    });
+    assert.ok(conn.overflowX <= 1, `a connection's flow stays inside the panel (${conn.overflowX}px)`);
+    assert.equal(conn.columns, 3, "the two endpoints sit either side of the connection");
+    assert.equal(conn.ends, 2, "both endpoints are drawn");
+    assert.ok(conn.endsInside, "and stay inside the panel");
+    assert.equal(conn.notesRight, conn.contentRight, "the note and readout end on the content edge");
     assert.deepEqual(wf.errors, []);
     await wf.context.close();
   });

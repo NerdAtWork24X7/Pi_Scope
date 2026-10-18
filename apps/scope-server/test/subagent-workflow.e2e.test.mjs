@@ -1272,6 +1272,88 @@ describe("subagent workflow plugin (server)", () => {
     assert.ok(!JSON.stringify(run).includes("\ufffd"), "no character was cut in half");
   });
 
+  test("keeps one row for a status line a harness repaints, counting the repeats", async () => {
+    const solo = path.join(tmpDir, "ws-repaint");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+
+    // opencode paints `> build · model` again on every step and every wait; a
+    // pipe turns each repaint into its own line, which used to read in the
+    // sidebar as the agent restarting. Three repaints in a row are one row.
+    const banner = "> build · deepseek-v4.1-flash-free";
+    const command =
+      "printf '> build · deepseek-v4.1-flash-free\\n'; sleep 0.2; " +
+      "printf '> build · deepseek-v4.1-flash-free\\n'; sleep 0.2; " +
+      "printf '> build · deepseek-v4.1-flash-free\\n'; " +
+      "printf 'the answer\\n'";
+    const upd = await act("updateNode", { id: agent.id, name: "repainter", config: {
+      harness: "custom", command, prompt: "{task}",
+    } }, solo);
+    assert.ok(upd.res.ok, upd.data?.error);
+
+    const started = await runApi("start", { task: "repaint check" }, solo);
+    assert.ok(started.res.ok, started.data?.error);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+
+    const rows = run.log.filter((l) => l.nodeId === agent.id && l.stream === "stdout");
+    assert.deepEqual(rows.map((l) => l.text), [banner, "the answer"],
+      "the repaints collapse into the one row that was painted, then the answer");
+    assert.equal(rows[0].repeat, 3, "and the row says how many times it was painted");
+
+    // The node's own result is untouched: all three banners are still in it.
+    assert.equal((run.nodes[agent.id].outputTail.match(/build ·/g) || []).length, 3,
+      "collapsing the log does not rewrite the harness's output");
+  });
+
+  test("reports a failed harness's own error line, not the status banner it repainted", async () => {
+    const solo = path.join(tmpDir, "ws-stderr-error");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+
+    // The mixed stderr a failing opencode leaves: its banner and a tool row, then
+    // the provider's refusal — what the reader needs is the refusal.
+    const command =
+      "printf '> build · deepseek-v4.1-flash-free\\n' >&2; " +
+      "printf '◈ Web Search via Exa \"x\"\\n' >&2; " +
+      "printf 'Error: Provider request failed with HTTP 500\\n' >&2; exit 1";
+    const upd = await act("updateNode", { id: agent.id, name: "failing", config: {
+      harness: "custom", command, prompt: "{task}",
+    } }, solo);
+    assert.ok(upd.res.ok, upd.data?.error);
+
+    const started = await runApi("start", { task: "fail check" }, solo);
+    assert.ok(started.res.ok, started.data?.error);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "error");
+    assert.match(run.nodes[agent.id].error, /Provider request failed with HTTP 500/);
+    assert.doesNotMatch(run.nodes[agent.id].error, /build ·/, "the banner is not the error");
+  });
+
+  test("falls back to the exit code when a failing harness wrote only status rows", async () => {
+    const solo = path.join(tmpDir, "ws-status-only");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+
+    const command =
+      "printf '> build · deepseek-v4.1-flash-free\\n' >&2; " +
+      "printf '◈ Web Search via Exa \"x\"\\n' >&2; exit 3";
+    const upd = await act("updateNode", { id: agent.id, name: "silent", config: {
+      harness: "custom", command, prompt: "{task}",
+    } }, solo);
+    assert.ok(upd.res.ok, upd.data?.error);
+
+    const started = await runApi("start", { task: "silent fail" }, solo);
+    assert.ok(started.res.ok, started.data?.error);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "error");
+    assert.equal(run.nodes[agent.id].error, "exited with code 3",
+      "a banner-only stderr leaves the exit code as the reason");
+  });
+
   test("resolves a Pi node's skills against the agent dir, reporting what is missing", async () => {
     const s = await snapshot(ws5);
     const agent = s.nodes.find((n) => n.type === "agent");
@@ -1974,15 +2056,25 @@ describe("subagent workflow plugin (client)", () => {
     assert.equal(await page.locator("#sw-modal-backdrop:visible").count(), 0);
     assert.deepEqual(await configOf(), agent.config, "closing is not saving");
 
-    // The ✕ in the head closes it too, and so does the actions row's Close.
+    // The ✕ in the head closes it too — it is the popup's only close control,
+    // sitting outside the name field at the panel's top-right corner.
     await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-f-harness");
+    assert.equal(await page.locator(".sw-dlg-actions #sw-close").count(), 0,
+      "no Close button in the actions row");
+    const headClose = await page.evaluate(() => {
+      const head = document.querySelector(".sw-dlg-head").getBoundingClientRect();
+      const name = document.querySelector(".sw-dlg-name-wrap").getBoundingClientRect();
+      const x = document.querySelector("#sw-close-x").getBoundingClientRect();
+      const hcs = getComputedStyle(document.querySelector(".sw-dlg-head"));
+      return {
+        outside: x.left >= name.right - 1,
+        atRightEdge: Math.round(x.right) === Math.round(head.right - parseFloat(hcs.paddingRight)),
+      };
+    });
+    assert.ok(headClose.outside, "the close ✕ sits outside the name field");
+    assert.ok(headClose.atRightEdge, "at the head's right edge");
     await page.click("#sw-close-x");
-    await page.waitForFunction(() => !document.querySelector("#sw-modal .sw-dlg-body"));
-
-    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
-    await page.waitForSelector("#sw-f-harness");
-    await page.click("#sw-close");
     await page.waitForFunction(() => !document.querySelector("#sw-modal .sw-dlg-body"));
 
     // Double-clicking the card is the same as pressing its gear — and an edit
@@ -2087,7 +2179,7 @@ describe("subagent workflow plugin (client)", () => {
     // settings popup covers the toolbar, so close it to reach ↻ and open the
     // node again — a reload inside the popup would be a different test.
     assert.ok((await act("updateNode", { id: agent.id, config: { harness: "pi", model: "mimo-v2.6-flash" } }, solo)).res.ok);
-    await page.click("#sw-close");
+    await page.click("#sw-close-x");
     await page.click("#sw-refresh");
     await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForFunction(() => document.querySelector("#sw-f-model")?.value === "__custom__");
@@ -2706,6 +2798,50 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
+  test("the messages sidebar shows what the agent said, not its harness's chatter", async () => {
+    const solo = path.join(tmpDir, "ws-msgs-own");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+
+    // The mix a real CLI writes: the answer on stdout, its banner and tool rows
+    // on stderr (opencode does exactly this). The sidebar is the conversation.
+    const command =
+      "printf 'The agent said this.\\n'; " +
+      "printf '> build · deepseek-v4.1-flash-free\\n' >&2; " +
+      "printf '⚙ execute {}\\n' >&2; " +
+      "printf '◈ Web Search via Exa \"x\"\\n' >&2";
+    assert.ok((await act("updateNode", { id: agent.id, name: "talker", config: {
+      harness: "custom", command, prompt: "{task}",
+    } }, solo)).res.ok);
+
+    const started = await runApi("start", { task: "chat check" }, solo);
+    assert.ok(started.res.ok, started.data?.error);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+
+    // The node's output is its answer alone: that is what the sidebar reads and
+    // what a downstream node is handed. The stderr chatter stays in the log.
+    assert.equal(run.nodes[agent.id].outputTail, "The agent said this.\n",
+      "the output tail is stdout, not the harness's status stream");
+
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.waitForSelector("#sw-msg-body");
+    const body = await page.textContent("#sw-msg-body");
+    assert.match(body, /The agent said this\./, "the agent's own words are in the sidebar");
+    assert.doesNotMatch(body, /build ·/, "its banner is not");
+    assert.doesNotMatch(body, /execute/, "nor its tool calls");
+    assert.doesNotMatch(body, /Web Search/, "nor the tool rows");
+
+    // Nothing was lost: the run log still carries the harness's whole stream.
+    const logText = await page.textContent("#sw-run-log");
+    assert.match(logText, /build ·/, "the run log keeps the banner");
+    assert.match(logText, /Web Search/, "and the tool rows");
+
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
   test("the messages sidebar resizes by its handle and remembers the width", async () => {
     const solo = path.join(tmpDir, "ws-msgs-size");
     fs.mkdirSync(solo, { recursive: true });
@@ -3059,6 +3195,72 @@ describe("subagent workflow plugin (client)", () => {
     assert.equal(await page.textContent("#sw-ref-picker .sw-pick-dir"), "workspace root");
     await page.click("#sw-ref-picker [data-pick-close]");
     assert.ok(await page.locator("#sw-ref-picker").isHidden(), "the ✕ hides the browser");
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("shows a node's output beside its message, with the references under it", async () => {
+    const solo = path.join(tmpDir, "ws-node-output");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    assert.ok((await act("updateNode", { id: agent.id, name: "writer", config: {
+      harness: "custom", command: "printf 'written by the node\\n'", prompt: "{task}",
+    } }, solo)).res.ok);
+
+    const started = await runApi("start", { task: "output check" }, solo);
+    assert.ok(started.res.ok, started.data?.error);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-node-out");
+
+    // The node's own result is in the panel, under an Output heading — the
+    // message that produced it is the field beside it.
+    assert.equal(await page.textContent(".sw-fld-out .sw-out-title"), "Output");
+    assert.match(await page.textContent("#sw-node-out"), /written by the node/);
+
+    // And the layout: references under the message on the left, output on the
+    // right, starting where the fields do.
+    const boxes = await page.evaluate(() => {
+      const r = (sel) => document.querySelector(sel).getBoundingClientRect();
+      const body = r(".sw-dlg-body");
+      const prompt = r(".sw-fld-prompt"), refs = r(".sw-fld-refs"), out = r(".sw-fld-out");
+      const bcs = getComputedStyle(document.querySelector(".sw-dlg-body"));
+      const row = document.querySelector(".sw-dlg-actions").getBoundingClientRect();
+      const rcs = getComputedStyle(document.querySelector(".sw-dlg-actions"));
+      return {
+        contentRight: Math.round(body.right - parseFloat(bcs.paddingRight)),
+        promptLeft: Math.round(prompt.left), promptBottom: Math.round(prompt.bottom),
+        refsLeft: Math.round(refs.left), refsTop: Math.round(refs.top),
+        outLeft: Math.round(out.left), outRight: Math.round(out.right),
+        actionsRight: Math.round(row.right - parseFloat(rcs.paddingRight)),
+        saveLeft: Math.round(r("#sw-save").left), saveRight: Math.round(r("#sw-save").right),
+        dupLeft: Math.round(r("#sw-duplicate").left), delLeft: Math.round(r("#sw-delete").left),
+      };
+    });
+    assert.ok(boxes.refsTop >= boxes.promptBottom - 1, "the references sit under the message");
+    assert.equal(boxes.refsLeft, boxes.promptLeft, "in the same left column");
+    assert.ok(boxes.outLeft > boxes.refsLeft, "the output is the right-hand column");
+    assert.equal(boxes.outRight, boxes.contentRight, "ending on the panel's content edge");
+
+    // The node's own actions sit together in the bottom-right corner, read
+    // Delete → Duplicate → Save node; the head's ✕ is the only close control.
+    assert.equal(boxes.saveRight, boxes.actionsRight, "the actions end on the bottom-right edge");
+    assert.ok(boxes.delLeft < boxes.dupLeft && boxes.dupLeft < boxes.saveLeft,
+      "in Delete → Duplicate → Save node order");
+    assert.equal(await page.locator("#sw-ok").count(), 0, "no OK button");
+    assert.equal(await page.locator(".sw-dlg-actions #sw-close").count(), 0, "and no Close button in the actions row");
+
+    // Save still writes the panel's fields.
+    await page.fill("#sw-f-prompt", "saved {task}");
+    await page.click("#sw-save");
+    await page.waitForTimeout(400);
+    assert.equal((await snapshot(solo)).nodes.find((n) => n.id === agent.id).config.prompt, "saved {task}",
+      "Save node writes the field");
+
     assert.deepEqual(errors, []);
     await context.close();
   });

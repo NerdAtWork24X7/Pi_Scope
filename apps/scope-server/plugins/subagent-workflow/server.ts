@@ -236,6 +236,34 @@ function clipText(text: string, max: number, fromEnd = false): string {
   return cut;
 }
 
+/**
+ * A row a CLI paints as live status rather than prose: opencode's `> agent ·
+ * model` banner, its `◈` / `%` tool rows, and a braille spinner frame. These are
+ * repainted as the agent works, so they say nothing about *why* a run failed.
+ */
+const STATUS_LINE_RE = /^(?:>\s+\S+\s+·|◈|%|[\u2800-\u28ff])/u;
+
+/**
+ * The line a failed harness actually meant to report, out of what it wrote to
+ * stderr. A harness that paints a live status line writes it again on every step
+ * and every wait (`opencode` reprints `> build · model`, then its `◈`/`%` tool
+ * rows), and through a pipe each repaint arrives as an ordinary line — so the
+ * tail of a failed run can be nothing but banners, which as a node's error says
+ * nothing at all. A line the CLI labelled as an error wins; failing that, the
+ * last row that is not live status is the best answer left. Empty when only
+ * status rows were written, so the caller can fall back to the exit code.
+ */
+function errorFromStderr(text: unknown): string {
+  const lines = cleanRunText(text).split("\n").map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^(?:error|fatal|failed|failure)\b/i.test(lines[i])) return clipText(lines[i], RUN_LOG_LINE_MAX);
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!STATUS_LINE_RE.test(lines[i])) return clipText(lines[i], RUN_LOG_LINE_MAX);
+  }
+  return "";
+}
+
 const collapse = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
 /** A stable id slug from a harness name (`"DeepSeek CLI"` → `"deepseek-cli"`). */
 const slug = (v) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
@@ -1261,6 +1289,17 @@ export function activate(api: any): void {
     // is empty, and an empty row in the messages sidebar is not a message.
     const clean = clipText(cleanRunText(text), RUN_LOG_LINE_MAX);
     if (!clean.trim()) return;
+    // A CLI that paints a live status line writes the same text again on every
+    // tick (`opencode` reprints `> build · model` while it waits on a model), and
+    // through a pipe each repaint is a new line. Consecutive identical lines from
+    // one node are one message being repainted — not the agent starting again —
+    // so the row is kept once and counts the repeats instead of filling the log.
+    const prev = run.log[run.log.length - 1];
+    if (prev && prev.nodeId === nodeId && prev.stream === stream && prev.text === clean) {
+      prev.ts = Date.now();
+      prev.repeat = (prev.repeat || 1) + 1;
+      return;
+    }
     run.seq++;
     run.log.push({ seq: run.seq, ts: Date.now(), nodeId, stream, text: clean });
     if (run.log.length > RUN_LOG_MAX) run.log.splice(0, run.log.length - RUN_LOG_MAX);
@@ -2284,9 +2323,14 @@ export function activate(api: any): void {
           let pending = "";
           const feed = (data: Buffer) => {
             const text = decoder.decode(data, { stream: true });
+            // The node's *output* is what the harness published on stdout: the
+            // answer the messages sidebar shows as the agent's words and the
+            // text a downstream node is handed as `{input}`. stderr is the
+            // harness's own chatter — opencode's `> build · model` banner and
+            // its `◈` / `%` tool rows arrive there — and is kept for the log
+            // and the failure report, never folded into the answer.
             if (stream === "stderr") errBuf = (errBuf + text).slice(-8000);
-            output = (output + text).slice(-RUN_OUTPUT_MAX);
-            s.output = cleanRunText(output);
+            else { output = (output + text).slice(-RUN_OUTPUT_MAX); s.output = cleanRunText(output); }
             pending += text;
             let nl: number;
             while ((nl = pending.indexOf("\n")) >= 0) {
@@ -2320,7 +2364,7 @@ export function activate(api: any): void {
           flush();
           const error = timedOut ? `timed out after ${node.config.timeoutSec}s`
             : code === 0 ? undefined
-            : (cleanRunText(errBuf).trim() || `exited with code ${code}`);
+            : (errorFromStderr(errBuf) || `exited with code ${code}`);
           resolve({ text: cleanRunText(output), code, error });
         });
       });

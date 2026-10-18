@@ -505,6 +505,7 @@
     renderEdges();
     renderDialog();
     syncFinalOutput();
+    syncNodeOutput();
     renderRun();
   }
 
@@ -519,6 +520,7 @@
     if (drag || link) { dirty = true; return; }
     applyRunStatuses();
     syncFinalOutput();
+    syncNodeOutput();
     renderRun();
   }
 
@@ -721,6 +723,51 @@
         `<button class="btn-sm" id="sw-final-copy" type="button" title="Copy the final output">Copy</button></div>` +
       `<pre class="sw-final-pre">${esc(text)}</pre>` +
       `<div class="sw-hint">The joined output of this node's incoming connections${status ? `, from the ${esc(status)} run` : ""}.</div>`;
+  }
+
+  /**
+   * A node's own **output** in its settings popup: what its agent has streamed
+   * (a live run) or what it produced in the run being read. The messages sidebar
+   * is where the whole stream is read; this is the node's result beside the
+   * message that asked for it, so the two can be compared without leaving the
+   * popup.
+   */
+  function nodeOutputHtml(n) {
+    const text = nodeOutputText(n.id).trim();
+    const rs = runNode(n.id);
+    const status = rs?.status || "";
+    if (!text) {
+      return `<p class="sw-muted">${status === "running" ? "Running — nothing printed yet."
+          : status === "error" ? `Nothing captured — ${esc(rs?.error || "the run failed")}.`
+          : "No output yet."}</p>` +
+        `<p class="sw-hint">Run the workflow and this node's output lands here, as its agent writes it.</p>`;
+    }
+    const lines = text.split("\n").length;
+    return `<div class="sw-out-head">` +
+        `<span class="sw-out-title">Output</span>` +
+        statusPill(n.id) +
+        `<span class="sw-out-meta">${lines} line${lines === 1 ? "" : "s"} · ${text.length} chars</span>` +
+        `<button class="btn-sm" id="sw-out-copy" type="button" title="Copy this node's output">Copy</button></div>` +
+      `<pre class="sw-out-pre">${esc(text)}</pre>` +
+      `<div class="sw-hint">${status === "running" ? "Live — the agent is still writing." : "What this node produced in the run being read."}</div>`;
+  }
+
+  /**
+   * Refresh the node output panel while the popup is open — a live run grows it
+   * with each poll. Left alone when nothing changed, so a selection the user is
+   * making survives the tick.
+   */
+  function syncNodeOutput() {
+    const box = dlgEl?.querySelector("#sw-node-out");
+    if (!box || dlg?.kind !== "node") return;
+    const n = nodeById(dlg.id);
+    if (!n || n.type !== "agent") return;
+    const rs = runNode(n.id);
+    const text = nodeOutputText(n.id);
+    const sig = `${rs?.status || ""}\u0000${rs?.error || ""}\u0000${text}`;
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    box.innerHTML = nodeOutputHtml(n);
   }
 
   /**
@@ -996,16 +1043,15 @@
   /**
    * The frame every popup shares: head, scrolling body, actions row.
    *
-   * `closeInHead` leaves the close control to the caller's own head markup
-   * instead of appending it. A node dialog asks for that: its head *is* its name
-   * field, so a button sitting next to it would eat into the content column and
-   * leave the field's right edge short of the settings below it.
+   * The close control lives in the head, at the panel's top-right corner and
+   * outside whatever the head holds — a node's name field included — so it never
+   * competes with a field for space. The actions row carries the surface's own
+   * actions only: closing is the ✕ (or Esc, or the scrim).
    */
-  function dialogHtml(head, body, actions, { closeInHead = false } = {}) {
-    return `<div class="sw-dlg-head">${head}` +
-        (closeInHead ? "" : closeXHtml()) + `</div>` +
+  function dialogHtml(head, body, actions) {
+    return `<div class="sw-dlg-head">${head}${closeXHtml()}</div>` +
       `<div class="sw-dlg-body">${body}</div>` +
-      `<div class="sw-dlg-actions">${actions}<button class="btn-sm sw-dlg-close" id="sw-close" type="button">Close</button></div>`;
+      `<div class="sw-dlg-actions">${actions}</div>`;
   }
 
   /** Open the popup on `{ kind, id }`, or close it with nothing. */
@@ -1025,10 +1071,16 @@
   /** (Re)build the open popup. A closed popup costs nothing. */
   function renderDialog() {
     if (!dlgEl || !dlg) return;
-    if (dlg.kind === "edge") return renderEdgeDialog();
-    if (dlg.kind === "triggers") return renderTriggersDialog();
+    // What is open decides how the panel lays itself out: a node's settings use
+    // the whole panel (see client.css → Node settings popup), while a connection
+    // or the trigger form stays one readable column. The class is reset on every
+    // render so opening another surface never inherits the last one's layout.
+    dlgEl.className = "sw-modal";
+    if (dlg.kind === "edge") { dlgEl.classList.add("sw-dlg-edge"); return renderEdgeDialog(); }
+    if (dlg.kind === "triggers") { dlgEl.classList.add("sw-dlg-triggers"); return renderTriggersDialog(); }
     const n = nodeById(dlg.id);
     if (!n) return closeDialog();
+    dlgEl.classList.add("sw-dlg-node", `sw-dlg-${n.type}`);
     return renderNodeDialog(n);
   }
 
@@ -1062,24 +1114,30 @@
     const sch = t.schedule || { mode: "off", everySeconds: 300, at: "09:00" };
     const ev = t.event || { enabled: false, types: [] };
     return `<div class="sw-triggers">` +
-      `<p class="sw-muted">Start this workflow on a schedule or when an event arrives, not only from ▶ Run.</p>` +
-      `<label class="sw-field"><span>Schedule</span>` +
+      `<p class="sw-muted sw-tr-lead">Start this workflow on a schedule or when an event arrives, not only from ▶ Run.</p>` +
+      `<label class="sw-field sw-tr-schedule"><span>Schedule</span>` +
         `<select class="set-select" id="sw-tr-mode">` +
           `<option value="off"${sch.mode === "off" ? " selected" : ""}>off — manual runs only</option>` +
           `<option value="interval"${sch.mode === "interval" ? " selected" : ""}>every N seconds</option>` +
           `<option value="daily"${sch.mode === "daily" ? " selected" : ""}>every day at…</option>` +
         `</select></label>` +
-      `<label class="sw-field" id="sw-tr-interval" style="display:${sch.mode === "interval" ? "" : "none"}"><span>Every (seconds)</span>` +
+      `<label class="sw-field sw-tr-timing" id="sw-tr-interval" style="display:${sch.mode === "interval" ? "" : "none"}"><span>Every (seconds)</span>` +
         `<input class="set-input" id="sw-tr-every" type="number" min="5" max="86400" step="5" value="${escAttr(sch.everySeconds || 300)}">` +
         `<div class="sw-hint">60 = every minute, 3600 = hourly.</div></label>` +
-      `<label class="sw-field" id="sw-tr-daily" style="display:${sch.mode === "daily" ? "" : "none"}"><span>At (local time)</span>` +
+      `<label class="sw-field sw-tr-timing" id="sw-tr-daily" style="display:${sch.mode === "daily" ? "" : "none"}"><span>At (local time)</span>` +
         `<input class="set-input" id="sw-tr-at" value="${escAttr(sch.at || "09:00")}" placeholder="09:00"></label>` +
-      `<label class="sw-check sw-check-line"><input type="checkbox" id="sw-tr-event"${ev.enabled ? " checked" : ""}> start on observed events</label>` +
-      `<label class="sw-field"><span>Event types</span>` +
-        `<input class="set-input" id="sw-tr-types" value="${escAttr((ev.types || []).join(", "))}" placeholder="tool_call, file_edit">` +
-        `<div class="sw-hint">Comma-separated event types. Empty = any event from this workspace.</div></label>` +
-      `<label class="sw-field"><span>Task <em>(optional)</em></span>` +
-        `<input class="set-input" id="sw-tr-task" value="${escAttr(t.task || "")}" placeholder="the start node's default task">` +
+      // The event watch is one idea, so it is one block: the switch that arms it
+      // and the types that narrow it.
+      `<div class="sw-tr-eventbox">` +
+        `<label class="sw-check sw-check-line"><input type="checkbox" id="sw-tr-event"${ev.enabled ? " checked" : ""}> start on observed events</label>` +
+        `<label class="sw-field"><span>Event types</span>` +
+          `<input class="set-input" id="sw-tr-types" value="${escAttr((ev.types || []).join(", "))}" placeholder="tool_call, file_edit">` +
+          `<div class="sw-hint">Comma-separated event types. Empty = any event from this workspace.</div></label>` +
+      `</div>` +
+      // The task is the run's prompt, so it is a prose box like the start node's:
+      // it grows into whatever height the trigger form has left.
+      `<label class="sw-field sw-tr-task"><span>Task <em>(optional)</em></span>` +
+        `<textarea class="set-input sw-textarea" id="sw-tr-task" rows="5" spellcheck="false" placeholder="the start node's default task">${esc(t.task || "")}</textarea>` +
         `<div class="sw-hint">${esc(triggerSummary(t))}</div></label>` +
     `</div>`;
   }
@@ -1350,10 +1408,14 @@
         `<button class="sw-ref-del" type="button" data-ref-del="${escAttr(r.id)}" ` +
           `title="Remove ${escAttr(shown)}">×</button></div>`;
     }).join("");
-    return `<div class="sw-field sw-refs" id="sw-refs">` +
+    return `<div class="sw-field sw-fld-refs sw-refs" id="sw-refs">` +
         `<span>Reference files &amp; folders <em>(optional)</em></span>` +
         (refs.length ? `<div class="sw-ref-list">${rows}</div>`
-                     : `<div class="sw-hint" id="sw-refs-empty">No references yet.</div>`) +
+                     : `<div class="sw-ref-empty" id="sw-refs-empty">` +
+                         `<span class="sw-ref-empty-glyph" aria-hidden="true">📎</span>` +
+                         `<span class="sw-ref-empty-title">No references yet</span>` +
+                         `<span class="sw-ref-empty-hint">Add a file or folder below — it is sent with this node's message so its agent can read it.</span>` +
+                       `</div>`) +
         `<div class="sw-ref-add">` +
           `<input class="set-input" id="sw-ref-path" spellcheck="false" autocomplete="off" ` +
             `placeholder="docs/architecture.md or src/ — relative to the workspace">` +
@@ -1473,22 +1535,25 @@
     if (n.type === "agent") {
       const c = n.config || {};
       fields =
-        `<label class="sw-field"><span class="sw-field-label">Provider <span id="sw-harness-icon">${harnessIcon(c.harness, providerLabel(c.harness))}</span></span>` +
+        `<label class="sw-field sw-fld-provider"><span class="sw-field-label">Provider <span id="sw-harness-icon">${harnessIcon(c.harness, providerLabel(c.harness))}</span></span>` +
           `<select class="set-select" id="sw-f-harness">${harnessOptions(c.harness)}</select>` +
           `<div class="sw-hint" id="sw-harness-hint"></div></label>` +
-        `<div id="sw-model-wrap">${modelFieldHtml(c.harness, c.model)}</div>` +
-        `<label class="sw-field"><span>User message</span>` +
+        `<div class="sw-fld-model" id="sw-model-wrap">${modelFieldHtml(c.harness, c.model)}</div>` +
+        `<label class="sw-field sw-fld-prompt"><span>User message</span>` +
           `<textarea class="set-input sw-textarea" id="sw-f-prompt" rows="5" spellcheck="false" placeholder="{input}">${esc(c.prompt || "")}</textarea>` +
           `<div class="sw-hint"><code>{input}</code> = what the nodes before this one produced, <code>{task}</code> = the run task.</div></label>` +
-        `<label class="sw-field sw-only-custom" id="sw-custom-wrap"><span>Command</span>` +
+        `<label class="sw-field sw-fld-command sw-only-custom" id="sw-custom-wrap"><span>Command</span>` +
           `<input class="set-input" id="sw-f-command" value="${escAttr(c.command || "")}" placeholder="my-agent -p &quot;${customVar("SW_PROMPT")}&quot;">` +
           `<div class="sw-hint">What this provider runs. <code>${esc(customVar("SW_PROMPT"))}</code>, <code>${esc(customVar("SW_TASK"))}</code>, <code>${esc(customVar("SW_NODE"))}</code> and <code>${esc(customVar("SW_REFS"))}</code> are set for it.` +
             (serverPlatform === "win32" ? ` Run through <code>cmd.exe</code>.` : ` Run through your shell.`) + `</div></label>` +
-        refsFieldHtml(n);
+        refsFieldHtml(n) +
+        // The node's result, beside the message that produced it: the wide
+        // panel's right column, and under the references on a narrow one.
+        `<div class="sw-field sw-fld-out" id="sw-node-out">${nodeOutputHtml(n)}</div>`;
     } else if (n.type === "approval") {
       const c = n.config || {};
       fields =
-        `<label class="sw-field"><span>User message</span>` +
+        `<label class="sw-field sw-fld-prompt"><span>User message</span>` +
           `<textarea class="set-input sw-textarea" id="sw-f-message" rows="5" spellcheck="false" placeholder="Approve the plan above before it is implemented.">${esc(c.message || "")}</textarea>` +
           `<div class="sw-hint">Shown on the gate's card in the messages sidebar while the run waits. <code>{input}</code> = the final output of the nodes wired in, <code>{task}</code> = the run task.</div></label>`;
     } else if (n.type === "loop") {
@@ -1512,12 +1577,12 @@
           `<code>{iterations}</code> and <code>{loop}</code> in its message (and <code>$SW_ITERATION</code> in a command).</div></label>`;
     } else if (n.type === "start") {
       fields =
-        `<label class="sw-field"><span>User message <em>(run task)</em></span>` +
+        `<label class="sw-field sw-fld-prompt"><span>User message <em>(run task)</em></span>` +
           `<textarea class="set-input sw-textarea" id="sw-f-task" rows="4" spellcheck="false" placeholder="What should this workflow do?">${esc(n.config?.defaultTask || "")}</textarea>` +
           `<div class="sw-hint">The run's task: every node can read it as <code>{task}</code> (and a command as <code>${esc(customVar("SW_TASK"))}</code>). Every node wired off the start runs in parallel.</div></label>`;
     } else {
       // The end node shows the workflow's final output (see finalOutputHtml).
-      fields = `<div id="sw-final-body">${finalOutputHtml()}</div>`;
+      fields = `<div class="sw-fld-final" id="sw-final-body">${finalOutputHtml()}</div>`;
     }
 
     dlgEl.innerHTML = dialogHtml(
@@ -1532,13 +1597,11 @@
           : `<span class="sw-dlg-glyph sw-t-${n.type}">${nodeGlyph(n.type)}</span>`) +
         `<input class="sw-dlg-name" id="sw-f-name" value="${escAttr(n.name)}" maxlength="60" aria-label="Node name" placeholder="node name">` +
         `<span class="sw-dlg-kind">${title.replace(" node", "")}</span>` +
-        closeXHtml() +
       `</span>`,
       fields,
-      `<button class="btn-sm sw-primary" id="sw-save" type="button">Save node</button>` +
+      `<button class="btn-sm sw-danger" id="sw-delete" type="button">Delete</button>` +
       (n.type !== "start" && n.type !== "end" ? `<button class="btn-sm" id="sw-duplicate" type="button" title="Clone this node, keeping its settings">Duplicate</button>` : "") +
-      `<button class="btn-sm sw-danger" id="sw-delete" type="button">Delete</button>`,
-      { closeInHead: true },
+      `<button class="btn-sm sw-primary" id="sw-save" type="button">Save node</button>`,
     );
 
     dlgEl.querySelector("#sw-save").addEventListener("click", () => saveNode(n));
@@ -1586,13 +1649,41 @@
     if (!e) { selected = null; return closeDialog(); }
     const from = nodeById(e.from), to = nodeById(e.to);
     const repeat = e.port === "repeat";
+    const kindOf = (n) => !n ? "unknown"
+      : n.type === "approval" ? "approval gate"
+      : n.type === "agent" ? (providerLabel(n.config?.harness) || "agent")
+      : n.type;
+    const endHtml = (side, n, id) =>
+      `<div class="sw-conn-end">` +
+        `<span class="sw-conn-eyebrow">${side}</span>` +
+        `<span class="sw-conn-name">${esc(n?.name || id)}</span>` +
+        `<span class="sw-conn-kind">${esc(kindOf(n))}</span>` +
+      `</div>`;
     dlgEl.innerHTML = dialogHtml(
       `<span class="sw-dlg-glyph">${repeat ? "🔁" : "⇢"}</span><span class="sw-dlg-title">${repeat ? "Repeat connection" : "Connection"}</span>`,
-      `<p class="sw-conn-label"><b>${esc(from?.name || e.from)}</b> → <b>${esc(to?.name || e.to)}</b></p>` +
-        (repeat
-          ? `<p class="sw-muted">Feedback: each pass of <b>${esc(from?.name || e.from)}</b> re-runs ` +
-            `<b>${esc(to?.name || e.to)}</b> with the previous pass's result as its <code>{input}</code>.</p>`
-          : `<p class="sw-muted">The source node's output is passed to the target as <code>{input}</code>.</p>`),
+      // The connection reads left to right: the two endpoints either side of the
+      // port it leaves, then what that means as a note and a mono readout. On a
+      // narrow panel the flow stacks; on a wide one it spans the panel.
+      `<div class="sw-conn-flow">` +
+        endHtml("From", from, e.from) +
+        `<div class="sw-conn-link" aria-hidden="true">` +
+          `<span class="sw-conn-arrow">→</span>` +
+          `<span class="sw-conn-port">${repeat ? "repeat" : "next"}</span>` +
+        `</div>` +
+        endHtml("To", to, e.to) +
+      `</div>` +
+      `<div class="sw-conn-notes">` +
+        `<p class="sw-muted">` +
+          (repeat
+            ? `Feedback: each pass of <b>${esc(from?.name || e.from)}</b> re-runs ` +
+              `<b>${esc(to?.name || e.to)}</b> with the previous pass's result as its <code>{input}</code>.`
+            : `The source node's output is passed to the target as <code>{input}</code>.`) +
+        `</p>` +
+        `<div class="sw-conn-readout">` +
+          `<div class="sw-conn-readout-row"><span>port</span><code>${esc(e.port || "next")}</code></div>` +
+          `<div class="sw-conn-readout-row"><span>input</span><code>{input}</code></div>` +
+        `</div>` +
+      `</div>`,
       `<button class="btn-sm sw-danger" id="sw-del-edge" type="button">Delete connection</button>`,
     );
     dlgEl.querySelector("#sw-del-edge").addEventListener("click", () => removeEdge(e.id));
@@ -1867,9 +1958,10 @@
         runLogEl.innerHTML = entries.length
           ? entries.map((l) => {
               const name = l.nodeId ? (nodeById(l.nodeId)?.name || "node") : "run";
+              const rep = l.repeat > 1 ? ` <span class="sw-log-repeat">×${l.repeat}</span>` : "";
               return `<div class="sw-log-line sw-log-${escAttr(l.stream)}">` +
                 `<span class="sw-log-node">${esc(name)}</span>` +
-                `<span class="sw-log-text">${esc(l.text)}</span></div>`;
+                `<span class="sw-log-text">${esc(l.text)}${rep}</span></div>`;
             }).join("")
           : `<div class="sw-log-empty">${historyRun ? "This run logged nothing." : "Run the workflow to see each node's output stream here."}</div>`;
         runLogEl.scrollTop = runLogEl.scrollHeight;
@@ -1909,14 +2001,27 @@
   }
 
   /**
+   * The lines an agent actually *said*: its own words, not the harness's banner,
+   * tool calls or progress chatter. Every harness writes its answer to stdout —
+   * opencode puts `> build · model` and its `◈` / `%` tool rows on stderr, and
+   * the Pi runner logs each text delta as stdout while a tool start is `tool` —
+   * so the sidebar reads stdout alone. The run log keeps everything else, which
+   * is where a harness's chatter stays available.
+   */
+  function assistantLinesFor(nodeId) {
+    return messagesFor(nodeId).filter((l) => l.stream === "stdout" && String(l.text || "").trim());
+  }
+
+  /**
    * What a node produced, as text: the run's own output tail when the server
-   * kept one, otherwise its streamed lines joined — so the same agent reads the
-   * same way whether the run is live or reopened.
+   * kept one, otherwise the lines it said joined — so the same agent reads the
+   * same way whether the run is live or reopened, and never as a harness's
+   * status stream.
    */
   function nodeOutputText(id) {
     const tail = runNode(id)?.outputTail;
     if (typeof tail === "string" && tail.trim()) return tail;
-    return messagesFor(id).filter((l) => l.stream !== "status").map((l) => l.text).join("\n");
+    return assistantLinesFor(id).map((l) => l.text).join("\n");
   }
 
   /** The agents wired straight into a node — who fed it. */
@@ -1971,9 +2076,12 @@
   function msgLineHtml(l) {
     const kind = l.stream === "stderr" ? "stderr" : l.stream === "status" ? "status" : "stdout";
     const t = l.ts ? new Date(l.ts).toLocaleTimeString([], { hour12: false }) : "";
+    // One row can stand for a status line the harness repainted several times:
+    // the count says so without repeating the line.
+    const rep = l.repeat > 1 ? `<span class="sw-msg-repeat">×${l.repeat}</span>` : "";
     return `<div class="sw-msg-line sw-msg-${kind}">` +
       (t ? `<span class="sw-msg-time">${esc(t)}</span>` : "") +
-      `<span class="sw-msg-text">${esc(l.text)}</span></div>`;
+      `<span class="sw-msg-text">${esc(l.text)}</span>${rep}</div>`;
   }
 
   /** The user message a node was handed, ahead of its own words. */
@@ -1990,7 +2098,9 @@
    */
   function agentSectionHtml(n, opts) {
     const o = opts || {};
-    const msgs = messagesFor(n.id);
+    // Only what the agent said: the harness's banner, tool calls and status
+    // chatter belong to the run log, not to this conversation.
+    const msgs = assistantLinesFor(n.id);
     const shown = msgs.length > MSG_LINES_MAX ? msgs.slice(-MSG_LINES_MAX) : msgs;
     const more = msgs.length - shown.length;
     let body;
@@ -1999,9 +2109,12 @@
         shown.map(msgLineHtml).join("");
     } else {
       const out = nodeOutputText(n.id);
-      const st = runNode(n.id)?.status;
+      const rs = runNode(n.id);
+      const st = rs?.status;
       body = out ? `<pre class="sw-msg-pre">${esc(out)}</pre>`
-        : `<div class="sw-msg-none">${st ? `Nothing captured — ${esc(st)}.` : "Nothing from this agent yet."}</div>`;
+        : st === "error" ? `<div class="sw-msg-none">Nothing captured — ${esc(rs?.error || "the run failed")}.</div>`
+        : st ? `<div class="sw-msg-none">No message — the harness wrote only status lines. The run log has them.</div>`
+        : `<div class="sw-msg-none">Nothing from this agent yet.</div>`;
     }
     return `<div class="sw-msg-section" data-node="${escAttr(n.id)}" title="Focus ${escAttr(n.name)}">` +
         `<div class="sw-msg-sec-head">` +
@@ -2606,7 +2719,16 @@
     // Closing or copying from inside the popup: delegated, because its contents
     // are rewritten as the output grows (and for a reopened past run).
     dlgEl.addEventListener("click", (e) => {
-      if (e.target.closest?.("#sw-close, #sw-close-x")) { e.preventDefault(); closeDialog(); return; }
+      if (e.target.closest?.("#sw-close-x")) { e.preventDefault(); closeDialog(); return; }
+      if (e.target.closest?.("#sw-out-copy")) {
+        const n = dlg?.kind === "node" ? nodeById(dlg.id) : null;
+        const text = n ? nodeOutputText(n.id) : "";
+        if (!text) return;
+        Promise.resolve(navigator.clipboard?.writeText(text))
+          .then(() => S.toast?.("Node output copied"))
+          .catch(() => S.toast?.("Could not copy the node output", "err"));
+        return;
+      }
       if (!e.target.closest?.("#sw-final-copy")) return;
       const text = finalOutput().text;
       if (!text) return;

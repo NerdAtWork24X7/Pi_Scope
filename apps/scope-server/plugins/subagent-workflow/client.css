@@ -301,6 +301,7 @@
 .sw-msg-line { display: flex; gap: 6px; align-items: baseline; font-family: monospace, var(--emoji); font-size: 11px; line-height: 1.5; }
 .sw-msg-time { flex: 0 0 auto; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .sw-msg-text { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.sw-msg-repeat, .sw-log-repeat { flex: 0 0 auto; margin-left: 6px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .sw-msg-status .sw-msg-text { color: var(--accent); }
 .sw-msg-stderr .sw-msg-text { color: var(--red); }
 
@@ -349,10 +350,13 @@
  * toolbar.
  *
  * It is a *panel*, not a full-bleed surface: the shared popup chrome (radius ·
- * hairline · shadow — see styles.css → superdesign-alpha — popups) applies. And
- * it has **one content column**: `--sw-col-x` pads the head, the body and the
- * actions row alike, so the node's name field in the head lines up with the
- * fields below it rather than stretching out past them on a wide monitor.
+ * hairline · shadow — see styles.css → superdesign-alpha — popups) applies.
+ *
+ * The panel is sized by the window, so the form is too: `--sw-col-x` is the
+ * shared hairline gutter (head, body and actions all pad by it), a node's
+ * settings split into two sides once the panel is wide enough, and the long
+ * boxes — the message, the reference list, the final output — take the height
+ * the fixed fields leave instead of a fixed row count.
  */
 
 .sw-modal-backdrop {
@@ -369,10 +373,13 @@
 /* The panel: 80% of the window wide (clamped to the scrim's own box on a very
    narrow window), full height — the backdrop's padding is the gap around it. */
 .sw-modal {
-  /* The one content column: 1080px centred, or the panel's own width when the
-     window is narrower. Percentages here resolve against the panel for every
-     child that uses it, so head, body and actions land on the same edge. */
-  --sw-col-x: max(16px, calc((100% - 1080px) / 2));
+  /* The shared gutter between the panel's edge and its content. It scales with
+     the window, from a comfortable phone inset to a generous desktop one, so a
+     wide panel is filled edge to edge rather than centred in a fixed column. */
+  --sw-col-x: clamp(14px, 2.2vw, 36px);
+  /* The panel is the query container for the form's own breakpoints: a node's
+     settings respond to the room the panel actually has, not the window's. */
+  container-type: inline-size;
   display: flex; flex-direction: column;
   width: min(80vw, 100%); height: 100%; max-width: none; max-height: none;
   background: var(--surface);
@@ -397,10 +404,9 @@
 .sw-dlg-glyph.sw-t-end { color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }
 .sw-dlg-title { font-family: var(--font-display); font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
 /* The node's name is its label on the canvas, so it is edited in the head — in
-   a field-shaped box that occupies the settings column exactly. The box is the
-   field (mark · name input · kind · close), and the head *is* that box, so what
-   lines up with `.sw-field` in the body is the box itself: the same left edge
-   and, because the close control sits inside it, the same right edge. */
+   a field-shaped box (mark · name input · kind). The close ✕ sits beside the
+   box, outside it, at the panel's top-right corner; the box takes the rest of
+   the head, so the first settings field below starts on the same left edge. */
 .sw-dlg-name-wrap {
   flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
   padding: 1px 5px 1px 6px;
@@ -408,9 +414,6 @@
 }
 .sw-dlg-name-wrap:focus-within { border-color: var(--accent); }
 .sw-dlg-name-wrap .sw-hicon { width: 20px; height: 20px; }
-/* The frame's close control, nested in that box: a touch smaller, so it reads as
-   part of the field rather than as chrome floating over it. */
-.sw-dlg-name-wrap .sw-dlg-x { width: 24px; height: 24px; font-size: 12px; }
 /* A bare input inside that box: the box carries the chrome, this carries the
    text, so the name reads as one field with its provider's mark on it. */
 .sw-dlg-name {
@@ -433,14 +436,20 @@
 }
 .sw-dlg-x:hover { color: var(--text); background: var(--surface-3); border-color: var(--accent); }
 
-/* The form inside the panel is centred in a readable column rather than
-   stretched across a wide monitor — the same column the head and the actions
-   row use (--sw-col-x), which is what keeps the name field aligned. */
-.sw-dlg-body { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; padding: 16px var(--sw-col-x); overflow: auto; min-height: 0; }
+/* The form fills the panel: the body is the flexible row between the head and
+   the actions, and its faint grid texture (the skill's blueprint grid, confined
+   to this panel — never a full-bleed backdrop) sits behind the fields. */
+.sw-dlg-body {
+  display: flex; flex-direction: column; gap: 12px;
+  flex: 1 1 auto; min-height: 0; padding: 16px var(--sw-col-x); overflow: auto;
+  background-color: var(--surface);
+  background-image: var(--grid);
+  background-size: var(--grid-size);
+}
 .sw-dlg-body p { margin: 0; }
-.sw-dlg-actions { display: flex; align-items: center; gap: 8px; padding: 12px var(--sw-col-x); border-top: 1px solid var(--hairline); }
-/* The destructive action sits apart, on the left; save and close stay together. */
-.sw-dlg-actions .sw-danger { margin-right: auto; }
+.sw-dlg-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px var(--sw-col-x); border-top: 1px solid var(--hairline); }
+/* The surface's actions read as one group in the bottom-right corner; closing
+   is the head's ✕, so no Close button competes with them here. */
 
 .sw-muted { color: var(--muted); font-size: 12.5px; }
 .sw-hint { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
@@ -451,9 +460,86 @@
 .sw-field-label .sw-hicon { width: 14px; height: 14px; }
 
 .sw-field { display: flex; flex-direction: column; gap: 5px; }
-.sw-field > span { font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
+/* Eyebrow labels in the display face (the skill's label ramp): uppercase and
+   widely tracked, so they sit above mono fields as signposts, not as prose. */
+.sw-field > span {
+  font-family: var(--font-display); font-size: 11px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--text-subtle);
+}
 .sw-field > span em { font-style: normal; font-weight: 400; text-transform: none; letter-spacing: 0; opacity: .8; }
 .sw-textarea { resize: vertical; font-family: monospace, var(--emoji); font-size: 12px; line-height: 1.45; }
+
+/* ── Node settings use the panel they are given ─────────────────────────── */
+/*
+ * The panel is 80% of the window and full height, so the form fills it rather
+ * than sitting in a fixed column. A wide panel splits into two — what runs the
+ * node on the left, what it is handed on the right — and either way the boxes
+ * holding prose (the message, the final output) take the height left over after
+ * the selects, instead of a fixed row count. Narrow panels stack the same fields
+ * in the same order, so the reading order is always the markup's.
+ */
+
+.sw-dlg-agent .sw-dlg-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  /* The message row is the one that grows: the fixed fields keep their own
+     height, the prose box takes what is left, and the node's output follows it.
+     References sit under the message that sends them — the left column of the
+     wide form, and directly below the message when the panel is narrow. */
+  grid-template-rows: auto auto minmax(150px, 1fr) auto auto minmax(140px, .8fr);
+  grid-template-areas: "provider" "model" "prompt" "refs" "command" "out";
+}
+.sw-dlg-agent .sw-fld-provider { grid-area: provider; }
+.sw-dlg-agent .sw-fld-model { grid-area: model; }
+.sw-dlg-agent .sw-fld-prompt { grid-area: prompt; min-height: 0; }
+.sw-dlg-agent .sw-fld-refs { grid-area: refs; }
+.sw-dlg-agent .sw-fld-command { grid-area: command; }
+.sw-dlg-agent .sw-fld-out { grid-area: out; min-height: 0; display: flex; flex-direction: column; }
+/* Auto-growing, so the panel's height decides how much message is readable at
+   once: the box fills its field instead of stopping at five rows. */
+.sw-dlg-agent .sw-fld-prompt .sw-textarea { flex: 1 1 auto; min-height: 120px; resize: none; }
+.sw-dlg-agent .sw-fld-out .sw-out-pre { flex: 1 1 auto; max-height: none; }
+
+@container (min-width: 760px) {
+  .sw-dlg-agent .sw-dlg-body {
+    /* Provider and model keep their row; the message and then the references it
+       sends own the left, and the node's output is the right-hand column. */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(320px, .95fr);
+    grid-template-rows: auto minmax(120px, 1fr) minmax(90px, .55fr) auto;
+    grid-template-areas:
+      "provider model out"
+      "prompt   prompt out"
+      "refs     refs   out"
+      "command  command out";
+    align-content: stretch;
+  }
+  /* The output column is the node's result read beside the message that asked
+     for it: it spans every row and scrolls inside the panel rather than
+     growing it past the window. */
+  .sw-dlg-agent .sw-fld-out {
+    min-height: 0; padding-left: 18px;
+    border-left: 1px solid var(--hairline);
+  }
+  .sw-dlg-agent .sw-fld-out .sw-out-pre { flex: 1 1 auto; min-height: 0; max-height: none; }
+  /* The references own their row, so their list scrolls instead of pushing the
+     form past the window. */
+  .sw-dlg-agent .sw-fld-refs { min-height: 0; }
+  .sw-dlg-agent .sw-fld-refs .sw-ref-list { flex: 1 1 auto; min-height: 50px; max-height: none; overflow: auto; }
+  .sw-dlg-agent .sw-fld-refs .sw-ref-picker { flex: 0 1 auto; }
+  /* The browser and the add row share a narrower column: the path gets its own
+     line, the description/buttons the next one. */
+  .sw-dlg-agent .sw-fld-refs .sw-ref-add { flex-wrap: wrap; }
+  .sw-dlg-agent .sw-fld-refs .sw-ref-add #sw-ref-path { flex: 1 1 100%; }
+}
+
+/* A gate's message and the start node's task are the whole form, and the end
+   node's output is the whole node: each grows into the panel's height. */
+.sw-dlg-approval .sw-fld-prompt,
+.sw-dlg-start .sw-fld-prompt { flex: 1 1 auto; min-height: 0; }
+.sw-dlg-approval .sw-fld-prompt .sw-textarea,
+.sw-dlg-start .sw-fld-prompt .sw-textarea { flex: 1 1 auto; min-height: 140px; resize: none; }
+.sw-dlg-end .sw-fld-final { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.sw-dlg-end .sw-final-pre { flex: 1 1 auto; min-height: 120px; max-height: none; }
 /* A loop's pass count is a single small number, not a field-wide value. */
 .sw-count-input { width: 120px; font-family: var(--mono), var(--emoji); }
 /* Only the custom-command provider renders this field. */
@@ -464,13 +550,93 @@
 
 .sw-primary { color: var(--text); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .sw-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, var(--surface-2)); }
+/* The dialog's one filled accent: Save is the panel's primary action, so it
+   wears the skill's solid amber with its quiet glow; everything else in the
+   actions row stays hairline + surface. */
+.sw-dlg-actions .sw-primary {
+  color: var(--on-accent); background: var(--accent); border-color: transparent;
+  box-shadow: var(--glow-accent);
+}
+.sw-dlg-actions .sw-primary:hover:not(:disabled) { color: var(--on-accent); background: var(--accent-strong); border-color: transparent; }
 .sw-danger { color: color-mix(in srgb, var(--red) 70%, var(--text)); background: color-mix(in srgb, var(--red) 10%, var(--surface-2)); border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border)); }
 .sw-danger:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--red) 20%, var(--surface-2)); border-color: var(--red); }
-.sw-conn-label { font-size: 13.5px; margin: 0 0 8px; }
+/* A connection has no fields, so it is read rather than filled in: the two
+   endpoints drawn as a left-to-right flow at the panel's full width, then the
+   note and a mono readout. On a tall panel it is centred instead of pinned to
+   the top of an empty sheet. */
+.sw-dlg-edge .sw-dlg-body { justify-content: safe center; }
+.sw-conn-flow {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch; gap: 14px; width: 100%;
+}
+.sw-conn-end {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  padding: 14px 16px;
+  background: var(--surface-2); border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-card);
+}
+.sw-conn-eyebrow {
+  font-family: var(--font-display); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--text-subtle);
+}
+.sw-conn-name {
+  font-family: var(--font-display); font-size: 18px; font-weight: 600;
+  letter-spacing: -.02em; color: var(--text); overflow-wrap: anywhere;
+}
+.sw-conn-kind { font-family: var(--mono), var(--emoji); font-size: 11px; color: var(--muted); }
+.sw-conn-link { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-width: 64px; }
+.sw-conn-arrow { font-size: 18px; line-height: 1; color: var(--accent); }
+.sw-conn-port { font-family: var(--mono), var(--emoji); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.sw-conn-notes { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px 24px; width: 100%; }
+.sw-conn-notes p { margin: 0; max-width: 72ch; line-height: 1.5; }
+.sw-conn-readout {
+  display: flex; flex-direction: column; gap: 4px; min-width: 160px;
+  padding: 9px 11px; background: var(--surface-2);
+  border: 1px solid var(--hairline); border-radius: var(--r-control);
+}
+.sw-conn-readout-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; font-family: var(--mono), var(--emoji); font-size: 11px; }
+.sw-conn-readout-row span { color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.sw-conn-readout-row code { color: var(--text); }
+@container (max-width: 560px) {
+  .sw-conn-flow { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .sw-conn-link { flex-direction: row; min-width: 0; padding: 2px 0; }
+  .sw-conn-link .sw-conn-arrow { transform: rotate(90deg); }
+  .sw-conn-notes { grid-template-columns: minmax(0, 1fr); }
+}
 
-/* Workflow-level triggers, opened from the toolbar's ⏱ button. */
-.sw-triggers { display: flex; flex-direction: column; gap: 12px; }
+/* Workflow-level triggers, opened from the toolbar's ⏱ button. The form follows
+   the node panel: one column on a narrow panel, a schedule/event/task grid on a
+   wide one, with the task box taking the height the fixed fields leave. */
+.sw-triggers { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; min-height: 0; }
 .sw-triggers p { margin: 0; line-height: 1.5; }
+.sw-triggers .sw-tr-task { flex: 1 1 auto; min-height: 0; }
+.sw-triggers .sw-tr-task .sw-textarea { flex: 1 1 auto; min-height: 120px; resize: none; }
+.sw-tr-eventbox { display: flex; flex-direction: column; gap: 10px; }
+@container (min-width: 760px) {
+  .sw-triggers {
+    display: grid;
+    grid-template-columns: minmax(0, 1.08fr) minmax(0, .92fr);
+    grid-template-rows: auto auto auto minmax(150px, 1fr);
+    grid-template-areas:
+      "lead lead"
+      "schedule timing"
+      "event event"
+      "task task";
+    gap: 14px 20px;
+  }
+  .sw-tr-lead { grid-area: lead; max-width: 78ch; }
+  .sw-tr-schedule { grid-area: schedule; }
+  .sw-tr-timing { grid-area: timing; }
+  .sw-tr-eventbox {
+    grid-area: event; padding: 12px 14px;
+    background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+    border: 1px solid var(--hairline); border-radius: var(--r-control);
+  }
+  /* A single-line input has no use for a thousand pixels. */
+  .sw-tr-eventbox .sw-field { max-width: 640px; }
+  .sw-tr-task { grid-area: task; min-height: 0; }
+  .sw-tr-task .sw-textarea { flex: 1 1 auto; min-height: 150px; resize: none; }
+}
 
 /* ── Run panel ──────────────────────────────────────────────────────────── */
 
@@ -508,6 +674,17 @@
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-control); padding: 8px 10px;
 }
 
+/* ── A node's output (in its settings popup) ────────────────────────────── */
+
+.sw-out-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.sw-out-title { font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
+.sw-out-meta { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-out-pre {
+  margin: 0 0 8px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-family: monospace, var(--emoji); font-size: 11.5px; line-height: 1.5; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-control); padding: 8px 10px;
+}
+
 /* ── The model dropdown ──────────────────────────────────────────────────── */
 
 .sw-model-custom { margin-top: 6px; }
@@ -515,6 +692,23 @@
 /* ── Reference files & folders (node settings) ──────────────────────────── */
 
 .sw-ref-list { display: flex; flex-direction: column; gap: 5px; }
+/* The empty reference box is a deliberate target, not a missing list: it sits
+   directly under the message that sends the references, with the add controls
+   beneath it, so the space reads as "this is where references go". */
+.sw-ref-empty {
+  flex: 1 1 auto; min-height: 88px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 18px 16px; text-align: center;
+  border: 1px dashed var(--hairline-strong); border-radius: var(--r-control);
+  background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+  color: var(--muted);
+}
+.sw-ref-empty-glyph { font-size: 18px; line-height: 1; color: var(--accent); opacity: .85; }
+.sw-ref-empty-title {
+  font-family: var(--font-display); font-size: 12px; font-weight: 600;
+  letter-spacing: .04em; color: var(--text-subtle);
+}
+.sw-ref-empty-hint { max-width: 36ch; font-size: 11.5px; line-height: 1.5; }
 .sw-ref-icon { flex: 0 0 auto; font-size: 11px; line-height: 1; }
 /* The reference browser: what the workspace holds, a folder at a time. */
 .sw-ref-picker {
