@@ -132,7 +132,7 @@ export function activate(api: any): void {
       // gitignore syntax.
       let s = p.replace(/\\/g, "\\\\");
       if (s.startsWith("#") || s.startsWith("!")) s = "\\" + s;
-      s = s.replace(/ +$/, (m) => m.replace(/ /g, "\\ "));
+      s = s.replace(/ +$/g, "\\$&");
       return s;
     };
     let text = "";
