@@ -127,9 +127,11 @@ export function activate(api: any): void {
     // the ignore file, and the Git view's paths are relative to `cwd` too.
     const ignorePath = path.join(absCwd, ".gitignore");
     const pattern = (p: string) => {
-      // Escape a leading `#`/`!` (comment / negation) and trailing spaces so the
-      // literal filename is ignored rather than read as gitignore syntax.
-      let s = p.startsWith("#") || p.startsWith("!") ? "\\" + p : p;
+      // Escape backslashes first, then escape a leading `#`/`!` (comment / negation)
+      // and trailing spaces so the literal filename is ignored rather than read as
+      // gitignore syntax.
+      let s = p.replace(/\\/g, "\\\\");
+      if (s.startsWith("#") || s.startsWith("!")) s = "\\" + s;
       s = s.replace(/ +$/, (m) => m.replace(/ /g, "\\ "));
       return s;
     };
