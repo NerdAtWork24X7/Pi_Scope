@@ -389,8 +389,16 @@
       const chip = document.createElement("span");
       chip.className = "m-msg-att";
       chip.title = String(p);
-      chip.innerHTML = attachIcon(attachKind(p)) +
-        `<span class="m-msg-att-name">${esc(attachBasename(p))}</span>`;
+
+      const icon = document.createElement("span");
+      icon.textContent = attachIcon(attachKind(p));
+
+      const name = document.createElement("span");
+      name.className = "m-msg-att-name";
+      name.textContent = attachBasename(p);
+
+      chip.appendChild(icon);
+      chip.appendChild(name);
       row.appendChild(chip);
     }
     return row;
