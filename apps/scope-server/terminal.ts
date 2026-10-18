@@ -1,18 +1,22 @@
 /**
  * terminal.ts — WebSocket ↔ node-pty bridge for an in-browser terminal.
  *
+ * The plugin host owns the server's single `upgrade` listener. This module only
+ * builds the transport: plugins/terminal/server.ts registers it on `/terminal`,
+ * and the host handles token/origin auth and enable/disable before calling it.
+ *
  * Clients connect to ws://<host>/terminal?token=<token> with xterm.js.
  * Raw frames are keystrokes written to the PTY; JSON control frames:
  *   { type: "resize", cols, rows }  -> pty.resize
  */
-import type { Server, IncomingMessage } from "node:http";
+import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import net from "node:net";
 import { execFileSync } from "node:child_process";
-import type { WebSocket as WsSocket, WebSocketServer as WsServer } from "ws";
+import type { WebSocket as WsSocket } from "ws";
 import { loadPiDep } from "./pi-deps.ts";
 import {
   shellQuote, resolveExecutable, interactiveShellCandidates, supportsPosixCommandSyntax,
@@ -21,23 +25,25 @@ import {
 // node-pty and ws are installed with the bundled pi agent (~/.pi-scope/pi), not
 // with this app, so server and desktop never each carry their own copy. See
 // pi-deps.ts for the resolution order.
-const pty: typeof import("node-pty") = loadPiDep("node-pty");
+// node-pty is loaded on the first terminal connection (see createTerminalTransport), not
+// at module import: it is a native addon, so loading it at boot makes the whole
+// server depend on the Terminal feature being installed and ABI-compatible.
 const { WebSocketServer, WebSocket } = loadPiDep<typeof import("ws")>("ws");
 
 interface TerminalConfig {
-  port: number;
-  host: string;
-  token: string;
+  /** Directory the shell starts in. */
   launchCwd: string;
   /** Called whenever the terminal's live cwd changes. */
   onCwdChange?: (ws: WsSocket, cwd: string) => void;
   /** Called when a terminal connection closes. */
   onClose?: (ws: WsSocket) => void;
-  /**
-   * Plugin gate — when this returns false the Terminal feature plugin is
-   * disabled and upgrade requests are refused. Absent means "always enabled".
-   */
-  isEnabled?: () => boolean;
+}
+
+export interface TerminalTransport {
+  /** Hand a matched HTTP upgrade request to the terminal's WebSocket server. */
+  upgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
+  /** Terminate live terminals and stop accepting new connections. */
+  close: () => void;
 }
 
 // ─── Herdr integration ────────────────────────────────────────────────────
@@ -127,24 +133,13 @@ function herdrFocusedCwd(): Promise<string | null> {
   });
 }
 
-export function attachTerminal(server: Server, cfg: TerminalConfig): WsServer {
+/**
+ * Build the Terminal transport. Unlike the old attachTerminal(), this installs
+ * no server-wide `upgrade` listener: the plugin host owns that one listener,
+ * authenticates the request, and hands the matching socket to `upgrade()`.
+ */
+export function createTerminalTransport(cfg: TerminalConfig): TerminalTransport {
   const wss = new WebSocketServer({ noServer: true });
-
-  server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    if (url.pathname !== "/terminal") { socket.destroy(); return; }
-    if (cfg.isEnabled && !cfg.isEnabled()) {
-      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-    if (url.searchParams.get("token") !== cfg.token) {
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
-  });
 
   wss.on("connection", (ws: WsSocket, req: IncomingMessage) => {
     const reqUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -164,8 +159,10 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WsServer {
     // the client is told why, exactly as it is while another program owns the PTY).
     const posixSyntax = selectedShell !== "herdr" && supportsPosixCommandSyntax(shell);
     if (CWD_DEBUG) console.log("[terminal] spawning shell:", shellName, "->", shell);
-    let term: ReturnType<typeof pty.spawn>;
+    let term: import("node-pty").IPty;
     try {
+      // First connection pays the native-addon load; boot does not.
+      const pty = loadPiDep<typeof import("node-pty")>("node-pty");
       term = pty.spawn(shell, [], {
         name: "xterm-256color", cols: 80, rows: 24, cwd: cfg.launchCwd,
         env: { ...process.env, TERM: "xterm-256color" },
@@ -285,7 +282,17 @@ export function attachTerminal(server: Server, cfg: TerminalConfig): WsServer {
     ws.on("error", () => { try { clearInterval(cwdTimer); } catch {} try { clearInterval(drainTimer); } catch {} try { term.kill(); } catch {} cfg.onClose?.(ws); });
   });
 
-  return wss;
+  return {
+    upgrade(req, socket, head) {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+    },
+    close() {
+      for (const client of wss.clients) {
+        try { client.terminate(); } catch { /* already gone */ }
+      }
+      try { wss.close(); } catch { /* already closed */ }
+    },
+  };
 }
 
 // Resolve an executable name to a full path so node-pty doesn't fail with

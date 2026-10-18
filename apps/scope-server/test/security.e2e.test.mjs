@@ -13,6 +13,7 @@
 import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import * as http from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -69,6 +70,51 @@ async function api(pathname, init = {}) {
 
 const post = (pathname, body) => api(pathname, { method: "POST", body: JSON.stringify(body) });
 
+/** A request with full control over Host/Origin (fetch sets Host itself). */
+function rawStatus(pathname, { method = "GET", headers = {}, body = "" } = {}) {
+  const url = new URL(`${base}${pathname}`);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: url.hostname, port: url.port, path: url.pathname, method, headers }, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res.statusCode));
+    });
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+/** Send a WebSocket upgrade and return the HTTP status the host answers with. */
+function upgradeStatus({ token = TOKEN, origin = base } = {}) {
+  const url = new URL(base);
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(Number(url.port), url.hostname);
+    let buf = "";
+    const timer = setTimeout(() => { sock.destroy(); reject(new Error("upgrade timed out")); }, 5000);
+    sock.on("connect", () => {
+      sock.write(
+        `GET /terminal?token=${encodeURIComponent(token)} HTTP/1.1\r\n` +
+        `Host: ${url.host}\r\n` +
+        `Upgrade: websocket\r\n` +
+        `Connection: Upgrade\r\n` +
+        `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n` +
+        `Sec-WebSocket-Version: 13\r\n` +
+        (origin ? `Origin: ${origin}\r\n` : "") +
+        "\r\n",
+      );
+    });
+    sock.on("data", (d) => {
+      buf += d.toString();
+      const m = buf.match(/^HTTP\/1\.1 (\d{3})/);
+      if (!m) return;
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(Number(m[1]));
+    });
+    sock.on("error", (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
 before(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-security-"));
   outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-outside-"));
@@ -95,6 +141,9 @@ before(async () => {
       SCOPE_HOST: "127.0.0.1",
       SCOPE_DB_PATH: path.join(tmpDir, "scope.db"),
       SCOPE_AUTH_TOKEN: TOKEN,
+      // Keep the test independent of any plugins the user has installed; the
+      // terminal-transport tests disable/re-enable the built-in Terminal.
+      SCOPE_PLUGINS_DIR: path.join(tmpDir, "plugins"),
       // Only the repo's parent is allowed — outsideDir is deliberately not.
       SCOPE_FILE_ROOT: tmpDir,
     },
@@ -144,6 +193,67 @@ describe("git option-injection guards", () => {
 
     const del = await post("/checkpoints/delete", { cwd: repoDir, ref: "refs/checkpoints/a/b/c" });
     assert.equal(del.res.status, 400);
+  });
+});
+
+describe("request trust boundaries", () => {
+  test("a DNS-rebound Host cannot borrow the loopback producer exemption", async () => {
+    // A page at attacker.example whose DNS entry points at 127.0.0.1 sends
+    // Origin === Host. Only a loopback Host may use the token-less producer
+    // path, so this must be refused instead of ingesting forged events.
+    for (const host of ["evil.example", "127.0.0.1.evil.example"]) {
+      const status = await rawStatus("/events", {
+        method: "POST",
+        headers: { host, origin: `http://${host}`, "content-type": "application/json", "content-length": "2" },
+        body: "{}",
+      });
+      assert.equal(status, 401, `Host ${host} must not be loopback-trusted`);
+    }
+  });
+
+  test("a DNS-rebound Host cannot shut the server down", async () => {
+    const status = await rawStatus("/shutdown", {
+      method: "POST",
+      headers: { host: "evil.example", origin: "http://evil.example", "content-length": "0" },
+    });
+    assert.equal(status, 401);
+  });
+
+  test("responses carry baseline browser-hardening headers", async () => {
+    const res = await fetch(`${base}/health`);
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(res.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(res.headers.get("x-frame-options"), "DENY");
+  });
+});
+
+describe("terminal transport (owned by the terminal plugin)", () => {
+  test("a valid token and same origin get a WebSocket upgrade", async () => {
+    assert.equal(await upgradeStatus(), 101);
+  });
+
+  test("a bad token is refused with 401", async () => {
+    assert.equal(await upgradeStatus({ token: "wrong-token" }), 401);
+  });
+
+  test("another origin is refused with 403", async () => {
+    assert.equal(await upgradeStatus({ origin: "http://evil.example" }), 403);
+  });
+
+  test("disabling the plugin refuses upgrades and re-enabling restores them", async () => {
+    const off = await api("/plugins", {
+      method: "POST",
+      body: JSON.stringify({ action: "disable", id: "terminal" }),
+    });
+    assert.equal(off.res.status, 200);
+    assert.equal(await upgradeStatus(), 403);
+
+    const on = await api("/plugins", {
+      method: "POST",
+      body: JSON.stringify({ action: "enable", id: "terminal" }),
+    });
+    assert.equal(on.res.status, 200);
+    assert.equal(await upgradeStatus(), 101);
   });
 });
 

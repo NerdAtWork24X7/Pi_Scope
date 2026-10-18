@@ -1102,24 +1102,6 @@
     return wrap;
   }
 
-  function renderFileTree(files) {
-    const wrap = document.createElement("div");
-    if (!files.length) { wrap.innerHTML = '<div class="git-diff-empty">no files</div>'; return wrap; }
-    const sha = currentDetail && currentDetail.sha ? currentDetail.sha : "";
-    wrap.innerHTML = files.map((f) =>
-      `<div class="git-detail-file${sha ? ' git-detail-file-link' : ''}" data-file="${esc(f)}" title="${fullscreen ? 'Click to view & edit' : 'Enter fullscreen (⛶) to edit'}"><span class="git-file-icon">📄</span><span>${esc(f)}</span></div>`
-    ).join("");
-    if (sha) {
-      wrap.querySelectorAll(".git-detail-file-link").forEach((el) => {
-        el.onclick = () => {
-          if (!fullscreen) { enterFullscreen(); }
-          openFileFromHistory(sha, el.dataset.file);
-        };
-      });
-    }
-    return wrap;
-  }
-
   // ─── Modal dialog (replaces browser prompt/confirm for Electron compat) ──
   function showGitModal({ title, message, input, select, confirmLabel, danger }) {
     return new Promise((resolve) => {

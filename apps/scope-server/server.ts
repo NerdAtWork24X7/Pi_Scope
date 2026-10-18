@@ -9,12 +9,13 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as http from "node:http";
-import { Readable } from "node:stream";
+import * as net from "node:net";
+import { Readable, type Duplex } from "node:stream";
 import { AGENT_DIR } from "./agent-dir.ts";
 import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent, canonicalSessionId } from "./db.ts";
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
-import { attachTerminal } from "./terminal.ts";
+import { createTerminalTransport } from "./terminal.ts";
 import {
   discover as discoverPlugins,
   activate as activatePlugins,
@@ -23,11 +24,12 @@ import {
   reload as reloadPlugins,
   disabledPluginForRoute,
   matchPluginRoute,
+  matchPluginTransport,
   runPluginRoute,
   emitPluginEvent,
   resolvePluginFile,
+  shutdown as shutdownPlugins,
   storeFor,
-  isEnabled as isPluginEnabled,
 } from "./plugins.ts";
 import { startChat, startChatSession, killChatSession, stopChat, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatLiveRuns, attachChatRun } from "./chat.ts";
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
@@ -69,7 +71,9 @@ const DB_PATH = process.env.SCOPE_DB_PATH ?? DEFAULT_DB_PATH;
 
 // Ensure parent folder exists (e.g. "db/" directory) before initializing SQLite
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const AUTH_TOKEN = process.env.SCOPE_AUTH_TOKEN ?? crypto.randomUUID();
+// An empty override is not a token: falling back to a random one keeps `?token=`
+// from authenticating every caller when the env var is present but blank.
+const AUTH_TOKEN = (process.env.SCOPE_AUTH_TOKEN ?? "").trim() || crypto.randomUUID();
 const VERSION = "0.1.0";
 const MAX_SSE_SUBSCRIBERS = 256;
 // Browser-openable UI URL with the token baked in. The UI's API + SSE calls are
@@ -87,6 +91,24 @@ const ALLOWED_ORIGINS = new Set([
 function corsOrigin(req: Request): string {
   const o = req.headers.get("origin");
   return o && ALLOWED_ORIGINS.has(o) ? o : `http://127.0.0.1:${PORT}`;
+}
+
+/** True when a Host header names this machine's loopback interface. Used to keep
+ *  a DNS name that resolves to 127.0.0.1 (DNS rebinding) from being treated as a
+ *  same-origin caller on a loopback-only bind. */
+function hostIsLoopbackName(host: string | null): boolean {
+  if (!host) return false;
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${host}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (hostname.startsWith("[") && hostname.endsWith("]")) hostname = hostname.slice(1, -1);
+  // IPv4 must be a literal loopback address, not a DNS name that merely starts
+  // with "127." (e.g. 127.0.0.1.attacker.example).
+  return hostname === "localhost" || hostname.endsWith(".localhost") ||
+    hostname === "::1" || (net.isIPv4(hostname) && hostname.startsWith("127."));
 }
 
 // Internal header carrying the real TCP peer address (set in the Node server
@@ -1265,9 +1287,25 @@ function thinkingLevelsFor(m: any): string[] | null {
 }
 
 /** Flatten the store + kilo cache into { "<provider>/<id>": { provider, contextWindow, maxTokens, cost, thinkingLevels } }. */
+// Memoised on the identity of its three inputs. `loadModelsStore()` and
+// `loadProviderCacheModels()` return the same object until their file mtime
+// changes, and runtimeModelsMeta is replaced only on a refresh, so this skips a
+// full rebuild on every /sessions poll (the rail polls while a session runs).
+let modelMetaCache:
+  | { store: Record<string, any>; providers: Record<string, any[]>; runtime: Record<string, any> | null; meta: Record<string, any> }
+  | null = null;
 function buildModelMeta(): Record<string, any> {
-  const out: Record<string, any> = {};
   const store = loadModelsStore();
+  const providerModels = loadProviderCacheModels();
+  if (
+    modelMetaCache &&
+    modelMetaCache.store === store &&
+    modelMetaCache.providers === providerModels &&
+    modelMetaCache.runtime === runtimeModelsMeta
+  ) {
+    return modelMetaCache.meta;
+  }
+  const out: Record<string, any> = {};
   for (const [provider, entry] of Object.entries(store) as [string, any][]) {
     for (const m of entry?.models ?? []) {
       if (!m?.id) continue;
@@ -1284,7 +1322,7 @@ function buildModelMeta(): Record<string, any> {
   // cache, not models-store.json. Register each under its own `<provider>/` key
   // so the cost catalog lists it as a provider of its own — distinct from any
   // same-id model another provider (e.g. openrouter) happens to expose.
-  for (const [provider, models] of Object.entries(loadProviderCacheModels())) {
+  for (const [provider, models] of Object.entries(providerModels)) {
     for (const m of models) {
       if (!m?.id) continue;
       out[`${provider}/${m.id}`] = {
@@ -1305,6 +1343,7 @@ function buildModelMeta(): Record<string, any> {
       if (!out[key]) out[key] = m;
     }
   }
+  modelMetaCache = { store, providers: providerModels, runtime: runtimeModelsMeta, meta: out };
   return out;
 }
 
@@ -1519,15 +1558,15 @@ const sseEncoder = new TextEncoder();
 // evicted now.
 const SSE_MAX_BACKLOG = 4096;
 
-/** Push an SSE-formatted event to one subscriber. Returns false if closed. */
-function pushSSE(sub: SSESubscriber, data: string): boolean {
+/** Push an already-encoded SSE frame to one subscriber. Returns false if closed. */
+function pushSSE(sub: SSESubscriber, frame: Uint8Array): boolean {
   try {
     const size = sub.controller.desiredSize;
     if (size !== null && size < -SSE_MAX_BACKLOG) {
       removeSubscriber(sub.id, sub.controller);
       return false;
     }
-    sub.controller.enqueue(sseEncoder.encode(data));
+    sub.controller.enqueue(frame);
     return true;
   } catch {
     removeSubscriber(sub.id, sub.controller);
@@ -1541,7 +1580,10 @@ function broadcastEvent(event: ObsEvent) {
   // not a browser is connected over SSE.
   emitPluginEvent(event);
   const payload = JSON.stringify(event);
-  const frame = `event: event\ndata: ${payload}\n\n`;
+  // Encode once per event, not once per subscriber: the same bytes can be
+  // enqueued into every stream, and a burst of N tabs used to re-encode the
+  // whole payload N times.
+  const frame = sseEncoder.encode(`event: event\ndata: ${payload}\n\n`);
   for (const sub of subscribers.values()) {
     if (sub.pool && sub.pool !== event.pool) continue;
     if (sub.tag && (!event.tags || !event.tags.includes(sub.tag))) continue;
@@ -1550,12 +1592,12 @@ function broadcastEvent(event: ObsEvent) {
   }
 }
 
-// Heartbeat every 15s
+// Heartbeat every 15s. Encoded once and shared, like a broadcast frame.
+const SSE_HEARTBEAT = sseEncoder.encode(": ping\n\n");
 setInterval(() => {
   if (subscribers.size === 0) return;
-  const ping = ": ping\n\n";
   for (const sub of subscribers.values()) {
-    pushSSE(sub, ping);
+    pushSSE(sub, SSE_HEARTBEAT);
   }
 }, 15_000);
 
@@ -1612,15 +1654,66 @@ function checkAuth(req: Request): boolean {
  * server). Those routes are legitimately reachable without the token, so the
  * Origin has to be the thing that proves who is asking.
  */
-function originSameServer(req: Request): boolean {
-  const origin = req.headers.get("origin");
+function originAllowed(origin: string | null, host: string | null): boolean {
   if (!origin) return true;
   if (ALLOWED_ORIGINS.has(origin)) return true;
   // A LAN-bound server is reached at an address the ALLOWED_ORIGINS set (built
   // from HOST = 0.0.0.0) can't name, so accept the Host the client actually
   // used. "null" (sandboxed/opaque origins) never matches and is refused.
-  const host = req.headers.get("host");
-  return !!host && (origin === `http://${host}` || origin === `https://${host}`);
+  if (!host) return false;
+  // On a loopback bind the only legitimate Host values are loopback names. A
+  // browser pointed at `http://attacker.example` that resolves to 127.0.0.1
+  // sends Origin === Host; without this check that would pass and hand the
+  // loopback-trusted producer routes (events, capture, shutdown) to the page.
+  if (!LAN_EXPOSED && !hostIsLoopbackName(host)) return false;
+  return origin === `http://${host}` || origin === `https://${host}`;
+}
+
+function originSameServer(req: Request): boolean {
+  return originAllowed(req.headers.get("origin"), req.headers.get("host"));
+}
+
+/**
+ * Host-owned gate for every plugin WebSocket transport. This is the server's
+ * only `upgrade` listener: it resolves the path against the plugin host, applies
+ * the same enablement rule as the plugin's HTTP routes, then authenticates the
+ * request before handing the socket to the owning plugin. A terminal (or any
+ * future transport) therefore cannot accidentally bypass the token wall.
+ */
+function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  const match = matchPluginTransport(url.pathname);
+  if (!match || "disabled" in match) {
+    // Deactivation removes the transport, so a disabled feature is found
+    // through its declared `serverRoutes` (the terminal plugin lists
+    // `/terminal`). Answer 403, matching the HTTP route gate.
+    const disabledOwner = match && "disabled" in match
+      ? match.disabled
+      : disabledPluginForRoute(url.pathname);
+    if (disabledOwner) {
+      socket.write(`HTTP/1.1 403 Forbidden\r\n\r\n`);
+    }
+    socket.destroy();
+    return;
+  }
+  const auth = req.headers.authorization;
+  const bearer = auth && /^Bearer\s+/i.test(auth) ? auth.replace(/^Bearer\s+/i, "").trim() : null;
+  if (!tokenMatches(url.searchParams.get("token") ?? bearer)) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+  if (!originAllowed(req.headers.origin ?? null, req.headers.host ?? null)) {
+    socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+  try {
+    match.handler(req, socket, head);
+  } catch (err) {
+    console.error("Upgrade handling failed:", err);
+    socket.destroy();
+  }
 }
 
 /** Parse a non-negative integer query param, clamped to `max`; `def` when
@@ -1756,14 +1849,16 @@ const MIME: Record<string, string> = {
  */
 type StaticEntry = { body: Uint8Array; mime: string; mtimeMs: number; size: number };
 const staticCache = new Map<string, StaticEntry>();
+// Resolved once, not per asset request. `path.resolve` below is what rejects a
+// `..` segment; the old string scrub also mangled legitimate names like
+// `foo..bar.js`.
+const PUBLIC_ROOT = path.resolve(import.meta.dirname, "public");
 
 function serveStatic(relPath: string, req?: Request): Response | null {
-  // Remove leading slash and strip path-traversal segments (defense in depth).
-  const safe = relPath.replace(/^\/+/, "").replace(/\.\./g, "");
-  const publicRoot = path.resolve(import.meta.dirname, "public");
-  const filePath = path.resolve(publicRoot, safe);
+  const safe = relPath.replace(/^\/+/, "");
+  const filePath = path.resolve(PUBLIC_ROOT, safe);
   // Refuse anything that escapes the public root.
-  if (filePath !== publicRoot && !filePath.startsWith(publicRoot + path.sep)) return null;
+  if (filePath !== PUBLIC_ROOT && !filePath.startsWith(PUBLIC_ROOT + path.sep)) return null;
 
   // One stat replaces the old existsSync + statSync pair, and carries the
   // size/mtime the cache and the validators are keyed on.
@@ -2555,20 +2650,15 @@ function matchSession(pathname: string): string | null {
 // ─── Graceful shutdown ──────────────────────────────────────────────────────
 
 let shuttingDown = false;
-let wssRef: import("ws").WebSocketServer | null = null;
 
 function gracefulShutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log("\n  Shutting down gracefully…");
 
-  // Close all WebSocket terminal connections so PTY processes are killed.
-  if (wssRef) {
-    for (const client of wssRef.clients) {
-      try { client.close(); } catch {}
-    }
-    try { wssRef.close(); } catch {}
-  }
+  // Tear down every activated plugin before the process exits. The terminal
+  // plugin's dispose closes its WebSocket server and terminates live PTYs.
+  try { shutdownPlugins(); } catch (err) { console.error("Plugin shutdown failed:", err); }
 
   // Kill any lingering pi chat subprocesses.
   shutdownChatSessions();
@@ -2686,8 +2776,15 @@ async function handle(req: Request): Promise<Response> {
     const rest = pathname.slice("/plugins/file/".length);
     const slash = rest.indexOf("/");
     if (slash <= 0) return textResponse("not found", 404, "text/plain");
-    const pid = decodeURIComponent(rest.slice(0, slash));
-    const rel = decodeURIComponent(rest.slice(slash + 1));
+    let pid: string;
+    let rel: string;
+    try {
+      pid = decodeURIComponent(rest.slice(0, slash));
+      rel = decodeURIComponent(rest.slice(slash + 1));
+    } catch {
+      // A malformed escape is a bad request, not a 500 from the outer handler.
+      return textResponse("bad request", 400, "text/plain");
+    }
     const file = resolvePluginFile(pid, rel);
     if (!file) return textResponse("not found", 404, "text/plain");
     try {
@@ -4221,6 +4318,12 @@ const server = http.createServer(async (req, res) => {
   }
   // Restrict CORS to loopback origins that match this server (see corsOrigin).
   response.headers.set("access-control-allow-origin", corsOrigin(request));
+  // Baseline browser hardening. The UI URL carries the auth token in its query
+  // string, so `no-referrer` keeps it out of Referer headers on any external
+  // navigation; nosniff/frame-options close MIME confusion and clickjacking.
+  response.headers.set("x-content-type-options", "nosniff");
+  response.headers.set("referrer-policy", "no-referrer");
+  response.headers.set("x-frame-options", "DENY");
   res.statusCode = response.status;
   response.headers.forEach((value, key) => res.setHeader(key, value));
   if (response.body) {
@@ -4230,16 +4333,10 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// WebSocket terminal bridge (xterm.js in the browser ↔ node-pty shell on the server)
-wssRef = attachTerminal(server, {
-  port: PORT,
-  host: HOST,
-  token: AUTH_TOKEN,
-  launchCwd: TERMINAL_CWD,
-  isEnabled: () => isPluginEnabled("terminal"),
-  onCwdChange: (ws, cwd) => liveTerminalCwds.set(ws, cwd),
-  onClose: (ws) => liveTerminalCwds.delete(ws),
-});
+// One host-owned upgrade listener for every plugin transport. The terminal
+// plugin registers `/terminal` on activation; a disabled plugin's transport is
+// refused here with 403 and unknown paths are dropped.
+server.on("upgrade", handleUpgrade);
 
 // ─── Plugin host kit ────────────────────────────────────────────────────────
 // The Files / Git / Checkpoints plugins are ordinary modules in
@@ -4285,6 +4382,13 @@ const pluginKit = {
   sttStatus, startStt, stopStt,
   // The live shared cwd (mutable; the STT status fallback needs its current value).
   terminalCwd: () => TERMINAL_CWD,
+  // The Terminal plugin's transport implementation. The plugin owns the
+  // `/terminal` endpoint and its lifecycle; the host owns the upgrade listener,
+  // auth and enable/disable gate. These two callbacks keep the shared cwd
+  // sandbox (validateCwd) following the shell the plugin spawned.
+  createTerminalTransport,
+  onTerminalCwdChange: (ws: WsSocket, cwd: string) => liveTerminalCwds.set(ws, cwd),
+  onTerminalClose: (ws: WsSocket) => liveTerminalCwds.delete(ws),
   libraryBlockFor: (cwd: string) => buildLibraryPrompt(readAgentConfig(cwd).library),
   // The agent dir the user's skills/ and extensions/ live in. A plugin that lets
   // a node pick skills or extensions needs it to resolve those names to real
@@ -4332,5 +4436,3 @@ server.listen(PORT, HOST, () => {
   console.log(`  Listening on http://${HOST}:${PORT}`);
   if (process.env.SCOPE_VERBOSE) console.log(`  Open the UI →  ${OPEN_URL}\n`);
 });
-
-// tmp impact test

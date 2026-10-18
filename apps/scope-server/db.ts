@@ -45,6 +45,11 @@ CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_pool ON events(pool);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
 CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, type);
+-- Hot paths: the session rail is ORDER BY last_ts DESC LIMIT n, and every
+-- ingested event resolves its session file through getSessionByFile. Without
+-- these, both fall back to a full table scan once the session table grows.
+CREATE INDEX IF NOT EXISTS idx_sessions_last_ts ON sessions(last_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_session_file ON sessions(session_file);
 `;
 
 // ─── Types ──────────────────────────────────────────────────────────────────

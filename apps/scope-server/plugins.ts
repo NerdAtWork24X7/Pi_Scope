@@ -25,8 +25,10 @@
  */
 
 import * as fs from "node:fs";
+import type { IncomingMessage } from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Duplex } from "node:stream";
 import { pathToFileURL } from "node:url";
 
 // ─── Locations ──────────────────────────────────────────────────────────────
@@ -39,12 +41,16 @@ import { pathToFileURL } from "node:url";
  * (`server-bundle/plugins`, beside the bundled server.js — see build-release.sh).
  * `SCOPE_BUILTIN_PLUGINS_DIR` overrides it.
  */
-const BUILTIN_DIR =
-  process.env.SCOPE_BUILTIN_PLUGINS_DIR ?? path.join(import.meta.dirname, "plugins");
+const BUILTIN_DIR = path.resolve(
+  process.env.SCOPE_BUILTIN_PLUGINS_DIR ?? path.join(import.meta.dirname, "plugins"),
+);
 
-/** User plugins. Override with SCOPE_PLUGINS_DIR (e.g. to keep them in-repo). */
-const USER_DIR =
-  process.env.SCOPE_PLUGINS_DIR ?? path.join(os.homedir(), ".pi-scope", "plugins");
+/** User plugins. Override with SCOPE_PLUGINS_DIR (e.g. to keep them in-repo).
+ *  Resolved to an absolute path so the entry-containment checks below compare
+ *  like with like even when the override is relative. */
+const USER_DIR = path.resolve(
+  process.env.SCOPE_PLUGINS_DIR ?? path.join(os.homedir(), ".pi-scope", "plugins"),
+);
 
 /** Where enable/disable choices are persisted. */
 const CONFIG_PATH = path.join(USER_DIR, "plugins.json");
@@ -119,12 +125,22 @@ type Ctx = {
 
 type RouteHandler = (ctx: Ctx) => unknown | Promise<unknown>;
 
+/** A raw HTTP `upgrade` handler owned by a plugin (a WebSocket endpoint today).
+ *  The host performs token/origin auth and enablement checks before calling it. */
+export type TransportHandler = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
+
 interface PluginRoute {
   pluginId: string;
   method: string;
   pattern: RegExp;
   keys: string[];
   handler: RouteHandler;
+}
+
+interface PluginTransport {
+  pluginId: string;
+  pathname: string;
+  handler: TransportHandler;
 }
 
 /** Services the server hands to plugins at activation time. The shared git /
@@ -147,6 +163,14 @@ interface PluginApi {
   log: (...args: unknown[]) => void;
   /** Register an HTTP route. Path supports `:name` params, and `*` suffixes. */
   route: (method: string, routePath: string, handler: RouteHandler) => void;
+  /**
+   * Register a transport (HTTP upgrade) endpoint at an exact pathname. The host
+   * owns the server's single `upgrade` listener: it checks that the owning
+   * plugin is enabled, applies the auth token + same-origin rules, and only
+   * then calls `handler(req, socket, head)`. A disabled plugin's transport is
+   * refused with 403, exactly like its HTTP `serverRoutes`.
+   */
+  transport: (pathname: string, handler: TransportHandler) => void;
   /** Observe every event ingested through POST /events. */
   onEvent: (handler: (event: any) => void) => void;
   /** Run a cleanup when the plugin is disabled or reloaded (e.g. stop a
@@ -174,6 +198,7 @@ interface PluginApi {
 
 const records = new Map<string, PluginRecord>();
 const routes: PluginRoute[] = [];
+const transports: PluginTransport[] = [];
 const eventHooks: { pluginId: string; handler: (event: any) => void }[] = [];
 const loaded = new Set<string>();
 const activations = new Map<string, PluginApi>();
@@ -287,8 +312,12 @@ export function discover(): PluginRecord[] {
   for (const manifest of seen.values()) {
     const source: "builtin" | "user" = builtinIds.has(manifest.id) && !isUserOverride(manifest.id) ? "builtin" : "user";
     const dir = pluginDir(manifest.id, source);
-    const serverEntry = manifest.server ? path.join(dir, manifest.server) : null;
-    const clientEntry = manifest.client ? path.join(dir, manifest.client) : null;
+    // Both entries must stay inside the plugin directory. Resolving here (not
+    // just at activation) means a manifest with `../` is reported in Settings
+    // and never gets a clientUrl, instead of silently looking like a plugin.
+    const serverEntry = manifest.server ? resolveEntry(dir, manifest.server) : null;
+    const clientEntry = manifest.client ? resolveEntry(dir, manifest.client) : null;
+    const escapedEntry = (manifest.server && !serverEntry) || (manifest.client && !clientEntry);
     records.set(manifest.id, {
       id: manifest.id,
       name: manifest.name,
@@ -308,9 +337,15 @@ export function discover(): PluginRecord[] {
       clientUrl: clientEntry && fs.existsSync(clientEntry)
         ? `/plugins/file/${encodeURIComponent(manifest.id)}/${manifest.client!.split(path.sep).join("/")}`
         : null,
-      error: null,
+      error: escapedEntry ? "entry escapes the plugin directory" : null,
       serverRoutes: manifest.serverRoutes ?? [],
     });
+  }
+  // Drop transports whose plugin no longer exists on disk. Reload already
+  // deactivates loaded plugins first; this also covers a direct discover()
+  // call after a plugin directory was removed.
+  for (let i = transports.length - 1; i >= 0; i--) {
+    if (!records.has(transports[i].pluginId)) transports.splice(i, 1);
   }
   return [...records.values()].sort(comparePlugins);
 }
@@ -322,6 +357,13 @@ function isUserOverride(id: string): boolean {
 
 function pluginDir(id: string, source: "builtin" | "user"): string {
   return source === "user" ? path.join(USER_DIR, id) : path.join(BUILTIN_DIR, id);
+}
+
+/** Resolve a manifest entry relative to the plugin dir, or null if it escapes. */
+function resolveEntry(dir: string, rel: string): string | null {
+  const base = path.resolve(dir);
+  const full = path.resolve(base, rel);
+  return full.startsWith(base + path.sep) ? full : null;
 }
 
 function comparePlugins(a: PluginRecord, b: PluginRecord): number {
@@ -461,6 +503,10 @@ function makeApi(record: PluginRecord, host: PluginHost): PluginApi {
       const { pattern, keys } = compileRoute(routePath);
       routes.push({ pluginId: record.id, method: method.toUpperCase(), pattern, keys, handler });
     },
+    transport: (pathname, handler) => {
+      const normalized = pathname.startsWith("/") ? pathname : `/${pathname}`;
+      transports.push({ pluginId: record.id, pathname: normalized, handler });
+    },
     onEvent: (handler) => {
       eventHooks.push({ pluginId: record.id, handler });
     },
@@ -522,6 +568,7 @@ function deactivate(id: string): void {
   }
   disposers.delete(id);
   for (let i = routes.length - 1; i >= 0; i--) if (routes[i].pluginId === id) routes.splice(i, 1);
+  for (let i = transports.length - 1; i >= 0; i--) if (transports[i].pluginId === id) transports.splice(i, 1);
   for (let i = eventHooks.length - 1; i >= 0; i--) if (eventHooks[i].pluginId === id) eventHooks.splice(i, 1);
   loaded.delete(id);
   activations.delete(id);
@@ -633,6 +680,26 @@ export function matchPluginRoute(
   return null;
 }
 
+/**
+ * Find the transport registered for an exact upgrade pathname. An enabled
+ * plugin wins; when only a disabled plugin claims the path, its id is returned
+ * so the host can answer 403 instead of dropping the socket.
+ */
+export function matchPluginTransport(
+  pathname: string,
+): { handler: TransportHandler } | { disabled: string } | null {
+  let disabled: string | null = null;
+  for (const entry of transports) {
+    if (entry.pathname !== pathname) continue;
+    if (!records.get(entry.pluginId)?.enabled) {
+      disabled ??= entry.pluginId;
+      continue;
+    }
+    return { handler: entry.handler };
+  }
+  return disabled ? { disabled } : null;
+}
+
 /** Run a plugin route handler and normalize its return value to a Response. */
 export async function runPluginRoute(
   match: { route: PluginRoute; params: Record<string, string> },
@@ -646,6 +713,14 @@ export async function runPluginRoute(
     console.error(`[plugins] route ${match.route.pattern} failed:`, err);
     return ctx.json({ error: String(err?.message ?? err) }, 500);
   }
+}
+
+/**
+ * Tear down every activated plugin. Called on process shutdown so transports
+ * close their sockets (and therefore their shells) before the server exits.
+ */
+export function shutdown(): void {
+  for (const id of [...loaded]) deactivate(id);
 }
 
 /** Fan out an ingested event to every enabled plugin that asked for events. */

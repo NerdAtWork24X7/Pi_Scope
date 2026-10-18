@@ -147,7 +147,7 @@ Done: header button → view → own HTTP route → own persistent counters.
 | Root | Purpose |
 |---|---|
 | `apps/scope-server/plugins/<id>/` | Built-in feature plugins shipped with the app (`plugin.json` + their route handler in `server.ts`; their client specs live in `public/plugins-builtin.js` — or, like the Office, ship their own `client.js` bundle and register themselves). |
-| `~/.pi-scope/plugins/<id>/` | **Your plugins.** Override the location with `SCOPE_PLUGINS_DIR` (**must be an absolute path** — see [Gotchas](#gotchas-and-hard-rules)). |
+| `~/.pi-scope/plugins/<id>/` | **Your plugins.** Override the location with `SCOPE_PLUGINS_DIR` (resolved to an absolute path — an absolute value is still recommended). |
 
 Enable/disable state is persisted to `~/.pi-scope/plugins/plugins.json`. Per
 plugin state written through `api.store` lands in `~/.pi-scope/plugins/.data/`.
@@ -158,11 +158,14 @@ A user plugin with the same `id` as a built-in **overrides** it — that is how 
 swap out a shipped feature without patching the app.
 
 Built-ins keep their server half beside the manifest: the Files, Git,
-Checkpoints and Office routes live in `plugins/files/server.ts`,
-`plugins/git/server.ts`, `plugins/checkpoints/server.ts` and
-`plugins/office/server.ts`. Those modules are ordinary plugins — they just
-receive a few extra host primitives through `api.kit` (below) instead of
-re-importing `server.ts`.
+Checkpoints, Terminal and Office routes live in `plugins/files/server.ts`,
+`plugins/git/server.ts`, `plugins/checkpoints/server.ts`,
+`plugins/terminal/server.ts` and `plugins/office/server.ts`. Those modules are
+ordinary plugins — they just receive a few extra host primitives through
+`api.kit` (below) instead of re-importing `server.ts`. The Terminal is the
+reference for a **transport plugin**: it registers `/terminal` through
+`api.transport`, while the host owns the single `upgrade` listener, auth and the
+enable/disable gate.
 
 The Office is the reference for a **fully standalone built-in**: manifest, server
 module, client bundle and stylesheet all in `plugins/office/`, with its own
@@ -217,7 +220,8 @@ Reload plugins**.
   the server returns `403 { error: "plugin disabled: <id>", plugin: "<id>" }` for
   those prefixes, so disabling a feature really turns it off rather than just
   hiding its button. User plugins get the same gate (verified), on top of their
-  own `api.route` handlers simply not matching while disabled.
+  own `api.route` handlers simply not matching while disabled. The same applies
+  to a plugin's `api.transport` endpoint: its upgrades are refused with `403`.
 * `nav` — `label` / `order` / `group` for the server-side snapshot (Settings list
   ordering). The client spec's `nav` is what actually renders the button; keep
   the two in sync. Built-in groups: `session` (10–50), `timeline` (60–75),
@@ -238,6 +242,7 @@ Reload plugins**.
 | `api.validateCwd(cwd)` | validate a caller-supplied cwd against the server's allowed roots |
 | `api.log(...args)` | namespaced logging (`[plugin:<id>] …`) |
 | `api.route(method, path, handler)` | register an HTTP route; `handler(ctx)` may return a value (JSON) or a `Response` |
+| `api.transport(pathname, handler)` | register an HTTP upgrade (WebSocket) endpoint at an exact path; the host authenticates and gates it before calling `handler(req, socket, head)` |
 | `api.onEvent(handler)` | called for every ingested event |
 | `api.store.get(key, fallback)` / `.set(key, value)` / `.all()` | JSON state persisted to `<pluginsDir>/.data/<id>.json` (mode `0600`) |
 | `api.projectStore(dir)` | the same store API, but persisted to `<dir>/.pi-scope/plugins/.data/<id>.json`; use it for state that belongs to one project |
@@ -260,6 +265,29 @@ Route semantics (compiled by `compileRoute` in `plugins.ts`):
 * Plugin routes are matched **after every core route**, so a plugin can never
   shadow one — pick your own namespace (`/my-plugin/…`).
 * First match wins; routes of a disabled plugin are skipped.
+
+#### Transports — `api.transport(pathname, handler)`
+
+The server has **one** `upgrade` listener, owned by the plugin host. A plugin
+that serves a WebSocket (the built-in Terminal is the reference) registers its
+exact pathname:
+
+```js
+// `myWsServer` is your own noServer WebSocket server (the built-in Terminal
+// gets its implementation from `api.kit.createTerminalTransport`).
+export function activate(api) {
+  api.transport("/my-plugin/socket", (req, socket, head) => {
+    myWsServer.handleUpgrade(req, socket, head, (ws) => myWsServer.emit("connection", ws, req));
+  });
+  api.onDispose(() => myWsServer.close());
+}
+```
+
+The host checks, in order: the pathname is registered, the owning plugin is
+enabled (else `403`), the request carries `?token=` or a Bearer token (else
+`401`), and the Origin is this server (else `403`). Only then is `handler`
+called. Disabling the plugin removes the transport and runs `onDispose`, so a
+live socket can be closed with the feature.
 * Return value → `ctx.json(result ?? { ok: true })` (200). Return a `Response`
   to control status/headers. A thrown error is caught, logged, and returned as
   `500 { error: "<message>" }` — it never takes the server down.
@@ -324,8 +352,11 @@ The kit exposes `fs`, `path`, `jsonResponse`, `textResponse`, `readBody`,
 `DEFAULT_COMMIT_TEMPLATE`, `generateCommitMessage`, `git`,
 `gitTry`, `gitConfigArgs`, `ensureGitRepo`, `resolveWithinCwd`, `cleanPaths`,
 `rejectOptionLike`, `parsePorcelainLine`, `porcelainStatus`, `buildRepoGraph`,
-and `legacyOfficeState` (a one-time migration reader the Office plugin uses to
-import a workspace's pre-plugin name/board; nothing else should need it).
+`createTerminalTransport` plus the `terminalCwd` / `onTerminalCwdChange` /
+`onTerminalClose` callbacks the Terminal plugin uses to keep the shared cwd
+sandbox in sync, and `legacyOfficeState` (a one-time migration reader the Office
+plugin uses to import a workspace's pre-plugin name/board; nothing else should
+need it).
 `requireCwd(raw)` is `validateCwd` plus the standard `400` bodies (it returns the
 absolute cwd or a `Response`), and `jsonBody(req)` reads + parses a JSON body,
 returning `{ value }` or `{ error }` (a `413`/`400` `Response`) — use them so
@@ -549,11 +580,9 @@ empty, and error (see `refresh()` above).
 
 ## Gotchas and hard rules
 
-* **`SCOPE_PLUGINS_DIR` must be absolute.** With a relative path, `record.dir`
-  is relative while entry paths are resolved to absolute, so activation fails
-  with `server entry escapes the plugin directory` and `/plugins/file/<id>/…`
-  404s — the plugin is listed but silently dead. Same trap applies to any
-  relative path you pass for a plugin root.
+* **`SCOPE_PLUGINS_DIR` is resolved to an absolute path at boot.** Relative
+  overrides are accepted now, but an absolute path is still the clearest choice
+  when you are pointing at a shared or per-project plugin root.
 * **No `../` in the server entry path** (same check) and **no path escape** in
   `/plugins/file/` (resolved and rejected server-side).
 * **Namespaces are yours.** Core routes win every match; a plugin route named
@@ -562,7 +591,10 @@ empty, and error (see `refresh()` above).
 * **Auth is on.** Every read route is token-gated. In the browser always go
   through `SCOPE.api` (or append `?token=` for a `<script>`/`<img>` src).
 * **Disable ≠ hide only.** With `serverRoutes` declared, disabled means `403`
-  from the server; that is the intended way to ship a capability switch.
+  from the server; that is the intended way to ship a capability switch. A
+  transport endpoint should also be listed in `serverRoutes` (the Terminal lists
+  `/terminal`) so disabling the plugin refuses its upgrades with the same `403`
+  and closes live sockets via `onDispose`.
 * **`api.kit` is internal** — it is handed to every plugin, but feature-detect
   every member (`api.kit?.gitTry`) rather than depending on it.
 * **ESM cache**: a server entry is imported once per process, so Reload never

@@ -4,6 +4,7 @@
   "description": "A real shell on the agent host, embedded in the browser over WebSocket.",
   "version": "1.0.0",
   "author": "Pi Scope",
+  "server": "server.ts",
   "serverRoutes": [
     "/terminal"
   ],
