@@ -30,6 +30,17 @@
  * **Waiting** column (see `reconcile`), where the board shows it until a human
  * answers and the run moves on.
  *
+ * The board is not the only way to put the orchestrator to work: a prompt typed
+ * in Chat starts the same kind of run without ever touching the board. Those
+ * runs are **adopted** — `adoptRuns` writes them in as ordinary tasks (marked
+ * `source: "run"`, titled with the prompt, In Progress with the run's own
+ * clock), so the board shows what the orchestrator is on whichever way it was
+ * started, and their history lands in Done like everything else. Adoption ties
+ * the card to the run through the same `runSessionId` every dispatched task
+ * carries, so `reconcile` settles it, the queue waits behind it (one run at a
+ * time), and taking the card off the board mutes that run instead of letting it
+ * be adopted straight back.
+ *
  * Disabled → `disabledPluginForRoute()` refuses `/office` with a 403, exactly
  * like the other feature plugins' routes.
  *
@@ -57,10 +68,21 @@ const TASK_MAX = 200;
 const TASK_NOTE_MAX = 4000;
 const NAME_MAX = 60;
 const TITLE_MAX = 200;
+/** Runs the board never adopts: a Workflow node's own `pi` run is that view's
+ *  business, not a task on this board (see `adoptRuns`). */
+const FOREIGN_RUN_RE = /^wf_/;
+/** How many taken-off-the-board runs are remembered so they are not adopted
+ *  straight back (see `muteRun`). A handful is plenty: it only has to outlive
+ *  the run that was dismissed. */
+const MUTED_MAX = 50;
 /** The store key holding `{ [workspace]: { officeName, tasks, runnerPaused } }`. */
 const KEY = "workspaces";
 /** The global store's index of project dirs (see `rememberProject`). */
 const INDEX_KEY = "projects";
+/** How often the board sweeps for the orchestrator's own runs when no page is
+ *  open (see `sweep`) — and how fast an ingested event may trigger one. */
+const SWEEP_MS = 4_000;
+const SWEEP_EVENT_MS = 1_000;
 
 const collapse = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
 
@@ -91,13 +113,32 @@ function normaliseTasks(raw: unknown): Record<string, any>[] {
     // instead of re-dispatching it (see runStates / `beginRun`).
     const runSessionId = String(r.runSessionId ?? "").trim();
     if (runSessionId) task.runSessionId = runSessionId;
+    // A card the board wrote itself for a run it did not start (see adoptRuns):
+    // kept so the card can say where it came from.
+    if (r.source === "run") task.source = "run";
     out.push(task);
   }
   return out;
 }
 
+/** Runs the user took off the board, as `{ sid, at }`: a run adopted for `sid`
+ *  with a start no later than `at` stays off (see `muteRun`). */
+function normaliseMuted(raw: unknown): { sid: string; at: number }[] {
+  if (!Array.isArray(raw)) return [];
+  const out: { sid: string; at: number }[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, any>;
+    const sid = String(r.sid ?? "").trim();
+    const at = Number(r.at);
+    if (!sid || !Number.isFinite(at) || at <= 0) continue;
+    out.push({ sid, at });
+  }
+  return out.slice(-MUTED_MAX);
+}
+
 /** The stored office state for one workspace, cleaned. */
-function normaliseState(raw: any): { officeName?: string; tasks: Record<string, any>[]; runnerPaused: boolean } {
+function normaliseState(raw: any): { officeName?: string; tasks: Record<string, any>[]; runnerPaused: boolean; muted: { sid: string; at: number }[] } {
   const name = collapse(raw && raw.officeName).slice(0, NAME_MAX);
   return {
     officeName: name || undefined,
@@ -105,6 +146,7 @@ function normaliseState(raw: any): { officeName?: string; tasks: Record<string, 
     // The queue runner starts PAUSED: a task parked in Planned waits for the
     // user to press Run. Anything but an explicit `false` means paused.
     runnerPaused: !(raw && raw.runnerPaused === false),
+    muted: normaliseMuted(raw && raw.muted),
   };
 }
 
@@ -162,7 +204,7 @@ export function activate(api: any): void {
 
   /** The state for `workspace`, seeding it once from the pre-plugin location or
    *  the old global store so an existing name and board survive the move. */
-  function readState(workspace: string): { officeName?: string; tasks: Record<string, any>[]; runnerPaused: boolean } {
+  function readState(workspace: string): { officeName?: string; tasks: Record<string, any>[]; runnerPaused: boolean; muted: { sid: string; at: number }[] } {
     const store = storeFor(workspace);
     rememberProject(workspace);
     const all = readStoreAll(workspace);
@@ -213,9 +255,17 @@ export function activate(api: any): void {
     return out;
   }
 
-  /** The wire shape: stored state plus the derived, never-stored live run map. */
+  /** The wire shape: stored state plus the derived, never-stored live run map.
+   *  `muted` is the board's own bookkeeping (which runs the user took off it) and
+   *  never leaves the server. */
+  const wireState = (state: any) => ({
+    officeName: state.officeName,
+    tasks: state.tasks,
+    runnerPaused: state.runnerPaused,
+  });
+
   function snapshot(workspace: string) {
-    return withRuns(readState(workspace));
+    return withRuns(wireState(readState(workspace)));
   }
 
   function commit(workspace: string, mutate: (state: any) => any): any {
@@ -224,7 +274,83 @@ export function activate(api: any): void {
     const all = readStoreAll(workspace);
     all[workspace] = next;
     store.set(KEY, all);
-    return withRuns(normaliseState(next));
+    return withRuns(wireState(normaliseState(next)));
+  }
+
+  /** Persist a state `reconcile`/`adoptRuns` already mutated in memory. */
+  function writeState(workspace: string, state: any): void {
+    const store = storeFor(workspace);
+    const all = readStoreAll(workspace);
+    all[workspace] = state;
+    store.set(KEY, all);
+  }
+
+  /** Remember a run the user took OFF the board — its card deleted, dragged out
+   *  of the run columns, or stopped — so the sweep does not adopt it straight
+   *  back while it is still live. One entry per session, refreshed, and only the
+   *  newest handful are kept. */
+  function muteRun(state: any, sessionId: unknown, at?: number): void {
+    const sid = String(sessionId ?? "").trim();
+    if (!sid) return;
+    const muted = normaliseMuted(state.muted).filter((m) => m.sid !== sid);
+    muted.push({ sid, at: Number(at) || Date.now() });
+    state.muted = muted.slice(-MUTED_MAX);
+  }
+
+  /**
+   * Adopt the orchestrator's own runs as board cards.
+   *
+   * A prompt typed in Chat starts the same kind of `pi` run the board dispatches
+   * — it just never touches the board, so without this the board reads "idle"
+   * while the orchestrator is plainly busy. Every live run in this workspace that
+   * no task owns is written in (In Progress, titled with the prompt, wearing the
+   * run's own clock), and `reconcile` settles it into Done like any other task,
+   * so the board keeps the history of work it did not start.
+   *
+   * Only live runs can be adopted — a settled one keeps no prompt — so the sweep
+   * runs while the run is going (see `sweep`). The runs the board itself owns are
+   * skipped: the queue's live dispatch, any task's recorded `runSessionId`, and
+   * the Workflow's own node runs.
+   */
+  function adoptRuns(workspace: string, state: any): boolean {
+    const liveRuns = api.kit.chatLiveRuns;
+    if (typeof liveRuns !== "function") return false; // no chat state to read
+    let runs: any[];
+    try { runs = liveRuns() || []; } catch { return false; }
+    const owned = new Set<string>();
+    for (const t of state.tasks) if (t.runSessionId) owned.add(String(t.runSessionId));
+    const muted = normaliseMuted(state.muted);
+    const isMuted = (sid: string, startedAt: number) => muted.some((m) => m.sid === sid && m.at >= startedAt);
+    const queue = RUNNERS.get(workspace);
+    const queueSid = queue ? String(queue.sessionId) : "";
+    let changed = false;
+    for (const r of runs) {
+      if (!r || !r.active || !r.prompt || r.fresh) continue;   // a live, prompted run
+      if (workspaceOf(r.cwd) !== workspace) continue;
+      const sid = String(r.sessionId ?? "").trim();
+      if (!sid || owned.has(sid) || sid === queueSid || FOREIGN_RUN_RE.test(sid)) continue;
+      const startedAt = Number(r.startedAt) || Date.now();
+      if (isMuted(sid, startedAt)) continue;
+      if (state.tasks.length >= TASK_MAX) break;               // the board is full
+      const prompt = collapse(r.prompt);
+      const title = prompt.slice(0, TITLE_MAX);
+      if (!title) continue;
+      const task: Record<string, any> = {
+        id: `task_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`,
+        title,
+        status: "in_progress",
+        createdAt: startedAt,
+        startedAt,
+        runStartedAt: startedAt,
+        runSessionId: sid,
+        source: "run",
+      };
+      const brief = prompt.slice(0, TASK_NOTE_MAX);
+      if (brief.length > title.length) task.note = brief;
+      state.tasks.push(task);
+      changed = true;
+    }
+    return changed;
   }
 
   /** A just-begun run may not have created its chat session yet; never self-heal
@@ -244,15 +370,21 @@ export function activate(api: any): void {
    * Progress. Both are reads of the same run state, so the board tells the truth
    * on any poll — including for a run started by a page that is no longer open.
    *
+   * It first ADOPTS the orchestrator's own runs (see `adoptRuns`), so the rest of
+   * this pass sees them as the ordinary tasks they now are.
+   *
    * Only unambiguous cases are touched, and only once past the grace window:
    * a fresh dispatch (or a fresh drag) is always left alone.
    */
   function reconcile(workspace: string): void {
     const status = api.kit.chatRunStatus;
-    if (typeof status !== "function") return; // no chat state to judge against
     const state = readState(workspace);
     const now = Date.now();
-    let changed = false;
+    let changed = adoptRuns(workspace, state);
+    if (typeof status !== "function") {   // no chat state to judge against
+      if (changed) writeState(workspace, state);
+      return;
+    }
     for (const t of state.tasks) {
       const held = isHeld(t);
       if (!held) continue;
@@ -295,11 +427,31 @@ export function activate(api: any): void {
         changed = true;
       }
     }
-    if (changed) {
-      const store = storeFor(workspace);
-      const all = readStoreAll(workspace);
-      all[workspace] = state;
-      store.set(KEY, all);
+    if (changed) writeState(workspace, state);
+  }
+
+  /**
+   * Keep every known board in step with the orchestrator's own runs — the ones
+   * started with no page open and no board involved (a prompt in Chat).
+   *
+   * `reconcile` has to run while a run is LIVE to adopt it (a settled run keeps
+   * no prompt) and again after it ends to settle the card, so the plugin drives
+   * itself: a slow timer for the settling, and an ingested event as the hint that
+   * a workspace is at work right now (a run can be over in well under a sweep).
+   *
+   * Only boards with something to do are touched — a live run in that workspace,
+   * or a card the board itself holds — so a dormant install costs a map lookup.
+   */
+  function sweep(): void {
+    if (disposed) return;
+    if (typeof api.kit.chatLiveRuns !== "function") return;
+    let runs: any[];
+    try { runs = api.kit.chatLiveRuns() || []; } catch { return; }
+    const busy = new Set<string>();
+    for (const r of runs) if (r && r.active && r.prompt) busy.add(workspaceOf(r.cwd));
+    for (const workspace of knownProjects()) {
+      if (!busy.has(workspace) && !readState(workspace).tasks.some(isHeld)) continue;
+      reconcile(workspace);
     }
   }
 
@@ -423,6 +575,21 @@ export function activate(api: any): void {
     for (const workspace of [...RUNNERS.keys()]) stopActiveRun(workspace);
   });
 
+  // The orchestrator keeps working with no page open, so the board learns about
+  // its runs on its own: a slow timer settles what it adopted, and an ingested
+  // event (throttled — a streaming turn posts them far faster than the board can
+  // change) is the near-instant hint that a run has just started.
+  const sweepTimer = setInterval(sweep, SWEEP_MS);
+  if (typeof sweepTimer.unref === "function") sweepTimer.unref();
+  let lastEventSweep = 0;
+  api.onEvent?.(() => {
+    const now = Date.now();
+    if (now - lastEventSweep < SWEEP_EVENT_MS) return;
+    lastEventSweep = now;
+    sweep();
+  });
+  api.onDispose?.(() => clearInterval(sweepTimer));
+
   api.route("GET", "/office", (ctx) => {
     const workspace = workspaceOf(ctx.url.searchParams.get("cwd"));
     reconcile(workspace);
@@ -497,8 +664,12 @@ export function activate(api: any): void {
           if (status === "done") task.finishedAt = at;
           // Leaving the run's own columns ends any recorded run: the task is no
           // longer owned by a chat session. Waiting keeps it — the run is still
-          // live, just blocked on an answer.
-          if (!HELD_STATUSES.has(status)) { delete task.runSessionId; delete task.runStartedAt; }
+          // live, just blocked on an answer. A run that is still going is muted
+          // so the sweep does not adopt the card back (see muteRun).
+          if (!HELD_STATUSES.has(status)) {
+            muteRun(current, task.runSessionId);
+            delete task.runSessionId; delete task.runStartedAt;
+          }
           return current;
         });
         if (busy) return jsonResponse({ error: "another task is already running", code: "conflict" }, 409);
@@ -560,7 +731,12 @@ export function activate(api: any): void {
           if (status === "done") task.finishedAt = at;
           // Leaving the run's own columns ends any recorded run: the task is no
           // longer owned by a chat session (Waiting keeps it — see `moveTask`).
-          if (!HELD_STATUSES.has(status)) { delete task.runSessionId; delete task.runStartedAt; }
+          // A run that is still going is muted so the sweep does not adopt the
+          // card back (see muteRun).
+          if (!HELD_STATUSES.has(status)) {
+            muteRun(current, task.runSessionId);
+            delete task.runSessionId; delete task.runStartedAt;
+          }
           if (status === "planned") {
             const queue = current.tasks
               .filter((t: any) => t.status === "planned")
@@ -626,6 +802,9 @@ export function activate(api: any): void {
           stopped = task.runSessionId || null;
           task.status = "planned";
           task.plannedAt = task.plannedAt || Date.now();
+          // The abort takes a moment; mute the run so the sweep does not adopt
+          // the card back while pi is still winding down (see muteRun).
+          muteRun(current, task.runSessionId);
           delete task.runSessionId;
           delete task.runStartedAt;
           delete task.startedAt;
@@ -651,6 +830,8 @@ export function activate(api: any): void {
           task.status = "planned";
           task.plannedAt = task.plannedAt || at;
           task.failedAt = at;
+          // A failed dispatch must not be adopted back as a live run (see muteRun).
+          muteRun(current, task.runSessionId);
           delete task.runSessionId;
           delete task.runStartedAt;
           delete task.startedAt;
@@ -663,6 +844,10 @@ export function activate(api: any): void {
         const id = String(body.id ?? "").trim();
         if (!id) return jsonResponse({ error: "missing id" }, 400);
         return jsonResponse(commit(workspace, (current) => {
+          const gone = current.tasks.find((t: any) => t.id === id);
+          // A card the orchestrator is working right now: remember the run, or
+          // the sweep would simply adopt it straight back (see muteRun).
+          if (gone) muteRun(current, gone.runSessionId);
           current.tasks = current.tasks.filter((t: any) => t.id !== id);
           return current;
         }));

@@ -1252,6 +1252,17 @@ body[data-ds-dark-theme] {
   overflow-wrap: anywhere;
 }
 .office-task-note { grid-column: 1; font-family: var(--font-body); font-size: 12px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+/* A card the board adopted from the orchestrator's own run (a prompt typed in
+   Chat) rather than one written here. */
+.office-task-src {
+  grid-column: 1;
+  width: fit-content;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill, 999px);
+  font-family: var(--mono); font-size: 10px; letter-spacing: .4px;
+  text-transform: uppercase; color: var(--text-subtle);
+}
 .office-task-acts { grid-column: 2; grid-row: 1 / span 3; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
 .office-task-del,
 .office-task-edit {

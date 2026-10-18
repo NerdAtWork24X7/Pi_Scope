@@ -969,6 +969,22 @@
     return pending && typeof pending === "object" ? pending : null;
   }
 
+  /** Is the orchestrator running its own task right now — a chat run the board
+   *  did not start? The server ADOPTS those runs (they are written onto the board
+   *  as ordinary tasks), so the view has to keep polling while one is going or
+   *  the new card only appears on the next unrelated refresh. `subagentStatus` is
+   *  the shared green / orange / red rule, so "busy" here can never disagree with
+   *  the rest of the UI. */
+  function orchestratorBusy() {
+    const cwd = (state().cwd || "").replace(/\/+$/, "");
+    for (const s of sessions()) {
+      if (!s || lower(s.agent_name) !== "orchestrator") continue;
+      if (cwd && s.cwd && String(s.cwd).replace(/\/+$/, "") !== cwd) continue;
+      if (S.subagentStatus && S.subagentStatus(s) === "green") return true;
+    }
+    return false;
+  }
+
   // ─── The orchestrator's model ─────────────────────────────────────────────
   // The orchestrator is the app's own agent: the model it runs on is the
   // settings.json default model (the same one a new chat session starts on, and
@@ -1176,6 +1192,11 @@
         live +
         waiting +
         failed +
+        // A card the board adopted from the orchestrator's own run: say so, so
+        // it is never mistaken for a task the user wrote on the board.
+        (task.source === "run"
+          ? `<span class="office-task-src" title="The orchestrator's own chat run — the board did not start this one">chat run</span>`
+          : "") +
         (task.note ? `<span class="office-task-note" title="${escAttr(task.note)}">${esc(task.note)}</span>` : "") +
         `<span class="office-task-acts">` +
           edit +
@@ -2587,7 +2608,7 @@
       `<div class="office-lib-panel office-board-panel" role="dialog" aria-modal="true" aria-label="Task board">` +
         `<div class="office-lib-head">` +
           `<span class="office-lib-hd-title">Task board</span>` +
-          `<span class="office-lib-hd-sub">Todo → Planned → In Progress → Waiting → Done. Drag a card to another column (or focus it and use ← →); drop it into Planned at a position to resequence the queue. Planned tasks run one at a time when the runner is running — a task whose run asks you a question parks in Waiting until you answer it.</span>` +
+          `<span class="office-lib-hd-sub">Todo → Planned → In Progress → Waiting → Done. Drag a card to another column (or focus it and use ← →); drop it into Planned at a position to resequence the queue. Planned tasks run one at a time when the runner is running — a task whose run asks you a question parks in Waiting until you answer it. A card marked <b>chat run</b> is work started outside the board (a prompt in Chat): the board shows it while it runs and keeps it once it is done.</span>` +
           `<span class="office-lib-hd-spacer"></span>` +
           // The runner starts paused; this is where the queue is started or held.
           `<button class="btn-sm office-run-toggle" id="office-run-toggle" type="button"></button>` +
@@ -3970,7 +3991,9 @@
     ticker = setInterval(() => {
       // In server-runner mode the queue advances on the server; poll the board so
       // the floor and the board reflect it without waiting for a manual refresh.
-      if (office && office.serverRunner && !runnerPaused()) void refreshOffice(true);
+      // The orchestrator's own runs count too: a chat run the board did not start
+      // is adopted server-side, so the view polls while one is going as well.
+      if (office && office.serverRunner && (!runnerPaused() || orchestratorBusy())) void refreshOffice(true);
       // Time-based statuses (the 10s activity window) and expiring labels.
       scheduleRender();
       // …and the running task's clock, which counts in seconds rather than on a

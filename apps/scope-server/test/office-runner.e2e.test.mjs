@@ -43,6 +43,9 @@ process.stdin.on("data", (d) => {
       const msg = String(ev.message || "");
       if (/FAIL/.test(msg)) process.exit(1);
       if (/SLOW/.test(msg)) setTimeout(finish, 30000);
+      // DELAY: finishes on its own, but not so fast that a test cannot see the
+      // run while it is live (used for the board's adoption of foreign runs).
+      else if (/DELAY/.test(msg)) setTimeout(finish, 1200);
       // ASK: pi raises a host dialog (what \`ask_user_question\` does) and stays
       // blocked on it — no more output until the host answers. The run is still
       // live, which is exactly the state the office parks in Waiting.
@@ -119,6 +122,18 @@ async function planTask(title) {
 async function clearBoard() {
   await post({ action: "setRunnerPaused", paused: true });
   for (const t of (await snapshot()).tasks) await post({ action: "removeTask", id: t.id });
+}
+
+/** Start a chat run in the workspace — the "started outside the board" case —
+ *  and drop the stream immediately (a page that walks away does not stop pi). */
+async function chatRun(prompt, sessionId) {
+  const res = await fetch(`${base}/chat`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ cwd: ws, prompt, sessionId }),
+  });
+  try { await res.body?.cancel(); } catch { /* the run outlives the reader */ }
+  return res.status;
 }
 
 before(async () => {
@@ -336,5 +351,98 @@ describe("the server-side queue runner", () => {
       await new Promise((r) => proc.once("exit", r));
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// The board is not the only way to put the orchestrator to work: a prompt typed
+// in Chat starts the same kind of run without touching the board. Those runs are
+// adopted as ordinary cards — so the board tells the truth about what the
+// orchestrator is on whichever way it was started — and they settle into Done
+// like everything else.
+describe("the board adopts the orchestrator's own runs", () => {
+  test("a chat run started outside the board is adopted and settles into Done", async () => {
+    await clearBoard();
+    assert.equal(await chatRun("DELAY adopted from chat", "chat-adopt-1"), 200);
+
+    // The board reads the live run in: an ordinary In Progress card, titled with
+    // the prompt, wearing the run's own clock and marked as adopted.
+    let adopted = null;
+    await until(async () => {
+      adopted = byTitle(await snapshot(), "DELAY adopted from chat");
+      return !!(adopted && adopted.status === "in_progress");
+    }, "the chat run is adopted onto the board");
+    assert.equal(adopted.source, "run", "the card says the board did not start it");
+    assert.equal(adopted.runSessionId, "chat-adopt-1", "and owns the run it came from");
+    assert.ok(adopted.runStartedAt > 0, "its clock starts when the run did");
+    const live = await snapshot();
+    assert.equal(live.runStates[adopted.id].active, true, "the adopted card is live");
+
+    // The run finishes by itself: the card settles into Done like any other, so
+    // the board keeps the history of work it did not start.
+    let done = null;
+    await until(async () => {
+      done = byTitle(await snapshot(), "DELAY adopted from chat");
+      return !!(done && done.status === "done");
+    }, "the finished chat run settles into Done");
+    assert.ok(done.finishedAt > 0, "the card is stamped finished");
+    assert.equal(done.runSessionId, undefined, "and its run link is dropped");
+  });
+
+  test("a live adopted card deleted from the board is not adopted straight back", async () => {
+    await clearBoard();
+    assert.equal(await chatRun("SLOW adopted then deleted", "chat-adopt-2"), 200);
+    let t = null;
+    await until(async () => {
+      t = byTitle(await snapshot(), "SLOW adopted then deleted");
+      return !!(t && t.status === "in_progress");
+    }, "the chat run is adopted");
+
+    assert.ok((await post({ action: "removeTask", id: t.id })).res.ok);
+    // The run is still live, so a read would adopt it again — the board remembered
+    // the dismissal instead. (The sweep runs the same pass, so wait one out.)
+    assert.equal(byTitle(await snapshot(), "SLOW adopted then deleted"), undefined, "the card is gone");
+    await new Promise((r) => setTimeout(r, 4500));
+    assert.equal(byTitle(await snapshot(), "SLOW adopted then deleted"), undefined, "and the sweep does not bring it back");
+  });
+
+  test("a run the queue itself dispatched is not adopted a second time", async () => {
+    await clearBoard();
+    await planTask("SLOW queue dispatch");
+    await post({ action: "setRunnerPaused", paused: false });
+    let live = null;
+    await until(async () => {
+      live = byTitle(await snapshot(), "SLOW queue dispatch");
+      return !!(live && live.status === "in_progress");
+    }, "the queue dispatch starts");
+    assert.equal(live.source, undefined, "a board-dispatched card is not marked adopted");
+    assert.equal(
+      (await snapshot()).tasks.filter((t) => t.title === "SLOW queue dispatch").length,
+      1,
+      "there is no second card for the live dispatch",
+    );
+    await post({ action: "setRunnerPaused", paused: true });
+    await until(async () => byTitle(await snapshot(), "SLOW queue dispatch").status === "planned", "cleanup: the task returns to Planned");
+  });
+
+  test("the queue waits behind a run the orchestrator started elsewhere", async () => {
+    await clearBoard();
+    assert.equal(await chatRun("SLOW adopted holds the floor", "chat-adopt-3"), 200);
+    let held = null;
+    await until(async () => {
+      held = byTitle(await snapshot(), "SLOW adopted holds the floor");
+      return !!(held && held.status === "in_progress");
+    }, "the chat run is adopted");
+
+    await planTask("queued behind the chat run");
+    await post({ action: "setRunnerPaused", paused: false });
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(byTitle(await snapshot(), "queued behind the chat run").status, "planned", "the queue holds behind the live chat run");
+
+    // Clean up: the adopted run is not the queue's to abort, so take its card off
+    // the board (which mutes the run) and hold the queue again.
+    await post({ action: "setRunnerPaused", paused: true });
+    if (held) await post({ action: "removeTask", id: held.id });
+    const queued = byTitle(await snapshot(), "queued behind the chat run");
+    if (queued) await post({ action: "removeTask", id: queued.id });
   });
 });
