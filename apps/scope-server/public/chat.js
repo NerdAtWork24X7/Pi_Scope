@@ -126,6 +126,7 @@
     footerFetchedAt: 0,
     thinkingLevel: null,   // selected thinking level (defaults to footer.thinking)
     showThinking: loadBool("scope-chat-show-thinking", false), // global fold/unfold of thought blocks
+    thoughtAutoScroll: loadBool("scope-chat-thought-autoscroll", true), // keep the open Thought block pinned to its newest line
     expandTools: loadBool("scope-chat-expand-tools", false),   // compact chips vs. folded per-call rows (click to open)
     steer: loadBool("scope-chat-steer", false), // send next message mid-run (steer) vs queue until done
     listening: false,   // dictation (speech to text) is recording on the host
@@ -2014,6 +2015,10 @@
     `<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>`;
   const ICON_THOUGHT =
     `<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/>`;
+  // "Follow the newest line" — an arrow onto a baseline. Doubles as the icon for
+  // the Thought block's auto-scroll toggle.
+  const ICON_SCROLL_DOWN =
+    `<path d="M12 4v13"/><polyline points="6.5 11.5 12 17 17.5 11.5"/><line x1="5" y1="21" x2="19" y2="21"/>`;
   const TOOL_ICONS = {
     file: `<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>`,
     edit: `<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>`,
@@ -2188,7 +2193,10 @@
 
   function applyThinkingState() {
     if (!el.msg) return;
-    el.msg.querySelectorAll("details.chat-thinking").forEach((d) => { d.open = CH.showThinking; });
+    el.msg.querySelectorAll("details.chat-thinking").forEach((d) => {
+      d.open = CH.showThinking;
+      if (d.open) scrollThoughtToBottom(d);
+    });
     updateToggleButtons();
   }
 
@@ -2196,6 +2204,45 @@
     CH.showThinking = !CH.showThinking;
     try { localStorage.setItem("scope-chat-show-thinking", CH.showThinking ? "1" : "0"); } catch {}
     applyThinkingState();
+  }
+
+  // ─── Thought block auto-scroll ────────────────────────────────────────────
+  // A streaming Thought block scrolls its own <pre> (which caps at 320px and
+  // scrolls internally) to reveal the newest line as the agent thinks. The
+  // button in the block's header switches that follow on/off; the choice is
+  // remembered across reloads. Scrolling the wrong element (the <details>, which
+  // never overflows) used to leave the text stuck at the top.
+  function thoughtScrollBtn() {
+    const on = CH.thoughtAutoScroll;
+    return `<button type="button" class="chat-th-autoscroll${on ? " on" : ""}"` +
+      ` data-th-autoscroll="1" aria-pressed="${on ? "true" : "false"}"` +
+      ` title="Auto-scroll thought ${on ? "on" : "off"} — click to turn ${on ? "off" : "on"}">` +
+      `${ico(ICON_SCROLL_DOWN, 13)}</button>`;
+  }
+  function scrollThoughtToBottom(det) {
+    if (!CH.thoughtAutoScroll || !det) return;
+    const pre = det.querySelector("pre");
+    if (pre) pre.scrollTop = pre.scrollHeight;
+  }
+  // Keep every toggle in the transcript showing the current state (a render can
+  // happen while the pref is flipped from the header button). When turning it ON
+  // the open blocks jump to their newest line right away.
+  function applyThoughtAutoScroll() {
+    if (!el.msg) return;
+    el.msg.querySelectorAll("details.chat-thinking").forEach((det) => {
+      const btn = det.querySelector(".chat-th-autoscroll");
+      if (btn) {
+        btn.classList.toggle("on", CH.thoughtAutoScroll);
+        btn.setAttribute("aria-pressed", CH.thoughtAutoScroll ? "true" : "false");
+        btn.title = `Auto-scroll thought ${CH.thoughtAutoScroll ? "on" : "off"} — click to turn ${CH.thoughtAutoScroll ? "off" : "on"}`;
+      }
+      if (det.open) scrollThoughtToBottom(det);
+    });
+  }
+  function toggleThoughtAutoScroll() {
+    CH.thoughtAutoScroll = !CH.thoughtAutoScroll;
+    try { localStorage.setItem("scope-chat-thought-autoscroll", CH.thoughtAutoScroll ? "1" : "0"); } catch {}
+    applyThoughtAutoScroll();
   }
 
   // Re-render each message's tool activity in the current display mode without
@@ -2304,7 +2351,7 @@
     const usageRow = usageRowHtml(m);
     const tools = renderToolsHtml(m);
     const thinking = m.thinking
-      ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre>${esc(m.thinking)}</pre></details>`
+      ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span>${thoughtScrollBtn()}</summary><pre>${esc(m.thinking)}</pre></details>`
       : "";
     const body = m.text
       ? `<div class="chat-text">${markdownHtml(m.text)}</div>`
@@ -2443,6 +2490,12 @@
     // (previously the stream kept writing into removed nodes — invisible until
     // the turn finalized — e.g. after switching away from and back to Chat).
     if (showLive) attachLiveDom(curT);
+    // Rebuilding the canvas resets each Thought block's internal scroll. For the
+    // live bubble that is mid-thought, put it back on its newest line when the
+    // follow is on (historical blocks are left where the reader had them).
+    if (showLive && CH.thoughtAutoScroll) {
+      el.msg.querySelectorAll(".chat-ai-live details.chat-thinking[open]").forEach((d) => scrollThoughtToBottom(d));
+    }
     updateScrollDown();
   }
 
@@ -2457,7 +2510,7 @@
     const dataIdx = idx != null ? idx : CH.chatHistory.length - 1;
     const copyAttr = esc(m.text || "");
     const thinking = m.thinking
-      ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre>${esc(m.thinking)}</pre></details>`
+      ? `<details class="chat-thinking"${CH.showThinking ? " open" : ""}><summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span>${thoughtScrollBtn()}</summary><pre>${esc(m.thinking)}</pre></details>`
       : "";
     const tools = renderToolsHtml(m);
     const text = m.text ? `<div class="chat-text chat-stream-text">${esc(m.text)}</div>` : "";
@@ -2565,11 +2618,13 @@
       det = document.createElement("details");
       det.className = "chat-thinking";
       det.open = CH.showThinking;
-      det.innerHTML = `<summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span></summary><pre></pre>`;
+      det.innerHTML = `<summary><span class="chat-th-label">${ico(ICON_THOUGHT, 13)} Thought</span>${thoughtScrollBtn()}</summary><pre></pre>`;
       livePrependTextNode(body, det, ".chat-tools, .chat-text, .chat-usage");
     }
     det.querySelector("pre").textContent = m.thinking;
-    det.scrollTop = det.scrollHeight;
+    // Follow the newest line: the scrollable element is the <pre>, not the
+    // <details> wrapper. Respects the header toggle.
+    scrollThoughtToBottom(det);
   }
 
   function streamText(body, m, delta) {
@@ -4484,6 +4539,15 @@
     // Delegated clicks: copy buttons (message + code), hero suggestion chips,
     // hero add-workspace CTA.
     document.addEventListener("click", (e) => {
+      // The Thought block's auto-scroll toggle sits inside its <summary>, so the
+      // click must not also fold/unfold the block.
+      const thScroll = e.target.closest?.("[data-th-autoscroll]");
+      if (thScroll) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleThoughtAutoScroll();
+        return;
+      }
       const copyBtn = e.target.closest("[data-copy]");
       if (copyBtn) {
         e.preventDefault();
@@ -4509,6 +4573,12 @@
       // re-render instead of snapping shut under the user.
       el.msg.addEventListener("toggle", (e) => {
         const det = e.target;
+        // Opening a Thought block reveals it at its newest line (when auto-scroll
+        // is on) instead of the very beginning of a long stream of reasoning.
+        if (det?.classList?.contains("chat-thinking")) {
+          if (det.open) scrollThoughtToBottom(det);
+          return;
+        }
         if (!det?.classList?.contains("chat-tool-call")) return;
         const m = CH.chatHistory[Number(det.closest(".chat-msg")?.dataset.i)];
         const ti = Number(det.dataset.ti);

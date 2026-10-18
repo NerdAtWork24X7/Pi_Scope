@@ -53,6 +53,14 @@ import type { WebSocket as WsSocket } from "ws";
 
 const PORT = parseInt(process.env.SCOPE_PORT ?? "43190", 10);
 const HOST = process.env.SCOPE_HOST ?? "127.0.0.1";
+// When THIS server process started. A session's OPEN turn (`last_turn_event ===
+// 'turn_start'`) can only still be running if it was announced to this run: pi
+// posts its events to whichever server is listening, so a turn that started
+// before this process booted belongs to a pi that is gone (the desktop app was
+// closed and reopened, killing the bundled agent). GET /sessions annotates each
+// row with `turn_live` from this so the UI stops showing a dead turn as
+// "working" forever (see subagentStatus in public/helpers.js). */
+const SERVER_BOOT_TS = Date.now();
 // A wildcard bind (0.0.0.0 / ::) makes the server reachable from the LAN — e.g. a
 // phone opening the Chat view on the same Wi-Fi. Several routes below skip the
 // auth wall on the premise that "only a local process can reach me", which only
@@ -4047,6 +4055,18 @@ async function handle(req: Request): Promise<Response> {
       const sessions = rows
         .filter((r) => !since || r.last_ts >= since)
         .map(rowToSession);
+
+      // Is an OPEN turn still live? A `turn_start` records the turn the agent is
+      // working on; `turn_end` closes it. A pi that is killed mid-turn (the app
+      // was closed) never posts its `turn_end`, so the row would otherwise stay
+      // green — "working" — forever. The only turns that can still be running
+      // under THIS server are ones whose start reached it, i.e. whose last
+      // activity is not older than boot. Everything earlier is a dangling turn
+      // from a previous server run and must read as not-live.
+      for (const s of sessions) {
+        const lastTs = typeof s.last_ts === "number" ? s.last_ts : Date.parse(s.last_ts);
+        s.turn_live = s.last_turn_event === "turn_start" && lastTs >= SERVER_BOOT_TS;
+      }
 
       // Annotate each session with the authoritative context window from the
       // model metadata store, keyed "<provider>/<model>" — the same source the

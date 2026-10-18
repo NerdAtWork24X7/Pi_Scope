@@ -96,7 +96,16 @@
   // agent finished and is waiting for the next prompt) does it turn orange.
   function subagentStatus(s) {
     if (s?.has_shutdown) return "red";
-    if (s?.last_turn_event === "turn_start") return "green";
+    if (s?.last_turn_event === "turn_start") {
+      // An OPEN turn only reads "working" while the server can vouch for it.
+      // The server annotates every session with `turn_live`: a turn that began
+      // before the server's current run — the pi that opened it was killed when
+      // the app was closed — or one the server knows is gone is NOT live, so the
+      // row must not stay green forever after the process is gone. Absent (an
+      // older server or a fixture that predates the field) keeps the historical
+      // "the open turn is the truth" behaviour.
+      return s.turn_live === false ? "orange" : "green";
+    }
     if (s?.last_turn_event === "turn_end") return "orange";
     // Sessions with no captured turn events (older harnesses, capture-only
     // sessions) fall back to the recency heuristic.

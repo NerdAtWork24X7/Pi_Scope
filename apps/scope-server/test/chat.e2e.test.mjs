@@ -759,6 +759,53 @@ describe("chat streaming", () => {
     turn.end();
   });
 
+  test("a Thought block follows its newest line, and the header button toggles that", async () => {
+    // Auto-scroll is on by default. The block's own <pre> is what scrolls (it
+    // caps at 320px), so the newest reasoning must stay in view; the button in
+    // the header turns the follow off and on, and the choice sticks.
+    await boot({ sessions: [makeSession(SESS_A)], seed: { "scope-chat-show-thinking": "1" } });
+    await wsRow(page, WS_A).click();
+    await page.waitForSelector(".chat-ws.active");
+    const turn = await send(page, mock, "think hard");
+    turn.send({ type: "session", sessionId: "live-think" });
+    turn.send({ type: "msg_start" });
+    const lines = (n, tag) => Array.from({ length: n }, (_, i) => `${tag} line ${i}`).join("\n") + "\n";
+    turn.send({ type: "thinking", delta: lines(40, "first") });
+    await page.waitForFunction(() => (document.querySelector(".chat-thinking pre")?.textContent || "").includes("first line 39"));
+    const pre = () => page.$(".chat-thinking pre");
+    const box = () => page.evaluate(() => {
+      const p = document.querySelector(".chat-thinking pre");
+      return { top: p.scrollTop, h: p.clientHeight, sh: p.scrollHeight };
+    });
+
+    let b = await box();
+    assert.ok(b.sh > b.h, "the block overflows so it can actually scroll");
+    assert.ok(b.top + b.h >= b.sh - 2, "auto-scroll pins the thought to its newest line");
+
+    // Turn the follow off: the button reflects it and further deltas leave the
+    // reading position alone (they only grow the block).
+    assert.equal(await page.getAttribute(".chat-th-autoscroll", "aria-pressed"), "true");
+    await page.click(".chat-th-autoscroll");
+    assert.equal(await page.getAttribute(".chat-th-autoscroll", "aria-pressed"), "false");
+    assert.equal(await page.$eval(".chat-thinking", (d) => d.open), true, "the toggle click does not fold the block");
+    const before = (await box()).top;
+    turn.send({ type: "thinking", delta: lines(20, "second") });
+    await page.waitForFunction(() => (document.querySelector(".chat-thinking pre")?.textContent || "").includes("second line 19"));
+    b = await box();
+    assert.equal(b.top, before, "with the follow off, the view does not jump");
+    assert.ok(b.top + b.h < b.sh - 2, "and the newest line is off-screen");
+
+    // Back on: it catches up to the bottom again.
+    await page.click(".chat-th-autoscroll");
+    assert.equal(await page.getAttribute(".chat-th-autoscroll", "aria-pressed"), "true");
+    b = await box();
+    assert.ok(b.top + b.h >= b.sh - 2, "turning it back on jumps to the newest line");
+
+    turn.send({ type: "done", sessionId: "live-think" });
+    turn.end();
+    assert.ok(await pre(), "the block survives the turn");
+  });
+
   test("show-tools mode folds every tool call: collapsed by default, click to open, sticky across a re-render", async () => {
     await boot({ sessions: [makeSession(SESS_A)], seed: { "scope-chat-expand-tools": "1" } });
     await wsRow(page, WS_A).click();
@@ -1756,6 +1803,28 @@ describe("a session running in the terminal", () => {
     }, new Date().toISOString());
     await page.waitForFunction(() => document.getElementById("chat-header-state").textContent === "working");
     await page.waitForSelector(".chat-ext-live", { state: "visible" });
+  });
+
+  test("REGRESSION: a turn left over from a previous run is not 'working' after a restart", async () => {
+    // Reported: close the app mid-turn, reopen it — Chat still showed the
+    // session as working (header + "working in your terminal…" strip) although
+    // nothing was running. The server annotates the dangling `turn_start` with
+    // `turn_live: false` (it predates the current server run), so the UI must
+    // read it as waiting, not working.
+    await boot({
+      sessions: [EXT({ last_turn_event: "turn_start", turn_live: false })],
+      events: { "ext-1": [
+        { type: "user_message", ts: now, payload: { text: "terminal work" } },
+        { type: "turn_start", ts: now, payload: {} },
+      ] },
+    });
+    await wsRow(page, WS_A).click();
+    await sessRow(page, "ext-1").click();
+    await page.waitForFunction(() => document.getElementById("chat-messages").textContent.includes("terminal work"));
+    assert.notEqual(await page.textContent("#chat-header-state"), "working", "a dead turn is not working");
+    assert.equal(await page.locator(".chat-ext-live").count(), 0, "no phantom 'working in your terminal' strip");
+    assert.equal(await page.locator("#chat-ext-run").isVisible(), false, "and no terminal marker");
+    assert.equal(await page.locator("#chat-stop").isVisible(), false, "nothing to stop");
   });
 
   test("REGRESSION: the terminal indicator lines up with the message column at any width", async () => {

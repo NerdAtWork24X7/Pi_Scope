@@ -6268,6 +6268,40 @@
       animation: chat-blink-soft 1s ease-in-out infinite;
       margin-left: auto;
     }
+    /* Auto-scroll toggle in a Thought block's header. Pushed to the right edge,
+     * dim until hovered; "on" reads in the accent colour so the state is obvious
+     * without a label. Its own click handler stops the toggle from folding the
+     * block (see the delegated click in chat.js). */
+    .chat-thinking .chat-th-autoscroll {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      opacity: 0.6;
+      transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+    }
+    .chat-thinking .chat-th-autoscroll:hover {
+      opacity: 1;
+      color: var(--orange);
+      border-color: var(--orange);
+    }
+    .chat-thinking .chat-th-autoscroll.on {
+      opacity: 1;
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+    .chat-thinking .chat-th-autoscroll:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
     .chat-thinking pre {
       margin: 0;
       border-top: 1px solid var(--hairline);

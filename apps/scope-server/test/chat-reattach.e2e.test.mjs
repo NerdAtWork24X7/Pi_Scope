@@ -367,3 +367,50 @@ describe("chat run recovery", () => {
     assert.ok(!run || !run.active, "the run is no longer active");
   });
 });
+
+// ─── Dangling turn status ───────────────────────────────────────────────────
+// A pi killed mid-turn never posts its `turn_end`, so the DB keeps a
+// `turn_start` as the last lifecycle event. GET /sessions must say whether that
+// open turn is still live: only a turn that reached THIS server run can be, so a
+// turn left over from a previous run (the app was closed and reopened) reads
+// `turn_live: false` and the UI stops showing it as "working" forever.
+describe("an open turn's liveness as /sessions reports it", () => {
+  async function postEvents(list) {
+    const { res, data } = await api("/events", { method: "POST", body: JSON.stringify(list) });
+    assert.ok(res.ok, `POST /events answered (${res.status}) ${JSON.stringify(data)}`);
+  }
+  async function session(sid) {
+    const { data } = await api("/sessions");
+    return (data.sessions || []).find((s) => s.session_id === sid) || null;
+  }
+
+  test("a turn that started after this server boot is live", async () => {
+    await postEvents([{ event_id: "live-1", session_id: "sess-turn-live", seq: 0, ts: new Date().toISOString(), type: "turn_start", payload: {} }]);
+    const s = await session("sess-turn-live");
+    assert.ok(s, "the session is listed");
+    assert.equal(s.last_turn_event, "turn_start");
+    assert.equal(s.turn_live, true, "the turn reached this server, so it is live");
+  });
+
+  test("a turn left over from a previous run is NOT live", async () => {
+    // An hour-old event: its `turn_start` cannot belong to a pi running under a
+    // server that booted moments ago.
+    const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    await postEvents([{ event_id: "stale-1", session_id: "sess-turn-stale", seq: 0, ts: old, type: "turn_start", payload: {} }]);
+    const s = await session("sess-turn-stale");
+    assert.ok(s, "the session is listed");
+    assert.equal(s.last_turn_event, "turn_start");
+    assert.equal(s.turn_live, false, "a pre-boot turn cannot still be running");
+  });
+
+  test("a closed turn is never live", async () => {
+    const now = new Date().toISOString();
+    await postEvents([
+      { event_id: "closed-1", session_id: "sess-turn-closed", seq: 0, ts: now, type: "turn_start", payload: {} },
+      { event_id: "closed-2", session_id: "sess-turn-closed", seq: 1, ts: now, type: "turn_end", payload: {} },
+    ]);
+    const s = await session("sess-turn-closed");
+    assert.equal(s.last_turn_event, "turn_end");
+    assert.equal(s.turn_live, false, "a turn that ended is not live");
+  });
+});

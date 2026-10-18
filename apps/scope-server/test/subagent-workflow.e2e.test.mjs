@@ -76,6 +76,7 @@ let stubDir;    // fake `claude` / `gemini` / `opencode` binaries, prepended to 
 let claudeLog;  // argv the fake claude was invoked with
 let geminiLog;  // argv the fake gemini was invoked with
 let opencodeRuns; // how often the fake opencode ran (its `models` answer is cached)
+let opencodePromptLog; // the argv + stdin the fake opencode's *run* was handed
 
 /** A fake harness binary that records its argv and the SW_* env it was given,
  *  then prints a marker — so a node's flags can be asserted end to end. */
@@ -97,8 +98,11 @@ function writeStubHarness(dir, name, log, marker) {
  * CLI does — one `provider/model` per line, exit 0 — mixed with the noise a real
  * one can carry (an SGR escape, a human sentence, a blank line). Every
  * invocation appends to `runsLog`, so a test can prove the answer was cached.
+ * A *run* additionally records the argv it was handed and the prompt it reads
+ * from its stdin — opencode is given its message there (see the opencode stdin
+ * test) — then prints a marker, so a test can see both halves of the launch.
  */
-function writeModelsStubHarness(dir, runsLog) {
+function writeModelsStubHarness(dir, runsLog, promptLog) {
   const file = path.join(dir, "opencode");
   const script = [
     "#!/bin/sh",
@@ -111,6 +115,13 @@ function writeModelsStubHarness(dir, runsLog) {
     `  printf 'local/qwen3\\n'`,
     "  exit 0",
     "fi",
+    // A *run*: record the argv it was handed, then the prompt it reads off
+    // stdin. `opencode run` takes its message either way, and the plugin sends
+    // it on stdin on purpose — a command line cannot carry a multi-line prompt
+    // on Windows (cmd.exe ends it at the first newline) and this runner's prompt
+    // is always multi-line, so an argv prompt would arrive truncated.
+    `{ printf 'argv: %s\\n' "$@" ; printf 'stdin: '; cat; printf '\\n'; } >> ${JSON.stringify(promptLog)}`,
+    `printf 'OPENCODE_RUN_OK\\n'`,
     "exit 0",
     "",
   ].join("\n");
@@ -364,7 +375,8 @@ before(async () => {
   writeStubHarness(stubDir, "claude", claudeLog, "CLAUDE_STUB_OK");
   writeStubHarness(stubDir, "gemini", geminiLog, "GEMINI_STUB_OK");
   opencodeRuns = path.join(tmpDir, "opencode-runs.log");
-  writeModelsStubHarness(stubDir, opencodeRuns);
+  opencodePromptLog = path.join(tmpDir, "opencode-prompt.log");
+  writeModelsStubHarness(stubDir, opencodeRuns, opencodePromptLog);
 
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
@@ -1236,6 +1248,41 @@ describe("subagent workflow plugin (server)", () => {
     const argv = fs.readFileSync(geminiLog, "utf8").split("\n");
     assert.equal(argv[argv.indexOf("--allowed-tools") + 1], "run_shell_command");
     assert.equal(argv[argv.indexOf("--model") + 1], "gemini-2.5-flash");
+  });
+
+  test("hands opencode its prompt on stdin, never on the command line", async () => {
+    // On Windows `opencode` is a `.cmd` shim, so it is launched through cmd.exe,
+    // and cmd.exe ends its command line at the first newline: an argv prompt
+    // reached the CLI as the single word `<user query>` and the model answered
+    // "your message came through empty" — with exit code 0, so the run looked
+    // healthy. Every prompt this runner builds is multi-line (the tag alone is
+    // three lines), so opencode's prompt has to travel on stdin instead.
+    const solo = path.join(tmpDir, "ws-opencode-stdin");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    assert.ok((await act("updateNode", { id: agent.id, name: "stdin-check", config: {
+      harness: "opencode", model: "zen/deepseek-v4.1-flash", prompt: "stdin check {task}",
+    } }, solo)).res.ok);
+
+    fs.rmSync(opencodePromptLog, { force: true });
+    const started = await runApi("start", { task: "go" }, solo);
+    assert.ok(started.res.ok, started.data?.error);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+    assert.match(run.nodes[agent.id].outputTail, /OPENCODE_RUN_OK/);
+
+    // The launch carries the subcommand and the model flag and no message…
+    const record = fs.readFileSync(opencodePromptLog, "utf8").trimEnd().split("\n");
+    assert.deepEqual(record, [
+      "argv: run",
+      "argv: --model",
+      "argv: zen/deepseek-v4.1-flash",
+      // …and the whole tagged prompt goes down its stdin, tags and all.
+      "stdin: <user query>",
+      "stdin check go",
+      "</user query>",
+    ]);
   });
 
   test("keeps a harness's escape sequences and split characters out of its message", async () => {

@@ -45,6 +45,12 @@ export interface SessionSummary {
    *  so a long tool call or a wait on a subagent no longer flips the row to
    *  "waiting" after the recency window elapses. */
   last_turn_event?: string;
+  /** Whether an OPEN turn (`last_turn_event === 'turn_start'`) is still live.
+   *  Annotated by the server on GET /sessions: a turn that began before the
+   *  server's current run — the app was closed and reopened, killing the pi that
+   *  opened it — cannot still be working, so a dangling `turn_start` left in the
+   *  DB must not read as "running" forever. Absent on older servers. */
+  turn_live?: boolean;
   /** First user message sent to the LLM in this session (truncated preview). */
   first_msg?: string;
   /** Session that spawned this one. Exact value recorded from the

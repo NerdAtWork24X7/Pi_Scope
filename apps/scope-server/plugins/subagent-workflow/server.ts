@@ -340,6 +340,11 @@ const DEFAULT_HARNESS_ARGS = "{prompt}";
  * Flag forms were taken from the harness's own `--help` (pi: `--tools`/
  * `--skill`/`--extension`, verified against the bundled agent) or its published
  * CLI reference (claude `--allowedTools`, gemini `--allowed-tools`).
+ *
+ * `promptStdin: true` says the harness reads its prompt from stdin rather than
+ * from `args(prompt)`, which then builds the launch with no message at all —
+ * see `opencode` below for the one that needs it, and `runCliHarness` for how
+ * the prompt is written.
  */
 const HARNESSES: Record<string, any> = {
   claude: {
@@ -369,7 +374,19 @@ const HARNESSES: Record<string, any> = {
     },
   },
   opencode: {
-    label: "opencode", bin: "opencode", args: (p: string) => ["run", p], modelFlag: "--model",
+    // `opencode run` accepts the message as a positional argument *or* reads it
+    // from stdin, and the prompt has to take the stdin route: on Windows the CLI
+    // is a `.cmd` shim, so `spawnCli` launches it through cmd.exe — and cmd.exe
+    // ends the command line at the first newline, dropping the rest silently (a
+    // truncated launch still exits 0). Every prompt this runner builds is
+    // multi-line (`<user query>` on a line of its own, then the reference
+    // block), so opencode was handed just the first line, `<user query>`, and
+    // answered "your message came through empty" while the run looked healthy.
+    // Verified against the real CLI: the same prompt on stdin answers correctly,
+    // and an *empty* prompt behaves exactly as an empty argument does ("You must
+    // provide a message").
+    label: "opencode", bin: "opencode", args: () => ["run"], modelFlag: "--model",
+    promptStdin: true,
     models: ["anthropic/claude-sonnet-4-5", "openai/gpt-5", "google/gemini-2.5-pro"],
     // opencode can print its own catalogue — every provider/model it is set up for
     // on this machine, one per line — which is a far better Model list than any
@@ -2255,6 +2272,9 @@ export function activate(api: any): void {
         };
         let cmd: string;
         let args: string[];
+        // Whether this node's prompt travels on the child's stdin instead of the
+        // command line (a `promptStdin` harness — see HARNESSES.opencode).
+        let promptOnStdin = false;
         if (node.config.harness === "custom") {
           // A custom node is a shell one-liner, so it runs through the platform's
           // shell — `$SHELL -c` on POSIX, the command processor on Windows, where
@@ -2267,7 +2287,10 @@ export function activate(api: any): void {
         } else {
           const spec = allHarnesses()[node.config.harness] as any;
           if (!spec || !spec.bin) { resolve({ text: "", code: null, error: `unknown harness: ${node.config.harness}` }); return; }
-          args = spec.args(prompt);
+          // A stdin harness is launched with no message at all: its prompt is
+          // written to the pipe below, where a multi-line prompt cannot be lost.
+          promptOnStdin = !!spec.promptStdin;
+          args = spec.args(promptOnStdin ? "" : prompt);
           if (node.config.model && spec.modelFlag) args = [...args, spec.modelFlag, node.config.model];
           if (node.config.extraArgs) args = [...args, ...splitArgs(node.config.extraArgs)];
           args = [...args, ...capabilityArgs(spec, node.config)];
@@ -2290,13 +2313,23 @@ export function activate(api: any): void {
         try {
           // spawnCli owns the platform's launch rules: a `.cmd` shim is run
           // through cmd.exe with every argument escaped, a real image is spawned
-          // directly, and POSIX is unchanged.
-          child = spawnCli(cmd, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+          // directly, and POSIX is unchanged. A stdin harness needs that pipe to
+          // exist (`ignore` leaves it closed, and it would read nothing).
+          child = spawnCli(cmd, args, { cwd, env, stdio: [promptOnStdin ? "pipe" : "ignore", "pipe", "pipe"] });
         } catch (err: any) {
           resolve({ text: "", code: null, error: `failed to spawn ${cmd}: ${err?.message ?? err}` });
           return;
         }
         run.children.add(child);
+        // Hand a stdin harness its prompt and close the pipe, so it starts on it
+        // at once instead of waiting for input that will never come. A command
+        // that exits before reading the prompt closes the pipe under us; with the
+        // listener in place that is a no-op, not an unhandled EPIPE that would
+        // take the whole server down.
+        if (promptOnStdin) {
+          child.stdin?.on("error", () => { /* the harness exited before reading it */ });
+          child.stdin?.end(prompt);
+        }
         let output = "";
         let errBuf = "";
         let timedOut = false;
