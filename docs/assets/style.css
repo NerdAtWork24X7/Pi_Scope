@@ -553,7 +553,9 @@ h1, h2, h3, h4, .display {
 .rail {
   display: flex;
   gap: 8px;
+  margin: 0;
   padding: 18px 20px;
+  list-style: none;
   overflow-x: auto;
   scrollbar-width: thin;
   background-image: var(--grid);
