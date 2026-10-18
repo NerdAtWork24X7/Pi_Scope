@@ -49,3 +49,4 @@ apps/scope-desktop/pi-scope.desktop
 
 # Per-machine launcher settings (may pin SCOPE_HOST=0.0.0.0 / a fixed token)
 apps/scope-desktop/scope.env
+nul

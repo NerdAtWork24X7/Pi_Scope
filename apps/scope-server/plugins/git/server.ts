@@ -115,6 +115,38 @@ export function activate(api: any): void {
     return r.ok ? jsonResponse({ ok: true }) : jsonResponse({ ok: false, error: r.out }, 500);
   });
 
+  api.route("POST", "/git/ignore", async (ctx) => {
+    const req = ctx.req;
+    const body = await gitPost(req);
+    if (body instanceof Response) return body;
+    const { cwd: absCwd, parsed } = body;
+    const paths = cleanPaths(absCwd, parsed.paths);
+    if (!paths || !paths.length) return jsonResponse({ error: "missing paths" }, 400);
+    // `.gitignore` is written beside the requested files (i.e. under `cwd`),
+    // which keeps it inside the sandbox: git resolves the patterns relative to
+    // the ignore file, and the Git view's paths are relative to `cwd` too.
+    const ignorePath = path.join(absCwd, ".gitignore");
+    const pattern = (p: string) => {
+      // Escape a leading `#`/`!` (comment / negation) and trailing spaces so the
+      // literal filename is ignored rather than read as gitignore syntax.
+      let s = p.startsWith("#") || p.startsWith("!") ? "\\" + p : p;
+      s = s.replace(/ +$/, (m) => m.replace(/ /g, "\\ "));
+      return s;
+    };
+    let text = "";
+    try { text = fs.readFileSync(ignorePath, "utf8"); } catch {}
+    const lines = new Set(text.split(/\r?\n/).map((l) => l.trim()));
+    const added = paths.filter((p) => !lines.has(pattern(p)) && !lines.has(p));
+    if (added.length) {
+      let out = text;
+      if (out && !out.endsWith("\n")) out += "\n";
+      out += added.map(pattern).join("\n") + "\n";
+      try { fs.writeFileSync(ignorePath, out); }
+      catch (e) { return jsonResponse({ ok: false, error: String(e) }, 500); }
+    }
+    return jsonResponse({ ok: true, added });
+  });
+
   api.route("GET", "/git/diff", async (ctx) => {
     const url = ctx.url;
     const cwd = url.searchParams.get("cwd") ?? "";

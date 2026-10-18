@@ -373,6 +373,15 @@
     await unstage(paths);
     await discard(paths, false);
   }
+  // Append working-tree file(s) to .gitignore so they drop out of the Git view.
+  async function addToGitignore(paths) {
+    const cwd = selectedCwd(); if (!cwd || !paths.length) return;
+    setStatus("adding to .gitignore…");
+    const { res, data } = await api("/git/ignore", {}, { cwd, paths });
+    if (!res.ok || !data.ok) { setStatus("gitignore failed: " + (data.error || res.status), true); return; }
+    setStatus("ignored " + paths.join(", "));
+    await loadStatus();
+  }
   async function commit() {
     const cwd = selectedCwd(); if (!cwd) return;
     const message = commitMsg.value.trim();
@@ -1209,12 +1218,14 @@
       if (f.section === "conflicted") add("Mark resolved", () => stage([f.path]));
       if (f.section === "untracked") {
         sep();
+        add("Add to .gitignore", () => addToGitignore([f.path]));
+      }
+      sep();
+      if (f.section === "untracked") {
         add("Delete untracked file", () => discard([f.path], true), true);
       } else if (f.section === "unstaged") {
-        sep();
         add("Discard changes", () => discard([f.path], false), true);
       } else if (staged) {
-        sep();
         add("Unstage & discard changes", () => unstageThenDiscard([f.path]), true);
       }
     });
