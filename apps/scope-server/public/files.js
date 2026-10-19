@@ -27,6 +27,9 @@
   const diffGrid = $(".diff-grid");
   const diffResizer = $("#diff-resizer");
   const filesResizer = $("#files-resizer");
+  const btnDiffGit = $("#btn-diff-git");
+  const btnUndo = $("#btn-diff-undo");
+  const btnRedo = $("#btn-diff-redo");
 
   const LINE_CAP = 6000; // combined line count for highlighted diff; above this render plain
   const MAX_CELLS = 9_000_000; // m*n bound for the LCS table
@@ -36,6 +39,15 @@
   let activeSide = "new";
   let fullView = true;
   let showIgnored = false; // file list starts by hiding everything .gitignore matches
+  let pendingOpenPath = ""; // a cross-view "open this file" request
+
+  // Edit history for the working-tree pane. A snapshot is the buffer plus the
+  // caret it had *before* the edit, so undo/redo lands where the user expects.
+  const HISTORY_MAX = 200;
+  let undoStack = [];
+  let redoStack = [];
+  let typingEdit = false;
+  let lastEditAt = 0;
 
   function refreshCwd() {
     window.SCOPE.cwdLabel(cwdLabel);
@@ -43,10 +55,13 @@
 
   function clearDiff() {
     current = { cwd: current.cwd, file: "", oldBuf: [], newBuf: [], binary: false, dirty: false, baseOldBuf: [], baseNewBuf: [] };
+    resetHistory();
     diffFilename.textContent = "no file selected";
     diffStats.textContent = "";
     diffOld.innerHTML = "";
     diffNew.innerHTML = "";
+    diffNew.contentEditable = "false";
+    if (btnDiffGit) btnDiffGit.style.display = "none";
     exitEditMode();
   }
 
@@ -92,8 +107,16 @@
         node[name] = { __file: f, __isDir: false };
       }
       renderTree(root, filesList, 0);
-      const active = ranked.find((f) => f.path === current.file) || ranked[0];
-      if (active) { markActive(filesList.querySelector(`[data-file="${CSS.escape(active.path)}"]`)); openFile(active.path); }
+      const requested = pendingOpenPath;
+      pendingOpenPath = "";
+      if (requested) {
+        const item = filesList.querySelector(`[data-file="${CSS.escape(requested)}"]`);
+        if (item) markActive(item);
+        openFile(requested);
+      } else {
+        const active = ranked.find((f) => f.path === current.file) || ranked[0];
+        if (active) { markActive(filesList.querySelector(`[data-file="${CSS.escape(active.path)}"]`)); openFile(active.path); }
+      }
     } catch (e) {
       filesList.innerHTML = `<div class="empty-state">error: ${window.SCOPE.escapeHtml(String(e))}</div>`;
     }
@@ -162,8 +185,13 @@
     const cwd = selectedCwd();
     if (!cwd) return;
     current = { cwd, file, oldBuf: [], newBuf: [], binary: false, dirty: false };
+    resetHistory();
+    activeSide = "new";
+    if (btnDiffGit) btnDiffGit.style.display = "";
     diffFilename.textContent = file;
     diffStats.textContent = "";
+    // No editing until the text file is loaded (and never for binary files).
+    diffNew.contentEditable = "false";
     diffOld.innerHTML = '<div class="dline placeholder"><span class="tx">loading…</span></div>';
     diffNew.innerHTML = "";
     exitEditMode();
@@ -171,6 +199,7 @@
       const { res, data } = await api("/files/diff", { cwd, file });
       if (data.binary) {
         current.binary = true;
+        diffNew.contentEditable = "false";
         diffOld.innerHTML = '<div class="diff-binary">binary file — diff not shown</div>';
         diffNew.innerHTML = "";
         return;
@@ -179,6 +208,9 @@
       current.newBuf = (data.new || "").split("\n");
       if (current.oldBuf.length && current.oldBuf[current.oldBuf.length - 1] === "") current.oldBuf.pop();
       if (current.newBuf.length && current.newBuf[current.newBuf.length - 1] === "") current.newBuf.pop();
+      // Keep one editable line for an empty/absent working-tree file; otherwise
+      // the pane has no `.tx` to put the caret in and cannot be typed into.
+      if (!current.newBuf.length) current.newBuf.push("");
       current.baseOldBuf = current.oldBuf.slice();
       current.baseNewBuf = current.newBuf.slice();
       renderDiff();
@@ -349,6 +381,315 @@
     return { plain: false, rows: opsToRows(ops, oldL, newL) };
   }
 
+  // ── Right-pane editor helpers ──────────────────────────────────────────────
+  // The working-tree side is a real editor, not a row of independent inputs:
+  // Enter splits a line, Backspace at column 0 joins the previous line, Delete
+  // at end-of-line joins the next, Up/Down move between lines, and a paste may
+  // span any number of lines. Structural edits re-run the diff so the HEAD side
+  // and the line numbers stay aligned with what is actually in the buffer.
+  function caretOffset(el) {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !el.contains(sel.anchorNode)) return 0;
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    r.setEnd(sel.anchorNode, sel.anchorOffset);
+    return r.toString().length;
+  }
+
+  function setCaret(el, offset) {
+    if (!el) return;
+    // The editing host is the whole right pane, not each line; focusing an inner
+    // span does not move the caret, so focus the nearest editable ancestor.
+    const host = el.closest?.('[contenteditable="true"]') || el;
+    host.focus();
+    const sel = window.getSelection();
+    if (!sel) return;
+    const r = document.createRange();
+    let remaining = Math.max(0, offset || 0);
+    const walk = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (remaining <= node.textContent.length) {
+          r.setStart(node, remaining);
+          r.collapse(true);
+          return true;
+        }
+        remaining -= node.textContent.length;
+        return false;
+      }
+      for (const child of node.childNodes) if (walk(child)) return true;
+      return false;
+    };
+    if (!walk(el)) { r.selectNodeContents(el); r.collapse(false); }
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+
+  function focusEditorLine(lineIndex, offset) {
+    if (lineIndex == null) return;
+    // renderDiff() is synchronous, so the new line already exists and the caret
+    // can be placed immediately — waiting for an animation frame dropped the
+    // first character typed after Enter, which made the editor feel broken.
+    const el = diffNew.querySelector(`.tx[data-line="${lineIndex}"]`);
+    if (!el) return;
+    setCaret(el, offset == null ? el.textContent.length : offset);
+  }
+
+  function currentCaretSnapshot() {
+    const info = selectionInfo();
+    return info ? { line: info.startLine, off: info.startOff } : { line: 0, off: 0 };
+  }
+
+  function updateUndoButtons() {
+    if (btnUndo) btnUndo.disabled = !undoStack.length;
+    if (btnRedo) btnRedo.disabled = !redoStack.length;
+  }
+
+  /** Record the buffer before an edit. `coalesce` groups a typing burst into
+   *  one undo step instead of one step per character. */
+  function beginEdit(caret, coalesce) {
+    const now = Date.now();
+    if (coalesce && typingEdit && now - lastEditAt < 700) {
+      lastEditAt = now;
+      redoStack = [];
+      updateUndoButtons();
+      return;
+    }
+    undoStack.push({
+      oldBuf: current.oldBuf.slice(),
+      newBuf: current.newBuf.slice(),
+      caret: caret || currentCaretSnapshot(),
+    });
+    if (undoStack.length > HISTORY_MAX) undoStack.shift();
+    redoStack = [];
+    typingEdit = !!coalesce;
+    lastEditAt = now;
+    updateUndoButtons();
+  }
+
+  function resetHistory() {
+    undoStack = [];
+    redoStack = [];
+    typingEdit = false;
+    lastEditAt = 0;
+    updateUndoButtons();
+  }
+
+  function restoreSnapshot(snap) {
+    current.oldBuf = snap.oldBuf.slice();
+    current.newBuf = snap.newBuf.slice();
+    // Undoing all the way back to the saved buffers hides Save/Cancel again.
+    current.dirty = current.oldBuf.join("\n") !== current.baseOldBuf.join("\n")
+      || current.newBuf.join("\n") !== current.baseNewBuf.join("\n");
+    renderDiff();
+    updateToolbar();
+    focusEditorLine(snap.caret.line, snap.caret.off);
+  }
+
+  function undoEdit() {
+    if (!undoStack.length) return;
+    const snap = undoStack.pop();
+    redoStack.push({
+      oldBuf: current.oldBuf.slice(),
+      newBuf: current.newBuf.slice(),
+      caret: currentCaretSnapshot(),
+    });
+    typingEdit = false;
+    restoreSnapshot(snap);
+    updateUndoButtons();
+  }
+
+  function redoEdit() {
+    if (!redoStack.length) return;
+    const snap = redoStack.pop();
+    undoStack.push({
+      oldBuf: current.oldBuf.slice(),
+      newBuf: current.newBuf.slice(),
+      caret: currentCaretSnapshot(),
+    });
+    typingEdit = false;
+    restoreSnapshot(snap);
+    updateUndoButtons();
+  }
+
+  /** Replace line `i` from the buffer and mark the file dirty. */
+  function commitEditorLine(i, text) {
+    if (i == null || i < 0 || i >= current.newBuf.length) return;
+    current.newBuf[i] = text;
+    current.dirty = true;
+    activeSide = "new";
+    updateToolbar();
+  }
+
+  function txFromNode(node) {
+    if (!node) return null;
+    if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+    const el = node.closest?.(".tx");
+    return el && diffNew.contains(el) && el.dataset.line != null ? el : null;
+  }
+
+  /** The current selection measured in (line index, character offset). */
+  function selectionInfo() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    const startEl = txFromNode(range.startContainer);
+    const endEl = txFromNode(range.endContainer);
+    if (!startEl || !endEl) return null;
+    const offsetIn = (el, container, offset) => {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      r.setEnd(container, offset);
+      return r.toString().length;
+    };
+    return {
+      startLine: Number(startEl.dataset.line),
+      startOff: offsetIn(startEl, range.startContainer, range.startOffset),
+      endLine: Number(endEl.dataset.line),
+      endOff: offsetIn(endEl, range.endContainer, range.endOffset),
+      collapsed: range.collapsed,
+    };
+  }
+
+  /** Replace the current selection (or insert at the caret) with `text`, which
+   *  may span lines, then put the caret after the inserted text. */
+  function replaceSelectedText(text) {
+    const info = selectionInfo();
+    if (!info) return false;
+    beginEdit({ line: info.startLine, off: info.startOff }, false);
+    const parts = String(text).replace(/\r/g, "").split("\n");
+    const before = current.newBuf[info.startLine].slice(0, info.startOff);
+    const after = current.newBuf[info.endLine].slice(info.endOff);
+    parts[0] = before + parts[0];
+    parts[parts.length - 1] += after;
+    current.newBuf.splice(info.startLine, info.endLine - info.startLine + 1, ...parts);
+    current.dirty = true;
+    activeSide = "new";
+    renderDiff();
+    updateToolbar();
+    focusEditorLine(info.startLine + parts.length - 1, parts[parts.length - 1].length - after.length);
+    return true;
+  }
+
+  function editorKeydown(e, i, tx) {
+    // A multi-line selection is replaced as a whole, like a real editor. The
+    // per-line branches below only cover a collapsed caret.
+    const info = selectionInfo();
+    if (info && !info.collapsed) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        replaceSelectedText("\n");
+        return;
+      }
+      if (e.key === "Backspace" || e.key === "Delete") {
+        e.preventDefault();
+        replaceSelectedText("");
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        replaceSelectedText("  ");
+        return;
+      }
+    }
+    const text = tx.textContent;
+    const off = caretOffset(tx);
+    if (e.key === "Enter") {
+      e.preventDefault();
+      beginEdit({ line: i, off }, false);
+      current.newBuf[i] = text.slice(0, off);
+      current.newBuf.splice(i + 1, 0, text.slice(off));
+      current.dirty = true;
+      activeSide = "new";
+      renderDiff();
+      updateToolbar();
+      focusEditorLine(i + 1, 0);
+      return;
+    }
+    if (e.key === "Backspace" && off === 0) {
+      // At column 0 the native backspace would eat the line wrapper (or the
+      // line number); handle the join ourselves, and do nothing on line 0.
+      e.preventDefault();
+      if (i > 0) {
+        const prevLen = current.newBuf[i - 1].length;
+        beginEdit({ line: i, off }, false);
+        current.newBuf[i - 1] += current.newBuf[i];
+        current.newBuf.splice(i, 1);
+        current.dirty = true;
+        activeSide = "new";
+        renderDiff();
+        updateToolbar();
+        focusEditorLine(i - 1, prevLen);
+      }
+      return;
+    }
+    if (e.key === "Delete" && off >= text.length) {
+      e.preventDefault();
+      if (i < current.newBuf.length - 1) {
+        beginEdit({ line: i, off }, false);
+        current.newBuf[i] += current.newBuf[i + 1];
+        current.newBuf.splice(i + 1, 1);
+        current.dirty = true;
+        activeSide = "new";
+        renderDiff();
+        updateToolbar();
+        focusEditorLine(i, off);
+      }
+      return;
+    }
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const target = i + (e.key === "ArrowDown" ? 1 : -1);
+      if (target >= 0 && target < current.newBuf.length) {
+        focusEditorLine(target, Math.min(off, current.newBuf[target].length));
+      }
+      return;
+    }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      beginEdit({ line: i, off }, false);
+      tx.textContent = text.slice(0, off) + "  " + text.slice(off);
+      commitEditorLine(i, tx.textContent);
+      setCaret(tx, off + 2);
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      saveFile();
+    }
+  }
+
+  function editorPaste(e) {
+    const pasted = (e.clipboardData?.getData("text/plain") || "").replace(/\r/g, "");
+    if (!pasted) return;
+    e.preventDefault();
+    replaceSelectedText(pasted);
+  }
+
+  function editorInput(i, tx) {
+    const text = tx.textContent.replace(/\r/g, "");
+    // Some engines deliver a multi-line paste as a text mutation even when the
+    // paste event is missed; splitting here keeps the buffer whole either way.
+    if (text.includes("\n")) {
+      beginEdit({ line: i, off: 0 }, false);
+      const parts = text.split("\n");
+      current.newBuf.splice(i, 1, ...parts);
+      current.dirty = true;
+      activeSide = "new";
+      renderDiff();
+      updateToolbar();
+      focusEditorLine(i + parts.length - 1, parts[parts.length - 1].length);
+      return;
+    }
+    const old = current.newBuf[i] ?? "";
+    if (text === old) return;
+    // Native typing happens before input fires; derive the pre-typing caret so
+    // undo returns the caret to the start of the typed run.
+    const after = caretOffset(tx);
+    const delta = text.length - old.length;
+    beginEdit({ line: i, off: delta >= 0 ? Math.max(0, after - delta) : after }, true);
+    commitEditorLine(i, text);
+  }
+
   function makeLine(row, side) {
     const isOld = side === "old";
     const text = isOld ? row.old : row.new;
@@ -358,6 +699,7 @@
     div.className = "dline " + (text == null ? "placeholder" : t);
     const ln = document.createElement("span");
     ln.className = "ln";
+    ln.contentEditable = "false";
     ln.textContent = no != null ? no : "";
     const tx = document.createElement("span");
     tx.className = "tx";
@@ -367,22 +709,18 @@
     const hasIdx = isOld ? row.oldIdx != null : row.newIdx != null;
     if (hasIdx) {
       if (!isOld) {
-        tx.contentEditable = "true";
-        tx.spellcheck = false;
-        tx.classList.add("editable");
-        tx.addEventListener("focus", () => { activeSide = "new"; });
-        tx.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
-        tx.addEventListener("input", () => {
-          if (row.newIdx != null) {
-            current.newBuf[row.newIdx] = tx.textContent;
-            current.dirty = true;
-            activeSide = "new";
-            updateToolbar();
-          }
-        });
+        if (row.newIdx != null) {
+          tx.classList.add("editable");
+          tx.dataset.line = String(row.newIdx);
+        } else {
+          // A HEAD-only placeholder aligns the split view; it is not a line in
+          // the working tree, so it must not accept edits.
+          tx.contentEditable = "false";
+        }
       }
       const b = document.createElement("button");
       b.className = "copy-btn";
+      b.contentEditable = "false";
       if (isOld) {
         b.textContent = "→";
         b.title = "Copy this line into the working tree (right)";
@@ -399,15 +737,20 @@
 
   function renderDiff() {
     if (current.binary) {
+      diffNew.contentEditable = "false";
       diffOld.innerHTML = '<div class="diff-binary">binary file — diff not shown</div>';
       diffNew.innerHTML = "";
       return;
     }
+    // The working-tree pane is editable only while a text file is open; the
+    // host attribute survives the innerHTML rebuild below.
+    diffNew.contentEditable = current.file ? "true" : "false";
     const diff = diffLines(current.oldBuf, current.newBuf);
     let rows = diff.rows;
     // changes-only mode: drop unchanged lines, keep the LCS alignment + line numbers.
     if (!fullView && !diff.plain) rows = rows.filter((r) => r.type !== "eq");
     let add = 0, del = 0;
+    const oldTop = diffOld.scrollTop, newTop = diffNew.scrollTop;
     diffOld.innerHTML = "";
     diffNew.innerHTML = "";
     for (const row of rows) {
@@ -417,12 +760,15 @@
       diffOld.appendChild(makeLine(row, "old"));
       diffNew.appendChild(makeLine(row, "new"));
     }
+    diffOld.scrollTop = oldTop;
+    diffNew.scrollTop = newTop;
     diffStats.innerHTML = `<span class="add">+${add}</span> <span class="del">−${del}</span>`
       + (fullView ? "" : ' <span style="color:var(--muted)">changes only</span>')
       + (current.dirty ? ' <span class="dirty">● unsaved</span>' : '');
   }
 
   function copyLine(row, dir) {
+    beginEdit(currentCaretSnapshot(), false);
     if (dir === "→") {
       if (row.newIdx != null) current.newBuf[row.newIdx] = current.oldBuf[row.oldIdx];
       else current.newBuf.splice(row.newIns, 0, current.oldBuf[row.oldIdx]);
@@ -439,6 +785,72 @@
 
   diffOld.addEventListener("scroll", () => { diffNew.scrollTop = diffOld.scrollTop; });
   diffNew.addEventListener("scroll", () => { diffOld.scrollTop = diffNew.scrollTop; });
+
+  // The right pane is a single editing host, so a selection can span lines and
+  // the caret can move through them naturally. Delegated handlers pick the line
+  // under the caret instead of making every line its own isolated input.
+  diffNew.spellcheck = false;
+  diffNew.setAttribute("autocorrect", "off");
+  diffNew.setAttribute("autocapitalize", "off");
+  function editorTarget() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    let node = sel.anchorNode;
+    if (node && node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+    const el = node?.closest?.(".tx");
+    return el && diffNew.contains(el) && el.dataset.line != null ? el : null;
+  }
+  diffNew.addEventListener("keydown", (e) => {
+    // Our history is the editor's history: intercept undo/redo before the
+    // browser can run its native (and now out-of-sync) contenteditable undo.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+      const key = e.key.toLowerCase();
+      if (key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redoEdit(); else undoEdit();
+        return;
+      }
+      if (key === "y") {
+        e.preventDefault();
+        redoEdit();
+        return;
+      }
+    }
+    // With one editing host, key events target the host — the line being edited
+    // is whichever `.tx` the caret sits in, not e.target.
+    const tx = editorTarget();
+    if (!tx) return;
+    activeSide = "new";
+    editorKeydown(e, Number(tx.dataset.line), tx);
+  });
+  diffNew.addEventListener("paste", (e) => editorPaste(e));
+  diffNew.addEventListener("beforeinput", (e) => {
+    // Typing over a multi-line selection must replace every selected line, not
+    // let the browser delete DOM nodes whose line indexes we track.
+    if (e.inputType !== "insertText" || e.isComposing) return;
+    const info = selectionInfo();
+    if (!info || info.collapsed) return;
+    e.preventDefault();
+    replaceSelectedText(e.data ?? "");
+  });
+  diffNew.addEventListener("cut", (e) => {
+    const info = selectionInfo();
+    if (!info || info.collapsed) return;
+    e.preventDefault();
+    e.clipboardData?.setData("text/plain", window.getSelection()?.toString() || "");
+    replaceSelectedText("");
+  });
+  diffNew.addEventListener("input", (e) => {
+    const tx = editorTarget();
+    if (!tx) return;
+    editorInput(Number(tx.dataset.line), tx);
+  });
+  // A browser-native drop can move DOM nodes between our tracked lines; paste
+  // (which we handle explicitly) stays available for moving text in.
+  diffNew.addEventListener("drop", (e) => e.preventDefault());
+  // Clicking somewhere else starts a new typing run, so undo does not merge
+  // edits made in two different places.
+  diffNew.addEventListener("mousedown", () => { typingEdit = false; });
 
   function updateToolbar() {
     btnSave.style.display = current.dirty ? "" : "none";
@@ -462,9 +874,12 @@
       current.dirty = false;
       current.baseOldBuf = current.oldBuf.slice();
       current.baseNewBuf = current.newBuf.slice();
-      diffStats.innerHTML = `<span class="add">saved ${data.bytes ?? 0} bytes (${activeSide === "old" ? "HEAD→file" : "working tree"})</span>`;
       exitEditMode();
+      // Re-render first: renderDiff() writes the +/− counters into the same
+      // element, and doing it after the confirmation used to overwrite "saved"
+      // with "+0 −0", leaving no feedback that the write landed.
       renderDiff();
+      diffStats.innerHTML = `<span class="add">saved ${data.bytes ?? 0} bytes (${activeSide === "old" ? "HEAD→file" : "working tree"})</span>`;
     } catch (e) {
       diffStats.innerHTML = `<span class="del">save error: ${window.SCOPE.escapeHtml(String(e))}</span>`;
     }
@@ -474,11 +889,33 @@
     current.oldBuf = current.baseOldBuf.slice();
     current.newBuf = current.baseNewBuf.slice();
     current.dirty = false;
+    resetHistory();
     renderDiff();
     updateToolbar();
   };
   btnSave.onclick = saveFile;
+  if (btnUndo) btnUndo.onclick = undoEdit;
+  if (btnRedo) btnRedo.onclick = redoEdit;
   btnRefresh.onclick = () => { loadModified(); if (viewMode === "diagram") ensureGraph(true); };
+  if (btnDiffGit) btnDiffGit.onclick = () => {
+    if (!current.file) return;
+    if (typeof window.SCOPE.openGitFile === "function") window.SCOPE.openGitFile(current.file);
+    else window.setView?.("git");
+  };
+
+  /**
+   * Cross-view navigation: open one file in Review's side-by-side diff. Used by
+   * the Git view (context menu / diff header) and by the diagram's wiring. The
+   * request survives switching into this view, because arriving here triggers
+   * a /files/modified refresh whose default selection would otherwise win.
+   */
+  window.SCOPE.openReviewFile = function (path) {
+    if (!path) return;
+    pendingOpenPath = path;
+    setViewMode("diff");
+    if (window.__SCOPE_STATE?.view !== "files") window.setView?.("files");
+    else loadModified();
+  };
 
   if (btnWrap) btnWrap.onclick = () => {
     const on = diffGrid.classList.toggle("diff-wrap");
@@ -607,7 +1044,10 @@
   let selNodeId = null;
   let diagramFilter = "";
   let diagramChangedOnly = false;
-  let diagramImpact = false;
+  // Impact is on from the start: clicking a file should immediately light up
+  // what depends on it (and the wires between them), without hunting for a
+  // checkbox. The toggle remains for temporarily turning the overlay off.
+  let diagramImpact = true;
   const LAY = { nodes: [], edges: [], clusters: [], folders: [], w: 800, h: 560, tx: 0, ty: 0, scale: 1 };
 
   // ── Review progress (persisted per cwd) ──────────────────────────────────
@@ -799,11 +1239,16 @@
     };
 
     const padX = 16, headH = 38, padBottom = 16, folderLabelH = 15;
-    const groupGap = 20, nodeGapY = 8, rowGap = 14, margin = 30;
-    const bandGapX = 26, bandGapY = 24;
+    const groupGap = 20, nodeGapX = 8, rowGap = 14, margin = 30;
+    const bandGapX = 26, bandGapY = 24, folderPad = 5;
     // Each area wraps its folder groups to roughly this width; areas are then
     // shelf-packed into a 2-D grid against the canvas aspect (below).
     const areaCapW = Math.max(LAY.w * 1.4, 1000);
+    // Files inside one folder flow into rows of this width, so a folder with
+    // dozens of files becomes a compact block instead of one tall column that
+    // pushes its neighbours off the visible floor. Six-ish files per row keeps
+    // labels readable while making far more of the folder visible at once.
+    const groupCapW = Math.max(260, Math.min(720, areaCapW * 0.5));
 
     // Build each area's rows of folder groups.
     const bands = [];
@@ -817,9 +1262,27 @@
       }
       const groups = [...groupsMap.entries()].map(([gk, gids]) => {
         gids.sort((a, b) => nodes[a].label.localeCompare(nodes[b].label));
-        const w = Math.max(70, ...gids.map((i) => sizes[i].w));
-        const h = folderLabelH + gids.reduce((s, i) => s + sizes[i].h + nodeGapY, 0) - nodeGapY;
-        return { gk, gids, w, h };
+        // Flow the folder's files left→right, wrapping at groupCapW. Rows can
+        // have different widths/heights (names differ), so each row is measured
+        // and the group is sized to the widest row.
+        const innerRows = [];
+        let row = [], rowW = 0, rowH = 0;
+        for (const i of gids) {
+          const s = sizes[i];
+          if (row.length && rowW + nodeGapX + s.w > groupCapW) {
+            innerRows.push({ row, w: rowW, h: rowH });
+            row = []; rowW = 0; rowH = 0;
+          }
+          rowW += (row.length ? nodeGapX : 0) + s.w;
+          rowH = Math.max(rowH, s.h);
+          row.push(i);
+        }
+        if (row.length) innerRows.push({ row, w: rowW, h: rowH });
+        const innerW = Math.max(70, ...innerRows.map((r) => r.w));
+        const w = innerW + folderPad * 2;
+        const h = folderLabelH + innerRows.reduce((s, r) => s + r.h, 0)
+          + rowGap * (innerRows.length - 1) + folderPad;
+        return { gk, gids, rows: innerRows, w, h };
       }).sort((a, b) => a.gk.localeCompare(b.gk));
       const rows = [];
       let row = [], rowW = 0, rowH = 0;
@@ -888,12 +1351,16 @@
         for (const r of band.rows) {
           let gx = bx + padX + (band.innerW - r.w) / 2;
           for (const g of r.row) {
-            LAY.folders.push({ label: g.gk, x: gx, y: gy, w: g.w });
+            LAY.folders.push({ label: g.gk, x: gx, y: gy, w: g.w, h: g.h, count: g.gids.length });
             let ny = gy + folderLabelH;
-            for (const i of g.gids) {
-              nodes[i].x = gx + g.w / 2;
-              nodes[i].y = ny + sizes[i].h / 2;
-              ny += sizes[i].h + nodeGapY;
+            for (const rr of g.rows) {
+              let nx = gx + folderPad + (g.w - folderPad * 2 - rr.w) / 2;
+              for (const i of rr.row) {
+                nodes[i].x = nx + sizes[i].w / 2;
+                nodes[i].y = ny + rr.h / 2;
+                nx += sizes[i].w + nodeGapX;
+              }
+              ny += rr.h + rowGap;
             }
             gx += g.w + groupGap;
           }
@@ -1082,10 +1549,13 @@
         + `</g>`;
     }
     for (const f of (LAY.folders || [])) {
+      // A folder is a visible slot around its files; the box makes the grouping
+      // legible even when several wrapped rows of files sit side by side.
+      clusterHtml += `<rect class="dfolder-box" x="${f.x.toFixed(1)}" y="${f.y.toFixed(1)}" width="${f.w.toFixed(1)}" height="${(f.h || 20).toFixed(1)}" rx="5"/>`;
       // Keep the folder label inside its own slot: no +slack, so it can never
       // reach past the band's inner edge.
-      const maxChars = Math.max(8, Math.floor(f.w / 5.8));
-      clusterHtml += `<text class="dfolder" x="${f.x.toFixed(1)}" y="${(f.y + 11).toFixed(1)}">${esc(window.SCOPE.trunc(f.label, maxChars))}</text>`;
+      const maxChars = Math.max(8, Math.floor((f.w - 10) / 5.8));
+      clusterHtml += `<text class="dfolder" x="${(f.x + 5).toFixed(1)}" y="${(f.y + 11).toFixed(1)}">${esc(window.SCOPE.trunc(f.label, maxChars))}</text>`;
     }
 
     let edgeHtml = "";
@@ -1094,11 +1564,30 @@
     // that merely leaves a dependent — or the selected node's own imports, which
     // run the other way — painted hops the change cannot take.
     const inBlast = blast ? (id) => id === sel.id || blast.has(id) : null;
+    // Labels are cheap to read on a small map; on a dense one they only appear
+    // on the selected node's wires (and on impact paths), where they matter.
+    const showAllLabels = LAY.edges.length <= 80;
     for (const e of LAY.edges) {
       const a = byId.get(e.from), b = byId.get(e.to);
       if (!a || !b) continue;
       const hot = inBlast && inBlast(e.from) && inBlast(e.to);
-      edgeHtml += `<path class="dedge${hot ? " hot" : ""}" data-from="${esc(e.from)}" data-to="${esc(e.to)}" d="${orthoPath(a, b)}" fill="none" vector-effect="non-scaling-stroke" marker-end="url(#d-arrow)"/>`;
+      const specs = Array.isArray(e.specs) ? e.specs : [];
+      const specText = specs.length
+        ? (specs.length > 1 ? `${specs[0]} +${specs.length - 1}` : specs[0])
+        : "";
+      const nearSel = sel && (e.from === sel.id || e.to === sel.id);
+      const labelCls = "dedge-label show" + (hot ? " hot" : "");
+      const title = `${e.from} imports ${e.to}${specText ? " · " + specText : ""} · click to inspect ${e.to}`;
+      // The wire itself is a navigation target: clicking it selects the imported
+      // file, so the side panel opens its wiring (imports / dependents) without
+      // hunting for the block on a crowded floor.
+      edgeHtml += `<path class="dedge${hot ? " hot" : ""}" data-from="${esc(e.from)}" data-to="${esc(e.to)}" d="${orthoPath(a, b)}" fill="none" vector-effect="non-scaling-stroke" marker-end="url(#${hot ? "d-arrow-hot" : "d-arrow"})">`
+        + `<title>${esc(title)}</title></path>`;
+      // Dense floors only render the labels that are actually visible for the
+      // current selection; the rest would be invisible DOM.
+      if (specText && (showAllLabels || nearSel || hot)) {
+        edgeHtml += `<text class="${labelCls}" x="${((a.x + b.x) / 2).toFixed(1)}" y="${((a.y + b.y) / 2 - 4).toFixed(1)}">${esc(window.SCOPE.trunc(specText, gran === "files" ? 30 : 36))}</text>`;
+      }
     }
     let nodeHtml = "";
     for (const nd of LAY.nodes) {
@@ -1112,7 +1601,7 @@
       if (sel && nd.id === sel.id) cls.push("sel");
       else if (blast && blast.has(nd.id)) cls.push("impact");
       else if (blast) cls.push("dim");
-      const tip = `${nd.full}${nd.changed ? " · " + (nd.status || "modified") : ""}${nd.fanIn ? " · " + nd.fanIn + " dependents" : ""}${isReviewed(nd.full) ? " · reviewed" : ""}`;
+      const tip = `${nd.full}${nd.changed ? " · " + (nd.status || "modified") : ""}${nd.fanIn ? " · " + nd.fanIn + " dependents" : ""}${isReviewed(nd.full) ? " · reviewed" : ""}${gran === "files" ? " · double-click to open diff" : ""}`;
       const sub = nodeSubLabel(nd);
       nodeHtml += `<g class="${cls.join(" ")}" data-node="${esc(nd.id)}" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})">`
         + `<rect class="dbox" x="${(-w / 2).toFixed(1)}" y="${(-h / 2).toFixed(1)}" width="${w.toFixed(0)}" height="${h}" rx="4"/>`
@@ -1123,7 +1612,10 @@
         + `</g>`;
     }
     diagramSvg.setAttribute("viewBox", `0 0 ${LAY.w} ${LAY.h}`);
-    diagramSvg.innerHTML = `<defs><marker id="d-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>`
+    diagramSvg.innerHTML = `<defs>`
+      + `<marker id="d-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker>`
+      + `<marker id="d-arrow-hot" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker>`
+      + `</defs>`
       + `<g class="dzoom" transform="translate(${LAY.tx.toFixed(1)},${LAY.ty.toFixed(1)}) scale(${LAY.scale.toFixed(3)})">${clusterHtml}${edgeHtml}${nodeHtml}</g>`;
     renderLegend();
     renderDiagramSide();
@@ -1253,8 +1745,11 @@
     }
     const imports = LAY.edges.filter((e) => e.from === node.id).map((e) => e.to);
     const dependents = LAY.edges.filter((e) => e.to === node.id).map((e) => e.from);
-    html += relationSection("imports", imports);
-    html += relationSection("dependents · what this could break", dependents);
+    // Both directions of the file's wiring are navigable: each row selects the
+    // related file (or opens its diff when it is not on the floor), so a review
+    // can walk the dependency chain instead of re-searching the diagram.
+    html += relationSection("wiring · imports", imports);
+    html += relationSection("wiring · dependents · what this could break", dependents);
     return html;
   }
 
@@ -1306,7 +1801,13 @@
       btnDiagram.classList.toggle("active", diag);
       btnDiagram.textContent = diag ? "⇄ diff" : "▦ diagram";
     }
-    if (diag) { setGranButtons(); ensureGraph(); }
+    if (diag) {
+      // Carry the file being reviewed into the diagram, so switching from a
+      // diff to its wiring immediately highlights that file's blast radius.
+      if (current.file) selNodeId = current.file;
+      setGranButtons();
+      ensureGraph();
+    }
   }
 
   // ── Diagram interactions ─────────────────────────────────────────────────
@@ -1335,6 +1836,15 @@
     let el = target;
     while (el && el !== diagramSvg) {
       if (el.getAttribute && el.getAttribute("data-node")) return el;
+      el = el.parentNode;
+    }
+    return null;
+  }
+
+  function closestEdge(target) {
+    let el = target;
+    while (el && el !== diagramSvg) {
+      if (el.classList && el.classList.contains("dedge")) return el;
       el = el.parentNode;
     }
     return null;
@@ -1395,8 +1905,19 @@
     diagramSvg.addEventListener("click", (e) => {
       if (dragMoved) return;
       const target = closestNode(e.target);
-      selNodeId = target ? target.getAttribute("data-node") : null;
+      if (target) {
+        selNodeId = target.getAttribute("data-node");
+      } else {
+        const edge = closestEdge(e.target);
+        selNodeId = edge ? edge.getAttribute("data-to") : null;
+      }
       renderDiagram();
+    });
+    // Double-clicking a file block jumps straight to its diff. Clicking still
+    // selects (and shows impact); only a deliberate double-click leaves the map.
+    diagramSvg.addEventListener("dblclick", (e) => {
+      const target = closestNode(e.target);
+      if (target && gran === "files") openDiff(target.getAttribute("data-node"));
     });
   }
   if (diagramCanvas) {
@@ -1427,6 +1948,7 @@
     });
   }
   if (diagramChangedEl) diagramChangedEl.addEventListener("change", () => { diagramChangedOnly = diagramChangedEl.checked; renderDiagram(true); });
+  if (diagramImpactEl) diagramImpactEl.checked = diagramImpact;
   if (diagramImpactEl) diagramImpactEl.addEventListener("change", () => {
     diagramImpact = diagramImpactEl.checked;
     // Ticking impact with nothing selected highlights the review queue's top
@@ -1439,6 +1961,7 @@
   // `.gitignore`d files hidden.
   setFilesHidden(true);
   updateIgnoredButton();
+  updateUndoButtons();
   setViewMode("diagram");
 
   window.__filesOnView = function () {

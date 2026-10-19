@@ -2182,6 +2182,11 @@
       font-family: var(--mono), var(--emoji);
     }
 
+    .diff-toolbar .btn-sm:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+
     .diff-spacer {
       flex: 1;
     }
@@ -2268,6 +2273,24 @@
 
     .diff-lines .dline .tx {
       white-space: pre;
+    }
+
+    /* The working-tree side is a full editor: each line stretches to the pane
+       edge so clicking anywhere on it starts editing, and the caret gets a
+       visible focus tint (the per-line input used to stop at the last glyph). */
+    .diff-col-new .dline {
+      cursor: text;
+    }
+
+    .diff-col-new .dline .tx {
+      flex: 1;
+      min-width: 2ch;
+      outline: none;
+    }
+
+    .diff-col-new .dline .tx.editable:focus {
+      background: var(--accent-soft);
+      box-shadow: inset 0 0 0 1px var(--accent);
     }
 
     .diff-grid.diff-wrap .diff-lines .dline .tx {
@@ -2375,6 +2398,8 @@
       cursor: pointer;
       font-size: 12px;
       z-index: 3;
+      user-select: none;
+      -webkit-user-select: none;
     }
 
     .diff-col-new .dline .copy-btn {
@@ -2487,6 +2512,12 @@
       stroke-width: 1.1;
       stroke-linecap: round;
       opacity: 0.7;
+      cursor: pointer;
+    }
+
+    .dedge:hover {
+      stroke: var(--accent);
+      opacity: 1;
     }
 
     .dedge.hot {
@@ -2495,8 +2526,38 @@
       opacity: 0.95;
     }
 
+    /* The literal import specifier (`../db`, `./api`, `pkg/x`) drawn at the
+       wire midpoint. On a dense floor only selected/impact wires show it. */
+    .dedge-label {
+      font-family: var(--mono), var(--emoji);
+      font-size: 8.5px;
+      fill: var(--muted);
+      text-anchor: middle;
+      dominant-baseline: middle;
+      pointer-events: none;
+      opacity: 0;
+      paint-order: stroke;
+      stroke: var(--bg);
+      stroke-width: 3px;
+      stroke-linejoin: round;
+    }
+
+    .dedge-label.show {
+      opacity: 0.85;
+    }
+
+    .dedge-label.hot {
+      fill: var(--accent);
+      opacity: 1;
+      font-weight: 600;
+    }
+
     #d-arrow path {
       fill: var(--border);
+    }
+
+    #d-arrow-hot path {
+      fill: var(--accent);
     }
 
     .dnode {
@@ -2652,12 +2713,22 @@
       opacity: 0.85;
     }
 
+    .dfolder-box {
+      fill: var(--bg);
+      fill-opacity: 0.4;
+      stroke: var(--border);
+      stroke-width: 0.8;
+      stroke-dasharray: 2 3;
+      pointer-events: none;
+    }
+
     .dfolder {
       font-family: var(--mono), var(--emoji);
       font-size: 9px;
       fill: var(--muted);
       text-anchor: start;
       opacity: 0.85;
+      pointer-events: none;
     }
 
     .darea {

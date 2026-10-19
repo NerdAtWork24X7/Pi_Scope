@@ -1110,7 +1110,10 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal((await act("addEdge", { from: a1.id, to: start.id })).res.status, 400);
     assert.equal((await act("addEdge", { from: end.id, to: a1.id })).res.status, 400);
     assert.equal((await act("addEdge", { from: a1.id, to: end.id })).res.status, 409);
-    assert.equal((await act("addNode", { type: "start" })).res.status, 409);
+    // A canvas may carry several entry points, each managed separately.
+    const secondStart = await act("addNode", { type: "start" });
+    assert.ok(secondStart.res.ok, secondStart.data?.error);
+    assert.ok((await act("removeNode", { id: secondStart.data.nodes.at(-1).id })).res.ok);
 
     assert.ok((await act("addEdge", { from: a1.id, to: a2.id })).res.ok);
     assert.equal((await act("addEdge", { from: a2.id, to: a1.id })).res.status, 400, "cycle refused");
@@ -1947,6 +1950,211 @@ describe("subagent workflow plugin (server)", () => {
     assert.ok(!now.log.some((l) => /started by schedule/.test(l.text)), "the due schedule was skipped");
   });
 
+  test("several start / end pairs run separately from the chosen entry point", async () => {
+    const solo = path.join(tmpDir, "ws-multi-entry");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const startA = seeded.nodes.find((n) => n.type === "start");
+    const agentA = seeded.nodes.find((n) => n.type === "agent");
+    const endA = seeded.nodes.find((n) => n.type === "end");
+    assert.ok((await act("updateNode", { id: agentA.id, name: "a", config: {
+      harness: "custom", command: echoQuery("A"), prompt: "{task}",
+    } }, solo)).res.ok);
+
+    // A second, independent entry point with its own branch and end node.
+    const startB = (await act("addNode", { type: "start", x: 80, y: 520 }, solo)).data.nodes.at(-1);
+    const agentB = (await act("addNode", { type: "agent", x: 360, y: 520 }, solo)).data.nodes.at(-1);
+    const endB = (await act("addNode", { type: "end", x: 700, y: 520 }, solo)).data.nodes.at(-1);
+    assert.ok((await act("updateNode", { id: startB.id, name: "Start B", config: { defaultTask: "from B" } }, solo)).res.ok);
+    assert.ok((await act("updateNode", { id: agentB.id, name: "b", config: {
+      harness: "custom", command: echoQuery("B"), prompt: "{task}",
+    } }, solo)).res.ok);
+    for (const [from, to] of [[startB.id, agentB.id], [agentB.id, endB.id]]) {
+      const e = await act("addEdge", { from, to }, solo);
+      assert.ok(e.res.ok, e.data?.error);
+    }
+    const graph = await snapshot(solo);
+    assert.equal(graph.nodes.filter((n) => n.type === "start").length, 2, "two start nodes coexist");
+    assert.equal(graph.nodes.filter((n) => n.type === "end").length, 2, "two end nodes coexist");
+
+    // A trigger belongs to one start node, not the workspace.
+    const trig = await api(`/${PLUGIN}/triggers`, {
+      method: "POST", body: JSON.stringify({ cwd: solo, nodeId: startB.id,
+        schedule: { mode: "interval", everySeconds: 3600 }, event: { enabled: false } }),
+    });
+    assert.ok(trig.res.ok, trig.data?.error);
+    const after = await snapshot(solo);
+    assert.equal(after.nodes.find((n) => n.id === startB.id).config.triggers.schedule.mode, "interval");
+    assert.equal(after.nodes.find((n) => n.id === startA.id).config.triggers.schedule.mode, "off",
+      "the sibling start's triggers are untouched");
+
+    // Running from B leaves A's branch alone, and B's end carries B's answer.
+    const runB = await runApi("start", { startId: startB.id }, solo);
+    assert.ok(runB.res.ok, runB.data?.error);
+    assert.equal(runB.data.run.startId, startB.id);
+    const b = await waitRun(solo);
+    assert.equal(b.status, "done");
+    assert.equal(b.nodes[agentB.id].outputTail, "B[from B]");
+    assert.equal(b.nodes[endB.id].outputTail, "B[from B]");
+    assert.equal(b.nodes[agentA.id].status, "skipped", "the other workflow's agent did not run");
+    assert.equal(b.nodes[endA.id].status, "skipped", "nor did its end node");
+
+    // Running from A executes the first branch instead.
+    assert.ok((await runApi("start", { task: "from A" }, solo)).res.ok);
+    const a = await waitRun(solo);
+    assert.equal(a.startId, startA.id, "with no startId the first start is the default");
+    assert.equal(a.nodes[agentA.id].outputTail, "A[from A]");
+    assert.equal(a.nodes[endA.id].outputTail, "A[from A]");
+    assert.equal(a.nodes[agentB.id].status, "skipped");
+    assert.equal(a.nodes[endB.id].status, "skipped");
+  });
+
+  // ── Groups: named frames over part of the canvas ─────────────────────────
+
+  test("groups nodes into a named frame, moves them together and folds it", async () => {
+    const solo = path.join(tmpDir, "ws-groups");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const start = seeded.nodes.find((n) => n.type === "start");
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    const end = seeded.nodes.find((n) => n.type === "end");
+
+    // Two nodes become one named sub-workflow.
+    const made = await act("addGroup", { name: "Delivery", nodeIds: [start.id, agent.id] }, solo);
+    assert.ok(made.res.ok, made.data?.error);
+    assert.equal(made.data.groups.length, 1);
+    const group = made.data.groups[0];
+    assert.equal(group.name, "Delivery");
+    assert.deepEqual(group.nodeIds.slice().sort(), [start.id, agent.id].sort());
+    assert.equal(group.collapsed, false);
+    assert.ok(group.x <= start.x && group.y <= start.y, "the frame anchors at its first member");
+
+    // A node belongs to one group: grouping it again moves it, rather than
+    // letting two frames claim the same card.
+    const second = await act("addGroup", { name: "Planning", nodeIds: [start.id] }, solo);
+    assert.ok(second.res.ok, second.data?.error);
+    assert.equal(second.data.groups.length, 2);
+    const planning = second.data.groups.find((g) => g.name === "Planning");
+    const delivery = second.data.groups.find((g) => g.name === "Delivery");
+    assert.deepEqual(planning.nodeIds, [start.id]);
+    assert.deepEqual(delivery.nodeIds, [agent.id], "the first frame lost the re-claimed node");
+
+    // Moving a frame moves every member by the same delta — and no one else.
+    const before = await snapshot(solo);
+    const x0 = before.nodes.find((n) => n.id === agent.id).x;
+    const y0 = before.nodes.find((n) => n.id === agent.id).y;
+    const endX = before.nodes.find((n) => n.id === end.id).x;
+    const moved = await act("moveGroup", { id: delivery.id, dx: 120, dy: 45 }, solo);
+    assert.ok(moved.res.ok, moved.data?.error);
+    const after = moved.data;
+    const agentAfter = after.nodes.find((n) => n.id === agent.id);
+    assert.equal(agentAfter.x, x0 + 120);
+    assert.equal(agentAfter.y, y0 + 45);
+    assert.equal(after.nodes.find((n) => n.id === end.id).x, endX, "ungrouped nodes stay put");
+    const deliveryAfter = after.groups.find((g) => g.id === delivery.id);
+    assert.equal(deliveryAfter.x, delivery.x + 120);
+    assert.equal(deliveryAfter.y, delivery.y + 45);
+
+    // Folding and naming are persisted; membership can be replaced wholesale.
+    const folded = await act("updateGroup", {
+      id: delivery.id, name: "Ship", collapsed: true,
+      nodeIds: [agent.id, end.id],
+    }, solo);
+    assert.ok(folded.res.ok, folded.data?.error);
+    const ship = folded.data.groups.find((g) => g.id === delivery.id);
+    assert.equal(ship.name, "Ship");
+    assert.equal(ship.collapsed, true);
+    assert.deepEqual(ship.nodeIds.slice().sort(), [agent.id, end.id].sort());
+
+    // Ungrouping is a frame operation: the nodes survive it.
+    const removed = await act("removeGroup", { id: delivery.id }, solo);
+    assert.ok(removed.res.ok, removed.data?.error);
+    assert.equal(removed.data.groups.length, 1);
+    assert.equal(removed.data.nodes.length, seeded.nodes.length, "the nodes stay on the canvas");
+
+    // Removing a node leaves the frame behind, minus that node.
+    const planningAfter = removed.data.groups[0];
+    const pruned = await act("removeNode", { id: start.id }, solo);
+    assert.ok(pruned.res.ok, pruned.data?.error);
+    assert.equal(pruned.data.groups.find((g) => g.id === planningAfter.id).nodeIds.length, 0,
+      "the removed node left its group");
+  });
+
+  test("stores a manually resized group frame and clamps its box", async () => {
+    const solo = path.join(tmpDir, "ws-group-resize");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    const made = await act("addGroup", { name: "Sized", nodeIds: [agent.id] }, solo);
+    assert.ok(made.res.ok, made.data?.error);
+    assert.equal(made.data.groups[0].resizable, true, "a new frame starts resizable");
+    const id = made.data.groups[0].id;
+
+    const resized = await act("updateGroup", { id, x: 40, y: 30, w: 520, h: 380 }, solo);
+    assert.ok(resized.res.ok, resized.data?.error);
+    let g = resized.data.groups[0];
+    assert.deepEqual({ x: g.x, y: g.y, w: g.w, h: g.h }, { x: 40, y: 30, w: 520, h: 380 });
+
+    // Too-small and negative values are clamped rather than stored as-is.
+    const clamped = await act("updateGroup", { id, x: -50, y: -20, w: 10, h: 10 }, solo);
+    assert.ok(clamped.res.ok, clamped.data?.error);
+    g = clamped.data.groups[0];
+    assert.equal(g.x, 0);
+    assert.equal(g.y, 0);
+    assert.equal(g.w, 160);
+    assert.equal(g.h, 100);
+
+    // Clearing the size returns the frame to measuring itself from members.
+    const auto = await act("updateGroup", { id, w: null, h: null }, solo);
+    assert.ok(auto.res.ok, auto.data?.error);
+    assert.equal("w" in auto.data.groups[0], false);
+    assert.equal("h" in auto.data.groups[0], false);
+
+    // The resize lock is a stored property, not just a client-side class.
+    const locked = await act("updateGroup", { id, resizable: false }, solo);
+    assert.ok(locked.res.ok, locked.data?.error);
+    assert.equal(locked.data.groups[0].resizable, false);
+    assert.equal((await snapshot(solo)).groups[0].resizable, false, "the lock survives a re-read");
+    const unlocked = await act("updateGroup", { id, resizable: true }, solo);
+    assert.ok(unlocked.res.ok, unlocked.data?.error);
+    assert.equal(unlocked.data.groups[0].resizable, true);
+  });
+
+  test("normalises groups on import, trimming unknown and doubly-claimed nodes", async () => {
+    const solo = path.join(tmpDir, "ws-groups-import");
+    fs.mkdirSync(solo, { recursive: true });
+    await snapshot(solo);
+    const r = await act("importWorkflow", { data: {
+      name: "Grouped import",
+      nodes: [
+        { id: "g1", type: "start", name: "Start", x: 20, y: 20 },
+        { id: "g2", type: "agent", name: "a", x: 240, y: 20, config: {
+          harness: "custom", command: "printf hi", prompt: "{task}",
+        } },
+        { id: "g3", type: "end", name: "End", x: 460, y: 20 },
+      ],
+      edges: [{ id: "e1", from: "g1", to: "g2" }, { id: "e2", from: "g2", to: "g3" }],
+      groups: [
+        { id: "grp_a", name: "A", x: 10, y: 10, w: 640, h: 420, collapsed: true, resizable: false, nodeIds: ["g1", "ghost", "g2"] },
+        // The second claim on g2 and g1 is dropped; unknown ids never survive.
+        { id: "grp_b", name: "B", x: 10, y: 10, nodeIds: ["g2", "g1", "g3"] },
+      ],
+    } }, solo);
+    assert.ok(r.res.ok, r.data?.error);
+    assert.equal(r.data.groups.length, 2);
+    assert.deepEqual(r.data.groups[0].nodeIds, ["g1", "g2"]);
+    assert.equal(r.data.groups[0].collapsed, true);
+    assert.equal(r.data.groups[0].w, 640, "an imported manual frame keeps its size");
+    assert.equal(r.data.groups[0].h, 420);
+    assert.equal(r.data.groups[0].resizable, false, "an imported lock is kept");
+    assert.deepEqual(r.data.groups[1].nodeIds, ["g3"], "only unclaimed nodes join the second frame");
+    assert.equal(r.data.groups[1].resizable, true, "a frame without the flag stays resizable");
+
+    // The exported shape carries groups, so sharing a canvas keeps its frames.
+    const now = await snapshot(solo);
+    assert.deepEqual(now.groups.map((g) => g.id), ["grp_a", "grp_b"]);
+  });
+
   // ── Duplicate + portability ─────────────────────────────────────────────
 
   test("duplicates an agent node with its settings, and refuses start/end", async () => {
@@ -2294,6 +2502,36 @@ describe("subagent workflow plugin (client)", () => {
     await page.waitForFunction(() => document.querySelectorAll(".sw-ref-row").length === 0);
     assert.deepEqual(await refsOf(), []);
     assert.equal(await page.locator(".sw-node.sw-t-agent .sw-ref-tag").count(), 0);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("the run button toggles between Run and Stop", async () => {
+    const solo = path.join(tmpDir, "ws-run-toggle");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    // A long node keeps the run live long enough to see and press Stop.
+    assert.ok((await act("updateNode", { id: agent.id, config: {
+      harness: "custom", command: "sleep 30", prompt: "{task}",
+    } }, solo)).res.ok);
+
+    const { page, context, errors } = await openWorkflow(solo);
+    const runBtn = page.locator("#sw-run");
+    assert.equal(await page.locator("#sw-stop").count(), 0, "there is one run control, not two");
+    assert.match((await runBtn.textContent()).trim(), /Run/);
+    assert.equal(await runBtn.getAttribute("aria-label"), "Run workflow");
+
+    await runBtn.click();
+    await page.waitForFunction(() => /Stop/.test(document.querySelector("#sw-run")?.textContent || ""));
+    assert.equal(await runBtn.getAttribute("aria-label"), "Stop workflow");
+    assert.match(await runBtn.getAttribute("class"), /sw-danger/);
+
+    await runBtn.click();
+    await page.waitForFunction(() => /stopped/.test(document.querySelector("#sw-run-status")?.textContent || ""));
+    await page.waitForFunction(() => /Run/.test(document.querySelector("#sw-run")?.textContent || ""));
+    assert.equal(await runBtn.getAttribute("aria-label"), "Run workflow");
+    assert.equal((await liveRun(solo)).status, "stopped");
     assert.deepEqual(errors, []);
     await context.close();
   });
@@ -2669,13 +2907,15 @@ describe("subagent workflow plugin (client)", () => {
 
     const { page, context, errors } = await openWorkflow(solo);
     // The run panel carries no task box and no separate approval banner: a gate
-    // is decided from its own card in the messages sidebar.
+    // is decided from its own card in the gate node's messages sidebar.
     assert.equal(await page.locator("#sw-task").count(), 0, "no run-level task box");
     assert.equal(await page.locator(".sw-approvals").count(), 0, "no approval banner above the log");
     // The gate is on the canvas with its own mark and no provider icon.
     assert.equal(await page.locator(`.sw-node.sw-t-approval[data-id="${g.gate.id}"] .sw-node-glyph`).count(), 1);
     assert.equal(await page.locator(`.sw-node[data-id="${g.gate.id}"] .sw-hicon`).count(), 0);
 
+    await page.click(`.sw-node[data-id="${g.gate.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "review");
     await page.click("#sw-run");
     await page.waitForSelector(".sw-msg-gate.waiting");
     assert.match(await page.textContent(".sw-msg-gate .sw-msg-gate-msg"), /Please review: A1\[hello\]/);
@@ -2741,9 +2981,9 @@ describe("subagent workflow plugin (client)", () => {
     // The sidebar reads the gate's input as the loop it is, showing the loop's
     // final result — not an intermediate pass, and not its raw stream.
     const { page, context, errors } = await openWorkflow(solo);
-    await page.waitForSelector(".sw-msg-gate.waiting");
-    await page.click(`#sw-msg-body .sw-msg-section[data-node="${gate.id}"] .sw-msg-gate-name`);
+    await page.click(`.sw-node[data-id="${gate.id}"] .sw-node-name`);
     await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "review");
+    await page.waitForSelector(".sw-msg-gate.waiting");
     const inputs = await page.$$eval("#sw-msg-body .sw-msg-input", (els) => els.map((e) => e.dataset.input));
     assert.deepEqual(inputs, [loop.id], "the loop is the gate's one input");
     const brief = page.locator(`#sw-msg-body .sw-msg-input[data-input="${loop.id}"]`);
@@ -2789,31 +3029,27 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
-  test("the messages sidebar lists every agent, and one agent once its card is clicked", async () => {
+  test("the messages sidebar appears only for the clicked node, not as one mixed feed", async () => {
     const solo = path.join(tmpDir, "ws-msgs-ui");
     fs.mkdirSync(solo, { recursive: true });
     const g = await buildCustomGraph(solo);
     await act("updateNode", { id: g.start.id, config: { defaultTask: "world" } }, solo);
     const { page, context, errors } = await openWorkflow(solo);
 
-    // With nothing in focus every node that carries messages is listed, each in
-    // a section of its own.
-    const sections = await page.$$eval("#sw-msg-body .sw-msg-section[data-node]",
-      (els) => els.map((e) => e.dataset.node));
-    assert.deepEqual(sections.slice().sort(), [g.first.id, g.a2.id, g.a3.id, g.end.id].sort());
-    assert.match(await page.textContent("#sw-msg-sub"), /3 agents/);
+    // Opening the canvas selects nothing, so there is no feed and no sidebar.
+    assert.equal(await page.locator("#sw-msg-side:visible").count(), 0, "the sidebar starts folded away");
+    assert.equal(await page.locator("#sw-msg-body .sw-msg-section").count(), 0, "and renders no mixed feed");
 
     await page.click("#sw-run");
     await page.waitForFunction(() =>
       document.querySelectorAll(".sw-node.sw-run-done").length >= 4, null, { timeout: 25_000 });
-    const body = await page.textContent("#sw-msg-body");
-    assert.match(body, /A1\[world\]/, "the first agent's own words");
-    assert.match(body, /A2\[A1\[world\]\]/);
-    assert.match(body, /A3\[A1\[world\]\]/);
+    assert.equal(await page.locator("#sw-msg-side:visible").count(), 0, "a run alone does not open it");
 
-    // Clicking an agent's card focuses its messages — its own, and only its own.
+    // Clicking an agent's card shows that node's messages — its own, and only
+    // its own.
     await page.click(`.sw-node[data-id="${g.a2.id}"] .sw-node-name`);
     await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "a2");
+    assert.equal(await page.locator("#sw-msg-side:visible").count(), 1);
     assert.equal(await page.locator("#sw-msg-body .sw-msg-section[data-node]").count(), 1, "one agent in focus");
     const focused = await page.textContent("#sw-msg-body");
     assert.match(focused, /A2\[A1\[world\]\]/);
@@ -2821,17 +3057,12 @@ describe("subagent workflow plugin (client)", () => {
     // It reads as a conversation: what the node was handed, then what it said.
     assert.match(await page.textContent(".sw-msg-sent pre"), /\{input\}/);
 
-    // “All agents” puts every section back, and a section in the sidebar is a
-    // way to focus that agent too.
-    await page.click("#sw-msg-all");
-    await page.waitForFunction((n) =>
-      document.querySelectorAll("#sw-msg-body .sw-msg-section[data-node]").length === n, 4);
-    assert.match(await page.textContent("#sw-msg-body"), /A2\[A1\[world\]\]/);
-    await page.click(`#sw-msg-body .sw-msg-section[data-node="${g.a3.id}"] .sw-msg-sec-name`);
+    // Clicking another node swaps the view; the previous workflow's agent is
+    // not carried along.
+    await page.click(`.sw-node[data-id="${g.a3.id}"] .sw-node-name`);
     await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "a3");
     assert.match(await page.textContent("#sw-msg-body"), /A3\[A1\[world\]\]/);
-    assert.doesNotMatch(await page.textContent("#sw-msg-body"), /A2\[A1\[world\]\]/,
-      "and it replaces the all-agents view");
+    assert.doesNotMatch(await page.textContent("#sw-msg-body"), /A2\[A1\[world\]\]/);
 
     // It sits beside the canvas, not over it: the diagram keeps a workable
     // width and the two never overlap.
@@ -2844,11 +3075,10 @@ describe("subagent workflow plugin (client)", () => {
     assert.ok(layout.sideL >= layout.canvasR, `and sits after the canvas (${layout.sideL} ≥ ${layout.canvasR})`);
     assert.ok(layout.canvasW >= 700, `which keeps its own width (${layout.canvasW}px)`);
 
-    // The sidebar can be folded away, and says so in the headers.
-    await page.click("#sw-msg-toggle");
+    // Its close control clears the selection and folds the panel away again.
+    await page.click("#sw-msg-close");
+    await page.waitForFunction(() => !document.querySelector(".sw-node.sel"));
     assert.equal(await page.locator("#sw-msg-side:visible").count(), 0);
-    await page.click("#sw-msg-toggle");
-    assert.equal(await page.locator("#sw-msg-side:visible").count(), 1);
     assert.deepEqual(errors, []);
     await context.close();
   });
@@ -2881,7 +3111,9 @@ describe("subagent workflow plugin (client)", () => {
       "the output tail is stdout, not the harness's status stream");
 
     const { page, context, errors } = await openWorkflow(solo);
-    await page.waitForSelector("#sw-msg-body");
+    // The sidebar is a node's context, so open it by clicking that node.
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "talker");
     const body = await page.textContent("#sw-msg-body");
     assert.match(body, /The agent said this\./, "the agent's own words are in the sidebar");
     assert.doesNotMatch(body, /build ·/, "its banner is not");
@@ -2900,8 +3132,11 @@ describe("subagent workflow plugin (client)", () => {
   test("the messages sidebar resizes by its handle and remembers the width", async () => {
     const solo = path.join(tmpDir, "ws-msgs-size");
     fs.mkdirSync(solo, { recursive: true });
-    await buildCustomGraph(solo);
+    const g = await buildCustomGraph(solo);
     const { page, context, errors } = await openWorkflow(solo);
+    // The sidebar only exists beside a selected node.
+    await page.click(`.sw-node[data-id="${g.a2.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-side")?.offsetParent);
 
     const sideW = () => page.$eval("#sw-msg-side", (el) => Math.round(el.getBoundingClientRect().width));
     const start = await sideW();
@@ -2931,7 +3166,8 @@ describe("subagent workflow plugin (client)", () => {
 
     // The chosen width survives a reload (it is remembered per browser).
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.waitForSelector("#sw-msg-resizer");
+    await page.waitForSelector("#sw-msg-resizer", { state: "attached" });
+    await page.click(`.sw-node[data-id="${g.a2.id}"] .sw-node-name`);
     await page.waitForFunction((w) =>
       Math.abs(document.getElementById("sw-msg-side").getBoundingClientRect().width - w) < 4, grown);
 
@@ -2940,16 +3176,92 @@ describe("subagent workflow plugin (client)", () => {
     await page.waitForFunction((w) =>
       Math.abs(document.getElementById("sw-msg-side").getBoundingClientRect().width - w) < 4, start);
 
-    // The handle is a keyboard-operable separator, and folding the panel hides it.
+    // The handle is a keyboard-operable separator, and it folds away with the
+    // panel when the node selection is cleared.
     assert.equal(await page.getAttribute("#sw-msg-resizer", "role"), "separator");
     assert.equal(await page.getAttribute("#sw-msg-resizer", "aria-orientation"), "vertical");
     await page.focus("#sw-msg-resizer");
     await page.keyboard.press("ArrowLeft");
     assert.ok(await sideW() > start, "ArrowLeft grows the sidebar");
-    await page.click("#sw-msg-toggle");
+    await page.click("#sw-msg-close");
     assert.equal(await page.locator("#sw-msg-resizer:visible").count(), 0, "the handle folds away with the panel");
-    await page.click("#sw-msg-toggle");
+    await page.click(`.sw-node[data-id="${g.a2.id}"] .sw-node-name`);
     assert.equal(await page.locator("#sw-msg-resizer:visible").count(), 1);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("remembers pan and zoom separately for each workspace", async () => {
+    const wa = path.join(tmpDir, "ws-view-a");
+    const wb = path.join(tmpDir, "ws-view-b");
+    fs.mkdirSync(wa, { recursive: true });
+    fs.mkdirSync(wb, { recursive: true });
+    await snapshot(wa);
+    await snapshot(wb);
+    const scrollOf = () => page.$eval(".sw-canvas-scroll", (el) => ({ x: el.scrollLeft, y: el.scrollTop }));
+
+    const { page, context, errors } = await openWorkflow(wa);
+    await page.click("#sw-zoom-in");
+    assert.equal(await page.textContent("#sw-zoom-pct"), "120%");
+    const view = await page.locator(".sw-canvas-scroll").boundingBox();
+    const before = await scrollOf();
+    await page.mouse.move(view.x + view.width - 60, view.y + view.height - 60);
+    await page.mouse.down();
+    await page.mouse.move(view.x + view.width - 280, view.y + view.height - 220, { steps: 10 });
+    await page.mouse.up();
+    const panned = await scrollOf();
+    assert.ok(panned.x > before.x + 150 && panned.y > before.y + 100, "the view moved on both axes");
+    await sleep(350); // let the debounced save land
+
+    // A reload restores exactly this workspace's zoom and scroll.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#sw-zoom-pct");
+    await page.waitForFunction(() => document.querySelector("#sw-zoom-pct")?.textContent === "120%");
+    const restored = await scrollOf();
+    assert.ok(Math.abs(restored.x - panned.x) <= 3, `x restored (${panned.x} → ${restored.x})`);
+    assert.ok(Math.abs(restored.y - panned.y) <= 3, `y restored (${panned.y} → ${restored.y})`);
+
+    // Another workspace has its own (default) view, not this one's. Switching
+    // through the app's shared cwd — not a storage poke + reload — is the real
+    // path the workspace rail uses.
+    await page.evaluate((w) => window.__setCwd(w), wb);
+    await page.waitForFunction(() =>
+      document.querySelector("#subagent-workflow-pane .sw-node") &&
+      document.querySelector("#sw-zoom-pct")?.textContent === "100%");
+    assert.deepEqual(await scrollOf(), { x: 0, y: 0 }, "the other workspace starts at its own origin");
+
+    // Give the second workspace a distinct view of its own.
+    await page.click("#sw-zoom-out");
+    const zoomB = await page.textContent("#sw-zoom-pct");
+    const viewB = await page.locator(".sw-canvas-scroll").boundingBox();
+    await page.mouse.move(viewB.x + viewB.width - 60, viewB.y + viewB.height - 60);
+    await page.mouse.down();
+    await page.mouse.move(viewB.x + viewB.width - 200, viewB.y + viewB.height - 170, { steps: 8 });
+    await page.mouse.up();
+    const pannedB = await scrollOf();
+    assert.ok(pannedB.x > 80 && pannedB.y > 60, "the second workspace has its own pan");
+    await sleep(350);
+
+    // Returning to the first workspace brings its view back.
+    await page.evaluate((w) => window.__setCwd(w), wa);
+    await page.waitForFunction(() => document.querySelector("#sw-zoom-pct")?.textContent === "120%");
+    const again = await scrollOf();
+    assert.ok(Math.abs(again.x - panned.x) <= 3 && Math.abs(again.y - panned.y) <= 3,
+      "the first workspace's pan came back");
+
+    // A reload still opens the first workspace where it was left…
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelector("#sw-zoom-pct")?.textContent === "120%");
+    const afterReload = await scrollOf();
+    assert.ok(Math.abs(afterReload.x - panned.x) <= 3 && Math.abs(afterReload.y - panned.y) <= 3,
+      "and the reload kept it");
+
+    // …and the second workspace still remembers its own view too.
+    await page.evaluate((w) => window.__setCwd(w), wb);
+    await page.waitForFunction((z) => document.querySelector("#sw-zoom-pct")?.textContent === z, zoomB);
+    const againB = await scrollOf();
+    assert.ok(Math.abs(againB.x - pannedB.x) <= 3 && Math.abs(againB.y - pannedB.y) <= 3,
+      `the second workspace's pan came back (${pannedB.x},${pannedB.y} → ${againB.x},${againB.y})`);
     assert.deepEqual(errors, []);
     await context.close();
   });
@@ -3053,23 +3365,19 @@ describe("subagent workflow plugin (client)", () => {
     await act("updateNode", { id: g.start.id, config: { defaultTask: "hello" } }, solo);
 
     const { page, context, errors } = await openWorkflow(solo);
+    // The gate's card is shown in the gate node's own sidebar context, so select
+    // that node before running.
+    await page.click(`.sw-node[data-id="${g.gate.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "review");
     await page.click("#sw-run");
     // The gate's card carries the same request as the banner, in the sidebar.
     await page.waitForSelector(".sw-msg-gate.waiting");
     assert.match(await page.textContent(".sw-msg-gate .sw-msg-gate-msg"), /Please review: A1\[hello\]/);
     assert.equal(await page.locator(".sw-msg-gate [data-approve]").count(), 1);
     assert.equal(await page.locator(".sw-msg-gate [data-reject]").count(), 1);
-    // Even unfocused, the gate section reads the agents wired into it as briefs:
-    // the message each was handed and its final result, never the raw stream.
-    const inline = page.locator(`#sw-msg-body .sw-msg-gate-wrap .sw-msg-input[data-input="${g.first.id}"]`);
-    assert.equal(await inline.count(), 1, "the gate section carries its input agent");
-    assert.equal(await inline.locator(".sw-msg-lines").count(), 0, "and not the agent's raw stream");
-    assert.match(await inline.locator(".sw-msg-sent pre").textContent(), /\{task\}/, "the message it was handed");
-    assert.match(await inline.locator(".sw-msg-pre").textContent(), /A1\[hello\]/, "its final result");
 
-    // Clicking the card focuses the gate: the same reading, per input agent.
-    await page.click(`#sw-msg-body .sw-msg-section[data-node="${g.gate.id}"] .sw-msg-gate-name`);
-    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "review");
+    // The focused gate reads each input node as a brief: the message it was
+    // handed and its final result, never the raw stream.
     const inputs = await page.$$eval("#sw-msg-body .sw-msg-input", (els) => els.map((e) => e.dataset.input));
     assert.deepEqual(inputs, [g.first.id], "the agent feeding the gate");
     const brief = page.locator(`#sw-msg-body .sw-msg-input[data-input="${g.first.id}"]`);
@@ -3095,6 +3403,393 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
+  test("Shift-dragging the canvas marquee-selects nodes for grouping", async () => {
+    const solo = path.join(tmpDir, "ws-marquee");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const start = seeded.nodes.find((n) => n.type === "start");
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    const end = seeded.nodes.find((n) => n.type === "end");
+
+    const { page, context, errors } = await openWorkflow(solo);
+    const startBox = await page.locator(`.sw-node[data-id="${start.id}"]`).boundingBox();
+    const agentBox = await page.locator(`.sw-node[data-id="${agent.id}"]`).boundingBox();
+    const endBox = await page.locator(`.sw-node[data-id="${end.id}"]`).boundingBox();
+    const x = Math.min(startBox.x, agentBox.x) - 30;
+    const y = Math.min(startBox.y, agentBox.y) - 30;
+    const right = Math.max(startBox.x + startBox.width, agentBox.x + agentBox.width) + 30;
+    const bottom = Math.max(startBox.y + startBox.height, agentBox.y + agentBox.height) + 30;
+    assert.ok(right < endBox.x, "the box stops before the end node");
+
+    await page.keyboard.down("Shift");
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(right, bottom, { steps: 8 });
+    assert.equal(await page.locator("#sw-marquee:visible").count(), 1, "the drag paints a selection box");
+    await page.mouse.up();
+    await page.keyboard.up("Shift");
+
+    assert.equal(await page.locator("#sw-canvas .sw-node.sel").count(), 2, "both cards inside the box are picked");
+    await page.click("#sw-add-group");
+    await page.waitForSelector(".sw-group");
+    const made = await snapshot(solo);
+    assert.equal(made.groups.length, 1);
+    assert.deepEqual(made.groups[0].nodeIds.slice().sort(), [agent.id, start.id].sort());
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("groups selected nodes on the canvas, drags the frame, folds it and ungroups", async () => {
+    const solo = path.join(tmpDir, "ws-groups-ui");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const start = seeded.nodes.find((n) => n.type === "start");
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    const end = seeded.nodes.find((n) => n.type === "end");
+
+    const { page, context, errors } = await openWorkflow(solo);
+    // Pick two cards — a plain click, then Shift-click — and group them.
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-name`);
+    await page.locator(`.sw-node[data-id="${start.id}"] .sw-node-name`).click({ modifiers: ["Shift"] });
+    assert.equal(await page.locator(".sw-node.sel").count(), 2, "both picked nodes read as selected");
+    await page.click("#sw-add-group");
+    await page.waitForSelector(".sw-group");
+    assert.equal(await page.locator(".sw-group").count(), 1);
+    assert.equal(await page.locator("#sw-canvas .sw-node").count(), 3, "grouping keeps every card");
+    assert.equal(await page.inputValue(".sw-group-name"), "Group 1");
+    assert.equal(await page.textContent(".sw-group-count"), "2 nodes");
+    const made = await snapshot(solo);
+    assert.equal(made.groups.length, 1);
+    assert.deepEqual(made.groups[0].nodeIds.slice().sort(), [agent.id, start.id].sort());
+
+    // Dragging the group's header moves the whole workflow — and nothing else.
+    const before = await snapshot(solo);
+    const a0 = before.nodes.find((n) => n.id === agent.id);
+    const e0 = before.nodes.find((n) => n.id === end.id);
+    const drag = await page.locator(".sw-group-count").boundingBox();
+    await page.mouse.move(drag.x + drag.width / 2, drag.y + drag.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(drag.x + drag.width / 2 + 120, drag.y + drag.height / 2 + 60, { steps: 8 });
+    await page.mouse.up();
+    let moved = null;
+    for (let i = 0; i < 50; i++) {
+      moved = await snapshot(solo);
+      if (moved.nodes.find((n) => n.id === agent.id).x === a0.x + 120) break;
+      await sleep(60);
+    }
+    const a1 = moved.nodes.find((n) => n.id === agent.id);
+    const s1 = moved.nodes.find((n) => n.id === start.id);
+    assert.equal(a1.x, a0.x + 120, "the member moved with the frame");
+    assert.equal(a1.y, a0.y + 60);
+    assert.equal(s1.x, before.nodes.find((n) => n.id === start.id).x + 120, "the other member moved too");
+    assert.equal(moved.nodes.find((n) => n.id === end.id).x, e0.x, "a node outside the group stays put");
+    assert.equal(moved.groups[0].collapsed, false);
+
+    // Folding hides the members and their wiring behind one chip.
+    await page.click(".sw-group-fold");
+    await page.waitForSelector(".sw-group.collapsed");
+    await page.waitForFunction(() => document.querySelectorAll("#sw-canvas .sw-node").length === 1);
+    assert.equal(await page.locator("#sw-canvas .sw-node").count(), 1, "only the ungrouped end node remains");
+    assert.equal(await page.locator("#sw-canvas path.sw-edge").count(), 0, "wiring into a folded group is hidden with it");
+    assert.equal(await page.textContent(".sw-group-count"), "2 nodes");
+    assert.equal((await snapshot(solo)).groups[0].collapsed, true, "the fold is remembered server-side");
+
+    // Unfolding brings back the cards, their connections and the frame.
+    await page.click(".sw-group-fold");
+    await page.waitForFunction(() => document.querySelectorAll("#sw-canvas .sw-node").length === 3);
+    assert.equal(await page.locator("#sw-canvas path.sw-edge").count(), seeded.edges.length);
+
+    // The header field renames the workflow.
+    await page.fill(".sw-group-name", "Release");
+    await page.locator(".sw-group-name").evaluate((el) => el.blur());
+    for (let i = 0; i < 40 && (await snapshot(solo)).groups[0].name !== "Release"; i++) await sleep(50);
+    assert.equal((await snapshot(solo)).groups[0].name, "Release");
+
+    // Dragging one card out of the frame leaves just that node ungrouped.
+    const agentCard = await page.locator(`.sw-node[data-id="${agent.id}"] .sw-node-name`).boundingBox();
+    const frameBeforeDragOut = await page.locator(".sw-group").boundingBox();
+    await page.mouse.move(agentCard.x + 30, agentCard.y + 8);
+    await page.mouse.down();
+    await page.mouse.move(agentCard.x + 520, agentCard.y + 320, { steps: 10 });
+    // The frame must stay still while the card is pulled out; it used to stretch
+    // on every pointer move, following the node instead of letting it leave.
+    await sleep(120);
+    const frameDuringDragOut = await page.locator(".sw-group").boundingBox();
+    assert.ok(Math.abs(frameDuringDragOut.width - frameBeforeDragOut.width) <= 1,
+      `the frame holds still during the drag (${frameBeforeDragOut.width} → ${frameDuringDragOut.width})`);
+    assert.ok(Math.abs(frameDuringDragOut.height - frameBeforeDragOut.height) <= 1,
+      `and keeps its height (${frameBeforeDragOut.height} → ${frameDuringDragOut.height})`);
+    await page.mouse.up();
+    let afterOut = null;
+    for (let i = 0; i < 50; i++) {
+      afterOut = await snapshot(solo);
+      if (afterOut.groups[0].nodeIds.length === 1) break;
+      await sleep(60);
+    }
+    assert.deepEqual(afterOut.groups[0].nodeIds, [start.id], "only the dragged node left the group");
+    assert.equal(afterOut.nodes.length, 3, "the ungrouped node stays on the canvas");
+    assert.equal(await page.locator(`.sw-node[data-id="${agent.id}"]`).count(), 1);
+    await page.waitForFunction((w) => {
+      const el = document.querySelector(".sw-group");
+      return !!el && el.getBoundingClientRect().width < w;
+    }, frameBeforeDragOut.width);
+    const frameAfterDrop = await page.locator(".sw-group").boundingBox();
+    assert.ok(frameAfterDrop.width < frameBeforeDragOut.width,
+      `the remaining frame shrinks back around its one member (${frameBeforeDragOut.width} → ${frameAfterDrop.width})`);
+
+    // Ungrouping removes only the frame: every node is still on the canvas.
+    await page.click(".sw-group-remove");
+    await page.waitForFunction(() => !document.querySelector(".sw-group"));
+    assert.equal(await page.locator("#sw-canvas .sw-node").count(), 3);
+    assert.equal((await snapshot(solo)).groups.length, 0);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("dropping a node into a group expands its frame to hold it", async () => {
+    const solo = path.join(tmpDir, "ws-group-drop");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const start = seeded.nodes.find((n) => n.type === "start");
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    const end = seeded.nodes.find((n) => n.type === "end");
+    const made = await act("addGroup", { name: "Team", nodeIds: [start.id, agent.id] }, solo);
+    assert.ok(made.res.ok, made.data?.error);
+
+    const { page, context, errors } = await openWorkflow(solo);
+    const frame = await page.locator(".sw-group").boundingBox();
+    const endCard = await page.locator(`.sw-node[data-id="${end.id}"] .sw-node-name`).boundingBox();
+
+    // Drop the end card inside the frame's lower-right corner: close enough to
+    // join the group, far enough right that the frame must grow around it.
+    const dropX = frame.x + frame.width - 12;
+    const dropY = frame.y + frame.height - 12;
+    await page.mouse.move(endCard.x + endCard.width / 2, endCard.y + endCard.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(dropX, dropY, { steps: 12 });
+    await page.mouse.up();
+
+    let after = null;
+    for (let i = 0; i < 50; i++) {
+      after = await snapshot(solo);
+      if (after.groups[0].nodeIds.includes(end.id)) break;
+      await sleep(60);
+    }
+    assert.deepEqual(after.groups[0].nodeIds.slice().sort(), [end.id, agent.id, start.id].sort(),
+      "the dropped node joined the group");
+    const grown = await page.locator(".sw-group").boundingBox();
+    assert.ok(grown.width > frame.width + 100, `the frame grew to wrap it (${frame.width} → ${grown.width})`);
+    assert.ok(grown.height >= frame.height, "and still wraps its old members");
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("dropping a node on a folded group adds it and unfolds the frame around it", async () => {
+    const solo = path.join(tmpDir, "ws-group-drop-folded");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const start = seeded.nodes.find((n) => n.type === "start");
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    const end = seeded.nodes.find((n) => n.type === "end");
+    const made = await act("addGroup", { name: "Folded", nodeIds: [start.id, agent.id] }, solo);
+    assert.ok(made.res.ok, made.data?.error);
+    assert.ok((await act("updateGroup", { id: made.data.groups[0].id, collapsed: true }, solo)).res.ok);
+
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.waitForSelector(".sw-group.collapsed");
+    const foldedW = (await page.locator(".sw-group").boundingBox()).width;
+    const chip = await page.locator(".sw-group-head").boundingBox();
+    const endCard = await page.locator(`.sw-node[data-id="${end.id}"] .sw-node-name`).boundingBox();
+
+    await page.mouse.move(endCard.x + endCard.width / 2, endCard.y + endCard.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(chip.x + chip.width / 2, chip.y + chip.height / 2, { steps: 12 });
+    await page.mouse.up();
+
+    let after = null;
+    for (let i = 0; i < 50; i++) {
+      after = await snapshot(solo);
+      if (after.groups[0].nodeIds.includes(end.id)) break;
+      await sleep(60);
+    }
+    assert.deepEqual(after.groups[0].nodeIds.slice().sort(), [end.id, agent.id, start.id].sort());
+    assert.equal(after.groups[0].collapsed, false, "the frame unfolds so the new member is visible");
+    await page.waitForFunction(() => !document.querySelector(".sw-group.collapsed"));
+    assert.equal(await page.locator("#sw-canvas .sw-node").count(), 3);
+    const grownW = (await page.locator(".sw-group").boundingBox()).width;
+    assert.ok(grownW > foldedW + 100, `the frame resizes around the new member (${foldedW} → ${grownW})`);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("resizes a group frame by its handles and persists the size", async () => {
+    const solo = path.join(tmpDir, "ws-group-resize-ui");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const start = seeded.nodes.find((n) => n.type === "start");
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    const made = await act("addGroup", { name: "Sized", nodeIds: [start.id, agent.id] }, solo);
+    assert.ok(made.res.ok, made.data?.error);
+    const groupId = made.data.groups[0].id;
+
+    const { page, context, errors } = await openWorkflow(solo);
+    assert.equal(await page.locator(".sw-group-handle").count(), 8, "an expanded frame has eight handles");
+    const before = await page.locator(".sw-group").boundingBox();
+
+    // Grow from the south-east corner.
+    let handle = await page.locator(".sw-group-handle.sw-gh-se").boundingBox();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2 + 180, handle.y + handle.height / 2 + 120, { steps: 10 });
+    await page.mouse.up();
+    let after = null;
+    for (let i = 0; i < 50; i++) {
+      after = await snapshot(solo);
+      const g = after.groups.find((x) => x.id === groupId);
+      if (g.w > before.width + 100) break;
+      await sleep(60);
+    }
+    let g = after.groups.find((x) => x.id === groupId);
+    assert.ok(g.w > before.width + 100, `the frame grew wider (${before.width} → ${g.w})`);
+    assert.ok(g.h > before.height + 60, `and taller (${before.height} → ${g.h})`);
+    // The stored size lands before the client repaints; wait for the frame to
+    // catch up rather than sampling whichever DOM is up at that instant.
+    await page.waitForFunction((w) => {
+      const el = document.querySelector(".sw-group");
+      return !!el && parseFloat(el.style.width || "0") > w;
+    }, before.width + 100);
+    const grown = await page.evaluate(() => {
+      const el = document.querySelector(".sw-group");
+      const r = el.getBoundingClientRect();
+      return { width: r.width, height: r.height };
+    });
+    assert.ok(grown.width > before.width + 100, "the rendered frame follows the stored size");
+
+    // Grow again from the north-west corner: the frame's origin moves too.
+    handle = await page.locator(".sw-group-handle.sw-gh-nw").boundingBox();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2 - 50, handle.y + handle.height / 2 - 40, { steps: 8 });
+    await page.mouse.up();
+    for (let i = 0; i < 50; i++) {
+      after = await snapshot(solo);
+      const x = after.groups.find((n) => n.id === groupId);
+      if (x.x < g.x) { g = x; break; }
+      await sleep(60);
+    }
+    assert.ok(g.x < made.data.groups[0].x, `the west edge moved out (${made.data.groups[0].x} → ${g.x})`);
+    assert.ok(g.w > before.width + 200, "and the frame grew with it");
+
+    // A reload keeps the hand-set box.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => {
+      const el = document.querySelector(".sw-group");
+      return !!el && el.style.width !== "" && parseFloat(el.style.width) > 0;
+    });
+    const persisted = await snapshot(solo);
+    const kept = persisted.groups.find((x) => x.id === groupId);
+    assert.equal(kept.w, g.w);
+    assert.equal(kept.h, g.h);
+    const rebuilt = await page.evaluate(() => {
+      const el = document.querySelector(".sw-group");
+      return el.getBoundingClientRect().width;
+    });
+    assert.ok(Math.abs(rebuilt - grown.width - 50) <= 24, `the frame comes back at its manual size (${grown.width} → ${rebuilt})`);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("the group lock button hides its resize handles and is remembered", async () => {
+    const solo = path.join(tmpDir, "ws-group-resize-lock");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const start = seeded.nodes.find((n) => n.type === "start");
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    const made = await act("addGroup", { name: "Fixed", nodeIds: [start.id, agent.id] }, solo);
+    assert.ok(made.res.ok, made.data?.error);
+    const groupId = made.data.groups[0].id;
+    const before = { x: made.data.groups[0].x, y: made.data.groups[0].y };
+
+    const { page, context, errors } = await openWorkflow(solo);
+    const lock = page.locator("[data-group-resizable]");
+    assert.equal(await lock.count(), 1, "the group header carries a resize lock");
+    assert.equal(await lock.getAttribute("aria-pressed"), "true");
+    assert.equal(await page.locator(".sw-group-handle").count(), 8);
+
+    // Locking hides the handles, stores the flag, and leaves the frame put.
+    await lock.click();
+    await page.waitForFunction(() =>
+      document.querySelector("[data-group-resizable]")?.getAttribute("aria-pressed") === "false");
+    await page.waitForFunction(() => document.querySelectorAll(".sw-group-handle").length === 0);
+    let stored = (await snapshot(solo)).groups.find((g) => g.id === groupId);
+    assert.equal(stored.resizable, false);
+    assert.deepEqual({ x: stored.x, y: stored.y }, before, "locking does not move the frame");
+
+    // A reload keeps the lock and its hidden handles.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() =>
+      document.querySelector("[data-group-resizable]")?.getAttribute("aria-pressed") === "false");
+    assert.equal(await page.locator(".sw-group-handle").count(), 0, "a locked frame has no resize handles");
+
+    // The same button unlocks it and brings the handles back.
+    await lock.click();
+    await page.waitForFunction(() =>
+      document.querySelector("[data-group-resizable]")?.getAttribute("aria-pressed") === "true");
+    await page.waitForFunction(() => document.querySelectorAll(".sw-group-handle").length === 8);
+    stored = (await snapshot(solo)).groups.find((g) => g.id === groupId);
+    assert.equal(stored.resizable, true);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("a folded group's chip carries the run's live status and progress", async () => {
+    const solo = path.join(tmpDir, "ws-group-status");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildCustomGraph(solo);
+    assert.ok((await act("updateNode", { id: g.start.id, config: { defaultTask: "world" } }, solo)).res.ok);
+    const made = await act("addGroup", { name: "Parallel", nodeIds: [g.a2.id, g.a3.id] }, solo);
+    assert.ok(made.res.ok, made.data?.error);
+    assert.ok((await act("updateGroup", { id: made.data.groups[0].id, collapsed: true }, solo)).res.ok);
+
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.waitForSelector(".sw-group.collapsed");
+    assert.equal(await page.textContent(".sw-group-status"), "not run", "an unrun folded workflow says so");
+
+    await page.click("#sw-run");
+    await page.waitForFunction(() =>
+      /✔ 2\/2/.test(document.querySelector(".sw-group-status")?.textContent || ""), null, { timeout: 25_000 });
+    const chip = await page.locator(".sw-group-status").evaluate((el) => ({
+      text: el.textContent, cls: el.className, title: el.title,
+    }));
+    assert.equal(chip.text, "✔ 2/2", "the chip shows how many members finished");
+    assert.match(chip.cls, /sw-gs-done/);
+    assert.match(chip.title, /2\/2 done/);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("pans vertically even when the graph fits the viewport", async () => {
+    const solo = path.join(tmpDir, "ws-pan-vertical");
+    fs.mkdirSync(solo, { recursive: true });
+    await snapshot(solo);
+    const { page, context, errors } = await openWorkflow(solo);
+    const view = await page.locator(".sw-canvas-scroll").boundingBox();
+    const before = await page.$eval(".sw-canvas-scroll", (el) => ({ x: el.scrollLeft, y: el.scrollTop }));
+
+    // Start on empty canvas near the bottom-right (the zoom cluster owns the
+    // bottom-left corner), then drag up: the view has to move down even though
+    // every node would fit on one screen.
+    await page.mouse.move(view.x + view.width - 60, view.y + view.height - 60);
+    await page.mouse.down();
+    await page.mouse.move(view.x + view.width - 60, view.y + view.height - 260, { steps: 10 });
+    await page.mouse.up();
+    const after = await page.$eval(".sw-canvas-scroll", (el) => ({ x: el.scrollLeft, y: el.scrollTop }));
+    assert.ok(after.y > before.y + 100, `an upward drag pans the view down (${before.y} → ${after.y})`);
+    assert.ok(after.x >= before.x, "and does not disturb the horizontal position");
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
   test("pans the canvas by dragging its background, and a click still clears the selection", async () => {
     const solo = path.join(tmpDir, "ws-pan");
     fs.mkdirSync(solo, { recursive: true });
@@ -3104,12 +3799,13 @@ describe("subagent workflow plugin (client)", () => {
     await act("moveNode", { id: s.nodes.find((n) => n.type === "end").id, x: 2400, y: 1400 }, solo);
 
     const { page, context, errors } = await openWorkflow(solo);
-    const box = await page.locator(".sw-canvas-scroll").boundingBox();
     const scroll = () => page.$eval(".sw-canvas-scroll", (el) => ({ x: el.scrollLeft, y: el.scrollTop }));
 
-    // Select a node first: a pan must not disturb it.
+    // Select a node first: a pan must not disturb it. The messages sidebar opens
+    // with the selection, so measure the canvas after it is shown.
     await page.click(".sw-node.sw-t-agent .sw-node-name");
     await page.waitForFunction(() => !!document.querySelector(".sw-node.sel"));
+    const box = await page.locator(".sw-canvas-scroll").boundingBox();
 
     const before = await scroll();
     await page.mouse.move(box.x + box.width - 60, box.y + box.height - 60);
@@ -3320,27 +4016,28 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
-  test("arms and disarms a trigger from the toolbar's triggers popup", async () => {
+  test("each start node's triggers live in its own settings, saved per entry point", async () => {
     const solo = path.join(tmpDir, "ws-trigger-ui");
     fs.mkdirSync(solo, { recursive: true });
-    await snapshot(solo);
+    const seeded = await snapshot(solo);
+    const firstStart = seeded.nodes.find((n) => n.type === "start");
+    const secondStart = (await act("addNode", { type: "start", x: 120, y: 460 }, solo)).data.nodes.at(-1);
+    assert.equal(secondStart.type, "start", "a canvas accepts more than one start node");
 
     const { page, context, errors } = await openWorkflow(solo);
-    // The workflow-level form is the third thing the settings popup carries,
-    // opened from ⏱ in the toolbar (a node's gear is the other way in).
-    assert.equal(await page.locator("#sw-tr-save").count(), 0, "closed until asked for");
-    await page.click("#sw-triggers");
-    await page.waitForSelector("#sw-tr-save");
+    // There is no workflow-level trigger popup any more.
+    assert.equal(await page.locator("#sw-triggers").count(), 0, "the toolbar no longer carries triggers");
+    await page.click(`.sw-node[data-id="${firstStart.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-tr-mode");
+    assert.equal(await page.locator("#sw-tr-task").count(), 0, "the start node's message is the task");
+    assert.equal(await page.locator("#sw-tr-save").count(), 0, "Save node saves the whole start node");
     assert.doesNotMatch(await page.textContent("#sw-status"), /trigger armed/);
-    // Its checkbox line is still laid out on its own row: the node panel dropped
-    // its bypass switch, and this form shares the same class.
+    // Its checkbox line keeps the trigger form's row layout.
     const box = await page.evaluate(() => {
       const el = document.querySelector(".sw-triggers .sw-check");
       const cs = getComputedStyle(el);
       return { display: cs.display, gap: cs.gap, align: cs.alignItems, box: Math.round(el.getBoundingClientRect().height) };
     });
-    // The rule is `inline-flex`, which blockifies to `flex` as an item of the
-    // trigger column — so assert the row itself, not the keyword.
     assert.match(box.display, /^(inline-)?flex$/, "the trigger checkbox keeps its row layout");
     assert.equal(box.gap, "6px", "with the box beside its text, not stacked on it");
     assert.equal(box.align, "center");
@@ -3348,21 +4045,30 @@ describe("subagent workflow plugin (client)", () => {
 
     await page.selectOption("#sw-tr-mode", "interval");
     await page.fill("#sw-tr-every", "3600");
-    await page.fill("#sw-tr-task", "from the ui");
-    await page.click("#sw-tr-save");
+    await page.click("#sw-save");
     await page.waitForFunction(() => /trigger armed/.test(document.querySelector("#sw-status")?.textContent || ""));
-    const saved = (await api(`/${PLUGIN}/triggers?cwd=${enc(solo)}`)).data.triggers;
-    assert.equal(saved.schedule.mode, "interval");
-    assert.equal(saved.schedule.everySeconds, 3600);
-    assert.equal(saved.task, "from the ui");
+    const savedFirst = (await snapshot(solo)).nodes.find((n) => n.id === firstStart.id).config.triggers;
+    assert.equal(savedFirst.schedule.mode, "interval");
+    assert.equal(savedFirst.schedule.everySeconds, 3600);
+    // The other entry point was not touched by saving this one.
+    assert.equal((await snapshot(solo)).nodes.find((n) => n.id === secondStart.id).config.triggers.schedule.mode, "off");
 
     // Saving never fires immediately, so no run exists yet.
     assert.equal(await liveRun(solo), null);
 
+    // The second start's own popup reads its own (unarmed) triggers.
+    await page.click("#sw-close-x");
+    await page.click(`.sw-node[data-id="${secondStart.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-tr-mode");
+    assert.equal(await page.inputValue("#sw-tr-mode"), "off");
+
+    // Turning the first start off disarms the canvas' only trigger.
+    await page.click("#sw-close-x");
+    await page.click(`.sw-node[data-id="${firstStart.id}"] .sw-node-config`);
     await page.selectOption("#sw-tr-mode", "off");
-    await page.click("#sw-tr-save");
+    await page.click("#sw-save");
     await page.waitForFunction(() => !/trigger armed/.test(document.querySelector("#sw-status")?.textContent || ""));
-    assert.equal((await api(`/${PLUGIN}/triggers?cwd=${enc(solo)}`)).data.triggers.armed, false);
+    assert.equal((await api(`/${PLUGIN}/triggers?cwd=${enc(solo)}&nodeId=${enc(firstStart.id)}`)).data.triggers.armed, false);
     assert.deepEqual(errors, []);
     await context.close();
   });

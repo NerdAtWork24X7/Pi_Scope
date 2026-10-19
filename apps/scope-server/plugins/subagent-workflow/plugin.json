@@ -2,7 +2,7 @@
   "id": "subagent-workflow",
   "name": "Subagent Workflow",
   "description": "Wire coding-agent harnesses into a workflow on a canvas: Claude Code, Codex CLI, Gemini CLI, opencode, Aider, Cursor Agent, the built-in Pi runner, or a custom command.",
-  "version": "1.10.0",
+  "version": "1.13.0",
   "author": "Pi Scope",
   "server": "server.ts",
   "client": "client.js",

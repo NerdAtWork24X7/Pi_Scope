@@ -275,7 +275,11 @@ describe("popup design system (superdesign-alpha)", () => {
     // below is the box the user ends up with (`rect` reflects a live transform).
     const wf = await openView("subagent-workflow", { reducedMotion: "reduce" });
     await wf.page.waitForSelector("#subagent-workflow-pane .sw-node");
-    await wf.page.click("#sw-triggers");
+    // A connection opens the same panel and carries the shared title ramp (a
+    // node's head is a name field instead of a title).
+    await wf.page.evaluate(() =>
+      document.querySelector("#subagent-workflow-pane path.sw-edge")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await wf.page.waitForSelector(".sw-modal-backdrop:not([hidden]) .sw-dlg-title");
     const wfChrome = await chromeOf(wf.page, ".sw-modal-backdrop:not([hidden])", ".sw-modal", ".sw-dlg-title");
     const wfTokens = await tokenChrome(wf.page);
@@ -361,33 +365,29 @@ describe("popup design system (superdesign-alpha)", () => {
     assert.ok(layout.textareaHeight >= 140, `the message box takes the height left by the fields (${layout.textareaHeight}px)`);
     assert.ok(layout.bodyBottom - layout.actionsTop <= 1, "the body fills the space down to the actions row");
 
-    // The trigger form fills the same panel: schedule and its timing field side
-    // by side, the task box taking the height below them.
+    // The trigger fields now fill the start node's panel: schedule and its
+    // timing field side by side, with the event watch below them.
     await wf.page.keyboard.press("Escape");
-    await wf.page.click("#sw-triggers");
-    await wf.page.waitForSelector("#sw-tr-task");
+    await wf.page.click("#subagent-workflow-pane .sw-node.sw-t-start .sw-node-config");
+    await wf.page.waitForSelector("#sw-tr-mode");
     await wf.page.selectOption("#sw-tr-mode", "interval");
     const trg = await wf.page.evaluate(() => {
       const bodyEl = document.querySelector(".sw-dlg-body");
-      const bcs = getComputedStyle(bodyEl);
-      const body = bodyEl.getBoundingClientRect();
       const r = (sel) => document.querySelector(sel).getBoundingClientRect();
       const schedule = r(".sw-tr-schedule");
       const every = r("#sw-tr-interval");
-      const task = r("#sw-tr-task");
+      const event = r(".sw-tr-eventbox");
       return {
         overflowX: bodyEl.scrollWidth - bodyEl.clientWidth,
-        contentRight: Math.round(body.right - parseFloat(bcs.paddingRight)),
         scheduleTop: Math.round(schedule.top), scheduleRight: Math.round(schedule.right),
         everyTop: Math.round(every.top), everyLeft: Math.round(every.left),
-        taskHeight: Math.round(task.height), taskRight: Math.round(task.right),
+        eventTop: Math.round(event.top), scheduleBottom: Math.round(schedule.bottom),
       };
     });
     assert.ok(trg.overflowX <= 1, `the trigger form stays inside the panel (${trg.overflowX}px)`);
     assert.equal(trg.everyTop, trg.scheduleTop, "schedule and its timing field share a row");
     assert.ok(trg.everyLeft > trg.scheduleRight, "as two columns, not one stretched field");
-    assert.ok(trg.taskHeight >= 150, `and the task box takes the height below (${trg.taskHeight}px)`);
-    assert.equal(trg.taskRight, trg.contentRight, "the task box ends on the panel's content edge");
+    assert.ok(trg.eventTop >= trg.scheduleBottom - 1, "and the event watch sits below them");
 
     // A connection has no fields: its two endpoints span the panel as a flow,
     // with the note and the mono readout under it.

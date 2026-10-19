@@ -41,10 +41,10 @@ const GRAPH = {
     { path: "src/f.js", module: "src", loc: 10, status: null, add: 0, del: 0, fanIn: 1, fanOut: 0 },
   ],
   fileEdges: [
-    { from: "src/b.js", to: "src/a.js" },
-    { from: "src/c.js", to: "src/a.js" },
-    { from: "src/e.js", to: "src/b.js" },
-    { from: "src/c.js", to: "src/f.js" },
+    { from: "src/b.js", to: "src/a.js", specs: ["./a"] },
+    { from: "src/c.js", to: "src/a.js", specs: ["./a"] },
+    { from: "src/e.js", to: "src/b.js", specs: ["./b"] },
+    { from: "src/c.js", to: "src/f.js", specs: ["./f"] },
   ],
   changed: [
     { path: "src/d.js", module: "src", status: "added", loc: 10, add: 40, del: 0, fanIn: 0 },
@@ -77,7 +77,7 @@ afterEach(async () => {
 });
 
 /** Load the Review view with the fixture graph. */
-async function boot() {
+async function boot(graph = GRAPH) {
   context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   page = await context.newPage();
   pageErrors = [];
@@ -88,12 +88,25 @@ async function boot() {
     pageErrors.push(m.text());
   });
   await page.route("**/files/graph**", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(GRAPH) }));
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(graph) }));
   await page.goto(`${mock.base}/?token=test-token#view=files`, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("#diagram-svg .dnode");
   await sleep(300);
   return page;
 }
+
+/** A one-folder graph with enough files to force the folder to wrap rows. */
+const WRAP_GRAPH = {
+  ...GRAPH,
+  fileNodes: Array.from({ length: 30 }, (_, i) => ({
+    path: `src/f${String(i).padStart(2, "0")}.js`, module: "src", loc: 1,
+    status: null, add: 0, del: 0, fanIn: 0, fanOut: 0,
+  })),
+  fileEdges: [],
+  changed: [],
+  modules: [{ id: "src", label: "src", depth: 1, files: 30, loc: 30, changedFiles: 0, add: 0, del: 0, fanIn: 0, fanOut: 0, statuses: {} }],
+  stats: { files: 30, modules: 1, changedFiles: 0, add: 0, del: 0, truncated: false },
+};
 
 /** The floor as the DOM reads it: the classes the diagram paints. */
 const floor = () => page.evaluate(() => ({
@@ -108,29 +121,23 @@ const floor = () => page.evaluate(() => ({
 }));
 
 describe("review diagram", () => {
-  test("selecting a node outlines it; impact is what dims the floor and marks the blast radius", async () => {
+  test("clicking a node immediately marks only its dependents and the wires between them", async () => {
     await boot();
+    assert.equal(await page.isChecked("#diagram-impact"), true, "impact is on by default");
 
-    // A plain selection: outlined, floor still readable (this used to dim it all).
+    // A leaf: it has no dependents, so the floor is not dimmed and the readout
+    // still explains that the radius is empty.
     await page.click('#diagram-svg [data-node="src/d.js"]');
     await sleep(120);
-    const selected = await floor();
-    assert.equal(selected.selected, "src/d.js");
-    assert.equal(selected.dimmed, 0, "a selection alone does not dim the floor");
-    assert.deepEqual(selected.impacted, []);
-    assert.equal(selected.legend.includes("impact"), false, "no impact chip before the box is ticked");
+    const leaf = await floor();
+    assert.equal(leaf.selected, "src/d.js");
+    assert.deepEqual(leaf.impacted, []);
+    assert.equal(leaf.dimmed, 0, "an empty blast radius dims nothing");
+    assert.match(leaf.stats, /impact 0 dependents/);
+    assert.match(leaf.legend, /impact/);
 
-    // Impact on, but this node has no blast radius: nothing to highlight means
-    // nothing is dimmed either (the whole floor going grey with no red on it was
-    // the report: "the impacted boxes grey out along with the others").
-    await page.check("#diagram-impact");
-    await sleep(120);
-    const leafRadius = await floor();
-    assert.deepEqual(leafRadius.impacted, [], "nothing depends on d.js, so nothing is marked");
-    assert.equal(leafRadius.dimmed, 0, "an empty blast radius dims nothing");
-    assert.deepEqual(leafRadius.hotEdges, [], "and no edge is lit for it");
-    assert.match(leafRadius.stats, /impact 0 dependents/, "…which the readout still says");
-
+    // Clicking a file shows its transitive dependents and only the wires inside
+    // that radius; the map dims everything else.
     await page.click('#diagram-svg [data-node="src/a.js"]');
     await sleep(120);
     const impact = await floor();
@@ -140,13 +147,22 @@ describe("review diagram", () => {
     assert.deepEqual(impact.hotEdges, ["src/b.js→src/a.js", "src/c.js→src/a.js", "src/e.js→src/b.js"],
       "every hop of the radius is hot — and c.js→f.js is not, it leaves the radius");
     assert.match(impact.stats, /impact 3 dependents/, "the readout reports what impact found");
-    assert.match(impact.legend, /impact/, "the legend explains the red outline");
-    assert.match(impact.side, /impact · blast radius/, "the side panel reports it for the selected node");
+    assert.match(impact.side, /impact · blast radius/);
     assert.match(impact.side, /3 nodes depend on this/);
+    assert.match(impact.side, /wiring · imports/);
+    assert.match(impact.side, /wiring · dependents/);
 
-    // The radius has to be visible on a dimmed floor. An unchanged dependent
-    // takes the red tint; a changed one keeps its own status fill and is marked
-    // by the red ring alone (the tint would out-shout its git status).
+    // Wires carry the literal specifier that created them; the impact path's
+    // labels are emphasized along with the hot wires.
+    const labels = await page.evaluate(() => ({
+      all: [...document.querySelectorAll(".dedge-label")].map((el) => el.textContent).sort(),
+      hot: [...document.querySelectorAll(".dedge-label.hot")].map((el) => el.textContent).sort(),
+      shown: document.querySelectorAll(".dedge-label.show").length,
+    }));
+    assert.deepEqual(labels.all, ["./a", "./a", "./b", "./f"]);
+    assert.deepEqual(labels.hot, ["./a", "./a", "./b"]);
+    assert.equal(labels.shown, 4, "a small map shows every specifier");
+
     const paint = await page.evaluate(() => {
       const box = (sel) => getComputedStyle(document.querySelector(`#diagram-svg .dnode${sel} .dbox`));
       return {
@@ -157,19 +173,31 @@ describe("review diagram", () => {
     assert.equal(paint.plain.stroke, paint.changed.stroke, "both ends of the radius carry the red ring");
     assert.notEqual(paint.changed.fill, paint.plain.fill, "a changed dependent keeps its status fill");
 
-    // And off again: the floor reads normally, with the selection kept.
+    // Clicking a wire follows it to the imported file, opening that file's wiring.
+    await page.evaluate(() => document.querySelector('.dedge[data-from="src/c.js"][data-to="src/f.js"]')
+      .dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await sleep(120);
+    const wired = await floor();
+    assert.equal(wired.selected, "src/f.js", "a wire click navigates to the imported file");
+    assert.match(wired.side, /wiring · dependents/);
+
+    // Turning impact off leaves the wire selection and the readable floor.
     await page.uncheck("#diagram-impact");
     await sleep(120);
     const off = await floor();
     assert.deepEqual(off.impacted, []);
-    assert.equal(off.dimmed, 0, "unticking impact clears the dimming");
-    assert.equal(off.selected, "src/a.js", "the selection survives the toggle");
-    assert.equal(off.stats.includes("impact"), false);
+    assert.equal(off.dimmed, 0);
+    assert.equal(off.selected, "src/f.js", "the selection survives the toggle");
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
-  test("ticking impact with nothing selected highlights the review queue's top entry that has a radius", async () => {
+  test("re-enabling impact with nothing selected anchors on the top changed file that has a radius", async () => {
     await boot();
+    // Clear the selection (the background is the pan surface).
+    await page.click("#diagram-canvas", { position: { x: 6, y: 6 } });
+    await sleep(120);
+    assert.equal((await floor()).selected, null);
+    await page.uncheck("#diagram-impact");
     await page.check("#diagram-impact");
     await sleep(120);
 
@@ -178,10 +206,8 @@ describe("review diagram", () => {
       "src/d.js tops the review queue but nothing depends on it, so the next entry anchors the radius");
     assert.deepEqual(floorNow.impacted, ["src/b.js", "src/c.js", "src/e.js"]);
     assert.match(floorNow.stats, /impact 3 dependents/);
-    assert.match(floorNow.side, /highlighted on the floor/, "the side panel lists the radius it found");
+    assert.match(floorNow.side, /highlighted on the floor/);
 
-    // A node nothing depends on still says so, rather than looking like the toggle
-    // never ran.
     await page.click('#diagram-svg [data-node="src/d.js"]');
     await sleep(120);
     const leaf = await floor();
@@ -189,6 +215,25 @@ describe("review diagram", () => {
     assert.equal(leaf.dimmed, 0, "an empty blast radius dims nothing");
     assert.match(leaf.stats, /impact 0 dependents/);
     assert.match(leaf.side, /nothing on the floor depends on this/);
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a folder with many files wraps them inside its slot instead of one tall column", async () => {
+    await boot(WRAP_GRAPH);
+    const layout = await page.evaluate(() => {
+      const box = document.querySelector(".dfolder-box");
+      const nodes = [...document.querySelectorAll("#diagram-svg .dnode")];
+      const inside = nodes.filter((n) => {
+        const r = n.querySelector(".dbox").getBoundingClientRect();
+        const b = box.getBoundingClientRect();
+        return r.left >= b.left - 1 && r.right <= b.right + 1 && r.top >= b.top - 1 && r.bottom <= b.bottom + 1;
+      }).length;
+      return { height: Number(box.getAttribute("height")), nodes: nodes.length, inside };
+    });
+    assert.equal(layout.nodes, 30);
+    assert.equal(layout.inside, 30, "every file sits inside its folder slot");
+    assert.ok(layout.height < 30 * 22 * 0.6,
+      `30 files should wrap into a compact block, got ${layout.height}px tall`);
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 });

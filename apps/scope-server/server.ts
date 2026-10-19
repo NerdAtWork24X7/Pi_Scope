@@ -2442,7 +2442,8 @@ const GRAPH_JS_IMPORT_RES: RegExp[] = [
 // Extensions tried, in order, when resolving an extensionless JS/TS import.
 const GRAPH_JS_RESOLVE = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", ".json"];
 
-interface GraphFileNode { path: string; module: string; loc: number; imports: string[]; }
+interface GraphImportRef { to: string; spec: string; }
+interface GraphFileNode { path: string; module: string; loc: number; imports: string[]; importRefs: GraphImportRef[]; }
 interface GraphModule {
   id: string; label: string; depth: number; files: number; loc: number;
   changedFiles: number; add: number; del: number; fanIn: number; fanOut: number;
@@ -2539,34 +2540,36 @@ function resolveGraphGo(fromRel: string, spec: string, goModule: string | null, 
 }
 
 /** Extract resolved local imports from one source file (best-effort per language). */
-function extractGraphImports(rel: string, text: string, fileSet: Set<string>, dirIndex: Map<string, string>, goModule: string | null): string[] {
+function extractGraphImports(rel: string, text: string, fileSet: Set<string>, dirIndex: Map<string, string>, goModule: string | null): GraphImportRef[] {
   const ext = graphExt(rel);
-  const out = new Set<string>();
-  const add = (p: string | null) => { if (p && p !== rel) out.add(p); };
+  // Map resolved file → the specifier that pulled it in. The first spelling wins
+  // when a file is imported twice; the diagram shows that literal module path.
+  const out = new Map<string, string>();
+  const add = (p: string | null, spec: string) => { if (p && p !== rel && !out.has(p)) out.set(p, spec); };
   if (GRAPH_JS_EXTS.has(ext)) {
     for (const re of GRAPH_JS_IMPORT_RES) {
       re.lastIndex = 0;
       let m: RegExpExecArray | null;
-      while ((m = re.exec(text))) add(resolveGraphJs(rel, m[1], fileSet));
+      while ((m = re.exec(text))) add(resolveGraphJs(rel, m[1], fileSet), m[1]);
     }
   } else if (GRAPH_PY_EXTS.has(ext)) {
     let m: RegExpExecArray | null;
     const fromRe = /^\s*from\s+([.\w]+)\s+import\b/gm;
-    while ((m = fromRe.exec(text))) add(resolveGraphPy(rel, m[1], fileSet));
+    while ((m = fromRe.exec(text))) add(resolveGraphPy(rel, m[1], fileSet), m[1]);
     const impRe = /^\s*import\s+([.\w]+)/gm;
-    while ((m = impRe.exec(text))) add(resolveGraphPy(rel, m[1].split(".")[0], fileSet));
+    while ((m = impRe.exec(text))) add(resolveGraphPy(rel, m[1].split(".")[0], fileSet), m[1]);
   } else if (GRAPH_GO_EXTS.has(ext)) {
     let m: RegExpExecArray | null;
     const blockRe = /import\s*\(([\s\S]*?)\)/g;
     while ((m = blockRe.exec(text))) {
       const lineRe = /["`]([^"`]+)["`]/g;
       let n: RegExpExecArray | null;
-      while ((n = lineRe.exec(m[1]))) add(resolveGraphGo(rel, n[1], goModule, dirIndex));
+      while ((n = lineRe.exec(m[1]))) add(resolveGraphGo(rel, n[1], goModule, dirIndex), n[1]);
     }
     const oneRe = /^\s*import\s+(?:\w+\s+)?["`]([^"`]+)["`]/gm;
-    while ((m = oneRe.exec(text))) add(resolveGraphGo(rel, m[1], goModule, dirIndex));
+    while ((m = oneRe.exec(text))) add(resolveGraphGo(rel, m[1], goModule, dirIndex), m[1]);
   }
-  return [...out];
+  return [...out.entries()].map(([to, spec]) => ({ to, spec }));
 }
 
 /** Build the module dependency graph + change overlay for the Review diagram. */
@@ -2614,16 +2617,18 @@ function buildRepoGraph(absCwd: string): unknown {
         totalBytes += s.size;
       }
     } catch { /* unreadable — keep the node, no edges */ }
+    const importRefs = text ? extractGraphImports(rel, text, fileSet, dirIndex, goModule) : [];
     nodes.set(rel, {
       path: rel,
       module: graphDir(rel),
       loc: text ? text.split("\n").length : 0,
-      imports: text ? extractGraphImports(rel, text, fileSet, dirIndex, goModule) : [],
+      imports: importRefs.map((r) => r.to),
+      importRefs,
     });
   }
   // Changed non-source files (README, config…) still highlight their module.
   for (const p of statusMap.keys()) {
-    if (!nodes.has(p)) nodes.set(p, { path: p, module: graphDir(p), loc: 0, imports: [] });
+    if (!nodes.has(p)) nodes.set(p, { path: p, module: graphDir(p), loc: 0, imports: [], importRefs: [] });
   }
 
   // ── Aggregate file edges into module edges + file fan-in. ───────────────
@@ -2635,17 +2640,29 @@ function buildRepoGraph(absCwd: string): unknown {
   }
   const moduleIds = new Set(modFiles.keys());
   const edgeWeight = new Map<string, number>();
+  const moduleSpecs = new Map<string, Set<string>>();
   const fileFanIn = new Map<string, number>();
   const fileEdgeSet = new Set<string>();
+  const fileSpecs = new Map<string, Set<string>>();
   for (const n of nodes.values()) {
-    for (const imp of n.imports) {
+    for (const ref of n.importRefs) {
+      const imp = ref.to;
       if (imp === n.path || !moduleIds.has(graphDir(imp))) continue;
       fileFanIn.set(imp, (fileFanIn.get(imp) || 0) + 1);
-      if (fileEdgeSet.size < 6000) fileEdgeSet.add(n.path + "\u0000" + imp);
+      const fileKey = n.path + "\u0000" + imp;
+      if (fileEdgeSet.size < 6000) {
+        fileEdgeSet.add(fileKey);
+        let specs = fileSpecs.get(fileKey);
+        if (!specs) { specs = new Set(); fileSpecs.set(fileKey, specs); }
+        specs.add(ref.spec);
+      }
       const toMod = graphDir(imp);
       if (toMod === n.module) continue;
       const key = n.module + "\u0000" + toMod;
       edgeWeight.set(key, (edgeWeight.get(key) || 0) + 1);
+      let modSpecs = moduleSpecs.get(key);
+      if (!modSpecs) { modSpecs = new Set(); moduleSpecs.set(key, modSpecs); }
+      modSpecs.add(ref.spec);
     }
   }
   const fanInMod = new Map<string, number>();
@@ -2680,7 +2697,7 @@ function buildRepoGraph(absCwd: string): unknown {
 
   let edges = [...edgeWeight.entries()].map(([key, weight]) => {
     const [from, to] = key.split("\u0000");
-    return { from, to, weight };
+    return { from, to, weight, specs: [...(moduleSpecs.get(key) || [])].slice(0, 20) };
   });
   edges.sort((a, b) => b.weight - a.weight);
   if (edges.length > 5000) edges = edges.slice(0, 5000);
@@ -2719,7 +2736,7 @@ function buildRepoGraph(absCwd: string): unknown {
   });
   const fileEdges = [...fileEdgeSet].map((key) => {
     const [from, to] = key.split("\u0000");
-    return { from, to };
+    return { from, to, specs: [...(fileSpecs.get(key) || [])].slice(0, 12) };
   });
 
   return {

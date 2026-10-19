@@ -5,9 +5,13 @@
  * harness* — Claude Code (`claude -p`), Codex CLI (`codex exec`), Gemini CLI
  * (`gemini -p`), opencode, Aider, Cursor Agent, the app's own Pi runner, or a
  * user-typed shell command. Nodes are wired into a **fan-out DAG** between a
- * `start` node and an `end` node, and a run executes the graph **server-side, in
- * the background** — it keeps going with no page open, streaming each node's
- * output into the run log.
+ * a `start` node and an `end` node, and a run executes the graph **server-side,
+ * in the background** — it keeps going with no page open, streaming each node's
+ * output into the run log. A canvas may hold several start / end nodes: each
+ * start is its own entry point (with its own task and triggers), each end its
+ * own branch's final output, and a run walks only the branch its start reaches.
+ * A canvas can also carry **groups** — named frames around a set of nodes — so
+ * several workflows stay together, move as one, and fold out of the way.
  *
  * A **`loop` node** repeats a step `config.count` times, one pass after the
  * next. It has one input and two outputs: **Repeat** and **Exit**. Wiring
@@ -43,7 +47,8 @@
  *     name, bin, args, models }                          harness of the user's own
  *   GET  /subagent-workflow/run?cwd=<workspace>        → the workspace's live run
  *   GET  /subagent-workflow/history?cwd=[&id=]         → past runs, or one of them
- *   GET  /subagent-workflow/triggers?cwd=<workspace>   → schedule + event watch
+ *   GET  /subagent-workflow/triggers?cwd=[&nodeId=]  → one start node's schedule
+ *                                                        + event watch
  *   POST /subagent-workflow { action, cwd, … }         → graph edits
  *   POST /subagent-workflow/run { action, cwd, … }     → start / stop / approve / reject
  *   POST /subagent-workflow/triggers { cwd, … }        → arm or disarm triggers
@@ -61,11 +66,12 @@
  * the step needs without pasting it into the message. A relative path is resolved against the workspace
  * and canonicalised when it is added; a path that has since gone missing is
  * reported in the run log and marked "(not found)" in the block.
- * Every edit is validated server-side: one start / one end node, no self-loops,
- * no duplicate edges, no edges into the start or out of the end (both take any
- * number of connections in the other direction — that is how a graph fans out
- * and fans back in), and no cycles — except a loop's `repeat` output, which is
- * the one connection allowed to close a cycle because it is what a repeat *is*.
+ * Every edit is validated server-side: no self-loops, no duplicate edges, no
+ * edges into a start node or out of an end node (both take any number of
+ * connections in the other direction — that is how a graph fans out and fans
+ * back in), and no cycles — except a loop's `repeat` output, which is the one
+ * connection allowed to close a cycle because it is what a repeat *is*. Any
+ * number of start / end nodes may share a canvas, each managed separately.
  *
  * ── Run history ────────────────────────────────────────────────────────────
  * Every run is recorded in the project store when it starts and whenever it
@@ -75,10 +81,11 @@
  * than as a phantom live run.
  *
  * ── Triggers ───────────────────────────────────────────────────────────────
- * A workflow can start itself: an interval / daily **schedule** and a watch on
- * the live **event** stream, both stored with the workflow and armed from the
- * settings popup. A trigger only starts a run while the workspace is idle — a busy
- * workflow skips the occurrence instead of queueing one up.
+ * A start node can start its workflow itself: an interval / daily **schedule**
+ * and a watch on the live **event** stream, stored in that start node's own
+ * config and armed from its settings popup. Each start node triggers its own
+ * run, and a trigger only starts while the workspace is idle — a busy workflow
+ * skips the occurrence instead of queueing one up.
  *
  * ── Human-in-the-loop ──────────────────────────────────────────────────────
  * An `approval` node is a gate a person opens: when the run reaches one it
@@ -98,7 +105,8 @@
  * `retryDelaySec` between attempts) before the run treats it as an error.
  *
  * ── Execution model ─────────────────────────────────────────────────────────
- * A run walks the graph from the start node. A node runs the chosen harness in
+ * A run walks the graph from the start node it was started for. A node runs the
+ * chosen harness in
  * the workspace with a prompt built from its own template, where `{input}` is
  * the joined output of its upstream nodes and `{task}` is the run's task. An
  * agent node runs once its parents have settled (`join: all`, the default, or
@@ -142,6 +150,9 @@ const KEY = "workspaces";
 
 const MAX_NODES = 200;
 const MAX_EDGES = 400;
+/** Visual groups a canvas may carry. A group is a named frame around a set of
+ *  nodes — its own sub-workflow — that can be moved and folded as one. */
+const MAX_GROUPS = 50;
 /** A loop node's pass count is clamped to MAX_LOOPS. Nesting multiplies (an
  *  inner loop runs fully inside every pass of its parent), so a RUN also carries
  *  a total-pass budget — MAX_LOOP_PASSES across every loop — and is aborted with
@@ -744,6 +755,21 @@ function normaliseLoopConfig(raw: any) {
   };
 }
 
+/**
+ * A start node's config: its default task and its own **triggers** — the
+ * schedule / event watch that starts a run from this entry point. A graph may
+ * hold several start nodes, each with its own triggers and task, so one canvas
+ * can carry several independently managed workflows.
+ */
+function normaliseStartConfig(raw: any) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  return {
+    description: collapse(r.description).slice(0, DESC_MAX),
+    defaultTask: multiline(r.defaultTask).slice(0, PROMPT_MAX),
+    triggers: normaliseTriggerConfig(r.triggers),
+  };
+}
+
 function normaliseNode(raw: any, index: number) {
   if (!raw || typeof raw !== "object") return null;
   const type = NODE_TYPES.includes(String(raw.type)) ? String(raw.type) : null;
@@ -760,7 +786,8 @@ function normaliseNode(raw: any, index: number) {
   if (type === "agent") node.config = normaliseAgentConfig(r);
   else if (type === "approval") node.config = normaliseApprovalConfig(r);
   else if (type === "loop") node.config = normaliseLoopConfig(r);
-  else node.config = { description: collapse(r.description).slice(0, DESC_MAX), defaultTask: type === "start" ? multiline(r.defaultTask).slice(0, PROMPT_MAX) : undefined };
+  else if (type === "start") node.config = normaliseStartConfig(r);
+  else node.config = { description: collapse(r.description).slice(0, DESC_MAX) };
   return node;
 }
 
@@ -768,14 +795,10 @@ function normaliseNodes(raw: any) {
   if (!Array.isArray(raw)) return [];
   const out: any[] = [];
   const seen = new Set<string>();
-  let sawStart = false;
-  let sawEnd = false;
   for (const item of raw) {
     if (out.length >= MAX_NODES) break;
     const node = normaliseNode(item, out.length);
     if (!node || seen.has(node.id)) continue;
-    if (node.type === "start") { if (sawStart) continue; sawStart = true; }
-    if (node.type === "end") { if (sawEnd) continue; sawEnd = true; }
     seen.add(node.id);
     out.push(node);
   }
@@ -810,6 +833,56 @@ function normaliseEdges(raw: any, nodes: any[]) {
   return out;
 }
 
+/**
+ * The canvas's **groups**: named frames that hold a set of nodes, so several
+ * workflows on one canvas can be kept together and folded away. Membership is
+ * stored on the group (`nodeIds`), and a node belongs to at most one group —
+ * an imported file that says otherwise is trimmed here, in order, so the first
+ * claim wins. Positions are the frame's anchor: the top-left of its header (or
+ * of its collapsed chip). An expanded frame's box is measured from its members
+ * by the client, so it always wraps what it holds.
+ */
+function normaliseGroups(raw: any, nodes: any[]) {
+  if (!Array.isArray(raw)) return [];
+  const known = new Set(nodes.map((n: any) => n.id));
+  const used = new Set<string>();
+  const ids = new Set<string>();
+  const out: any[] = [];
+  for (const item of raw) {
+    if (out.length >= MAX_GROUPS) break;
+    if (!item || typeof item !== "object") continue;
+    const id = String(item.id ?? "").trim() || `group_${out.length + 1}`;
+    if (ids.has(id)) continue;
+    const nodeIds: string[] = [];
+    for (const member of Array.isArray(item.nodeIds) ? item.nodeIds : []) {
+      const nid = String(member ?? "").trim();
+      if (!nid || !known.has(nid) || used.has(nid) || nodeIds.includes(nid)) continue;
+      used.add(nid);
+      nodeIds.push(nid);
+    }
+    ids.add(id);
+    const group: any = {
+      id,
+      name: collapse(item.name).slice(0, NAME_MAX) || `Group ${out.length + 1}`,
+      x: clamp(Number(item.x), 0, CANVAS_MAX),
+      y: clamp(Number(item.y), 0, CANVAS_MAX),
+      collapsed: item.collapsed === true,
+      // Older canvases predate the lock; a missing flag means resizable, so
+      // they keep behaving exactly as before.
+      resizable: item.resizable !== false,
+      nodeIds,
+    };
+    // A manually resized frame keeps its own box; without one the client
+    // measures the frame from its members. Both sides are clamped so a hand-
+    // edited file cannot produce a zero-sized or off-canvas frame.
+    const w = Number(item.w), h = Number(item.h);
+    if (Number.isFinite(w) && w > 0) group.w = clamp(w, 160, CANVAS_MAX);
+    if (Number.isFinite(h) && h > 0) group.h = clamp(h, 100, CANVAS_MAX);
+    out.push(group);
+  }
+  return out;
+}
+
 function normaliseState(raw: any) {
   const r = raw && typeof raw === "object" ? raw : {};
   const nodes = normaliseNodes(r.nodes);
@@ -817,6 +890,7 @@ function normaliseState(raw: any) {
     name: collapse(r.name).slice(0, NAME_MAX) || "My Workflow",
     nodes,
     edges: normaliseEdges(r.edges, nodes),
+    groups: normaliseGroups(r.groups, nodes),
   };
 }
 
@@ -825,7 +899,7 @@ function seedState() {
   return normaliseState({
     name: "My Workflow",
     nodes: [
-      { id: "node_start", type: "start", name: "Start", x: 80, y: 240, config: { description: "", defaultTask: "" } },
+      { id: "node_start", type: "start", name: "Start", x: 80, y: 240, config: { description: "", defaultTask: "", triggers: {} } },
       {
         id: "node_agent_1", type: "agent", name: "claude", x: 360, y: 200,
         config: {
@@ -892,6 +966,7 @@ function summariseRun(rec: any) {
     task: String(rec?.task ?? ""),
     startedAt: rec?.startedAt ?? null,
     finishedAt: rec?.finishedAt ?? null,
+    startId: rec?.startId ?? null,
     interrupted: rec?.interrupted === true,
     nodes: states.length,
     done: states.filter((s) => s?.status === "done").length,
@@ -993,7 +1068,29 @@ export function activate(api: any): void {
   function readState(workspace: string) {
     const store = storeFor(workspace);
     const all = readStoreAll(workspace);
-    if (workspace in all) return normaliseState(all[workspace]);
+    if (workspace in all) {
+      const raw = all[workspace];
+      const state = normaliseState(raw);
+      // Older builds kept one trigger per workspace. It now belongs to a start
+      // node, so fold it into the first start node — but only for a graph that
+      // predates start-node triggers. A graph that already carries them owns its
+      // own state (including "off"), and the legacy record is retired so turning
+      // a trigger off cannot resurrect it on the next read.
+      const legacy = readLegacyTriggerConfig(workspace);
+      const rawStarts = Array.isArray(raw?.nodes) ? raw.nodes.filter((n: any) => n?.type === "start") : [];
+      const graphOwnsTriggers = rawStarts.some((n: any) =>
+        n?.config && typeof n.config === "object" && Object.prototype.hasOwnProperty.call(n.config, "triggers"));
+      if (legacy) {
+        if (!graphOwnsTriggers && triggerArmed(legacy)) {
+          const start = state.nodes.find((n: any) => n.type === "start");
+          if (start) start.config = { ...(start.config || {}), triggers: legacy };
+          all[workspace] = state;
+          store.set(KEY, all);
+        }
+        dropLegacyTriggerConfig(workspace);
+      }
+      return state;
+    }
     const moved = globalBucket(workspace);
     const seeded = moved !== undefined ? normaliseState(moved) : seedState();
     all[workspace] = seeded;
@@ -1364,6 +1461,7 @@ export function activate(api: any): void {
     }
     return {
       id: run.id, status: run.status, task: run.task,
+      startId: run.startId || null,
       startedAt: run.startedAt, finishedAt: run.finishedAt || null,
       seq: run.seq, nodes,
       log: incremental ? run.log.filter((l: any) => l.seq > since) : run.log.slice(-200),
@@ -1474,20 +1572,56 @@ export function activate(api: any): void {
   function writeIndex(list: string[]): void {
     api.store.set(TRIGGER_INDEX_KEY, [...new Set(list)].slice(0, 200));
   }
-  function readTriggerConfig(workspace: string): any {
+  /** The old workspace-level trigger record, read only to migrate it. */
+  function readLegacyTriggerConfig(workspace: string): any {
     const all = storeFor(workspace).get(TRIGGER_KEY, {});
     const cfg = all && typeof all === "object" ? all[workspace] : null;
     return cfg ? normaliseTriggerConfig(cfg) : null;
   }
-  function writeTriggerConfig(workspace: string, cfg: any): void {
+  /** Drop the old workspace-level trigger record once the graph owns it. */
+  function dropLegacyTriggerConfig(workspace: string): void {
     const store = storeFor(workspace);
     const all = store.get(TRIGGER_KEY, {});
-    const next = all && typeof all === "object" ? all : {};
-    next[workspace] = cfg;
-    store.set(TRIGGER_KEY, next);
+    if (all && typeof all === "object" && workspace in all) {
+      delete all[workspace];
+      store.set(TRIGGER_KEY, all);
+    }
   }
-  const triggersFor = (workspace: string) =>
-    publicTrigger(readTriggerConfig(workspace) || normaliseTriggerConfig({}));
+
+  /** The start node a trigger call means: `nodeId` when given, else the first. */
+  function startNodeFor(workspace: string, nodeId?: string | null): any {
+    const state = readState(workspace);
+    const starts = state.nodes.filter((n: any) => n.type === "start");
+    if (nodeId) return starts.find((n: any) => n.id === nodeId) || null;
+    return starts[0] || null;
+  }
+
+  /** One start node's triggers (defaults when it has never been configured). */
+  function readTriggerConfig(workspace: string, nodeId?: string | null): any {
+    const start = startNodeFor(workspace, nodeId);
+    if (start) return normaliseTriggerConfig(start.config?.triggers);
+    // A graph with no start node has nowhere for a trigger to live; this is the
+    // shape the client's form and the trigger index expect.
+    return normaliseTriggerConfig({});
+  }
+
+  /** Write one start node's triggers, preserving every other node's config. */
+  function writeTriggerConfig(workspace: string, cfg: any, nodeId?: string | null): any {
+    const next = normaliseTriggerConfig(cfg);
+    let found = false;
+    const state = commit(workspace, (current) => {
+      const starts = current.nodes.filter((n: any) => n.type === "start");
+      const start = nodeId ? starts.find((n: any) => n.id === nodeId) : starts[0];
+      if (!start) return current;
+      found = true;
+      start.config = { ...(start.config || {}), triggers: next };
+      return current;
+    });
+    return found ? next : null;
+  }
+
+  const triggersFor = (workspace: string, nodeId?: string | null) =>
+    publicTrigger(readTriggerConfig(workspace, nodeId));
 
   const scheduleDue = (cfg: any, now: number): boolean => {
     const { mode, everySeconds, at } = cfg.schedule;
@@ -1504,19 +1638,21 @@ export function activate(api: any): void {
     return false;
   };
 
-  const startNodeTask = (workspace: string) =>
-    readState(workspace).nodes.find((n: any) => n.type === "start")?.config?.defaultTask ?? "";
+  const startNodeTask = (workspace: string, startId?: string | null) => {
+    const start = startNodeFor(workspace, startId);
+    return start?.config?.defaultTask ?? "";
+  };
 
-  /** Start a run for `workspace` unless one is already in flight. */
-  async function fireTrigger(workspace: string, reason: string): Promise<boolean> {
+  /** Start a run for `workspace` from one start node, unless one is in flight. */
+  async function fireTrigger(workspace: string, reason: string, startId?: string | null): Promise<boolean> {
     const live = RUNS.get(workspace);
     if (live && live.status === "running") {
       api.log(`trigger skipped for ${workspace}: a run is already in progress`);
       return false;
     }
-    const cfg = readTriggerConfig(workspace);
+    const cfg = readTriggerConfig(workspace, startId);
     try {
-      const run = await startRun(workspace, cfg?.task || startNodeTask(workspace));
+      const run = await startRun(workspace, cfg?.task || startNodeTask(workspace, startId), startId || undefined);
       logLine(run, null, "status", `⚡ started by ${reason}`);
       saveRun(run);
       return true;
@@ -1530,26 +1666,35 @@ export function activate(api: any): void {
     if (disposed) return;
     const now = Date.now();
     for (const workspace of indexedWorkspaces()) {
-      let cfg: any;
-      try { cfg = readTriggerConfig(workspace); } catch { continue; }
-      if (!triggerArmed(cfg)) continue;
-      if (cfg.schedule.mode === "interval" && !cfg.lastScheduleAt) {
-        // Armed just now (or on a fresh boot): the clock starts here, not at 0.
+      let state: any;
+      try { state = readState(workspace); } catch { continue; }
+      for (const start of state.nodes.filter((n: any) => n.type === "start")) {
+        const cfg = normaliseTriggerConfig(start.config?.triggers);
+        if (!triggerArmed(cfg)) continue;
+        if (cfg.schedule.mode === "interval" && !cfg.lastScheduleAt) {
+          // Armed just now (or on a fresh boot): the clock starts here, not at 0.
+          cfg.lastScheduleAt = now;
+          writeTriggerConfig(workspace, cfg, start.id);
+          continue;
+        }
+        if (!scheduleDue(cfg, now)) continue;
+        // Claimed before the async start, so a slow run cannot double-fire.
         cfg.lastScheduleAt = now;
-        writeTriggerConfig(workspace, cfg);
-        continue;
+        writeTriggerConfig(workspace, cfg, start.id);
+        void fireTrigger(workspace, `schedule (${cfg.schedule.mode})`, start.id);
+        // One workspace has one live run: the next due start waits for it
+        // (and is skipped, exactly like any other busy trigger).
+        break;
       }
-      if (!scheduleDue(cfg, now)) continue;
-      // Claimed before the async start, so a slow run cannot double-fire.
-      cfg.lastScheduleAt = now;
-      writeTriggerConfig(workspace, cfg);
-      void fireTrigger(workspace, `schedule (${cfg.schedule.mode})`);
     }
   }
 
   function anyTriggerArmed(): boolean {
     return indexedWorkspaces().some((ws) => {
-      try { return triggerArmed(readTriggerConfig(ws)); } catch { return false; }
+      try {
+        return readState(ws).nodes.some((n: any) =>
+          n.type === "start" && triggerArmed(normaliseTriggerConfig(n.config?.triggers)));
+      } catch { return false; }
     });
   }
   function syncTriggerTimer(): void {
@@ -1563,20 +1708,39 @@ export function activate(api: any): void {
     }
   }
 
+  /**
+   * Keep the install-level trigger index (and its ticker) in step with a
+   * workspace's start nodes after an edit. A workspace is indexed while *any* of
+   * its start nodes has an armed trigger; the ticker reads the graph itself, so
+   * removing one start node's trigger never silently disarms another's.
+   */
+  function syncTriggerIndex(workspace: string, state: any): void {
+    const armed = (state?.nodes || []).some((n: any) =>
+      n.type === "start" && triggerArmed(normaliseTriggerConfig(n.config?.triggers)));
+    const others = indexedWorkspaces().filter((w) => w !== workspace);
+    writeIndex(armed ? [...others, workspace] : others);
+    syncTriggerTimer();
+  }
+
   // A live event from a workspace with an armed event trigger starts a run. The
   // debounce is claimed synchronously so a burst of events starts one run, not N.
   api.onEvent?.((evt: any) => {
     try {
       const workspace = resolveProjectDir(evt?.cwd ? String(evt.cwd) : null);
       if (!workspace || !indexedWorkspaces().includes(workspace)) return;
-      const cfg = readTriggerConfig(workspace);
-      if (!cfg || !cfg.event.enabled) return;
-      if (cfg.event.types.length && !cfg.event.types.includes(String(evt.type))) return;
       const now = Date.now();
-      if (now - (cfg.lastEventAt || 0) < TRIGGER_EVENT_DEBOUNCE_MS) return;
-      cfg.lastEventAt = now;
-      writeTriggerConfig(workspace, cfg);
-      void fireTrigger(workspace, `event:${evt.type}`);
+      for (const start of readState(workspace).nodes.filter((n: any) => n.type === "start")) {
+        const cfg = normaliseTriggerConfig(start.config?.triggers);
+        if (!cfg.event.enabled) continue;
+        if (cfg.event.types.length && !cfg.event.types.includes(String(evt.type))) continue;
+        if (now - (cfg.lastEventAt || 0) < TRIGGER_EVENT_DEBOUNCE_MS) continue;
+        cfg.lastEventAt = now;
+        writeTriggerConfig(workspace, cfg, start.id);
+        void fireTrigger(workspace, `event:${evt.type}`, start.id);
+        // One workspace has one live run; another matching start is left for
+        // the next event rather than racing this one.
+        return;
+      }
     } catch (err: any) {
       api.log(`event trigger failed: ${err?.message ?? err}`);
     }
@@ -1611,15 +1775,17 @@ export function activate(api: any): void {
     saveRun(run);
   }
 
-  async function startRun(workspace: string, task: string) {
+  async function startRun(workspace: string, task: string, startId?: string) {
     const existing = RUNS.get(workspace);
     if (existing && existing.status === "running") throw new Error("a workflow run is already in progress");
     const wf = readState(workspace);
-    const start = wf.nodes.find((n: any) => n.type === "start");
-    if (!start) throw new Error("the workflow has no start node");
+    const start = startId
+      ? wf.nodes.find((n: any) => n.type === "start" && n.id === startId)
+      : wf.nodes.find((n: any) => n.type === "start");
+    if (!start) throw new Error(startId ? "no such start node" : "the workflow has no start node");
     const run: any = {
       id: `run_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`,
-      workspace, status: "running", task, startedAt: Date.now(), finishedAt: 0, seq: 0,
+      workspace, startId: start.id, status: "running", task, startedAt: Date.now(), finishedAt: 0, seq: 0,
       nodes: {}, log: [], children: new Set<any>(), sessions: new Set<string>(),
     };
     for (const n of wf.nodes) {
@@ -1655,8 +1821,12 @@ export function activate(api: any): void {
       children.get(e.from)?.push(e.to);
       if (e.port !== "repeat") deps.get(e.to)?.push(e.from);
     }
-    // Reachability: only what the start node can reach is executed.
-    const start = wf.nodes.find((n: any) => n.type === "start");
+    // Reachability: only what this run's start node can reach is executed. A
+    // canvas may hold several start / end pairs; a run from one start leaves
+    // every other entry point and its branch alone.
+    const start = (run.startId && wf.nodes.find((n: any) => n.id === run.startId))
+      || wf.nodes.find((n: any) => n.type === "start");
+    if (!start) throw new Error("the workflow has no start node");
     const reachable = new Set<string>();
     const queue = [start.id];
     while (queue.length) {
@@ -2494,8 +2664,11 @@ export function activate(api: any): void {
       // A loop between passes spawns no process, so it is not in `running` — but
       // the run is not over until its section has run its last pass.
       if (loopBusy()) return;
-      const end = wf.nodes.find((n: any) => n.type === "end");
-      const endSettled = !!(end && reachable.has(end.id) && settled(end.id));
+      // Every end node this run can reach must settle. Several end nodes may
+      // exist on one canvas (one per independently managed workflow); this run
+      // only waits for the ones its own start branch reaches.
+      const ends = wf.nodes.filter((n: any) => n.type === "end" && reachable.has(n.id));
+      const endSettled = ends.length > 0 && ends.every((n: any) => settled(n.id));
       // "Unsettled" covers a node that is still eligible *and* one parked on an
       // approval gate — otherwise a paused run would be declared finished.
       const anyUnsettled = wf.nodes.some((n: any) => {
@@ -2534,14 +2707,18 @@ export function activate(api: any): void {
 
   api.route("GET", "/subagent-workflow/triggers", (ctx: any) => {
     const workspace = workspaceOf(ctx.url.searchParams.get("cwd"));
-    return { workspace, triggers: triggersFor(workspace) };
+    const nodeId = ctx.url.searchParams.get("nodeId") || ctx.url.searchParams.get("startId");
+    return { workspace, nodeId: nodeId || null, triggers: triggersFor(workspace, nodeId) };
   });
 
   api.route("POST", "/subagent-workflow/triggers", async (ctx: any) => {
     let body: any;
     try { body = await parseBody(ctx); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
     const workspace = workspaceOf(body?.cwd);
-    const previous = readTriggerConfig(workspace);
+    const nodeId = String(body?.nodeId ?? body?.startId ?? "").trim() || null;
+    const start = startNodeFor(workspace, nodeId);
+    if (!start) return jsonResponse({ error: nodeId ? "no such start node" : "the workflow has no start node" }, 404);
+    const previous = readTriggerConfig(workspace, start.id);
     const next = normaliseTriggerConfig({
       schedule: body?.schedule,
       event: body?.event,
@@ -2551,11 +2728,9 @@ export function activate(api: any): void {
       lastScheduleAt: Date.now(),
       lastEventAt: previous?.lastEventAt || 0,
     });
-    writeTriggerConfig(workspace, next);
-    const others = indexedWorkspaces().filter((w) => w !== workspace);
-    writeIndex(triggerArmed(next) ? [...others, workspace] : others);
-    syncTriggerTimer();
-    return jsonResponse({ workspace, triggers: publicTrigger(next) });
+    writeTriggerConfig(workspace, next, start.id);
+    syncTriggerIndex(workspace, readState(workspace));
+    return jsonResponse({ workspace, nodeId: start.id, triggers: publicTrigger(next) });
   });
 
   // The run history: a list of summaries, or one run's full record with `?id=`.
@@ -2732,10 +2907,17 @@ export function activate(api: any): void {
     if (action === "start") {
       // There is no run-level task box any more: an explicit task (a trigger, or
       // an API client) still wins, and otherwise the run's material is the start
-      // node's own default task — each node's message is its real prompt.
-      const task = multiline(body.task).slice(0, PROMPT_MAX) || startNodeTask(workspace);
+      // node's own default task — each node's message is its real prompt. A
+      // canvas may hold several start nodes, so the caller names the one to run
+      // from (the client sends the selected start, if any).
+      const startId = String(body.startId ?? body.nodeId ?? "").trim() || undefined;
+      if (startId) {
+        const start = startNodeFor(workspace, startId);
+        if (!start) return jsonResponse({ error: "no such start node" }, 404);
+      }
+      const task = multiline(body.task).slice(0, PROMPT_MAX) || startNodeTask(workspace, startId);
       try {
-        const run = await startRun(workspace, task);
+        const run = await startRun(workspace, task, startId);
         return jsonResponse({ workspace, run: publicRun(run) });
       } catch (err: any) {
         return jsonResponse({ error: String(err?.message ?? err) }, 409);
@@ -2780,26 +2962,158 @@ export function activate(api: any): void {
       case "addNode": {
         const type = NODE_TYPES.includes(String(body.type)) ? String(body.type) : "agent";
         let full = false;
-        let exists = false;
         const state = commit(workspace, (current) => {
           if (current.nodes.length >= MAX_NODES) { full = true; return current; }
-          if (type === "start" && current.nodes.some((n: any) => n.type === "start")) { exists = true; return current; }
-          if (type === "end" && current.nodes.some((n: any) => n.type === "end")) { exists = true; return current; }
           const node: any = {
             id: nextId("node"), type,
-            name: type === "start" ? "Start" : type === "end" ? "End" : type === "approval" ? "Approval" : type === "loop" ? "Loop" : "agent",
+            // Several starts / ends may share a canvas: each start is its own
+            // entry point (with its own triggers and task), each end its own
+            // final output, so a name alone would be ambiguous.
+            name: type === "start"
+              ? `Start ${current.nodes.filter((n: any) => n.type === "start").length + 1}`
+              : type === "end"
+                ? `End ${current.nodes.filter((n: any) => n.type === "end").length + 1}`
+                : type === "approval" ? "Approval" : type === "loop" ? "Loop" : "agent",
             x: clamp(Number(body.x), 0, CANVAS_MAX), y: clamp(Number(body.y), 0, CANVAS_MAX),
           };
           node.config = type === "agent" ? normaliseAgentConfig({})
             : type === "approval" ? normaliseApprovalConfig({})
             : type === "loop" ? normaliseLoopConfig({})
-            : { description: "", defaultTask: "" };
+            : type === "start" ? normaliseStartConfig({})
+            : { description: "" };
           current.nodes.push(node);
           return current;
         });
         if (full) return jsonResponse({ error: `the canvas is full (${MAX_NODES} nodes)` }, 400);
-        if (exists) return jsonResponse({ error: `the workflow already has a ${type} node` }, 409);
         return jsonResponse(state);
+      }
+
+      // ── Groups (named frames around a set of nodes) ───────────────────────
+      // A group is how several workflows share one canvas without becoming one
+      // tangle: its members move together, and the whole frame folds to a chip.
+      case "addGroup": {
+        const name = collapse(body.name).slice(0, NAME_MAX);
+        const wanted = Array.isArray(body.nodeIds) ? body.nodeIds : [];
+        let full = false;
+        const state = commit(workspace, (current) => {
+          if (current.groups.length >= MAX_GROUPS) { full = true; return current; }
+          const ids: string[] = [];
+          for (const raw of wanted) {
+            const id = String(raw ?? "").trim();
+            if (!id || ids.includes(id)) continue;
+            if (current.nodes.some((n: any) => n.id === id)) ids.push(id);
+          }
+          // A node belongs to at most one group: grouping it again moves it.
+          if (ids.length) {
+            for (const g of current.groups) g.nodeIds = (g.nodeIds || []).filter((id: string) => !ids.includes(id));
+          }
+          const first = current.nodes.find((n: any) => n.id === ids[0]);
+          const wantX = Number(body.x), wantY = Number(body.y);
+          current.groups.push({
+            id: nextId("group"),
+            name: name || `Group ${current.groups.length + 1}`,
+            // No position given (grouping a selection): sit just above/left of
+            // its first member, so the frame wraps the selection from the start.
+            x: clamp(Number.isFinite(wantX) ? wantX : first ? first.x - 24 : 120, 0, CANVAS_MAX),
+            y: clamp(Number.isFinite(wantY) ? wantY : first ? Math.max(0, first.y - 52) : 120, 0, CANVAS_MAX),
+            collapsed: false,
+            resizable: true,
+            nodeIds: ids,
+          });
+          return current;
+        });
+        if (full) return jsonResponse({ error: `the canvas is full (${MAX_GROUPS} groups)` }, 400);
+        return jsonResponse(state);
+      }
+
+      case "updateGroup": {
+        const id = String(body.id ?? "").trim();
+        if (!id) return jsonResponse({ error: "missing id" }, 400);
+        const name = body.name == null ? null : collapse(body.name).slice(0, NAME_MAX);
+        if (name != null && !name) return jsonResponse({ error: "a group needs a name" }, 400);
+        let found = false;
+        const state = commit(workspace, (current) => {
+          const g = current.groups.find((x: any) => x.id === id);
+          if (!g) return current;
+          found = true;
+          if (name != null) g.name = name;
+          if (body.collapsed != null) g.collapsed = body.collapsed === true;
+          if (body.resizable != null) g.resizable = body.resizable === true;
+          // A frame the user has resized carries its own top-left and size. `w`
+          // or `h` sent as null clears the override and lets the client fit the
+          // frame back around its members.
+          if (body.x != null) g.x = clamp(Number(body.x), 0, CANVAS_MAX);
+          if (body.y != null) g.y = clamp(Number(body.y), 0, CANVAS_MAX);
+          for (const key of ["w", "h"] as const) {
+            if (!(key in body)) continue;
+            if (body[key] == null) { delete g[key]; continue; }
+            const size = Number(body[key]);
+            if (Number.isFinite(size) && size > 0) {
+              g[key] = clamp(size, key === "w" ? 160 : 100, CANVAS_MAX);
+            }
+          }
+          // The whole membership list, when one is given: nodes left out are
+          // ungrouped, and a node claimed here leaves any other group.
+          if (Array.isArray(body.nodeIds)) {
+            const ids: string[] = [];
+            for (const raw of body.nodeIds) {
+              const nid = String(raw ?? "").trim();
+              if (!nid || ids.includes(nid)) continue;
+              if (current.nodes.some((n: any) => n.id === nid)) ids.push(nid);
+            }
+            for (const other of current.groups) {
+              if (other !== g) other.nodeIds = (other.nodeIds || []).filter((nid: string) => !ids.includes(nid));
+            }
+            g.nodeIds = ids;
+          }
+          return current;
+        });
+        if (!found) return jsonResponse({ error: "no such group" }, 404);
+        return jsonResponse(state);
+      }
+
+      case "moveGroup": {
+        const id = String(body.id ?? "").trim();
+        if (!id) return jsonResponse({ error: "missing id" }, 400);
+        const wantDx = Number(body.dx), wantDy = Number(body.dy);
+        if (!Number.isFinite(wantDx) || !Number.isFinite(wantDy)) {
+          return jsonResponse({ error: "missing dx/dy" }, 400);
+        }
+        let found = false;
+        const state = commit(workspace, (current) => {
+          const g = current.groups.find((x: any) => x.id === id);
+          if (!g) return current;
+          found = true;
+          const members = current.nodes.filter((n: any) => (g.nodeIds || []).includes(n.id));
+          let dx = wantDx, dy = wantDy;
+          // Clamp the whole move so the frame's box (not each node separately)
+          // stops at the canvas edge instead of collapsing in on itself.
+          if (members.length) {
+            const minX = Math.min(...members.map((n: any) => n.x));
+            const maxX = Math.max(...members.map((n: any) => n.x));
+            const minY = Math.min(...members.map((n: any) => n.y));
+            const maxY = Math.max(...members.map((n: any) => n.y));
+            dx = clamp(dx, -minX, CANVAS_MAX - maxX);
+            dy = clamp(dy, -minY, CANVAS_MAX - maxY);
+          }
+          for (const n of members) { n.x = clamp(n.x + dx, 0, CANVAS_MAX); n.y = clamp(n.y + dy, 0, CANVAS_MAX); }
+          g.x = clamp(g.x + dx, 0, CANVAS_MAX);
+          g.y = clamp(g.y + dy, 0, CANVAS_MAX);
+          return current;
+        });
+        if (!found) return jsonResponse({ error: "no such group" }, 404);
+        return jsonResponse(state);
+      }
+
+      case "removeGroup": {
+        const id = String(body.id ?? "").trim();
+        if (!id) return jsonResponse({ error: "missing id" }, 400);
+        return jsonResponse(commit(workspace, (current) => {
+          // Ungrouping keeps the nodes: a group is a frame, not a container
+          // that owns the work inside it.
+          current.groups = current.groups.filter((g: any) => g.id !== id);
+          return current;
+        }));
       }
 
       case "updateNode": {
@@ -2808,6 +3122,7 @@ export function activate(api: any): void {
         const name = body.name == null ? null : collapse(body.name).slice(0, NAME_MAX);
         if (name != null && !name) return jsonResponse({ error: "a node needs a name" }, 400);
         let found = false;
+        let triggersChanged = false;
         const state = commit(workspace, (current) => {
           const node = current.nodes.find((n: any) => n.id === id);
           if (!node) return current;
@@ -2855,16 +3170,34 @@ export function activate(api: any): void {
                 enabled: patch.enabled != null ? patch.enabled : node.config.enabled,
                 when: patch.when != null ? patch.when : node.config.when,
               });
+            } else if (node.type === "start") {
+              // A start node owns the triggers that start runs from it. Saving
+              // the form re-bases the schedule on `now`, so switching a trigger
+              // on never fires a catch-up run on the next tick.
+              const prev = node.config || {};
+              const hasNewTriggers = patch.triggers != null;
+              if (hasNewTriggers) triggersChanged = true;
+              node.config = normaliseStartConfig({
+                description: patch.description != null ? patch.description : prev.description,
+                defaultTask: patch.defaultTask != null ? patch.defaultTask : prev.defaultTask,
+                triggers: hasNewTriggers
+                  ? {
+                      ...(patch.triggers && typeof patch.triggers === "object" ? patch.triggers : {}),
+                      lastScheduleAt: Date.now(),
+                      lastEventAt: prev.triggers?.lastEventAt || 0,
+                    }
+                  : prev.triggers,
+              });
             } else {
               node.config = {
                 description: collapse(patch.description != null ? patch.description : node.config.description).slice(0, DESC_MAX),
-                defaultTask: node.type === "start" ? multiline(patch.defaultTask != null ? patch.defaultTask : node.config.defaultTask).slice(0, PROMPT_MAX) : undefined,
               };
             }
           }
           return current;
         });
         if (!found) return jsonResponse({ error: "no such node" }, 404);
+        if (triggersChanged) syncTriggerIndex(workspace, state);
         return jsonResponse(state);
       }
 
@@ -2887,11 +3220,16 @@ export function activate(api: any): void {
       case "removeNode": {
         const id = String(body.id ?? "").trim();
         if (!id) return jsonResponse({ error: "missing id" }, 400);
-        return jsonResponse(commit(workspace, (current) => {
+        const state = commit(workspace, (current) => {
           current.nodes = current.nodes.filter((n: any) => n.id !== id);
           current.edges = current.edges.filter((e: any) => e.from !== id && e.to !== id);
+          // A removed node leaves its group frame; an empty frame stays, so it
+          // can be filled again rather than vanishing under the user.
+          for (const g of current.groups) g.nodeIds = (g.nodeIds || []).filter((nid: string) => nid !== id);
           return current;
-        }));
+        });
+        syncTriggerIndex(workspace, state);
+        return jsonResponse(state);
       }
 
       case "duplicateNode": {
@@ -2902,8 +3240,9 @@ export function activate(api: any): void {
         const before = readState(workspace);
         const src = before.nodes.find((n: any) => n.id === id);
         if (!src) return jsonResponse({ error: "no such node" }, 404);
-        // A graph has exactly one start and one end, so only the repeatable
-        // kinds (agents, approval gates and loops) clone.
+        // Start / end nodes are entry / exit points a user adds deliberately
+        // (each start owns its own triggers), so only the repeatable kinds
+        // (agents, approval gates and loops) clone.
         if (src.type !== "agent" && src.type !== "approval" && src.type !== "loop") {
           return jsonResponse({ error: "only agent, approval and loop nodes can be duplicated" }, 409);
         }
@@ -2918,6 +3257,9 @@ export function activate(api: any): void {
           copy.x = clamp(from.x + 40, 0, CANVAS_MAX);
           copy.y = clamp(from.y + 60, 0, CANVAS_MAX);
           current.nodes.push(copy);
+          // A clone of a grouped node joins the same frame, beside its source.
+          const owner = current.groups.find((g: any) => (g.nodeIds || []).includes(id));
+          if (owner) owner.nodeIds.push(copy.id);
           return current;
         });
         if (full) return jsonResponse({ error: `the canvas is full (${MAX_NODES} nodes)` }, 400);
@@ -3016,7 +3358,9 @@ export function activate(api: any): void {
         }
         // Imported edges are trimmed to the nodes that actually survived
         // normalisation, so a hand-edited file can never produce a dangling edge.
-        return jsonResponse(commit(workspace, () => next));
+        const state = commit(workspace, () => next);
+        syncTriggerIndex(workspace, state);
+        return jsonResponse(state);
       }
 
       case "addEdge": {

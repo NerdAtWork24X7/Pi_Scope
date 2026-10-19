@@ -11,21 +11,31 @@
  * pending → running → done/error.
  *
  * Beside the canvas sits the **messages sidebar** — what each agent actually
- * said. With nothing selected every agent is listed in a section of its own;
- * clicking an agent's card (or its section) focuses that one agent's messages,
- * with the message it was handed above them. A waiting **approval** gate shows
- * its card there too — the one place a gate is decided — with what each node
- * wired into it produced in a section of its final result; the **end**
- * node does the same for the workflow's final output, one section per incoming
- * agent followed by the joined result. It reads only — a node's settings are a
- * popup, never a column.
+ * said. It opens only while a node is selected: clicking a card (or a section
+ * in the sidebar) shows that node's own context, with the message it was handed
+ * above its words. A waiting **approval** gate shows its card there too — the
+ * one place a gate is decided — with what each node wired into it produced in a
+ * section of its final result; an **end** node does the same for its branch's
+ * final output, one section per incoming agent followed by the joined result.
+ * With nothing selected the sidebar stays folded away, so several independently
+ * managed workflows can share one canvas without mixing their messages. It reads
+ * only — a node's settings are a popup, never a column.
+ *
+ * A **group** is a named frame around a set of nodes. Shift-click, or a
+ * Shift-drag across the canvas, picks several cards and Group gathers them into
+ * one; the frame's header drags the whole workflow at once, and folding it
+ * hides the member cards and their wiring behind a single chip — which still
+ * reports the run's progress. Dragging one card out of the frame ungroups just
+ * that node. That is how one canvas holds several workflows without every node
+ * being on screen at once.
  *
  * A node is configured with exactly three things — its **provider** (the harness
  * it spawns), its **model**, and the **user message** it is given — and each
  * agent node wears its provider's mark on the canvas. A Pi node's Model field
  * offers every model this app can run, grouped by provider and valued
- * `<provider>/<id>` (what pi resolves); the **end** node shows the workflow's
- * final output once a run reaches it. An agent node can also carry **reference
+ * `<provider>/<id>` (what pi resolves); each **end** node shows its own branch's
+ * final output once a run reaches it, and each **start** node carries the task
+ * and triggers that start its workflows. An agent node can also carry **reference
  * files and folders** — paths the user types or picks from a browser of the
  * workspace's own tree, each with a description — which ride in its user
  * message: the query in a `<user query>` tag, then this material in a
@@ -36,12 +46,13 @@
  * exported/imported as JSON. An **approval** node pauses the run for a person:
  * the waiting gate shows up in the messages sidebar with its message, a note box
  * and Approve / Reject (there is no separate approval banner). The run panel also lists **past runs** (reopen one to
- * replay its log and node badges), and the toolbar's ⏱ button opens the same
- * kind of popup on the **triggers** — a schedule and an event watch that start
- * runs on their own. The settings popup is a panel 80% of the window wide and
- * full height, because a node's references, the model catalogue and the end
+ * replay its log and node badges). Each **start node** owns its triggers — a
+ * schedule and an event watch that start a run from that entry point — edited
+ * in the start node's settings, so several start / end pairs can share a canvas
+ * and be managed separately. The settings popup is a panel 80% of the window wide and
+ * full height, because a node's references, the model catalogue and an end
  * node's final output all need the room while the canvas they belong to stays
- * visible around it: a node, a connection and the triggers are all edited in
+ * visible around it: a node, a connection and a start node's triggers are all edited in
  * that one modal, over the canvas. A node's own output is read there too, with a
  * **Markdown / Raw** switch — the agent's prose rendered, or the bytes exactly as
  * they streamed (the end node's final output offers the same switch).
@@ -108,10 +119,11 @@
   const TRIGGER_POLL_MS = 8000;
 
   let pane = null;
-  let canvasEl = null, nodesEl = null, svgEl = null, edgePathsEl = null, tmpPathEl = null, edgeBtnsEl = null;
+  let canvasEl = null, nodesEl = null, groupsEl = null, handlesEl = null, svgEl = null, edgePathsEl = null, tmpPathEl = null, edgeBtnsEl = null;
   let canvasScrollEl = null;   // the scroller holding the canvas (zoom + grid owner)
+  let canvasSizeObs = null;    // re-measures the pane when the view gets wider/taller
   let dlgEl = null, modalEl = null, statusEl = null, nameInput = null;
-  let runStatusEl = null, runLogEl = null, runSummaryEl = null, runBtn = null, stopBtn = null;
+  let runStatusEl = null, runLogEl = null, runSummaryEl = null, runBtn = null;
   let historyEl = null, historySig = "";
 
   let wf = null;
@@ -140,6 +152,9 @@
   let serverPlatform = "";
   let cwd = "";
   let selected = null;
+  /** Nodes picked for **grouping** with Shift/Ctrl-click, in addition to the one
+   *  in `selected`. A plain click resets it to that one node. */
+  let groupSel = new Set();
   /**
    * How an agent's output is read in its settings popup: `"markdown"` renders the
    * prose it wrote (the default), `"raw"` shows the bytes exactly as they
@@ -158,6 +173,10 @@
    */
   let dlg = null;
   let drag = null;
+  let groupDrag = null;
+  let groupResize = null;
+  let marquee = null;
+  let marqueeEl = null;
   let link = null;
   let loadError = null;
   let dirty = false;
@@ -171,7 +190,17 @@
 
   const nodes = () => (wf && Array.isArray(wf.nodes) ? wf.nodes : []);
   const edges = () => (wf && Array.isArray(wf.edges) ? wf.edges : []);
+  const groups = () => (wf && Array.isArray(wf.groups) ? wf.groups : []);
   const nodeById = (id) => nodes().find((n) => n.id === id) || null;
+  const groupById = (id) => groups().find((g) => g.id === id) || null;
+  /** The group a node belongs to, or null. */
+  const groupOfNode = (id) => groups().find((g) => (g.nodeIds || []).includes(id)) || null;
+  /** Nodes inside a folded group: their cards (and incident edges) are hidden. */
+  function foldedNodeIds() {
+    const out = new Set();
+    for (const g of groups()) if (g.collapsed) for (const id of g.nodeIds || []) out.add(id);
+    return out;
+  }
   /** The run the canvas is showing: a reopened past run when one is selected,
    *  otherwise the live one. Everything that paints run state reads this. */
   const viewRun = () => historyRun || run;
@@ -476,12 +505,22 @@
    *  `$SW_PROMPT` elsewhere. */
   const customVar = (name) => (serverPlatform === "win32" ? `%${name}%` : `$${name}`);
 
+  /** Does one start node's trigger config arm it? */
+  function startTriggerArmed(t) {
+    return !!t && (t.schedule?.mode === "interval" || t.schedule?.mode === "daily" || t.event?.enabled === true);
+  }
+
+  /** Does any entry point on this canvas have a trigger armed? */
+  function anyStartTriggerArmed() {
+    return nodes().some((n) => n.type === "start" && startTriggerArmed(n.config?.triggers));
+  }
+
   function syncPolling() {
     const running = run && run.status === "running";
     if (running && !pollTimer) pollTimer = setInterval(refreshRun, POLL_MS);
     else if (!running && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    // With a trigger armed, a run can start without this page asking for it.
-    const watching = !running && !!triggers?.armed;
+    // With any start node triggered, a run can start without this page asking.
+    const watching = !running && anyStartTriggerArmed();
     if (watching && !watchTimer) watchTimer = setInterval(refreshRun, TRIGGER_POLL_MS);
     else if (!watching && watchTimer) { clearInterval(watchTimer); watchTimer = null; }
   }
@@ -499,6 +538,13 @@
     edgeEls.clear();
     boxCache.clear();
     canvasW = 0; canvasH = 0;
+    groupSel = new Set();
+    groupDrag = null;
+    groupResize = null;
+    marquee = null;
+    if (marqueeEl) { marqueeEl.hidden = true; marqueeEl.style.width = "0px"; marqueeEl.style.height = "0px"; }
+    if (groupsEl) groupsEl.innerHTML = "";
+    if (handlesEl) handlesEl.innerHTML = "";
     historySig = "";    // the history picker is about to be rebuilt
     msgSig = "";        // …and so is the messages sidebar
     historyRun = null;  // a rebuilt pane starts on the live run
@@ -508,12 +554,15 @@
 
   function paint() {
     if (!pane) return;
-    if (drag || link) { dirty = true; return; }
+    if (drag || groupDrag || groupResize || marquee || link) { dirty = true; return; }
     dirty = false;
     if (nameInput && document.activeElement !== nameInput) nameInput.value = wf?.name || "";
     renderStatus();
+    renderGroups();
     renderNodes();
+    layoutGroups();
     resizeCanvas();
+    applyPendingView();
     renderEdges();
     renderDialog();
     syncFinalOutput();
@@ -529,8 +578,10 @@
    */
   function paintRun() {
     if (!pane) return;
-    if (drag || link) { dirty = true; return; }
+    if (drag || groupDrag || groupResize || marquee || link) { dirty = true; return; }
     applyRunStatuses();
+    syncGroupStatuses();
+    layoutGroups();
     syncFinalOutput();
     syncNodeOutput();
     renderRun();
@@ -564,7 +615,7 @@
     const hasStart = nodes().some((x) => x.type === "start");
     const hasEnd = nodes().some((x) => x.type === "end");
     const bits = [`${n} node${n === 1 ? "" : "s"}`, `${e} connection${e === 1 ? "" : "s"}`];
-    if (triggers?.armed) bits.push("⚡ trigger armed");
+    if (anyStartTriggerArmed()) bits.push("⚡ trigger armed");
     statusEl.className = "sw-status";
     if (!hasStart) { bits.push("no start node"); statusEl.classList.add("warn"); }
     if (!hasEnd) { bits.push("no end node"); statusEl.classList.add("warn"); }
@@ -578,6 +629,20 @@
   function resizeCanvas() {
     let maxX = 1000, maxY = 700;
     for (const n of nodes()) { maxX = Math.max(maxX, n.x + NODE_W + 120); maxY = Math.max(maxY, n.y + 200); }
+    // A folded chip — or a frame enlarged by hand — may extend past the cards it
+    // holds; the scrollable canvas has to include it.
+    for (const g of groups()) {
+      const b = groupBox(g);
+      maxX = Math.max(maxX, b.x + b.w + 120);
+      maxY = Math.max(maxY, b.y + b.h + 120);
+    }
+    // Even a two-node workflow must be draggable in both axes. Without room
+    // beyond the viewport, a canvas that fits the pane has no vertical (or
+    // horizontal) scroll range at all, so one drag direction does nothing.
+    const viewW = canvasScrollEl?.clientWidth || 0;
+    const viewH = canvasScrollEl?.clientHeight || 0;
+    if (viewW) maxX = Math.max(maxX, viewW + CANVAS_PAN_ROOM_X);
+    if (viewH) maxY = Math.max(maxY, viewH + CANVAS_PAN_ROOM_Y);
     if (maxX === canvasW && maxY === canvasH) return;
     canvasW = maxX; canvasH = maxY;
     canvasEl.style.width = `${maxX}px`;
@@ -596,9 +661,19 @@
   // placement from the scroll offsets (`addNode`). The grid is painted by the
   // *scroller*, so it is re-sized alongside instead of sliding under the cards.
 
-  const ZOOM_MIN = 0.4, ZOOM_MAX = 2, ZOOM_STEP = 1.2, ZOOM_KEY = "scope-sw-zoom";
+  // Blank room kept beyond the viewport so the canvas can always be panned in
+  // both directions, even when the whole graph would fit on one screen.
+  const CANVAS_PAN_ROOM_X = 1200, CANVAS_PAN_ROOM_Y = 900;
+  const ZOOM_MIN = 0.4, ZOOM_MAX = 2, ZOOM_STEP = 1.2;
+  /** Each workspace remembers its own view (zoom + scroll), so several graphs
+   *  reopened from the same browser come back where the user left them. */
+  const VIEW_KEY_PREFIX = "scope-sw-view:";
   let zoom = 1;
   let zoomPctEl = null;
+  let viewRestore = false;
+  let pendingView = null;
+  let viewSaveTimer = null;
+  let viewSuppress = false;
   /** The scroller's grid pitch (from `--grid-size`), read once so the graph
    *  paper scales with the canvas instead of sliding under it. */
   let gridBase = 26;
@@ -616,6 +691,63 @@
     if (zoomPctEl) zoomPctEl.textContent = `${Math.round(zoom * 100)}%`;
   }
 
+  // ── Per-workspace view memory ─────────────────────────────────────────────
+
+  const viewKey = () => `${VIEW_KEY_PREFIX}${cwd || "default"}`;
+
+  function readSavedView() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(viewKey()) || "null");
+      if (!raw || typeof raw !== "object") return null;
+      const saved = {};
+      if (Number.isFinite(Number(raw.zoom))) saved.zoom = clampZoom(Number(raw.zoom));
+      if (Number.isFinite(Number(raw.x))) saved.x = Math.max(0, Math.round(Number(raw.x)));
+      if (Number.isFinite(Number(raw.y))) saved.y = Math.max(0, Math.round(Number(raw.y)));
+      return saved;
+    } catch { return null; } // private mode / corrupt value
+  }
+
+  function saveViewNow() {
+    if (viewSuppress || !cwd || !canvasScrollEl || !wf) return;
+    if (viewSaveTimer) { clearTimeout(viewSaveTimer); viewSaveTimer = null; }
+    try {
+      localStorage.setItem(viewKey(), JSON.stringify({
+        zoom,
+        x: Math.round(canvasScrollEl.scrollLeft),
+        y: Math.round(canvasScrollEl.scrollTop),
+      }));
+    } catch { /* private mode */ }
+  }
+
+  /** Coalesce the writes a pan or zoom gesture would otherwise make. */
+  function saveViewSoon() {
+    if (viewSuppress || !cwd || !canvasScrollEl) return;
+    if (viewSaveTimer) clearTimeout(viewSaveTimer);
+    viewSaveTimer = setTimeout(saveViewNow, 180);
+  }
+
+  /** Read the incoming workspace's saved view; it is applied once the canvas
+   *  has been laid out (see `applyPendingView`). */
+  function requestViewRestore() {
+    viewRestore = true;
+    pendingView = readSavedView();
+  }
+
+  function applyPendingView() {
+    if (!viewRestore || !canvasScrollEl) return;
+    viewRestore = false;
+    const saved = pendingView;
+    pendingView = null;
+    viewSuppress = true;
+    zoom = saved && Number.isFinite(saved.zoom) ? clampZoom(saved.zoom) : 1;
+    applyZoom();
+    canvasScrollEl.scrollLeft = saved && Number.isFinite(saved.x) ? saved.x : 0;
+    canvasScrollEl.scrollTop = saved && Number.isFinite(saved.y) ? saved.y : 0;
+    // A programmatic scroll fires a scroll event; keep it from writing the view
+    // back while the page is still settling.
+    setTimeout(() => { viewSuppress = false; }, 180);
+  }
+
   /** Zoom about a point in the scroller's viewport (the centre, by default), so
    *  what the user is looking at stays put. */
   function setZoom(next, anchor) {
@@ -629,7 +761,7 @@
     applyZoom();
     canvasScrollEl.scrollLeft = before.x * zoom - a.x;
     canvasScrollEl.scrollTop = before.y * zoom - a.y;
-    try { localStorage.setItem(ZOOM_KEY, String(zoom)); } catch { /* private mode */ }
+    saveViewSoon();
   }
 
   /** Frame the whole graph: the zoom that fits every node, then centred. */
@@ -642,7 +774,13 @@
       minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
       maxX = Math.max(maxX, n.x + NODE_W); maxY = Math.max(maxY, n.y + 170);
     }
-    if (!ns.length) { setZoom(1); return; }
+    // A folded chip, or a frame the user enlarged, can reach past every card.
+    for (const g of groups()) {
+      const b = groupBox(g);
+      minX = Math.min(minX, b.x); minY = Math.min(minY, b.y);
+      maxX = Math.max(maxX, b.x + b.w); maxY = Math.max(maxY, b.y + b.h);
+    }
+    if (!Number.isFinite(minX)) { setZoom(1); return; }
     const vw = canvasScrollEl.clientWidth - pad * 2;
     const vh = canvasScrollEl.clientHeight - pad * 2;
     const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
@@ -653,7 +791,7 @@
     applyZoom();
     canvasScrollEl.scrollLeft = (minX + w / 2) * z - canvasScrollEl.clientWidth / 2;
     canvasScrollEl.scrollTop = (minY + h / 2) * z - canvasScrollEl.clientHeight / 2;
-    try { localStorage.setItem(ZOOM_KEY, String(zoom)); } catch { /* private mode */ }
+    saveViewSoon();
   }
 
   /** Wire the zoom cluster, the ctrl/⌘+wheel shortcut and the keyboard keys. */
@@ -670,11 +808,8 @@
     // The grid pitch comes from the theme, not a hardcoded 26px.
     const pitch = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--grid-size"));
     if (Number.isFinite(pitch) && pitch > 0) gridBase = pitch;
-    try {
-      const saved = parseFloat(localStorage.getItem(ZOOM_KEY) || "");
-      if (Number.isFinite(saved) && saved >= ZOOM_MIN && saved <= ZOOM_MAX) zoom = saved;
-    } catch { /* private mode */ }
     applyZoom();
+    canvasScrollEl?.addEventListener("scroll", saveViewSoon, { passive: true });
     // Ctrl/⌘ + wheel is the gesture every canvas editor uses; a plain wheel
     // still scrolls, which is what the rest of the app expects.
     canvasScrollEl?.addEventListener("wheel", (e) => {
@@ -698,14 +833,16 @@
   }
 
   /**
-   * The workflow's **final output**: what the run's end node received from the
+   * One end node's **final output**: what the run's end node received from the
    * branches wired into it. The end node is a sentinel — it spawns nothing — so
-   * its own output *is* the answer the graph produced, and the server keeps that
-   * output's tail on the run record (a live run and a reopened one alike).
-   * Empty until a run has reached the end node.
+   * its own output *is* the answer its branch produced, and the server keeps
+   * that output's tail on the run record (a live run and a reopened one alike).
+   * A canvas may hold several end nodes, each managed separately; `nodeId` picks
+   * the one to read, defaulting to the first. Empty until a run reached it.
    */
-  function finalOutput() {
-    const end = nodes().find((n) => n.type === "end");
+  function finalOutput(nodeId) {
+    const ends = nodes().filter((n) => n.type === "end");
+    const end = nodeId ? ends.find((n) => n.id === nodeId) : ends[0];
     if (!end) return { nodeId: "", text: "" };
     const tail = runNode(end.id)?.outputTail;
     return { nodeId: end.id, text: typeof tail === "string" ? tail : "" };
@@ -879,8 +1016,8 @@
    * The end node's panel body: the workflow's final output, whole (the server
    * keeps the last 4000 characters), with what it belongs to and a Copy button.
    */
-  function finalOutputHtml() {
-    const { text } = finalOutput();
+  function finalOutputHtml(n) {
+    const { text } = finalOutput(n?.id);
     if (!text) {
       return `<p class="sw-muted">Every branch that reaches this node has settled when the run finishes here.</p>` +
         `<p class="sw-hint">Run the workflow and this node shows what it produced — the joined output of the connections wired into it.</p>`;
@@ -950,21 +1087,24 @@
    * user is making mid-run survives the next tick.
    */
   function syncFinalOutput() {
-    const { nodeId, text } = finalOutput();
-    const card = nodeId
-      ? nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(nodeId)}"] .sw-node-final`)
-      : null;
-    if (card) {
+    // Each end node shows its own branch's answer.
+    for (const end of nodes().filter((n) => n.type === "end")) {
+      const { text } = finalOutput(end.id);
+      const card = nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(end.id)}"] .sw-node-final`);
+      if (!card) continue;
       const preview = finalPreview(text);
       card.classList.toggle("has-output", !!preview);
       card.textContent = preview || "Workflow exit";
       card.title = text ? text.slice(0, 600) : "";
     }
     const box = dlgEl?.querySelector("#sw-final-body");
-    if (!box || dlg?.kind !== "node" || dlg.id !== nodeId) return;
+    if (!box || dlg?.kind !== "node") return;
+    const n = nodeById(dlg.id);
+    if (!n || n.type !== "end") return;
+    const { text } = finalOutput(n.id);
     if (box.dataset.text === text) return;
     box.dataset.text = text;
-    box.innerHTML = finalOutputHtml();
+    box.innerHTML = finalOutputHtml(n);
   }
 
   /** The mark a non-agent node wears on the canvas and in its settings head. */
@@ -1003,22 +1143,198 @@
       return `<div class="sw-node-model">Repeat ×${count}${live}${off}</div>` +
         `<div class="sw-node-desc">${esc(n.config?.description || (feedback ? "Refines the step wired to its Repeat output" : "Repeats the section it feeds"))}</div>`;
     }
+    if (n.type === "start") {
+      // This entry point's trigger and task. A canvas may hold several starts,
+      // each with its own schedule / event watch, so the card says which one.
+      const t = n.config?.triggers || {};
+      const bits = [];
+      if (t.schedule?.mode === "interval") bits.push(`every ${t.schedule.everySeconds}s`);
+      if (t.schedule?.mode === "daily") bits.push(`daily ${t.schedule.at}`);
+      if (t.event?.enabled) bits.push(t.event.types?.length ? `on ${t.event.types.join(", ")}` : "on events");
+      return `<div class="sw-node-model">${bits.length ? `⚡ ${esc(bits.join(" · "))}` : "Manual start"}</div>` +
+        `<div class="sw-node-desc">${esc(n.config?.defaultTask || n.config?.description || "Workflow entry point")}</div>`;
+    }
     if (n.type === "end") {
-      // The graph's answer. Filled in by syncFinalOutput once a run reaches it.
-      const out = finalPreview(finalOutput().text);
+      // This end's branch answer. Filled in by syncFinalOutput once a run reaches it.
+      const out = finalPreview(finalOutput(n.id).text);
       return `<div class="sw-node-final${out ? " has-output" : ""}" title="${escAttr(out.slice(0, 200))}">` +
         `${esc(out || n.config?.description || "Workflow exit")}</div>`;
     }
     return `<div class="sw-node-desc">${esc(n.config?.description || (n.type === "start" ? "Workflow entry point" : "Workflow exit"))}</div>`;
   }
 
+  // ── Groups ────────────────────────────────────────────────────────────────
+  //
+  // A group is a named frame around a set of nodes — one workflow on a canvas
+  // that may hold several. Its members move with it, and folding it hides their
+  // cards (and their wiring) behind a single chip, so a large canvas reads as a
+  // few named workflows rather than every node at once. The frame is measured
+  // from its members, so it always wraps what it holds.
+
+  const GROUP_PAD = 16;
+  const GROUP_HEAD = 44;
+  const GROUP_FOLDED_W = 248, GROUP_FOLDED_H = 40;
+  const GROUP_MIN_W = 200, GROUP_MIN_H = 120;
+  const CANVAS_LIMIT = 6000; // mirrors the server's CANVAS_MAX
+  const GROUP_HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+
+  function renderGroups() {
+    if (!groupsEl) return;
+    groupsEl.innerHTML = groups().map((g) => {
+      const folded = !!g.collapsed;
+      const count = (g.nodeIds || []).length;
+      const noun = `${count} node${count === 1 ? "" : "s"}`;
+      // A folded workflow hides its cards, so its header carries what the run is
+      // doing: progress (`2/4`), with waiting/running/error/done in its ink.
+      const st = folded ? groupRunStatus(g) : null;
+      const statusChip = st
+        ? `<span class="sw-group-status sw-gs-${st.state}" data-group-status="${escAttr(g.id)}" ` +
+            `title="${escAttr(st.title)}">${esc(st.text)}</span>`
+        : "";
+      const resizable = g.resizable !== false;
+      return `<section class="sw-group${folded ? " collapsed" : ""}" data-group="${escAttr(g.id)}">` +
+          `<div class="sw-group-head" data-group-drag="${escAttr(g.id)}" ` +
+            `title="Drag to move this group">` +
+            `<button class="sw-group-fold" data-group-fold="${escAttr(g.id)}" type="button" ` +
+              `title="${folded ? "Unfold" : "Fold"} this group" aria-label="${folded ? "Unfold" : "Fold"} group">${folded ? "▸" : "▾"}</button>` +
+            `<input class="sw-group-name" data-group-name="${escAttr(g.id)}" value="${escAttr(g.name)}" ` +
+              `maxlength="60" aria-label="Group name">` +
+            statusChip +
+            `<span class="sw-group-count">${esc(noun)}</span>` +
+            `<button class="sw-group-resize-toggle${resizable ? "" : " off"}" data-group-resizable="${escAttr(g.id)}" ` +
+              `type="button" aria-pressed="${resizable}" ` +
+              `title="${resizable ? "Resizing on — click to lock this frame" : "Resizing locked — click to allow resizing"}" ` +
+              `aria-label="${resizable ? "Disable resizing" : "Enable resizing"}">${resizable ? "🔓" : "🔒"}</button>` +
+            `<button class="sw-group-remove" data-group-remove="${escAttr(g.id)}" type="button" ` +
+              `title="Ungroup — keep the nodes on the canvas" aria-label="Ungroup ${escAttr(g.name)}">⤫</button>` +
+          `</div>` +
+        `</section>`;
+    }).join("");
+    // Resize handles live in their own layer above the cards, so a frame edge
+    // that a card overlaps is still grabbable. A folded or locked frame has none.
+    if (handlesEl) {
+      handlesEl.innerHTML = groups().filter((g) => !g.collapsed && g.resizable !== false).map((g) =>
+        GROUP_HANDLES.map((dir) =>
+          `<span class="sw-group-handle sw-gh-${dir}" data-group-resize="${escAttr(g.id)}" ` +
+            `data-dir="${dir}" title="Resize ${escAttr(g.name)}"></span>`).join("")).join("");
+    }
+  }
+
+  /** The box an expanded group wraps: its members plus the header and padding. */
+  function groupBox(g) {
+    if (g.collapsed) return { x: g.x, y: g.y, w: GROUP_FOLDED_W, h: GROUP_FOLDED_H };
+    const members = (g.nodeIds || []).map(nodeById).filter(Boolean);
+    const manual = Number.isFinite(g.w) && g.w > 0 && Number.isFinite(g.h) && g.h > 0;
+    if (!members.length) {
+      return manual ? { x: g.x, y: g.y, w: g.w, h: g.h } : { x: g.x, y: g.y, w: 300, h: 180 };
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of members) {
+      const b = boxCache.get(n.id) || { x: n.x, y: n.y, w: NODE_W, h: 120 };
+      minX = Math.min(minX, b.x); minY = Math.min(minY, b.y);
+      maxX = Math.max(maxX, b.x + b.w); maxY = Math.max(maxY, b.y + b.h);
+    }
+    const auto = {
+      x: Math.max(0, minX - GROUP_PAD),
+      y: Math.max(0, minY - GROUP_HEAD),
+      w: Math.max(240, maxX - minX + GROUP_PAD * 2),
+      h: Math.max(120, maxY - minY + GROUP_HEAD + GROUP_PAD),
+    };
+    // A hand-resized frame keeps its room, but always grows to hold a member
+    // that was moved or dropped outside it — the frame never loses a node.
+    if (!manual) return auto;
+    const left = Math.min(g.x, auto.x), top = Math.min(g.y, auto.y);
+    const right = Math.max(g.x + g.w, auto.x + auto.w);
+    const bottom = Math.max(g.y + g.h, auto.y + auto.h);
+    return { x: left, y: top, w: right - left, h: bottom - top };
+  }
+
+  /**
+   * A folded group's run summary: what its members are doing in the run the
+   * canvas is showing (`viewRun`), as a short chip label. A folded workflow is
+   * otherwise invisible, so this is how a run started elsewhere tells the user
+   * that this group is waiting, running, done or failed.
+   */
+  function groupRunStatus(g) {
+    const ids = g.nodeIds || [];
+    const total = ids.length;
+    const states = ids.map((id) => runNode(id)).filter(Boolean);
+    if (!states.length) return { state: "idle", text: "not run", title: "No run has reached this group yet" };
+    const count = (st) => states.filter((s) => s.status === st).length;
+    const done = count("done");
+    const running = count("running");
+    const waiting = count("waiting");
+    const errors = count("error");
+    const stopped = count("stopped");
+    const skipped = count("skipped");
+    let state = "idle", text = `${done}/${total}`;
+    if (errors) { state = "error"; text = `✖ ${done}/${total}`; }
+    else if (waiting) { state = "waiting"; text = `⏸ ${done}/${total}`; }
+    else if (running) { state = "running"; text = `◌ ${done}/${total}`; }
+    else if (stopped) { state = "stopped"; text = `■ ${done}/${total}`; }
+    else if (total && done === total) { state = "done"; text = `✔ ${done}/${total}`; }
+    else if (total && skipped === total) { state = "skipped"; text = `– ${total}/${total}`; }
+    else if (done) { state = "partial"; text = `${done}/${total}`; }
+    const bits = [`${done}/${total} done`];
+    if (running) bits.push(`${running} running`);
+    if (waiting) bits.push(`${waiting} waiting`);
+    if (errors) bits.push(`${errors} failed`);
+    return { state, text, title: bits.join(" · ") };
+  }
+
+  /** Refresh chip summaries in place for a live-run tick (no DOM rebuild). */
+  function syncGroupStatuses() {
+    if (!groupsEl) return;
+    for (const el of groupsEl.querySelectorAll(".sw-group.collapsed")) {
+      const g = groupById(el.dataset.group);
+      const chip = el.querySelector("[data-group-status]");
+      if (!g || !chip) continue;
+      const st = groupRunStatus(g);
+      chip.className = `sw-group-status sw-gs-${st.state}`;
+      chip.textContent = st.text;
+      chip.title = st.title;
+    }
+  }
+
+  /** Write one group's frame box — and its resize handles — onto the canvas. */
+  function placeGroup(g) {
+    const el = groupsEl?.querySelector(`.sw-group[data-group="${CSS.escape(g.id)}"]`);
+    if (!el) return;
+    const b = groupBox(g);
+    el.style.left = `${b.x}px`;
+    el.style.top = `${b.y}px`;
+    el.style.width = `${b.w}px`;
+    el.style.height = `${b.h}px`;
+    const half = 6;
+    const at = {
+      nw: [b.x, b.y], n: [b.x + b.w / 2, b.y], ne: [b.x + b.w, b.y],
+      e: [b.x + b.w, b.y + b.h / 2], se: [b.x + b.w, b.y + b.h],
+      s: [b.x + b.w / 2, b.y + b.h], sw: [b.x, b.y + b.h], w: [b.x, b.y + b.h / 2],
+    };
+    for (const handle of handlesEl?.querySelectorAll(`.sw-group-handle[data-group-resize="${CSS.escape(g.id)}"]`) || []) {
+      const p = at[handle.dataset.dir];
+      if (!p) continue;
+      handle.style.left = `${p[0] - half}px`;
+      handle.style.top = `${p[1] - half}px`;
+    }
+  }
+
+  /** Place every frame over the cards it holds (one measure, then all writes). */
+  function layoutGroups() {
+    if (!groupsEl) return;
+    measureBoxes();
+    for (const g of groups()) placeGroup(g);
+  }
+
   function renderNodes() {
     const sel = selected && selected.kind === "node" ? selected.id : null;
-    nodesEl.innerHTML = nodes().map((n) => {
+    const folded = foldedNodeIds();
+    nodesEl.innerHTML = nodes().filter((n) => !folded.has(n.id)).map((n) => {
       const rs = runNode(n.id);
       const st = rs?.status || "";
       const off = n.type === "agent" && n.config?.enabled === false;
-      const cls = `sw-node sw-t-${n.type}${n.id === sel ? " sel" : ""}${st ? ` sw-run-${st}` : ""}${off ? " sw-off" : ""}`;
+      const picked = n.id === sel || groupSel.has(n.id);
+      const cls = `sw-node sw-t-${n.type}${picked ? " sel" : ""}${st ? ` sw-run-${st}` : ""}${off ? " sw-off" : ""}`;
       const badge = st ? `<span class="sw-badge sw-b-${st}" title="${escAttr(rs?.bypassed ? "bypassed" : st)}">${badgeGlyph(st, rs?.bypassed)}</span>` : "";
       // A loop has three ports, laid out for a feedback edge: the **input**
       // arrives on the right (with the exit), and the **Repeat** output leaves on
@@ -1190,7 +1506,10 @@
 
   function renderEdges() {
     measureBoxes();
-    layoutEdges(edges(), true);
+    // A folded group's nodes are off the canvas, so their wiring goes with them
+    // — showing an edge that ends in nothing would read as a broken graph.
+    const folded = foldedNodeIds();
+    layoutEdges(edges().filter((e) => !folded.has(e.from) && !folded.has(e.to)), true);
   }
   function showTmpPath(fromId, port, toX, toY) {
     const p1 = portPos(fromId, "out", port);
@@ -1259,7 +1578,9 @@
   // ─── Triggers (workflow-level) ────────────────────────────────────────────
 
   function triggerSummary(t) {
-    if (!t || !t.armed) return "No trigger armed — runs start when you press ▶ Run.";
+    const armed = t && (typeof t.armed === "boolean" ? t.armed
+      : t.schedule?.mode === "interval" || t.schedule?.mode === "daily" || t.event?.enabled === true);
+    if (!t || !armed) return "No trigger armed — runs start when you press ▶ Run.";
     const bits = [];
     if (t.schedule?.mode === "interval") bits.push(`every ${t.schedule.everySeconds}s`);
     if (t.schedule?.mode === "daily") bits.push(`daily at ${t.schedule.at}`);
@@ -1269,24 +1590,24 @@
   }
 
   function renderTriggersDialog() {
-    const t = triggers || {};
-    const sch = t.schedule || { mode: "off", everySeconds: 300, at: "09:00" };
-    const ev = t.event || { enabled: false, types: [] };
     dlgEl.innerHTML = dialogHtml(
       `<span class="sw-dlg-glyph">⏱</span><span class="sw-dlg-title">Workflow triggers</span>`,
-      triggersFormHtml(),
+      triggersFormHtml(triggers || {}),
       `<button class="btn-sm sw-primary" id="sw-tr-save" type="button">Save triggers</button>`,
     );
     wireTriggersForm();
   }
 
-  /** The trigger form's fields — schedule, event watch and the run's task. */
-  function triggersFormHtml() {
-    const t = triggers || {};
-    const sch = t.schedule || { mode: "off", everySeconds: 300, at: "09:00" };
-    const ev = t.event || { enabled: false, types: [] };
-    return `<div class="sw-triggers">` +
-      `<p class="sw-muted sw-tr-lead">Start this workflow on a schedule or when an event arrives, not only from ▶ Run.</p>` +
+  /** The trigger fields — schedule and event watch — as they sit inside a start
+   *  node's settings. The start node's own user message is the run's task, so a
+   *  trigger does not repeat it here. */
+  function triggersFormHtml(t, opts) {
+    const o = opts || {};
+    const cfg = t || {};
+    const sch = cfg.schedule || { mode: "off", everySeconds: 300, at: "09:00" };
+    const ev = cfg.event || { enabled: false, types: [] };
+    return `<div class="sw-triggers${o.compact ? " sw-triggers-compact" : ""}">` +
+      `<p class="sw-muted sw-tr-lead">${o.lead || "Start this workflow on a schedule or when an event arrives, not only from ▶ Run."}</p>` +
       `<label class="sw-field sw-tr-schedule"><span>Schedule</span>` +
         `<select class="set-select" id="sw-tr-mode">` +
           `<option value="off"${sch.mode === "off" ? " selected" : ""}>off — manual runs only</option>` +
@@ -1306,38 +1627,46 @@
           `<input class="set-input" id="sw-tr-types" value="${escAttr((ev.types || []).join(", "))}" placeholder="tool_call, file_edit">` +
           `<div class="sw-hint">Comma-separated event types. Empty = any event from this workspace.</div></label>` +
       `</div>` +
-      // The task is the run's prompt, so it is a prose box like the start node's:
-      // it grows into whatever height the trigger form has left.
-      `<label class="sw-field sw-tr-task"><span>Task <em>(optional)</em></span>` +
-        `<textarea class="set-input sw-textarea" id="sw-tr-task" rows="5" spellcheck="false" placeholder="the start node's default task">${esc(t.task || "")}</textarea>` +
-        `<div class="sw-hint">${esc(triggerSummary(t))}</div></label>` +
+      `<div class="sw-hint sw-tr-summary">${esc(triggerSummary(cfg))}</div>` +
     `</div>`;
   }
 
-  function wireTriggersForm() {
-    const mode = dlgEl.querySelector("#sw-tr-mode");
-    if (!mode) return;
-    const sync = () => {
-      dlgEl.querySelector("#sw-tr-interval").style.display = mode.value === "interval" ? "" : "none";
-      dlgEl.querySelector("#sw-tr-daily").style.display = mode.value === "daily" ? "" : "none";
-    };
-    mode.addEventListener("change", sync);
-    sync();
-    dlgEl.querySelector("#sw-tr-save").addEventListener("click", saveTriggers);
-  }
-
-  async function saveTriggers() {
+  /** Read the trigger fields currently in the open start-node popup. */
+  function readTriggersForm() {
     const types = (dlgEl.querySelector("#sw-tr-types")?.value || "")
       .split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
-    const payload = {
+    return {
       schedule: {
         mode: dlgEl.querySelector("#sw-tr-mode")?.value || "off",
         everySeconds: Number(dlgEl.querySelector("#sw-tr-every")?.value || 0) || 300,
         at: dlgEl.querySelector("#sw-tr-at")?.value.trim() || "09:00",
       },
       event: { enabled: !!dlgEl.querySelector("#sw-tr-event")?.checked, types },
-      task: dlgEl.querySelector("#sw-tr-task")?.value ?? "",
+      // The start node's own message is the task; a trigger never overrides it.
+      task: "",
     };
+  }
+
+  function wireTriggerFields() {
+    const mode = dlgEl.querySelector("#sw-tr-mode");
+    if (!mode) return;
+    const sync = () => {
+      const interval = dlgEl.querySelector("#sw-tr-interval");
+      const daily = dlgEl.querySelector("#sw-tr-daily");
+      if (interval) interval.style.display = mode.value === "interval" ? "" : "none";
+      if (daily) daily.style.display = mode.value === "daily" ? "" : "none";
+    };
+    mode.addEventListener("change", sync);
+    sync();
+  }
+
+  function wireTriggersForm() {
+    wireTriggerFields();
+    dlgEl.querySelector("#sw-tr-save")?.addEventListener("click", saveTriggers);
+  }
+
+  async function saveTriggers() {
+    const payload = readTriggersForm();
     try {
       const { res, data } = await S.api("/subagent-workflow/triggers", {}, Object.assign({ cwd }, payload));
       if (!res.ok || data?.error) throw new Error(data?.error || `HTTP ${res.status}`);
@@ -1751,10 +2080,17 @@
       fields =
         `<label class="sw-field sw-fld-prompt"><span>User message <em>(run task)</em></span>` +
           `<textarea class="set-input sw-textarea" id="sw-f-task" rows="4" spellcheck="false" placeholder="What should this workflow do?">${esc(n.config?.defaultTask || "")}</textarea>` +
-          `<div class="sw-hint">The run's task: every node can read it as <code>{task}</code> (and a command as <code>${esc(customVar("SW_TASK"))}</code>). Every node wired off the start runs in parallel.</div></label>`;
+          `<div class="sw-hint">The run's task: every node can read it as <code>{task}</code> (and a command as <code>${esc(customVar("SW_TASK"))}</code>). Every node wired off this start runs in parallel.</div></label>` +
+        `<div class="sw-field sw-start-triggers"><span>Triggers</span>` +
+          triggersFormHtml(n.config?.triggers || {}, {
+            compact: true,
+            lead: "Start this entry point on a schedule or when an event arrives, not only from ▶ Run.",
+          }) +
+        `</div>` +
+        `<div class="sw-hint">Each start node owns its own triggers and task, so several workflows can share this canvas and run independently.</div>`;
     } else {
       // The end node shows the workflow's final output (see finalOutputHtml).
-      fields = `<div class="sw-fld-final" id="sw-final-body">${finalOutputHtml()}</div>`;
+      fields = `<div class="sw-fld-final" id="sw-final-body">${finalOutputHtml(n)}</div>`;
     }
 
     dlgEl.innerHTML = dialogHtml(
@@ -1781,6 +2117,7 @@
     dlgEl.querySelector("#sw-duplicate")?.addEventListener("click", () => duplicateNode(n.id));
     bindModelField();
     wireRefs(n);
+    if (n.type === "start") wireTriggerFields();
     const harnessSel = dlgEl.querySelector("#sw-f-harness");
     if (harnessSel) {
       const syncCustom = () => {
@@ -1896,7 +2233,12 @@
       };
     } else {
       config = { ...stored };
-      if (n.type === "start") config.defaultTask = read("#sw-f-task", stored.defaultTask || "");
+      if (n.type === "start") {
+        config.defaultTask = read("#sw-f-task", stored.defaultTask || "");
+        // Triggers live on the start node now, so saving its settings saves the
+        // schedule / event watch that starts a run from this entry point.
+        config.triggers = readTriggersForm();
+      }
     }
     await run_(() => post("updateNode", { id: n.id, name, config }), "Node saved");
   }
@@ -1915,6 +2257,7 @@
   }
   async function removeNode(id) {
     await run_(() => post("removeNode", { id }), "Node deleted");
+    groupSel.delete(id);
     if (selected && selected.id === id) selected = null;
   }
   async function removeEdge(id) {
@@ -1923,8 +2266,14 @@
   }
 
   async function run_(fn, okMsg) {
-    try { wf = await fn(); paint(); if (okMsg) S.toast?.(okMsg); }
-    catch (err) { S.toast?.(String(err.message || err), "err"); }
+    try {
+      wf = await fn();
+      paint();
+      // A node save can arm (or disarm) one start node's trigger, so the idle
+      // watcher has to follow the graph that just came back.
+      syncPolling();
+      if (okMsg) S.toast?.(okMsg);
+    } catch (err) { S.toast?.(String(err.message || err), "err"); }
   }
 
   // ─── Portable workflows ───────────────────────────────────────────────────
@@ -1932,7 +2281,7 @@
   /** The graph as a shareable file: name, nodes and edges — no run state, no
    *  absolute paths beyond whatever a node's own config carries. */
   function workflowFile() {
-    return { name: wf?.name || "My Workflow", nodes: nodes(), edges: edges() };
+    return { name: wf?.name || "My Workflow", nodes: nodes(), edges: edges(), groups: groups() };
   }
 
   function exportWorkflow() {
@@ -1963,6 +2312,7 @@
     catch { S.toast?.("That file is not valid JSON", "err"); return; }
     if (!window.confirm?.(`Replace the current workflow with “${data?.name || file.name}”?`)) return;
     selected = null;
+    groupSel = new Set();
     await run_(() => post("importWorkflow", { data }), "Workflow imported");
   }
 
@@ -1984,9 +2334,17 @@
   function startDrag(nodeEl, e) {
     const n = nodeById(nodeEl.dataset.id);
     if (!n) return;
+    // The frame a node came from, measured before the drag. The frame follows
+    // its dragged member (so it keeps wrapping it), which means the drop test
+    // has to compare against where the frame *was* to tell “moved within the
+    // group” from “dragged out of it”.
+    const owner = groupOfNode(n.id);
+    const ownerEl = owner ? groupsEl?.querySelector(`.sw-group[data-group="${CSS.escape(owner.id)}"]`) : null;
     drag = {
       id: n.id, el: nodeEl, sx: e.clientX, sy: e.clientY, px: e.clientX, py: e.clientY,
       x: n.x, y: n.y, moved: false,
+      ownerId: owner?.id || null,
+      ownerRect: ownerEl ? ownerEl.getBoundingClientRect() : null,
       // Only this node's edges move while it is dragged — fixed for the drag.
       edges: edges().filter((ed) => ed.from === n.id || ed.to === n.id),
     };
@@ -2006,6 +2364,17 @@
     if (n) { n.x = nx; n.y = ny; }
     const b = boxCache.get(drag.id);
     if (b) { b.x = nx; b.y = ny; }
+    // The frame stays put while a card is dragged. Re-measuring it on every
+    // pointer move made it stretch to follow the card out of its group — it
+    // looked like the frame was resizing instead of the node leaving. The drop
+    // re-measures once: removed from the group, or grown to hold a new position.
+    const owner = groupOfNode(drag.id);
+    // Show which frame the card would join (a folded chip counts too: dropping
+    // on it adds the node and unfolds the group around it).
+    const target = groupAtPoint(drag.px, drag.py, owner?.id);
+    for (const el of groupsEl?.children || []) {
+      el.classList.toggle("drop-target", el.dataset.group === target?.id);
+    }
     layoutEdges(drag.edges, false);
   }
   function onDragMove(e) {
@@ -2014,15 +2383,62 @@
     if (Math.abs(drag.px - drag.sx) + Math.abs(drag.py - drag.sy) > 3) drag.moved = true;
     onFrame(applyDrag);
   }
-  function onDragUp() {
+  /** The expanded group under a screen point, if any (the smallest wins when
+   *  frames overlap). Folded groups are headers only and take no members. */
+  function groupAtPoint(cx, cy, exceptId) {
+    let best = null, bestArea = Infinity;
+    for (const el of groupsEl?.children || []) {
+      const g = groupById(el.dataset.group);
+      if (!g || g.id === exceptId) continue;
+      const r = el.getBoundingClientRect();
+      if (cx < r.left || cx > r.right || cy < r.top || cy > r.bottom) continue;
+      const area = r.width * r.height;
+      if (area < bestArea) { best = g; bestArea = area; }
+    }
+    return best;
+  }
+
+  function onDragUp(e) {
     document.removeEventListener("mousemove", onDragMove);
     document.removeEventListener("mouseup", onDragUp);
     if (!drag) return;
     const d = drag;
     applyDrag(); // flush the last pointer position before committing
     drag = null;
-    if (d.moved) run_(() => post("moveNode", { id: d.id, x: nodeById(d.id)?.x ?? d.x, y: nodeById(d.id)?.y ?? d.y }));
-    else renderDialog();
+    if (d.moved) {
+      // Dropping a card inside a frame joins that workflow; dropping it inside
+      // the frame it already belongs to just moves it; dropping it outside every
+      // frame leaves the one it came from.
+      const owner = groupOfNode(d.id);
+      const target = groupAtPoint(e.clientX, e.clientY, owner?.id);
+      const r = d.ownerRect;
+      const leftOwner = !!owner && !!r &&
+        (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom);
+      const pos = { id: d.id, x: nodeById(d.id)?.x ?? d.x, y: nodeById(d.id)?.y ?? d.y };
+      if (target && target.id !== owner?.id) {
+        run_(async () => {
+          await post("moveNode", pos);
+          // Dropping onto a folded chip unfolds the group so the new member is
+          // visible inside the frame that just grew around it.
+          return post("updateGroup", {
+            id: target.id,
+            nodeIds: [...(target.nodeIds || []), d.id],
+            ...(target.collapsed ? { collapsed: false } : {}),
+          });
+        }, `Moved into ${target.name}`);
+      } else if (!target && owner && leftOwner) {
+        run_(async () => {
+          await post("moveNode", pos);
+          return post("updateGroup", {
+            id: owner.id,
+            nodeIds: (owner.nodeIds || []).filter((id) => id !== d.id),
+          });
+        }, `Removed from ${owner.name}`);
+      } else {
+        run_(() => post("moveNode", pos));
+      }
+    } else renderDialog();
+    for (const el of groupsEl?.children || []) el.classList.remove("drop-target");
     if (dirty) paint();
   }
   function startLink(fromId, port) {
@@ -2088,9 +2504,288 @@
     canvasScrollEl?.classList.remove("panning");
     const p = pan;
     pan = null;
+    saveViewSoon();
     // A drag moved the view; a plain left click still clears the selection (a
     // middle-click never does — it is a view gesture, not a click on the canvas).
-    if (p && !p.moved && p.button === 0 && selected) { selected = null; renderNodes(); selectionChanged(); }
+    if (p && !p.moved && p.button === 0 && (selected || groupSel.size)) {
+      selected = null; groupSel = new Set(); renderNodes(); selectionChanged();
+    }
+  }
+
+  // ─── Marquee selection ────────────────────────────────────────────────────
+  //
+  // Shift-drag on the empty canvas draws a box and picks every card it touches,
+  // so a whole workflow can be gathered for Group without clicking each node.
+  // A plain left-drag still pans: selection is the modifier gesture, the view
+  // stays the default one.
+
+  function marqueeRect(m) {
+    return {
+      left: Math.min(m.x0, m.x1), top: Math.min(m.y0, m.y1),
+      right: Math.max(m.x0, m.x1), bottom: Math.max(m.y0, m.y1),
+    };
+  }
+  function drawMarquee(m) {
+    if (!marqueeEl) return;
+    const r = marqueeRect(m);
+    marqueeEl.style.left = `${r.left}px`;
+    marqueeEl.style.top = `${r.top}px`;
+    marqueeEl.style.width = `${Math.max(0, r.right - r.left)}px`;
+    marqueeEl.style.height = `${Math.max(0, r.bottom - r.top)}px`;
+  }
+  function startMarquee(e) {
+    if (!marqueeEl) return;
+    e.preventDefault();
+    measureBoxes(); // the hit test at drop uses these boxes
+    const p = canvasPoint(e.clientX, e.clientY);
+    marquee = {
+      x0: p.x, y0: p.y, x1: p.x, y1: p.y, moved: false,
+      // Shift picks *more*; the other modifiers start a fresh selection.
+      base: e.shiftKey ? new Set(groupSel) : new Set(),
+    };
+    marqueeEl.hidden = false;
+    drawMarquee(marquee);
+    document.addEventListener("mousemove", onMarqueeMove);
+    document.addEventListener("mouseup", onMarqueeUp);
+  }
+  function onMarqueeMove(e) {
+    if (!marquee) return;
+    const p = canvasPoint(e.clientX, e.clientY);
+    marquee.x1 = p.x; marquee.y1 = p.y;
+    if (Math.abs(p.x - marquee.x0) + Math.abs(p.y - marquee.y0) > 3) marquee.moved = true;
+    drawMarquee(marquee);
+  }
+  function onMarqueeUp() {
+    document.removeEventListener("mousemove", onMarqueeMove);
+    document.removeEventListener("mouseup", onMarqueeUp);
+    const m = marquee;
+    marquee = null;
+    if (marqueeEl) marqueeEl.hidden = true;
+    if (!m || !m.moved) return;
+    measureBoxes();
+    const r = marqueeRect(m);
+    const folded = foldedNodeIds();
+    const hits = nodes().filter((n) => {
+      if (folded.has(n.id)) return false;
+      const b = boxCache.get(n.id);
+      return !!b && b.x < r.right && b.x + b.w > r.left && b.y < r.bottom && b.y + b.h > r.top;
+    });
+    groupSel = new Set([...m.base, ...hits.map((n) => n.id)]);
+    if (hits.length) selected = { kind: "node", id: hits[hits.length - 1].id };
+    else if (!m.base.size) selected = null;
+    renderNodes();
+    selectionChanged();
+    if (dirty) paint();
+  }
+
+  // ─── Group interactions ───────────────────────────────────────────────────
+
+  /** Group the picked nodes (Shift-click or Shift-drag picks several), or drop
+   *  an empty frame where the view is looking when nothing is picked. */
+  async function addGroup() {
+    const ids = [...groupSel];
+    if (selected?.kind === "node" && !ids.includes(selected.id) && nodeById(selected.id)) ids.push(selected.id);
+    const payload = { nodeIds: ids };
+    if (!ids.length) {
+      payload.x = Math.round((canvasScrollEl?.scrollLeft || 0) / zoom + 80);
+      payload.y = Math.round((canvasScrollEl?.scrollTop || 0) / zoom + 80);
+    }
+    await run_(() => post("addGroup", payload), ids.length ? `Grouped ${ids.length} node${ids.length === 1 ? "" : "s"}` : "Group added");
+    groupSel = new Set();
+    if (pane) renderNodes();
+  }
+
+  /** Lock or unlock a frame's manual resize handles. The stored box (if any)
+   *  stays put — this only controls whether the user can drag its edges. */
+  async function toggleGroupResizable(id) {
+    const g = groupById(id);
+    if (!g) return;
+    const resizable = g.resizable === false;
+    await run_(() => post("updateGroup", { id, resizable }),
+      resizable ? "Group resizing enabled" : "Group resizing locked");
+  }
+
+  async function toggleGroupFold(id) {
+    const g = groupById(id);
+    if (!g) return;
+    // Folding hides the members, so a focused node inside is no longer on the
+    // canvas: let it go rather than leave the sidebar reading a hidden card.
+    if (!g.collapsed && selected?.kind === "node" && (g.nodeIds || []).includes(selected.id)) {
+      selected = null; groupSel = new Set(); selectionChanged();
+    }
+    await run_(() => post("updateGroup", { id, collapsed: !g.collapsed }),
+      g.collapsed ? "Group unfolded" : "Group folded");
+  }
+
+  async function renameGroup(id, raw) {
+    const g = groupById(id);
+    if (!g) return;
+    const name = String(raw || "").trim().slice(0, 60);
+    if (!name || name === g.name) return;
+    await run_(() => post("updateGroup", { id, name }), "Group renamed");
+  }
+
+  async function ungroup(id) {
+    await run_(() => post("removeGroup", { id }), "Group removed — nodes kept");
+  }
+
+  function startGroupDrag(head, e) {
+    const id = head.dataset.groupDrag;
+    const g = groupById(id);
+    if (!g) return;
+    e.preventDefault();
+    const members = (g.nodeIds || []).map(nodeById).filter(Boolean);
+    groupDrag = {
+      id, el: head.closest(".sw-group"), g,
+      sx: e.clientX, sy: e.clientY, px: e.clientX, py: e.clientY,
+      moved: false, dx: 0, dy: 0,
+      x: g.x, y: g.y,
+      members: members.map((n) => ({
+        id: n.id, x: n.x, y: n.y,
+        el: nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(n.id)}"]`),
+      })),
+      edges: edges().filter((ed) => (g.nodeIds || []).includes(ed.from) || (g.nodeIds || []).includes(ed.to)),
+    };
+    document.addEventListener("mousemove", onGroupDragMove);
+    document.addEventListener("mouseup", onGroupDragUp);
+  }
+
+  /** Move every member and the frame together, at most once per frame. */
+  function applyGroupDrag() {
+    if (!groupDrag) return;
+    const dx = (groupDrag.px - groupDrag.sx) / zoom, dy = (groupDrag.py - groupDrag.sy) / zoom;
+    groupDrag.dx = Math.round(dx); groupDrag.dy = Math.round(dy);
+    for (const m of groupDrag.members) {
+      const nx = Math.max(0, Math.round(m.x + dx)), ny = Math.max(0, Math.round(m.y + dy));
+      const n = nodeById(m.id);
+      if (n) { n.x = nx; n.y = ny; }
+      if (m.el) { m.el.style.left = `${nx}px`; m.el.style.top = `${ny}px`; }
+      const b = boxCache.get(m.id);
+      if (b) { b.x = nx; b.y = ny; }
+    }
+    // The frame follows its members (or, folded, its own stored chip position).
+    const g = groupDrag.g;
+    g.x = Math.max(0, Math.round(groupDrag.x + dx));
+    g.y = Math.max(0, Math.round(groupDrag.y + dy));
+    placeGroup(g);
+    layoutEdges(groupDrag.edges, false);
+  }
+  function onGroupDragMove(e) {
+    if (!groupDrag) return;
+    groupDrag.px = e.clientX; groupDrag.py = e.clientY;
+    if (Math.abs(e.clientX - groupDrag.sx) + Math.abs(e.clientY - groupDrag.sy) > 3) groupDrag.moved = true;
+    onFrame(applyGroupDrag);
+  }
+  function onGroupDragUp() {
+    document.removeEventListener("mousemove", onGroupDragMove);
+    document.removeEventListener("mouseup", onGroupDragUp);
+    const d = groupDrag;
+    if (!d) return;
+    applyGroupDrag(); // flush the last pointer position before committing
+    groupDrag = null;
+    if (d.moved) run_(() => post("moveGroup", { id: d.id, dx: d.dx, dy: d.dy }));
+    else if (dirty) paint();
+  }
+
+  // ─── Resizing a group frame ───────────────────────────────────────────────
+  //
+  // The eight handles set the frame's own box. The frame may grow freely, but
+  // never shrinks past the cards it holds: a group is a container, and dragging
+  // an edge should not leave a member outside it. The manual box is persisted
+  // with the group; without one the frame stays measured from its members.
+
+  /** The tightest box that still contains every member (the shrink limit). */
+  function groupResizeLimits(g) {
+    const members = (g.nodeIds || []).map(nodeById).filter(Boolean);
+    if (!members.length) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of members) {
+      const b = boxCache.get(n.id) || { x: n.x, y: n.y, w: NODE_W, h: 120 };
+      minX = Math.min(minX, b.x); minY = Math.min(minY, b.y);
+      maxX = Math.max(maxX, b.x + b.w); maxY = Math.max(maxY, b.y + b.h);
+    }
+    return {
+      left: Math.max(0, minX - GROUP_PAD),
+      top: Math.max(0, minY - GROUP_HEAD),
+      right: Math.min(CANVAS_LIMIT, maxX + GROUP_PAD),
+      bottom: Math.min(CANVAS_LIMIT, maxY + GROUP_PAD),
+    };
+  }
+
+  /** Which part of a frame's box a pointer is on, if any: `n`, `se`, … */
+  function groupEdgeDir(rect, cx, cy, pad = 10) {
+    const left = cx - rect.left <= pad, right = rect.right - cx <= pad;
+    const top = cy - rect.top <= pad, bottom = rect.bottom - cy <= pad;
+    if (!left && !right && !top && !bottom) return null;
+    return `${top ? "n" : bottom ? "s" : ""}${left ? "w" : right ? "e" : ""}` || null;
+  }
+
+  function startGroupResize(id, dir, e) {
+    const g = groupById(id);
+    if (!g || g.collapsed || g.resizable === false) return;
+    e.preventDefault();
+    measureBoxes();
+    groupResize = {
+      id, g, dir: dir || "se",
+      sx: e.clientX, sy: e.clientY, px: e.clientX, py: e.clientY, moved: false,
+      box: groupBox(g),
+      limits: groupResizeLimits(g),
+    };
+    for (const el of groupsEl?.children || []) el.classList.remove("drop-target");
+    document.addEventListener("mousemove", onGroupResizeMove);
+    document.addEventListener("mouseup", onGroupResizeUp);
+  }
+
+  function applyGroupResize() {
+    if (!groupResize) return;
+    const r = groupResize;
+    const dx = (r.px - r.sx) / zoom, dy = (r.py - r.sy) / zoom;
+    if (Math.abs(r.px - r.sx) + Math.abs(r.py - r.sy) > 3) r.moved = true;
+    let left = r.box.x, right = r.box.x + r.box.w;
+    let top = r.box.y, bottom = r.box.y + r.box.h;
+    if (r.dir.includes("w")) left += dx;
+    if (r.dir.includes("e")) right += dx;
+    if (r.dir.includes("n")) top += dy;
+    if (r.dir.includes("s")) bottom += dy;
+    if (r.limits) {
+      // Clamp only the dragged edges: the opposite side is fixed, and the
+      // content limit is what stops a shrink before it would cut a card off.
+      if (r.dir.includes("w")) left = Math.max(0, Math.min(left, r.limits.left));
+      if (r.dir.includes("e")) right = Math.min(CANVAS_LIMIT, Math.max(right, r.limits.right));
+      if (r.dir.includes("n")) top = Math.max(0, Math.min(top, r.limits.top));
+      if (r.dir.includes("s")) bottom = Math.min(CANVAS_LIMIT, Math.max(bottom, r.limits.bottom));
+    }
+    // A minimum readable frame, even when the group is empty.
+    if (right - left < GROUP_MIN_W) {
+      if (r.dir.includes("w")) left = right - GROUP_MIN_W;
+      else right = left + GROUP_MIN_W;
+    }
+    if (bottom - top < GROUP_MIN_H) {
+      if (r.dir.includes("n")) top = bottom - GROUP_MIN_H;
+      else bottom = top + GROUP_MIN_H;
+    }
+    r.g.x = Math.round(Math.max(0, left));
+    r.g.y = Math.round(Math.max(0, top));
+    r.g.w = Math.round(Math.min(CANVAS_LIMIT, right) - r.g.x);
+    r.g.h = Math.round(Math.min(CANVAS_LIMIT, bottom) - r.g.y);
+    placeGroup(r.g);
+  }
+
+  function onGroupResizeMove(e) {
+    if (!groupResize) return;
+    groupResize.px = e.clientX; groupResize.py = e.clientY;
+    onFrame(applyGroupResize);
+  }
+  function onGroupResizeUp() {
+    document.removeEventListener("mousemove", onGroupResizeMove);
+    document.removeEventListener("mouseup", onGroupResizeUp);
+    const r = groupResize;
+    if (!r) return;
+    applyGroupResize();
+    groupResize = null;
+    if (r.moved) {
+      run_(() => post("updateGroup", { id: r.id, x: r.g.x, y: r.g.y, w: r.g.w, h: r.g.h }), "Group resized");
+    } else if (dirty) paint();
   }
 
   // ─── Run bar + log ────────────────────────────────────────────────────────
@@ -2101,8 +2796,17 @@
     const status = shown?.status || "idle";
     // A gate only ever holds the *live* run; a past run is read-only.
     const waiting = !historyRun && live?.status === "running" ? waitingNodes() : [];
-    if (runBtn) runBtn.disabled = live?.status === "running";
-    if (stopBtn) stopBtn.disabled = live?.status !== "running";
+    if (runBtn) {
+      // One button, two jobs: it starts a workflow and, while that workflow is
+      // live, becomes the stop control. A past run never changes it — only the
+      // live run can be running.
+      const running = live?.status === "running";
+      runBtn.textContent = running ? "■ Stop" : "▶ Run";
+      runBtn.title = running ? "Stop the running workflow" : "Run this workflow";
+      runBtn.setAttribute("aria-label", running ? "Stop workflow" : "Run workflow");
+      runBtn.classList.toggle("sw-danger", running);
+      runBtn.classList.toggle("sw-primary", !running);
+    }
     if (runStatusEl) {
       runStatusEl.className = `sw-run-status sw-rs-${waiting.length ? "waiting" : status}`;
       if (!shown) runStatusEl.textContent = "no run yet";
@@ -2411,11 +3115,15 @@
                        : `<div class="sw-msg-none">Nothing is wired into this gate.</div>`);
     }
     if (n.type === "end") return endOutputHtml(n);
+    // This start's own task when the run being read came from it; otherwise the
+    // task it would use, so a sibling workflow's run is never shown here as this
+    // entry point's material.
+    const shown = viewRun()?.startId === n.id ? viewRun()?.task : (n.config?.defaultTask || viewRun()?.task);
     return `<div class="sw-msg-section">` +
         `<div class="sw-msg-sec-head"><span class="sw-node-glyph">▶</span>` +
           `<span class="sw-msg-sec-name">${esc(n.name)}</span>` +
           `<span class="sw-msg-sec-tag">start</span></div>` +
-        `<pre class="sw-msg-pre">${esc(viewRun()?.task || n.config?.defaultTask || "—")}</pre></div>`;
+        `<pre class="sw-msg-pre">${esc(shown || "—")}</pre></div>`;
   }
 
   /** The sidebar with nothing in focus: every agent, then any gate, then the end. */
@@ -2442,38 +3150,58 @@
     return parts.join("");
   }
 
+  /** The node the messages sidebar is showing, or null while none is selected. */
+  function focusedNode() {
+    return selected && selected.kind === "node" ? nodeById(selected.id) : null;
+  }
+
   /**
-   * Repaint the sidebar. Rebuilt only when the reading really changed (a new
-   * line, a new focus, a gate that started or stopped waiting), so a live tick
-   * never churns it — and a note typed into a gate card is carried over.
+   * The sidebar is a node's own context, not a feed for the whole canvas: it is
+   * shown only while a node is selected (clicking an edge or the empty canvas
+   * folds it away again).
+   */
+  function syncMessagesVisibility() {
+    const main = msgSideEl?.closest(".sw-main") || pane?.querySelector(".sw-main");
+    const focus = focusedNode();
+    main?.classList.toggle("no-focus", !focus);
+    msgSideEl?.classList.toggle("has-focus", !!focus);
+    if (!focus && msgBodyEl && msgBodyEl.innerHTML) msgBodyEl.innerHTML = "";
+  }
+
+  /**
+   * Repaint the sidebar for the selected node. Rebuilt only when the reading
+   * really changed (a new line, a new focus, a gate that started or stopped
+   * waiting), so a live tick never churns it — and a note typed into a gate card
+   * is carried over. With nothing selected there is nothing to show.
    */
   function renderMessages() {
     if (!msgBodyEl || !msgTitleEl) return;
-    // Folded away, the panel costs nothing: its signature stays unset, so
-    // showing it again repaints it from scratch.
-    if (msgSideEl?.closest(".sw-main")?.classList.contains("no-msgs")) return;
+    syncMessagesVisibility();
+    const focus = focusedNode();
+    if (!focus) {
+      msgSig = "";
+      msgTitleEl.textContent = "Messages";
+      if (msgSubEl) msgSubEl.textContent = "click a node to see its messages";
+      return;
+    }
     const waiting = !historyRun && run?.status === "running" ? waitingNodes().map((n) => n.id) : [];
-    const focus = selected && selected.kind === "node" ? nodeById(selected.id) : null;
     const entries = logEntries();
     const last = entries.length ? entries[entries.length - 1].seq : 0;
-    const sig = `${historyRun ? historyRun.id : "live"}|${focus ? focus.id : "all"}|${entries.length}|${last}|${waiting.join(",")}`;
+    const sig = `${historyRun ? historyRun.id : "live"}|${focus.id}|${entries.length}|${last}|${waiting.join(",")}`;
     if (sig === msgSig) return;
     msgSig = sig;
     const notes = new Map();
     for (const card of msgBodyEl.querySelectorAll(".sw-msg-gate")) {
       notes.set(card.dataset.gate, card.querySelector(".sw-msg-note")?.value ?? "");
     }
-    msgTitleEl.textContent = focus ? focus.name : "Messages";
-    msgSubEl.textContent = focus
-      ? `${focus.type === "agent" ? providerLabel(focus.config?.harness) : focus.type} · messages`
-      : `${nodes().filter((n) => n.type === "agent").length} agents · every message`;
-    msgBodyEl.innerHTML = focus ? focusedHtml(focus, waiting) : allMessagesHtml(waiting);
+    msgTitleEl.textContent = focus.name;
+    msgSubEl.textContent = `${focus.type === "agent" ? providerLabel(focus.config?.harness) : focus.type} · messages`;
+    msgBodyEl.innerHTML = focusedHtml(focus, waiting);
     for (const card of msgBodyEl.querySelectorAll(".sw-msg-gate")) {
       const note = notes.get(card.dataset.gate);
       const box = card.querySelector(".sw-msg-note");
       if (note && box) box.value = note;
     }
-    msgSideEl?.classList.toggle("has-focus", !!focus);
   }
 
   /** The selection moved: repaint the canvas highlights and the sidebar. */
@@ -2644,10 +3372,13 @@
 
   async function startRun() {
     // There is no run-level task box: each node carries its own message, and the
-    // run's task is the start node's default task (the server reads it when no
-    // task is sent).
+    // run's task is the selected start node's default task. With several start
+    // nodes on one canvas, selecting one and pressing ▶ Run is how that entry
+    // point is run on its own; with none selected the server uses the first.
+    const sel = focusedNode();
+    const startId = sel?.type === "start" ? sel.id : undefined;
     try {
-      const data = await postRun("start", {});
+      const data = await postRun("start", startId ? { startId } : {});
       historyRun = null; // a new run takes the canvas back to the live view
       historySig = "";
       adoptRun(data.run, true);
@@ -2683,10 +3414,9 @@
           `<button class="btn-sm sw-primary" id="sw-add-agent" type="button" title="Add an agent node">+ Agent</button>` +
           `<button class="btn-sm" id="sw-add-approval" type="button" title="Add a human approval gate">+ Approval</button>` +
           `<button class="btn-sm" id="sw-add-loop" type="button" title="Add a loop node — wire its repeat output back to a step to refine it">+ Loop</button>` +
-          `<button class="btn-sm" id="sw-add-start" type="button" title="Add the start node">+ Start</button>` +
-          `<button class="btn-sm" id="sw-add-end" type="button" title="Add the end node">+ End</button>` +
-          `<button class="btn-sm" id="sw-triggers" type="button" title="Start this workflow on a schedule or an observed event">⏱ Triggers</button>` +
-          `<button class="btn-sm" id="sw-msg-toggle" type="button" title="Show or hide the messages sidebar">💬 Messages</button>` +
+          `<button class="btn-sm" id="sw-add-start" type="button" title="Add a start node — each start is its own entry point with its own triggers">+ Start</button>` +
+          `<button class="btn-sm" id="sw-add-end" type="button" title="Add an end node — each end reports its own branch's final output">+ End</button>` +
+          `<button class="btn-sm" id="sw-add-group" type="button" title="Group the selected nodes — Shift-click or Shift-drag to pick several, or click with nothing selected for an empty group">▣ Group</button>` +
           `<button class="btn-sm" id="sw-export" type="button" title="Download this workflow as JSON">⬇ Export</button>` +
           `<button class="btn-sm" id="sw-import" type="button" title="Load a workflow JSON file">⬆ Import</button>` +
           `<input type="file" id="sw-import-file" accept="application/json,.json" style="display:none">` +
@@ -2694,18 +3424,21 @@
         `</div>` +
       `</div>` +
       `<div class="sw-runbar">` +
-        `<button class="btn-sm sw-primary" id="sw-run" type="button">▶ Run</button>` +
-        `<button class="btn-sm sw-danger" id="sw-stop" type="button" disabled>■ Stop</button>` +
+        `<button class="btn-sm sw-primary sw-run-btn" id="sw-run" type="button" ` +
+          `title="Run this workflow" aria-label="Run workflow">▶ Run</button>` +
         `<span class="sw-run-status" id="sw-run-status"></span>` +
       `</div>` +
       `<div class="sw-body">` +
-        `<div class="sw-main">` +
+        `<div class="sw-main no-focus">` +
           `<div class="sw-canvas-scroll">` +
             `<div class="sw-canvas" id="sw-canvas">` +
               `<svg class="sw-edges" xmlns="http://www.w3.org/2000/svg" width="1000" height="700">` +
                 `<g id="sw-edge-paths"></g><path id="sw-tmp" class="sw-tmp" style="display:none"></path></svg>` +
+              `<div class="sw-groups" id="sw-groups"></div>` +
               `<div class="sw-nodes" id="sw-nodes"></div>` +
+              `<div class="sw-group-handles" id="sw-group-handles"></div>` +
               `<div class="sw-edge-btns" id="sw-edge-btns"></div>` +
+              `<div class="sw-marquee" id="sw-marquee" hidden></div>` +
             `</div>` +
           `</div>` +
           // Zoom controls for the canvas: a floating cluster at the canvas's
@@ -2726,7 +3459,7 @@
             `<div class="sw-msg-head">` +
               `<span class="sw-msg-title" id="sw-msg-title">Messages</span>` +
               `<span class="sw-msg-sub" id="sw-msg-sub"></span>` +
-              `<button class="btn-sm sw-msg-all" id="sw-msg-all" type="button" title="Show every agent again">All agents</button>` +
+              `<button class="btn-sm sw-msg-close" id="sw-msg-close" type="button" title="Close messages and clear the selection">✕</button>` +
             `</div>` +
             `<div class="sw-msg-body" id="sw-msg-body"></div>` +
           `</aside>` +
@@ -2752,10 +3485,20 @@
     runSummaryEl = pane.querySelector("#sw-run-summary");
     historyEl = pane.querySelector("#sw-history");
     runBtn = pane.querySelector("#sw-run");
-    stopBtn = pane.querySelector("#sw-stop");
     canvasEl = pane.querySelector("#sw-canvas");
     canvasScrollEl = pane.querySelector(".sw-canvas-scroll");
+    // The canvas keeps pan room measured from the pane, so a resize has to
+    // re-measure it. Changing the canvas's own size does not resize the pane,
+    // so this cannot feed itself.
+    canvasSizeObs?.disconnect();
+    if (typeof ResizeObserver === "function" && canvasScrollEl) {
+      canvasSizeObs = new ResizeObserver(() => { canvasW = 0; canvasH = 0; resizeCanvas(); });
+      canvasSizeObs.observe(canvasScrollEl);
+    }
     nodesEl = pane.querySelector("#sw-nodes");
+    groupsEl = pane.querySelector("#sw-groups");
+    handlesEl = pane.querySelector("#sw-group-handles");
+    marqueeEl = pane.querySelector("#sw-marquee");
     svgEl = pane.querySelector("svg.sw-edges");
     edgePathsEl = pane.querySelector("#sw-edge-paths");
     tmpPathEl = pane.querySelector("#sw-tmp");
@@ -2767,20 +3510,13 @@
     msgTitleEl = pane.querySelector("#sw-msg-title");
     msgSubEl = pane.querySelector("#sw-msg-sub");
 
-    // The messages sidebar can be folded away, and remembers it (per browser,
-    // like the app's other panel toggles).
+    // The messages sidebar belongs to the selected node: nothing is selected on
+    // open, so it stays folded away until a node is clicked. Each workflow on
+    // the canvas is then managed in its own context rather than one mixed feed.
     const mainEl = pane.querySelector(".sw-main");
-    let msgsOn = true;
-    try { msgsOn = localStorage.getItem("scope-sw-msgs") !== "0"; } catch { /* private mode */ }
-    mainEl.classList.toggle("no-msgs", !msgsOn);
-    pane.querySelector("#sw-msg-toggle").addEventListener("click", () => {
-      const hidden = mainEl.classList.toggle("no-msgs");
-      try { localStorage.setItem("scope-sw-msgs", hidden ? "0" : "1"); } catch { /* private mode */ }
-      msgSig = "";
-      renderMessages();
-    });
-    pane.querySelector("#sw-msg-all").addEventListener("click", () => {
+    pane.querySelector("#sw-msg-close").addEventListener("click", () => {
       selected = null;
+      groupSel = new Set();
       renderNodes();
       selectionChanged();
     });
@@ -2796,6 +3532,7 @@
       const sec = e.target.closest?.(".sw-msg-section[data-node]");
       if (!sec) return;
       selected = { kind: "node", id: sec.dataset.node };
+      groupSel = new Set([sec.dataset.node]);
       renderNodes();
       nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(sec.dataset.node)}"]`)
         ?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
@@ -2808,14 +3545,16 @@
     pane.querySelector("#sw-add-loop").addEventListener("click", () => addNode("loop"));
     pane.querySelector("#sw-add-start").addEventListener("click", () => addNode("start"));
     pane.querySelector("#sw-add-end").addEventListener("click", () => addNode("end"));
+    pane.querySelector("#sw-add-group").addEventListener("click", addGroup);
     pane.querySelector("#sw-export").addEventListener("click", exportWorkflow);
     const importFile = pane.querySelector("#sw-import-file");
     pane.querySelector("#sw-import").addEventListener("click", () => importFile.click());
     importFile.addEventListener("change", importWorkflow);
-    pane.querySelector("#sw-triggers").addEventListener("click", () => openDialog({ kind: "triggers" }));
     pane.querySelector("#sw-refresh").addEventListener("click", reloadWorkflow);
-    runBtn.addEventListener("click", startRun);
-    stopBtn.addEventListener("click", stopRun);
+    runBtn.addEventListener("click", () => {
+      if (run?.status === "running") void stopRun();
+      else void startRun();
+    });
     historyEl.addEventListener("change", () => selectHistory(historyEl.value));
     pane.querySelector("#sw-run-toggle").addEventListener("click", (e) => {
       const panel = pane.querySelector(".sw-run-panel");
@@ -2823,12 +3562,52 @@
       e.currentTarget.textContent = collapsed ? "▴" : "▾";
     });
 
+    canvasEl.addEventListener("click", (e) => {
+      const toggle = e.target.closest?.("[data-group-resizable]");
+      if (!toggle) return;
+      e.preventDefault(); e.stopPropagation();
+      void toggleGroupResizable(toggle.dataset.groupResizable);
+    });
+
     canvasEl.addEventListener("mousedown", (e) => {
       // Middle-button drag pans the view from anywhere, including over a node —
       // but never off a control (a port, the gear, a delete button), which keeps
       // its own click behaviour whatever button was used.
-      const onControl = e.target.closest?.(".sw-port-out, .sw-node-del, .sw-node-config, .sw-edge-del");
+      const onControl = e.target.closest?.(".sw-port-out, .sw-node-del, .sw-node-config, .sw-edge-del, " +
+        ".sw-group-fold, .sw-group-remove, .sw-group-resize-toggle, .sw-group-name, .sw-group-handle");
       if (e.button === 1 && !onControl) { startPan(e); return; }
+      // Group controls are canvas chrome, not card actions: a click folds the
+      // workflow or drops its frame, a drag on the header moves the whole group,
+      // and a handle drag sets the frame's own size.
+      const resizeHandle = e.target.closest?.("[data-group-resize]");
+      if (resizeHandle && e.button === 0) {
+        e.preventDefault(); e.stopPropagation();
+        startGroupResize(resizeHandle.dataset.groupResize, resizeHandle.dataset.dir, e);
+        return;
+      }
+      const fold = e.target.closest?.("[data-group-fold]");
+      if (fold && e.button === 0) { e.preventDefault(); e.stopPropagation(); void toggleGroupFold(fold.dataset.groupFold); return; }
+      const resizeToggle = e.target.closest?.("[data-group-resizable]");
+      if (resizeToggle && e.button === 0) {
+        // The action runs on `click`, so the same button works from the keyboard;
+        // this only keeps the header from starting a group drag underneath it.
+        e.preventDefault(); e.stopPropagation();
+        return;
+      }
+      const ungroupBtn = e.target.closest?.("[data-group-remove]");
+      if (ungroupBtn && e.button === 0) { e.preventDefault(); e.stopPropagation(); void ungroup(ungroupBtn.dataset.groupRemove); return; }
+      if (e.target.closest?.("[data-group-name]")) return; // the input edits the name itself
+      const gHead = e.target.closest?.("[data-group-drag]");
+      if (gHead && e.button === 0) {
+        // The top edge of the header is also the frame's north resize edge.
+        const gEl = gHead.closest(".sw-group");
+        const g = groupById(gEl?.dataset.group);
+        const dir = g && !g.collapsed && g.resizable !== false
+          ? groupEdgeDir(gEl.getBoundingClientRect(), e.clientX, e.clientY, 8) : null;
+        if (dir) { startGroupResize(g.id, dir, e); return; }
+        startGroupDrag(gHead, e);
+        return;
+      }
       const port = e.target.closest?.(".sw-port-out");
       if (port) {
         e.preventDefault(); e.stopPropagation();
@@ -2844,6 +3623,7 @@
       if (gear) {
         e.preventDefault(); e.stopPropagation();
         selected = { kind: "node", id: gear.dataset.config };
+        groupSel = new Set([gear.dataset.config]);
         renderNodes();
         selectionChanged();
         openDialog({ kind: "node", id: gear.dataset.config });
@@ -2855,12 +3635,23 @@
       if (nodeEl) {
         e.preventDefault();
         const id = nodeEl.dataset.id;
+        // Shift/Ctrl/⌘-click picks several nodes for the Group button without
+        // changing which node's messages the sidebar is reading.
+        if (e.shiftKey || e.metaKey || e.ctrlKey) {
+          if (groupSel.has(id)) groupSel.delete(id); else groupSel.add(id);
+          if (groupSel.has(id)) selected = { kind: "node", id };
+          else if (selected?.kind === "node" && selected.id === id) selected = null;
+          renderNodes();
+          selectionChanged();
+          return;
+        }
         // Rebuild the node DOM only when the selection really changed. A
         // rebuild detaches the element the pointer is on, which would leave a
         // double-click (the second way into a node's settings) with no element
         // to bubble from — and it is wasted work on every click.
-        if (selected?.kind !== "node" || selected.id !== id) {
+        if (selected?.kind !== "node" || selected.id !== id || groupSel.size !== 1 || !groupSel.has(id)) {
           selected = { kind: "node", id };
+          groupSel = new Set([id]);
           renderNodes();
           // Clicking an agent is how its messages are asked for.
           selectionChanged();
@@ -2872,10 +3663,42 @@
         startDrag(nodesEl.querySelector(`.sw-node[data-id="${CSS.escape(id)}"]`) || nodeEl, e);
         return;
       }
-      // Nothing above matched: the pointer is on empty canvas. A drag pans the
-      // view; a click that does not move still clears the selection.
-      if (e.button === 0) startPan(e);
-      else if (selected) { selected = null; renderNodes(); selectionChanged(); }
+      // Inside an expanded group's frame (but not on a card): its edges resize
+      // the frame, and its body is still empty canvas to pan or marquee from.
+      const groupEl = e.target.closest?.(".sw-group");
+      if (groupEl && e.button === 0) {
+        const g = groupById(groupEl.dataset.group);
+        if (g && !g.collapsed) {
+          const dir = groupEdgeDir(groupEl.getBoundingClientRect(), e.clientX, e.clientY);
+          if (dir) { startGroupResize(g.id, dir, e); return; }
+        }
+        if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) startMarquee(e);
+        else startPan(e);
+        return;
+      }
+      // Nothing above matched: the pointer is on empty canvas. Shift-drag (or
+      // Ctrl/⌘/Alt-drag) draws a selection box; anything else pans the view, and
+      // a click that does not move still clears the selection.
+      if (e.button === 0) {
+        if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) startMarquee(e);
+        else startPan(e);
+      } else if (selected || groupSel.size) { selected = null; groupSel = new Set(); renderNodes(); selectionChanged(); }
+    });
+
+    // A group's name is an inline field on its header.
+    canvasEl.addEventListener("change", (e) => {
+      const nameEl = e.target.closest?.("[data-group-name]");
+      if (nameEl) void renameGroup(nameEl.dataset.groupName, nameEl.value);
+    });
+
+    // The canvas can be smaller than the viewport (a short workflow), leaving
+    // blank scroller around it. That blank area pans too, so the background is
+    // one continuous surface rather than a grab cursor that only works over the
+    // canvas's own rectangle.
+    canvasScrollEl.addEventListener("mousedown", (e) => {
+      if (e.target !== canvasScrollEl) return;
+      if (e.button === 0 || e.button === 1) startPan(e);
+      else if (selected || groupSel.size) { selected = null; groupSel = new Set(); renderNodes(); selectionChanged(); }
     });
 
     // Double-clicking a node is the same as pressing its gear.
@@ -2883,6 +3706,7 @@
       const nodeEl = e.target.closest?.(".sw-node");
       if (!nodeEl) return;
       selected = { kind: "node", id: nodeEl.dataset.id };
+      groupSel = new Set([nodeEl.dataset.id]);
       renderNodes();
       selectionChanged();
       openDialog({ kind: "node", id: nodeEl.dataset.id });
@@ -2912,7 +3736,8 @@
         return;
       }
       if (!e.target.closest?.("#sw-final-copy")) return;
-      const text = finalOutput().text;
+      const endNode = dlg?.kind === "node" ? nodeById(dlg.id) : null;
+      const text = endNode?.type === "end" ? finalOutput(endNode.id).text : finalOutput().text;
       if (!text) return;
       Promise.resolve(navigator.clipboard?.writeText(text))
         .then(() => S.toast?.("Final output copied"))
@@ -2925,6 +3750,8 @@
       const path = e.target.closest?.(".sw-edge");
       if (!path) return;
       selected = { kind: "edge", id: path.dataset.edge };
+      groupSel = new Set();
+      renderNodes();
       renderEdges();
       selectionChanged();
       openDialog({ kind: "edge", id: path.dataset.edge });
@@ -2949,6 +3776,10 @@
     document.head.appendChild(link);
   }
 
+  // A reload is the common way this view is left; flush the view before the
+  // document goes away rather than losing the debounced write.
+  window.addEventListener("beforeunload", saveViewNow);
+
   S.Plugins.register({
     id: "subagent-workflow",
     name: "Subagent Workflow",
@@ -2968,13 +3799,21 @@
         historyRun = null;
         historySig = "";
         cwd = S.currentCwd?.() || "";
+        requestViewRestore();
         // `refresh()` paints when the graph arrives; the harness list only feeds
         // the settings popup, so it does not trigger a second canvas paint.
         void loadHarnesses();
         refresh();
       },
-      onHide: stopPolling,
-      onCwd: () => { cwd = S.currentCwd?.() || ""; historyRun = null; historySig = ""; refresh(); },
+      onHide: () => { saveViewNow(); stopPolling(); },
+      onCwd: () => {
+        saveViewNow(); // the workspace being left keeps its own view
+        cwd = S.currentCwd?.() || "";
+        historyRun = null;
+        historySig = "";
+        requestViewRestore();
+        refresh();
+      },
       onReconnect: () => refresh(),
     },
     pluginSettings: {

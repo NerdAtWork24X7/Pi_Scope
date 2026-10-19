@@ -63,6 +63,7 @@
   let fullscreen = false; // whether the detail pane is in fullscreen mode
   let changesFs = false; // whether the changes diff view is fullscreen
   let editFile = { path: "", content: "", original: "", sha: "" };
+  let pendingSelect = ""; // cross-view "open this file's changes" request
 
   const selectedCwd = window.SCOPE.currentCwd;
 
@@ -98,6 +99,12 @@
 
   function refreshCwd() {
     window.SCOPE.cwdLabel(cwdLabel);
+  }
+
+  /** Cross-view navigation: open one file in the Review side-by-side diff. */
+  function openInReview(path) {
+    if (typeof window.SCOPE.openReviewFile === "function") window.SCOPE.openReviewFile(path);
+    else window.setView?.("files");
   }
 
   // ─── Diff rendering (side-by-side split or unified) ────────────────────
@@ -224,6 +231,13 @@
         `<span style="color:var(--muted);font-size:11px">${esc(d.section)}${d.cached ? " · staged" : ""}</span>` +
         `<span class="gdh-stat"><span class="a">+${d.add}</span> <span class="d">−${d.del}</span></span>`;
       diffHeader.appendChild(modeToggle(renderChangesDiff));
+      const revBtn = document.createElement("button");
+      revBtn.type = "button";
+      revBtn.className = "btn-sm";
+      revBtn.textContent = "↗ Review";
+      revBtn.title = "Open this file in the Review side-by-side diff";
+      revBtn.onclick = () => openInReview(d.path);
+      diffHeader.appendChild(revBtn);
       const fsBtn = document.createElement("button");
       fsBtn.type = "button";
       fsBtn.className = "btn-sm";
@@ -1209,17 +1223,17 @@
     menuEl.style.top = Math.min(y, window.innerHeight - rect.height - 8) + "px";
   }
 
-  // Right-click menu for a working-tree file row: stage/unstage, discard, etc.
+  // Right-click menu for a working-tree file row: navigate (Review / ignore)
+  // plus the staging, discard and conflict actions.
   function showFileMenu(f, x, y) {
     showMenu(x, y, (add, sep) => {
       const staged = f.section === "staged";
+      add("Open in Review diff", () => openInReview(f.path));
+      add("Add to .gitignore", () => addToGitignore([f.path]));
+      sep();
       if (staged) add("Unstage file", () => unstage([f.path]));
       else add("Stage file", () => stage([f.path]));
       if (f.section === "conflicted") add("Mark resolved", () => stage([f.path]));
-      if (f.section === "untracked") {
-        sep();
-        add("Add to .gitignore", () => addToGitignore([f.path]));
-      }
       sep();
       if (f.section === "untracked") {
         add("Delete untracked file", () => discard([f.path], true), true);
@@ -1551,6 +1565,15 @@
     else syncEl.textContent = "no upstream";
     renderFiles(data.files || []);
     setStatus("");
+    // A cross-view request lands on the file's Changes diff, not on whichever
+    // tab happened to be open last.
+    if (pendingSelect) {
+      const wanted = pendingSelect;
+      pendingSelect = "";
+      const f = (data.files || []).find((x) => x.path === wanted);
+      if (f) { selectFile(f.path, f.section); return; }
+      setStatus(`${wanted} is not modified`);
+    }
     if (activeTab === "history") loadHistory();
     else if (activeTab === "branches") loadBranches();
     else if (activeTab === "stashes") loadStashes();
@@ -1701,6 +1724,14 @@
     // Keep the box visible when the viewport shrinks (intent preserved).
     window.addEventListener("resize", () => { if (desired != null) render(); });
   })();
+
+  /** Cross-view navigation: show one file's changes in the Git view. */
+  window.SCOPE.openGitFile = function (path) {
+    if (!path) return;
+    pendingSelect = path;
+    if (window.__SCOPE_STATE?.view !== "git") window.setView?.("git");
+    else loadStatus();
+  };
 
   window.__gitOnView = async function () {
     refreshCwd();

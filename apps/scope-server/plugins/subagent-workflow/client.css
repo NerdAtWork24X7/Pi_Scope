@@ -31,6 +31,7 @@
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
 }
+.sw-run-btn { min-width: 78px; display: inline-flex; align-items: center; justify-content: center; }
 .sw-run-status { flex: 0 0 auto; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sw-rs-running { color: var(--accent); }
 .sw-rs-done { color: var(--green); }
@@ -85,8 +86,116 @@
 .sw-edge-repeat:hover, .sw-edge-repeat.sel { stroke: var(--cyan); }
 .sw-tmp { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 4; }
 
-.sw-nodes { position: absolute; inset: 0; }
-.sw-edge-btns { position: absolute; inset: 0; pointer-events: none; }
+/* ── Groups ─────────────────────────────────────────────────────────────── */
+/*
+ * A named frame around one workflow on a shared canvas. The frame itself is
+ * inert (its cards are what you click); only its header takes the pointer, so a
+ * drag there moves the whole workflow and a click on the fold arrow turns it
+ * into a single chip. The box is measured from its members by client.js, so the
+ * frame always wraps what it holds.
+ */
+.sw-groups { position: absolute; inset: 0; pointer-events: none; }
+.sw-group {
+  position: absolute; box-sizing: border-box; pointer-events: none;
+  border: 1px dashed color-mix(in srgb, var(--accent) 38%, var(--border-strong));
+  border-radius: var(--r-card);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  transition: border-color .12s ease, background .12s ease;
+}
+.sw-group:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--border-strong)); }
+/* The frame a dragged card would join, highlighted before the drop lands. */
+.sw-group.drop-target {
+  border: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.sw-group.collapsed {
+  pointer-events: auto;
+  border-style: solid; border-color: var(--border-strong);
+  background: var(--surface-2);
+  box-shadow: 0 6px 18px -12px rgba(0, 0, 0, .6);
+}
+/* Eight handles on an expanded frame: corners and edge midpoints. They sit in
+   their own layer above the cards so a handle on an edge a card overlaps still
+   takes the pointer. A folded group is a chip, so it shows none (see client.js). */
+.sw-group-handles { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+.sw-group-handle {
+  position: absolute; width: 12px; height: 12px;
+  pointer-events: auto; box-sizing: border-box;
+  background: var(--surface); border: 1px solid var(--accent); border-radius: 3px;
+  box-shadow: 0 1px 3px -1px rgba(0, 0, 0, .35);
+  opacity: .6; transition: opacity .12s ease, background .12s ease;
+}
+.sw-group-handle:hover { opacity: 1; background: var(--accent-soft); }
+.sw-gh-nw, .sw-gh-se { cursor: nwse-resize; }
+.sw-gh-n, .sw-gh-s { cursor: ns-resize; }
+.sw-gh-ne, .sw-gh-sw { cursor: nesw-resize; }
+.sw-gh-e, .sw-gh-w { cursor: ew-resize; }
+
+.sw-group-head {
+  position: absolute; top: 0; left: 0; right: 0; height: 36px;
+  display: flex; align-items: center; gap: 6px; padding: 0 8px;
+  box-sizing: border-box; pointer-events: auto; cursor: grab; user-select: none;
+  background: color-mix(in srgb, var(--surface-2) 92%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-radius: calc(var(--r-card) - 1px) calc(var(--r-card) - 1px) 0 0;
+}
+.sw-group-head:active { cursor: grabbing; }
+.sw-group.collapsed .sw-group-head {
+  height: 100%; border-bottom: none; border-radius: calc(var(--r-card) - 1px);
+}
+.sw-group-fold, .sw-group-remove, .sw-group-resize-toggle {
+  width: 20px; height: 20px; padding: 0; flex: 0 0 auto;
+  display: grid; place-items: center; border-radius: var(--r-control);
+  font-family: inherit; font-size: 10px; line-height: 1;
+  color: var(--muted); background: transparent; border: 1px solid transparent;
+  cursor: pointer; transition: color .12s ease, background .12s ease, border-color .12s ease;
+}
+.sw-group-fold:hover, .sw-group-resize-toggle:hover { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+/* The lock is quiet until the frame is hovered, but a locked frame keeps its
+   padlock visible so the missing resize handles have an explanation. */
+.sw-group-resize-toggle { opacity: .6; }
+.sw-group:hover .sw-group-resize-toggle { opacity: 1; }
+.sw-group-resize-toggle.off { opacity: 1; color: var(--orange); }
+.sw-group-remove { opacity: 0; }
+.sw-group:hover .sw-group-remove { opacity: 1; }
+.sw-group-remove:hover { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+.sw-group-name {
+  flex: 1; min-width: 0; font: inherit; font-size: 11.5px; font-weight: 600;
+  color: var(--text); background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-btn); padding: 2px 5px; cursor: text;
+}
+.sw-group-name:hover { background: var(--surface-3); border-color: var(--border); }
+.sw-group-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; background: var(--surface); border-color: var(--border); }
+.sw-group-count {
+  flex: 0 0 auto; font-size: 10.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* A folded group's run summary: progress from the run the canvas is showing. */
+.sw-group-status {
+  flex: 0 0 auto; font-family: var(--mono), var(--emoji); font-size: 10px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  padding: 0 5px; border-radius: var(--r-pill);
+  border: 1px solid var(--border); color: var(--muted);
+}
+.sw-gs-running { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); animation: sw-pulse 1.1s ease-in-out infinite; }
+.sw-gs-waiting { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 45%, var(--border)); }
+.sw-gs-done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
+.sw-gs-error { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--border)); }
+.sw-gs-stopped { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 45%, var(--border)); }
+
+/* The box a Shift-drag on the canvas paints over the cards it selects. */
+.sw-marquee {
+  position: absolute; z-index: 6; pointer-events: none;
+  border: 1px dashed var(--accent); border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* The cards' layer is transparent to the pointer so the group headers beneath
+   it stay reachable; each card itself takes the pointer back. */
+.sw-nodes { position: absolute; inset: 0; pointer-events: none; }
+.sw-node { pointer-events: auto; }
+.sw-edge-btns { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
 .sw-edge-del {
   position: absolute; width: 18px; height: 18px; padding: 0;
   display: grid; place-items: center; border-radius: 50%;
@@ -266,16 +375,18 @@
   background: var(--surface); border-left: 1px solid var(--border);
 }
 .sw-main.no-msgs .sw-msg-resizer,
-.sw-main.no-msgs .sw-msg-side { display: none; }
+.sw-main.no-msgs .sw-msg-side,
+.sw-main.no-focus .sw-msg-resizer,
+.sw-main.no-focus .sw-msg-side { display: none; }
 .sw-msg-head {
   flex: 0 0 auto; display: flex; align-items: baseline; gap: 8px;
   padding: 9px 12px; background: var(--surface-2); border-bottom: 1px solid var(--border);
 }
 .sw-msg-title { font-size: 12.5px; font-weight: 600; color: var(--text); max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sw-msg-sub { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Only a focused node can be un-focused, so “All agents” appears with one. */
-.sw-msg-all { flex: 0 0 auto; font-size: 11px; padding: 2px 7px; visibility: hidden; }
-.sw-msg-side.has-focus .sw-msg-all { visibility: visible; }
+/* The close control appears only beside a focused node's messages. */
+.sw-msg-close { flex: 0 0 auto; font-size: 11px; padding: 2px 7px; visibility: hidden; }
+.sw-msg-side.has-focus .sw-msg-close { visibility: visible; }
 .sw-msg-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
 
 .sw-msg-section {
@@ -534,8 +645,8 @@
   .sw-dlg-agent .sw-fld-refs .sw-ref-add #sw-ref-path { flex: 1 1 100%; }
 }
 
-/* A gate's message and the start node's task are the whole form, and the end
-   node's output is the whole node: each grows into the panel's height. */
+/* A gate's message and the start node's task are its own field; the start also
+   carries the trigger form, and the end node's output is the whole node. */
 .sw-dlg-approval .sw-fld-prompt,
 .sw-dlg-start .sw-fld-prompt { flex: 1 1 auto; min-height: 0; }
 .sw-dlg-approval .sw-fld-prompt .sw-textarea,
@@ -607,9 +718,10 @@
   .sw-conn-notes { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* Workflow-level triggers, opened from the toolbar's ⏱ button. The form follows
-   the node panel: one column on a narrow panel, a schedule/event/task grid on a
-   wide one, with the task box taking the height the fixed fields leave. */
+/* A start node's triggers, inside its settings popup. The form follows the node
+   panel: one column on a narrow panel, a schedule / timing / event grid on a
+   wide one. The old workflow-level task box is gone — the start node's own
+   message is the task. */
 .sw-triggers { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; min-height: 0; }
 .sw-triggers p { margin: 0; line-height: 1.5; }
 .sw-triggers .sw-tr-task { flex: 1 1 auto; min-height: 0; }
@@ -639,6 +751,21 @@
   .sw-tr-eventbox .sw-field { max-width: 640px; }
   .sw-tr-task { grid-area: task; min-height: 0; }
   .sw-tr-task .sw-textarea { flex: 1 1 auto; min-height: 150px; resize: none; }
+}
+
+/* Triggers inside a start node's own settings: the task is the start node's
+   message, so the compact form drops the old task row and never grows to fill
+   the panel. */
+.sw-start-triggers { flex: 0 0 auto; }
+.sw-triggers-compact { flex: 0 0 auto; }
+@container (min-width: 760px) {
+  .sw-triggers-compact {
+    grid-template-rows: auto auto auto;
+    grid-template-areas:
+      "lead lead"
+      "schedule timing"
+      "event event";
+  }
 }
 
 /* ── Run panel ──────────────────────────────────────────────────────────── */
