@@ -2120,6 +2120,46 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal(unlocked.data.groups[0].resizable, true);
   });
 
+  test("a group's master switch skips its members in a run and survives a re-read", async () => {
+    const solo = path.join(tmpDir, "ws-group-toggle");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    const end = seeded.nodes.find((n) => n.type === "end");
+    assert.ok((await act("updateNode", { id: agent.id, name: "step", config: {
+      harness: "custom", command: echoQuery("ran"), prompt: "{task}",
+    } }, solo)).res.ok);
+
+    const made = await act("addGroup", { name: "Delivery", nodeIds: [agent.id] }, solo);
+    assert.ok(made.res.ok, made.data?.error);
+    assert.equal(made.data.groups[0].enabled, true, "a new group starts enabled");
+    const id = made.data.groups[0].id;
+
+    // Switched off: the run skips the member and passes its input along, exactly
+    // like a node with `enabled: false` — without changing the node's setting.
+    const off = await act("updateGroup", { id, enabled: false }, solo);
+    assert.ok(off.res.ok, off.data?.error);
+    assert.equal(off.data.groups[0].enabled, false);
+    assert.equal((await snapshot(solo)).groups[0].enabled, false, "the master switch survives a re-read");
+    assert.notEqual((await snapshot(solo)).nodes.find((n) => n.id === agent.id).config.enabled, false,
+      "the node's own switch is untouched");
+
+    assert.ok((await runApi("start", { task: "go" }, solo)).res.ok);
+    const skipped = await waitRun(solo);
+    assert.equal(skipped.status, "done");
+    assert.equal(skipped.nodes[agent.id].status, "skipped", "the group's node did not run");
+    assert.equal(skipped.nodes[end.id].outputTail, "go", "the skipped node forwarded its input");
+
+    // Switched back on, the same node runs again.
+    const on = await act("updateGroup", { id, enabled: true }, solo);
+    assert.ok(on.res.ok, on.data?.error);
+    assert.equal(on.data.groups[0].enabled, true);
+    assert.ok((await runApi("start", { task: "go" }, solo)).res.ok);
+    const ran = await waitRun(solo);
+    assert.equal(ran.nodes[agent.id].status, "done");
+    assert.equal(ran.nodes[end.id].outputTail, "ran[go]");
+  });
+
   test("normalises groups on import, trimming unknown and doubly-claimed nodes", async () => {
     const solo = path.join(tmpDir, "ws-groups-import");
     fs.mkdirSync(solo, { recursive: true });
@@ -2147,6 +2187,7 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal(r.data.groups[0].w, 640, "an imported manual frame keeps its size");
     assert.equal(r.data.groups[0].h, 420);
     assert.equal(r.data.groups[0].resizable, false, "an imported lock is kept");
+    assert.equal(r.data.groups[0].enabled, true, "a frame without the flag stays enabled");
     assert.deepEqual(r.data.groups[1].nodeIds, ["g3"], "only unclaimed nodes join the second frame");
     assert.equal(r.data.groups[1].resizable, true, "a frame without the flag stays resizable");
 
@@ -3498,6 +3539,25 @@ describe("subagent workflow plugin (client)", () => {
     await page.click(".sw-group-fold");
     await page.waitForFunction(() => document.querySelectorAll("#sw-canvas .sw-node").length === 3);
     assert.equal(await page.locator("#sw-canvas path.sw-edge").count(), seeded.edges.length);
+
+    // The header's power button is the group's master switch: it dims the frame
+    // and its cards, and the state is remembered server-side.
+    assert.equal(await page.getAttribute(".sw-group-power", "aria-pressed"), "true");
+    const powerBox = await page.locator(".sw-group-power").boundingBox();
+    const lockBox = await page.locator(".sw-group-resize-toggle").boundingBox();
+    assert.ok(powerBox.width >= 24 && powerBox.height >= 24,
+      `the master switch is large enough to find (${powerBox.width}×${powerBox.height})`);
+    assert.ok(lockBox.width >= 24 && lockBox.height >= 24,
+      `the resize lock is large enough to find (${lockBox.width}×${lockBox.height})`);
+    await page.click(".sw-group-power");
+    await page.waitForFunction(() => document.querySelector(".sw-group")?.classList.contains("off"));
+    assert.equal(await page.getAttribute(".sw-group-power", "aria-pressed"), "false");
+    assert.equal(await page.locator(".sw-node.sw-group-off").count(), 2, "both members dim with the group");
+    for (let i = 0; i < 40 && (await snapshot(solo)).groups[0].enabled !== false; i++) await sleep(50);
+    assert.equal((await snapshot(solo)).groups[0].enabled, false, "the master switch is remembered server-side");
+    await page.click(".sw-group-power");
+    await page.waitForFunction(() => !document.querySelector(".sw-group")?.classList.contains("off"));
+    assert.equal(await page.locator(".sw-node.sw-group-off").count(), 0);
 
     // The header field renames the workflow.
     await page.fill(".sw-group-name", "Release");

@@ -840,7 +840,9 @@ function normaliseEdges(raw: any, nodes: any[]) {
  * an imported file that says otherwise is trimmed here, in order, so the first
  * claim wins. Positions are the frame's anchor: the top-left of its header (or
  * of its collapsed chip). An expanded frame's box is measured from its members
- * by the client, so it always wraps what it holds.
+ * by the client, so it always wraps what it holds. `enabled` is the group's
+ * master switch: switching it off skips every member in a run, without
+ * touching each node's own `enabled` setting.
  */
 function normaliseGroups(raw: any, nodes: any[]) {
   if (!Array.isArray(raw)) return [];
@@ -870,6 +872,9 @@ function normaliseGroups(raw: any, nodes: any[]) {
       // Older canvases predate the lock; a missing flag means resizable, so
       // they keep behaving exactly as before.
       resizable: item.resizable !== false,
+      // Likewise, a canvas that predates the master switch keeps running its
+      // groups: only an explicit `false` switches one off.
+      enabled: item.enabled !== false,
       nodeIds,
     };
     // A manually resized frame keeps its own box; without one the client
@@ -1810,6 +1815,13 @@ export function activate(api: any): void {
   /** The DAG scheduler: decide which nodes may start, start them, finish. */
   async function execute(wf: any, run: any) {
     const byId = new Map<string, any>(wf.nodes.map((n: any) => [n.id, n]));
+    // A group's master switch is off: every member is skipped exactly like a
+    // node with `enabled: false`, so a whole workflow can be taken out of a run
+    // without changing each node's own setting.
+    const offGroups = new Map<string, string>();
+    for (const g of wf.groups || []) {
+      if (g.enabled === false) for (const id of g.nodeIds || []) offGroups.set(id, g.name || "group");
+    }
     const parents = new Map<string, string[]>(wf.nodes.map((n: any) => [n.id, []]));
     const children = new Map<string, string[]>(wf.nodes.map((n: any) => [n.id, []]));
     // `deps` is the same graph *minus the repeat edges*: a repeat edge is the
@@ -2118,6 +2130,7 @@ export function activate(api: any): void {
      * can be toggled or branched without cutting the graph.
      */
     function bypassReason(node: any): string | null {
+      if (offGroups.has(node.id)) return `group “${offGroups.get(node.id)}” switched off`;
       if (node.config.enabled === false) return "switched off";
       const w = node.config.when;
       if (!w || w.mode === "always") return null;
@@ -3018,6 +3031,7 @@ export function activate(api: any): void {
             y: clamp(Number.isFinite(wantY) ? wantY : first ? Math.max(0, first.y - 52) : 120, 0, CANVAS_MAX),
             collapsed: false,
             resizable: true,
+            enabled: true,
             nodeIds: ids,
           });
           return current;
@@ -3039,6 +3053,8 @@ export function activate(api: any): void {
           if (name != null) g.name = name;
           if (body.collapsed != null) g.collapsed = body.collapsed === true;
           if (body.resizable != null) g.resizable = body.resizable === true;
+          // The master switch: off means the run skips this group's nodes.
+          if (body.enabled != null) g.enabled = body.enabled === true;
           // A frame the user has resized carries its own top-left and size. `w`
           // or `h` sent as null clears the override and lets the client fit the
           // frame back around its members.

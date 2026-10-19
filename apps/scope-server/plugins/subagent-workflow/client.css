@@ -115,6 +115,12 @@
   background: var(--surface-2);
   box-shadow: 0 6px 18px -12px rgba(0, 0, 0, .6);
 }
+/* The master switch is off: the whole workflow is out of the run, so its frame
+   and header recede instead of competing with the groups that still run. */
+.sw-group.off { border-color: var(--border); }
+.sw-group.off:not(.collapsed) { background: color-mix(in srgb, var(--muted) 5%, transparent); }
+.sw-group.off .sw-group-head { border-bottom-color: var(--border); }
+.sw-group.off .sw-group-name { color: var(--muted); }
 /* Eight handles on an expanded frame: corners and edge midpoints. They sit in
    their own layer above the cards so a handle on an edge a card overlaps still
    takes the pointer. A folded group is a chip, so it shows none (see client.js). */
@@ -144,18 +150,22 @@
 .sw-group.collapsed .sw-group-head {
   height: 100%; border-bottom: none; border-radius: calc(var(--r-card) - 1px);
 }
-.sw-group-fold, .sw-group-remove, .sw-group-resize-toggle {
+.sw-group-fold, .sw-group-remove, .sw-group-power, .sw-group-resize-toggle {
   width: 20px; height: 20px; padding: 0; flex: 0 0 auto;
   display: grid; place-items: center; border-radius: var(--r-control);
   font-family: inherit; font-size: 10px; line-height: 1;
   color: var(--muted); background: transparent; border: 1px solid transparent;
   cursor: pointer; transition: color .12s ease, background .12s ease, border-color .12s ease;
 }
-.sw-group-fold:hover, .sw-group-resize-toggle:hover { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
-/* The lock is quiet until the frame is hovered, but a locked frame keeps its
-   padlock visible so the missing resize handles have an explanation. */
-.sw-group-resize-toggle { opacity: .6; }
-.sw-group:hover .sw-group-resize-toggle { opacity: 1; }
+.sw-group-fold:hover, .sw-group-power:hover, .sw-group-resize-toggle:hover { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+/* The master switch and the resize lock carry a whole workflow's fate, so they
+   get a bigger hit area and glyph than the fold/ungroup controls — and stay
+   visible while idle, since an off or locked frame needs them found at a glance. */
+.sw-group-power, .sw-group-resize-toggle {
+  width: 26px; height: 26px; font-size: 15px; opacity: .9;
+}
+.sw-group:hover .sw-group-power, .sw-group:hover .sw-group-resize-toggle { opacity: 1; }
+.sw-group-power.off { opacity: 1; color: var(--orange); }
 .sw-group-resize-toggle.off { opacity: 1; color: var(--orange); }
 .sw-group-remove { opacity: 0; }
 .sw-group:hover .sw-group-remove { opacity: 1; }
@@ -183,6 +193,7 @@
 .sw-gs-done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
 .sw-gs-error { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--border)); }
 .sw-gs-stopped { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 45%, var(--border)); }
+.sw-gs-off { color: var(--muted); border-style: dashed; }
 
 /* The box a Shift-drag on the canvas paints over the cards it selects. */
 .sw-marquee {
@@ -291,6 +302,10 @@
 
 /* A node switched off (or gated out) reads as inert on the canvas. */
 .sw-node.sw-off { opacity: .66; border-top-color: var(--muted); }
+/* A member of a switched-off group: dimmed like a switched-off node, but the
+   group header's master switch (not this card) is what turns it back on. */
+.sw-node.sw-group-off { opacity: .66; border-top-color: var(--muted); }
+.sw-node.sw-group-off .sw-node-model { color: var(--muted); }
 .sw-node.sw-off .sw-node-model { color: var(--muted); }
 .sw-off-tag {
   font-size: 9.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;

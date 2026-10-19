@@ -1182,6 +1182,7 @@
     if (!groupsEl) return;
     groupsEl.innerHTML = groups().map((g) => {
       const folded = !!g.collapsed;
+      const enabled = g.enabled !== false;
       const count = (g.nodeIds || []).length;
       const noun = `${count} node${count === 1 ? "" : "s"}`;
       // A folded workflow hides its cards, so its header carries what the run is
@@ -1192,7 +1193,7 @@
             `title="${escAttr(st.title)}">${esc(st.text)}</span>`
         : "";
       const resizable = g.resizable !== false;
-      return `<section class="sw-group${folded ? " collapsed" : ""}" data-group="${escAttr(g.id)}">` +
+      return `<section class="sw-group${folded ? " collapsed" : ""}${enabled ? "" : " off"}" data-group="${escAttr(g.id)}">` +
           `<div class="sw-group-head" data-group-drag="${escAttr(g.id)}" ` +
             `title="Drag to move this group">` +
             `<button class="sw-group-fold" data-group-fold="${escAttr(g.id)}" type="button" ` +
@@ -1201,6 +1202,10 @@
               `maxlength="60" aria-label="Group name">` +
             statusChip +
             `<span class="sw-group-count">${esc(noun)}</span>` +
+            `<button class="sw-group-power${enabled ? "" : " off"}" data-group-enabled="${escAttr(g.id)}" ` +
+              `type="button" aria-pressed="${enabled}" ` +
+              `title="${enabled ? "Group on — click to skip its nodes when the workflow runs" : "Group off — its nodes are skipped when the workflow runs; click to enable"}" ` +
+              `aria-label="${enabled ? "Disable this group" : "Enable this group"}">⏻</button>` +
             `<button class="sw-group-resize-toggle${resizable ? "" : " off"}" data-group-resizable="${escAttr(g.id)}" ` +
               `type="button" aria-pressed="${resizable}" ` +
               `title="${resizable ? "Resizing on — click to lock this frame" : "Resizing locked — click to allow resizing"}" ` +
@@ -1256,6 +1261,11 @@
    * that this group is waiting, running, done or failed.
    */
   function groupRunStatus(g) {
+    // A switched-off group never takes part in a run, so its chip says so
+    // instead of reporting progress it will never make.
+    if (g.enabled === false) {
+      return { state: "off", text: "off", title: "This group is switched off — its nodes are skipped in a run" };
+    }
     const ids = g.nodeIds || [];
     const total = ids.length;
     const states = ids.map((id) => runNode(id)).filter(Boolean);
@@ -1332,9 +1342,14 @@
     nodesEl.innerHTML = nodes().filter((n) => !folded.has(n.id)).map((n) => {
       const rs = runNode(n.id);
       const st = rs?.status || "";
+      const owner = groupOfNode(n.id);
+      const groupOff = !!owner && owner.enabled === false;
       const off = n.type === "agent" && n.config?.enabled === false;
       const picked = n.id === sel || groupSel.has(n.id);
-      const cls = `sw-node sw-t-${n.type}${picked ? " sel" : ""}${st ? ` sw-run-${st}` : ""}${off ? " sw-off" : ""}`;
+      const cls = `sw-node sw-t-${n.type}${picked ? " sel" : ""}${st ? ` sw-run-${st}` : ""}${off ? " sw-off" : ""}${groupOff ? " sw-group-off" : ""}`;
+      // A dim card in a switched-off frame says why, so the master switch is
+      // discoverable from the node as well as from the group header.
+      const groupOffTitle = groupOff ? ` title="Group “${escAttr(owner.name)}” is switched off — this node is skipped in a run"` : "";
       const badge = st ? `<span class="sw-badge sw-b-${st}" title="${escAttr(rs?.bypassed ? "bypassed" : st)}">${badgeGlyph(st, rs?.bypassed)}</span>` : "";
       // A loop has three ports, laid out for a feedback edge: the **input**
       // arrives on the right (with the exit), and the **Repeat** output leaves on
@@ -1365,7 +1380,7 @@
       // double-click of the card).
       const gear = `<button class="sw-node-config" data-config="${escAttr(n.id)}" type="button" ` +
         `title="Settings for ${escAttr(n.name)}" aria-label="Settings for ${escAttr(n.name)}">⚙</button>`;
-      return `<div class="${cls}" data-id="${escAttr(n.id)}" style="left:${n.x}px;top:${n.y}px">` +
+      return `<div class="${cls}" data-id="${escAttr(n.id)}"${groupOffTitle} style="left:${n.x}px;top:${n.y}px">` +
         `<div class="sw-node-head">` +
           glyph +
           `<span class="sw-node-name" title="${escAttr(n.name)}">${esc(n.name)}</span>` +
@@ -2605,6 +2620,16 @@
       resizable ? "Group resizing enabled" : "Group resizing locked");
   }
 
+  /** The frame's master switch: off skips every member in a run (their cards
+   *  dim, but their own `enabled` settings are left untouched). */
+  async function toggleGroupEnabled(id) {
+    const g = groupById(id);
+    if (!g) return;
+    const enabled = g.enabled === false;
+    await run_(() => post("updateGroup", { id, enabled }),
+      enabled ? "Group enabled" : "Group disabled — its nodes are skipped");
+  }
+
   async function toggleGroupFold(id) {
     const g = groupById(id);
     if (!g) return;
@@ -3563,6 +3588,12 @@
     });
 
     canvasEl.addEventListener("click", (e) => {
+      const power = e.target.closest?.("[data-group-enabled]");
+      if (power) {
+        e.preventDefault(); e.stopPropagation();
+        void toggleGroupEnabled(power.dataset.groupEnabled);
+        return;
+      }
       const toggle = e.target.closest?.("[data-group-resizable]");
       if (!toggle) return;
       e.preventDefault(); e.stopPropagation();
@@ -3574,7 +3605,7 @@
       // but never off a control (a port, the gear, a delete button), which keeps
       // its own click behaviour whatever button was used.
       const onControl = e.target.closest?.(".sw-port-out, .sw-node-del, .sw-node-config, .sw-edge-del, " +
-        ".sw-group-fold, .sw-group-remove, .sw-group-resize-toggle, .sw-group-name, .sw-group-handle");
+        ".sw-group-fold, .sw-group-remove, .sw-group-power, .sw-group-resize-toggle, .sw-group-name, .sw-group-handle");
       if (e.button === 1 && !onControl) { startPan(e); return; }
       // Group controls are canvas chrome, not card actions: a click folds the
       // workflow or drops its frame, a drag on the header moves the whole group,
@@ -3591,6 +3622,12 @@
       if (resizeToggle && e.button === 0) {
         // The action runs on `click`, so the same button works from the keyboard;
         // this only keeps the header from starting a group drag underneath it.
+        e.preventDefault(); e.stopPropagation();
+        return;
+      }
+      const powerToggle = e.target.closest?.("[data-group-enabled]");
+      if (powerToggle && e.button === 0) {
+        // Same as the resize lock: the switch itself acts on `click`.
         e.preventDefault(); e.stopPropagation();
         return;
       }
