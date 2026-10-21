@@ -39,53 +39,56 @@
     :root {
       /* Emoji-capable fallbacks appended to every font stack via var(--emoji). */
       --emoji: 'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif;
-      /* ── superdesign-alpha "Amber Terminal Noir" design system ──────────────
-         Dark-mode-default engineering-console palette: near-black surfaces,
-         hairline borders, sharp rectangles, one rationed amber accent. The
-         light theme is the same system on warm paper ("amber on paper").
-         Geometry, type and motion tokens (declared at the bottom of this
-         block) are shared by both themes; only the palette differs. */
+      /* ── PandaCode-inspired "warm workspace" design system ─────────────────
+         A calm, paper-warm desktop workspace: white content field, greige
+         chrome, hairline borders, small radii and one rationed bamboo-yellow
+         accent that always carries dark ink. The dark theme is the same
+         hierarchy in charcoal. Geometry, type and motion tokens (declared at
+         the bottom of this block) are shared by both themes; only the palette
+         differs. Light is the default (dark is a toggle). */
       color-scheme: light;
-      --bg: #f7f7f5;
-      --surface: #ffffff;
-      --surface-2: #f2f2ef;
+      --bg: #ffffff;
+      --surface: #fbfbfa;
+      --surface-2: #f5f5f3;
       --surface-3: #ffffff;
-      --border: #e4e4e7;
-      --border-strong: #d4d4d8;
-      --hairline: rgba(10, 10, 10, 0.07);
-      --hairline-strong: rgba(10, 10, 10, 0.14);
-      --text: #0a0a0a;
-      --muted: #52525b;
-      --text-subtle: #71717a;
-      --accent: #b45309;
-      --accent-rgb: 180, 83, 9;
-      --accent-strong: #92400e;
-      --accent-soft: #fef3c7;
-      --accent-hover: #fffbeb;
-      --row-hover: #f2f2ef;
-      --row-error: rgba(220, 38, 38, 0.07);
-      --on-accent: #ffffff;
-      --green: #059669;
-      --red: #dc2626;
-      --orange: #ea580c;
-      --amber: #b45309;
-      --purple: #7c3aed;
-      --cyan: #0891b2;
-      --yellow: #ca8a04;
-      --pill-bg: #f2f2ef;
-      --tint-green: #ecfdf5;
-      --tint-red: #fef2f2;
-      --tint-orange: #fff7ed;
-      --tint-blue: #fef9c3;
-      --tint-purple: #f5f3ff;
-      --tint-cyan: #ecfeff;
-      --diff-add: #059669;
-      --diff-del: #dc2626;
-      --diff-change: #b45309;
-      --glass-bg: rgba(255, 255, 255, 0.72);
+      --border: #e3e3df;
+      --border-strong: #d3d3cc;
+      --hairline: rgba(36, 36, 35, 0.055);
+      --hairline-strong: rgba(36, 36, 35, 0.12);
+      --text: #242423;
+      --muted: #656560;
+      --text-subtle: #71716c;
+      --accent: #ffd43b;
+      --accent-rgb: 255, 212, 59;
+      --accent-strong: #f5ca2f;
+      --accent-ink: #554400;
+      --accent-soft: #fff1b6;
+      --accent-hover: #fffcf1;
+      --row-hover: #f1f1ef;
+      --row-error: rgba(176, 53, 53, 0.07);
+      --on-accent: #242423;
+      --focus: #8b6c00;
+      --green: #237345;
+      --red: #b03535;
+      --orange: #a8700a;
+      --amber: #8b6c00;
+      --purple: #7a4fc7;
+      --cyan: #2f6fc7;
+      --yellow: #8b6c00;
+      --pill-bg: #f1f1ef;
+      --tint-green: #eaf4ee;
+      --tint-red: #fbeceb;
+      --tint-orange: #fbf1e3;
+      --tint-blue: #fffcf1;
+      --tint-purple: #f2edf9;
+      --tint-cyan: #eaf1fa;
+      --diff-add: #237345;
+      --diff-del: #b03535;
+      --diff-change: #8b6c00;
+      --glass-bg: rgba(255, 255, 255, 0.74);
       --glass-bg-strong: rgba(255, 255, 255, 0.94);
-      --glass-border: rgba(10, 10, 10, 0.08);
-      --glass-shadow: 0 24px 64px rgba(10, 10, 10, 0.12);
+      --glass-border: rgba(36, 36, 35, 0.08);
+      --glass-shadow: 0 24px 64px rgba(36, 36, 35, 0.12);
       /* Every surface that covers the app shares one scrim and one stacking
          ladder: anchored menus float above the page, a popup's scrim above
          those, toasts above everything they can cover. */
@@ -93,21 +96,21 @@
       --z-menu: 1000;
       --z-modal: 1200;
       --z-toast: 1300;
-      --bg-gradient: linear-gradient(180deg, #fcfcfb 0%, #f7f7f5 45%, #f1f1ee 100%);
-      --grid-line: rgba(10, 10, 10, 0.030);
-      --shadow-panel: 0 0 0 1px var(--hairline), 0 24px 64px rgba(10, 10, 10, 0.10);
-      --shadow-card: 0 0 0 1px var(--hairline), 0 8px 32px rgba(10, 10, 10, 0.07);
+      --bg-gradient: linear-gradient(180deg, #fffbee 0%, #ffffff 42%, #f7f7f4 100%);
+      --grid-line: rgba(36, 36, 35, 0.028);
+      --shadow-panel: 0 0 0 1px var(--hairline), 0 24px 64px rgba(36, 36, 35, 0.10);
+      --shadow-card: 0 0 0 1px var(--hairline), 0 2px 5px rgba(36, 36, 35, 0.025), 0 8px 24px rgba(36, 36, 35, 0.035);
       --glow-accent: 0 0 24px rgba(var(--accent-rgb), 0.25);
 
       /* Shared geometry / type / motion — identical in both themes. */
-      --mono: 'MesloLGS NFM', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
-      --font-display: 'Clash Grotesk', 'Satoshi', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      --font-body: 'Satoshi', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      --mono: 'MesloLGS NFM', ui-monospace, SFMono-Regular, 'SF Mono', 'Cascadia Code', Menlo, Consolas, 'Liberation Mono', monospace;
+      --font-display: -apple-system, BlinkMacSystemFont, 'Segoe UI', ui-sans-serif, Roboto, 'Helvetica Neue', Arial, sans-serif;
+      --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', ui-sans-serif, Roboto, 'Helvetica Neue', Arial, sans-serif;
       --r-sharp: 2px;
-      --r-control: 6px;
-      --r-btn: 8px;
-      --r-card: 12px;
-      --r-panel: 16px;
+      --r-control: 4px;
+      --r-btn: 4px;
+      --r-card: 6px;
+      --r-panel: 6px;
       --r-pill: 9999px;
       --grid-size: 26px 26px;
       --grid: linear-gradient(var(--grid-line) 1px, transparent 1px), linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
@@ -119,54 +122,56 @@
 
     body[data-ds-dark-theme] {
       color-scheme: dark;
-      --bg: #0a0a0a;
-      --surface: #121212;
-      --surface-2: #141414;
-      --surface-3: #1a1a1a;
-      --border: #2a2a2a;
-      --border-strong: #3f3f46;
-      --hairline: rgba(255, 255, 255, 0.08);
-      --hairline-strong: rgba(255, 255, 255, 0.16);
-      --text: #ffffff;
-      --muted: #71717a;
-      --text-subtle: #a1a1aa;
-      --accent: #f5c400;
-      --accent-rgb: 245, 196, 0;
-      --accent-strong: #ffd740;
-      --accent-soft: rgba(245, 196, 0, 0.12);
-      --accent-hover: rgba(245, 196, 0, 0.07);
-      --row-hover: #141414;
-      --row-error: rgba(220, 38, 38, 0.12);
-      --on-accent: #0a0a0a;
-      --green: #10b981;
-      --red: #dc2626;
-      --orange: #ff5a3c;
-      --amber: #f5c400;
-      --purple: #a78bfa;
-      --cyan: #22d3ee;
-      --yellow: #f5c400;
-      --pill-bg: #141414;
-      --tint-green: rgba(16, 185, 129, 0.14);
-      --tint-red: rgba(220, 38, 38, 0.14);
-      --tint-orange: rgba(255, 90, 60, 0.14);
-      --tint-blue: rgba(245, 196, 0, 0.10);
-      --tint-purple: rgba(167, 139, 250, 0.14);
-      --tint-cyan: rgba(34, 211, 238, 0.12);
-      --diff-add: #10b981;
-      --diff-del: #dc2626;
-      --diff-change: #f5c400;
-      --glass-bg: rgba(18, 18, 18, 0.72);
-      --glass-bg-strong: rgba(18, 18, 18, 0.94);
+      --bg: #1c1c1b;
+      --surface: #222220;
+      --surface-2: #232321;
+      --surface-3: #272725;
+      --border: #3b3b36;
+      --border-strong: #4a4a42;
+      --hairline: rgba(255, 255, 255, 0.055);
+      --hairline-strong: rgba(255, 255, 255, 0.12);
+      --text: #f3f1e9;
+      --muted: #b1b0a7;
+      --text-subtle: #a09f95;
+      --accent: #ffd43b;
+      --accent-rgb: 255, 212, 59;
+      --accent-strong: #f5ca2f;
+      --accent-ink: #f3d778;
+      --accent-soft: #48401e;
+      --accent-hover: #29271f;
+      --row-hover: #31312e;
+      --row-error: rgba(255, 158, 150, 0.10);
+      --on-accent: #29230e;
+      --focus: #e4be37;
+      --green: #83cf9c;
+      --red: #ff9e96;
+      --orange: #e3b24f;
+      --amber: #e4be37;
+      --purple: #ad8cf2;
+      --cyan: #6aa2f0;
+      --yellow: #f3d778;
+      --pill-bg: #31312e;
+      --tint-green: rgba(131, 207, 156, 0.14);
+      --tint-red: rgba(255, 158, 150, 0.14);
+      --tint-orange: rgba(227, 178, 79, 0.14);
+      --tint-blue: rgba(255, 212, 59, 0.10);
+      --tint-purple: rgba(173, 140, 242, 0.14);
+      --tint-cyan: rgba(106, 162, 240, 0.12);
+      --diff-add: #83cf9c;
+      --diff-del: #ff9e96;
+      --diff-change: #e4be37;
+      --glass-bg: rgba(28, 28, 27, 0.72);
+      --glass-bg-strong: rgba(34, 34, 32, 0.94);
       --glass-border: rgba(255, 255, 255, 0.08);
       --glass-shadow: 0 24px 64px rgba(0, 0, 0, 0.60);
       --scrim: rgba(0, 0, 0, 0.66);
       --z-menu: 1000;
       --z-modal: 1200;
       --z-toast: 1300;
-      --bg-gradient: linear-gradient(180deg, #121212 0%, #0a0a0a 45%, #050505 100%);
-      --grid-line: rgba(255, 255, 255, 0.025);
+      --bg-gradient: linear-gradient(180deg, #232321 0%, #1c1c1b 42%, #171716 100%);
+      --grid-line: rgba(255, 255, 255, 0.022);
       --shadow-panel: 0 0 0 1px var(--hairline), 0 24px 64px rgba(0, 0, 0, 0.55);
-      --shadow-card: 0 0 0 1px var(--hairline), 0 8px 32px rgba(0, 0, 0, 0.45);
+      --shadow-card: 0 0 0 1px var(--hairline), 0 8px 24px rgba(0, 0, 0, 0.35);
       --glow-accent: 0 0 24px rgba(var(--accent-rgb), 0.25);
     }
 
@@ -178,6 +183,8 @@
 
     body {
       font-family: var(--font-body), var(--emoji);
+      font-size: 14px;
+      line-height: 1.5;
       background: var(--bg);
       color: var(--text);
       height: 100vh;
@@ -820,7 +827,7 @@
     }
 
     .turn-header .turn-label {
-      color: var(--accent)
+      color: var(--accent-ink)
     }
 
     .turn-header .turn-cost {
@@ -964,12 +971,12 @@
 
     .pill.user_message {
       background: var(--tint-blue);
-      color: var(--accent)
+      color: var(--accent-ink)
     }
 
     .pill.assistant_message {
       background: var(--tint-blue);
-      color: var(--accent)
+      color: var(--accent-ink)
     }
 
     .pill.tool_call {
@@ -1021,7 +1028,7 @@
     }
 
     .evt-agent-end .evt-summary {
-      color: var(--accent) !important;
+      color: var(--accent-ink) !important;
       font-weight: 600
     }
 
@@ -1148,7 +1155,7 @@
       transform: translateX(-50%);
       background: var(--surface);
       border: 1px solid var(--accent);
-      color: var(--accent);
+      color: var(--accent-ink);
       padding: 3px 12px;
       border-radius: var(--r-card);
       font-size: 15px;
@@ -1714,11 +1721,11 @@
       font-size: 15px
     }
 
-    body.layout-form aside {
+    body.layout-form #workspace-sidebar {
       width: var(--sidebar-w, 300px)
     }
 
-    body.layout-form.sidebar-collapsed aside {
+    body.layout-form.sidebar-collapsed #workspace-sidebar {
       width: 56px
     }
 
@@ -2139,7 +2146,7 @@
 
     .file-item .st.untracked {
       background: var(--tint-blue);
-      color: var(--accent);
+      color: var(--accent-ink);
     }
 
     .file-item .st.renamed {
@@ -2516,12 +2523,12 @@
     }
 
     .dedge:hover {
-      stroke: var(--accent);
+      stroke: var(--accent-ink);
       opacity: 1;
     }
 
     .dedge.hot {
-      stroke: var(--accent);
+      stroke: var(--accent-ink);
       stroke-width: 1.8;
       opacity: 0.95;
     }
@@ -2547,7 +2554,7 @@
     }
 
     .dedge-label.hot {
-      fill: var(--accent);
+      fill: var(--accent-ink);
       opacity: 1;
       font-weight: 600;
     }
@@ -2557,7 +2564,7 @@
     }
 
     #d-arrow-hot path {
-      fill: var(--accent);
+      fill: var(--accent-ink);
     }
 
     .dnode {
@@ -2648,7 +2655,7 @@
 
     .dnode.sel .dbox {
       fill: var(--accent-soft);
-      stroke: var(--accent);
+      stroke: var(--accent-ink);
       stroke-width: 2.5;
     }
 
@@ -2952,7 +2959,7 @@
     .dchanged .st.untracked,
     .drel .st.untracked {
       background: var(--tint-blue);
-      color: var(--accent);
+      color: var(--accent-ink);
     }
 
     .dchanged .st.renamed,
@@ -2973,7 +2980,7 @@
     }
 
     .dchanged-path:hover {
-      color: var(--accent);
+      color: var(--accent-ink);
       text-decoration: underline;
     }
 
@@ -3281,7 +3288,7 @@
     }
 
     .phone-chip.active {
-      color: var(--accent);
+      color: var(--accent-ink);
       border-color: var(--accent);
       font-weight: 600;
     }
@@ -3366,6 +3373,10 @@
       color: var(--muted);
       font-size: 13px;
       font-family: var(--mono), var(--emoji);
+      /* One line only: the summary used to wrap onto four lines at narrow
+         widths, pushing the 55px pane-header seam out of alignment. */
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     #trajectory-overview {
@@ -3388,6 +3399,10 @@
       position: absolute;
       right: 0;
       border-top: 1px dashed var(--border);
+      /* Bars sit at percentage offsets; a record at the end of the span would
+         otherwise paint a few pixels past the track and force a horizontal
+         scrollbar on the overview. */
+      overflow: hidden;
     }
 
     .tov-lane-label {
@@ -3495,7 +3510,7 @@
     .traj-disp-chip {
       border: 1px solid var(--accent);
       background: color-mix(in srgb, var(--accent) 12%, transparent);
-      color: var(--accent);
+      color: var(--accent-ink);
       border-radius: var(--r-card);
       padding: 1px 8px;
       font-size: 11.5px;
@@ -3609,11 +3624,11 @@
     }
 
     .traj-row.traj-user .traj-col-kind {
-      color: var(--accent);
+      color: var(--accent-ink);
     }
 
     .traj-row.traj-message .traj-col-kind {
-      color: var(--accent);
+      color: var(--accent-ink);
     }
 
     .traj-row.traj-tool .traj-col-kind {
@@ -3734,7 +3749,7 @@
 
     .traj-agent-name {
       font-weight: 700;
-      color: var(--accent);
+      color: var(--accent-ink);
       font-family: var(--mono), var(--emoji);
     }
 
@@ -3969,7 +3984,7 @@
       transform: translateX(-50%);
       background: var(--surface);
       border: 1px solid var(--accent);
-      color: var(--accent);
+      color: var(--accent-ink);
       padding: 4px 12px;
       border-radius: var(--r-card);
       font-size: 14px;
@@ -4002,9 +4017,18 @@
       padding: 6px 14px 6px 26px;
     }
 
-    body.layout-form #trajectory-inspector {
-      width: 440px;
-    }
+body.layout-form #trajectory-inspector {
+  width: 440px;
+}
+
+/* Narrow windows: the inspector keeps a readable share of the pane instead of
+   its fixed 440px pushing it past the right edge (the ledger and inspector sit
+   side by side inside .traj-body, so both must fit). */
+@media (max-width: 900px) {
+  body.layout-form #trajectory-inspector { width: min(440px, 55vw); }
+  #trajectory-ledger { min-width: 0; }
+  .traj-body { min-width: 0; }
+}
 
     /* ─── Git view: Fork-style git client ───────────────────────────────── */
     #git-pane {
@@ -4021,7 +4045,7 @@
       padding: 1px 8px;
       border-radius: var(--r-btn);
       background: var(--tint-blue);
-      color: var(--accent);
+      color: var(--accent-ink);
       border: 1px solid var(--border);
       max-width: 180px;
       overflow: hidden;
@@ -4189,7 +4213,7 @@
 
     .git-file .gf-status.untracked {
       background: var(--tint-blue);
-      color: var(--accent);
+      color: var(--accent-ink);
     }
 
     .git-file .gf-status.renamed {
@@ -4255,7 +4279,13 @@
       border-bottom: 1px solid var(--border);
       background: var(--surface);
       flex-shrink: 0;
+      /* The tab strip scrolls rather than spilling past the pane on narrow
+         windows (History/Remotes/Submodules used to run off the edge). */
+      overflow-x: auto;
+      scrollbar-width: none;
     }
+
+    .git-tabs::-webkit-scrollbar { height: 0; }
 
     .git-tab {
       padding: 3px 12px;
@@ -4397,7 +4427,7 @@
     }
 
     .git-diff .gd-file {
-      color: var(--accent);
+      color: var(--accent-ink);
       font-weight: 600;
     }
 
@@ -4465,7 +4495,7 @@
     .gs-row.gs-hunk {
       display: block;
       padding: 4px 10px;
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
       font-size: 11.5px;
       border-top: 1px solid var(--hairline);
@@ -4679,7 +4709,7 @@
       align-items: center;
       padding: 0 8px;
       font-size: 12px;
-      color: var(--accent);
+      color: var(--accent-ink);
     }
 
     .git-date-cell {
@@ -4726,7 +4756,7 @@
     }
 
     .git-detail-tab.active {
-      color: var(--accent);
+      color: var(--accent-ink);
       border-bottom-color: var(--accent);
     }
 
@@ -4797,7 +4827,7 @@
     }
 
     .git-compare-bar code {
-      color: var(--accent);
+      color: var(--accent-ink);
       font-weight: 600;
     }
 
@@ -4938,7 +4968,7 @@
     }
 
     .git-detail-hash {
-      color: var(--accent);
+      color: var(--accent-ink);
       font-family: var(--mono), var(--emoji);
       font-size: 12.5px;
     }
@@ -4963,7 +4993,7 @@
     }
 
     .git-issue {
-      color: var(--accent);
+      color: var(--accent-ink);
     }
 
     .git-detail-file {
@@ -5027,7 +5057,7 @@
     }
 
     .git-changes-sidebar-file.active {
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
       border-left-color: var(--accent);
     }
@@ -5207,7 +5237,7 @@
     }
 
     .git-branch-item.current .gb-name {
-      color: var(--accent);
+      color: var(--accent-ink);
       font-weight: 700;
     }
 
@@ -5507,7 +5537,7 @@
       color: var(--text);
     }
     .chat-ws.active .chat-ws-caret {
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .chat-ws-icon {
       width: 24px;
@@ -5558,7 +5588,7 @@
       white-space: nowrap;
     }
     .chat-ws.active .chat-ws-meta {
-      color: var(--accent);
+      color: var(--accent-ink);
       opacity: 0.85;
     }
     .chat-ws-count {
@@ -5661,7 +5691,7 @@
       color: var(--text);
     }
     .ws-sess-fold.open .ws-sess-fold-caret {
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
     }
     .ws-sess-fold-label {
@@ -5727,7 +5757,7 @@
       transition: all 0.12s ease;
     }
     .chat-ws-add-btn:hover {
-      color: var(--accent);
+      color: var(--accent-ink);
       border-color: var(--accent);
       background: var(--accent-soft);
     }
@@ -5923,7 +5953,7 @@
       white-space: nowrap;
     }
     .chat-hbtn.chat-toggle.on {
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
       border-color: var(--accent);
     }
@@ -5964,7 +5994,7 @@
       background: var(--row-hover);
     }
     .chat-view-btn.on {
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
     }
     .chat-live-dot {
@@ -6041,7 +6071,7 @@
       transform: translateY(0);
     }
     .chat-scroll-down:hover {
-      color: var(--accent);
+      color: var(--accent-ink);
       border-color: var(--accent);
     }
 
@@ -6112,7 +6142,7 @@
     }
     .chat-msg-model {
       font-size: 10.5px;
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
       border-radius: var(--r-pill);
       padding: 1px 8px;
@@ -6248,7 +6278,7 @@
       margin: 0;
     }
     .chat-text a {
-      color: var(--accent);
+      color: var(--accent-ink);
       text-decoration: none;
       border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     }
@@ -6262,7 +6292,7 @@
       border: 1px solid var(--border);
       border-radius: var(--r-control);
       padding: 1px 5px;
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .chat-text blockquote {
       margin: 0 0 11px;
@@ -6349,7 +6379,7 @@
     }
     .chat-copy-btn:hover {
       background: var(--pill-bg);
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .chat-code pre {
       margin: 0;
@@ -6444,7 +6474,7 @@
     }
     .chat-thinking .chat-th-autoscroll.on {
       opacity: 1;
-      color: var(--accent);
+      color: var(--accent-ink);
       border-color: var(--accent);
     }
     .chat-thinking .chat-th-autoscroll:focus-visible {
@@ -6490,7 +6520,7 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      color: var(--accent);
+      color: var(--accent-ink);
       opacity: 0.9;
     }
     .chat-tool-name {
@@ -6560,7 +6590,7 @@
       transform: rotate(90deg);
     }
     .chat-tool-call > summary .chat-tool-icon {
-      color: var(--accent);
+      color: var(--accent-ink);
       opacity: 0.9;
     }
     .chat-tool-call > summary .chat-tool-name {
@@ -6638,7 +6668,7 @@
     }
     .chat-tool-call.ok .chat-tool-call-state { color: var(--green); }
     .chat-tool-call.err .chat-tool-call-state { color: var(--red); }
-    .chat-tool-call.live .chat-tool-call-state { color: var(--accent); }
+    .chat-tool-call.live .chat-tool-call-state { color: var(--accent-ink); }
     /* The media a result carries (screenshots, charts, generated images, video
        links) is listed in a table — one row per item: a thumbnail, its name
        (a link to the source), and its pixel size — ordered largest first by
@@ -6687,7 +6717,7 @@
       padding: 0 5px;
       border-radius: 999px;
       background: var(--accent-soft);
-      color: var(--accent);
+      color: var(--accent-ink);
       font-size: 10px;
       letter-spacing: 0;
     }
@@ -6728,7 +6758,7 @@
       white-space: nowrap;
     }
     .image-table .img-cell-name a {
-      color: var(--accent);
+      color: var(--accent-ink);
       text-decoration: none;
     }
     .image-table .img-cell-name a:hover { text-decoration: underline; }
@@ -6802,7 +6832,7 @@
       flex-shrink: 0;
       display: inline-flex;
       margin-top: 2px;
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .chat-ask-q {
       flex: 1;
@@ -6937,7 +6967,7 @@
       gap: 5px;
       margin-top: 9px;
       font-size: 11px;
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .chat-ask-status {
       margin-top: 8px;
@@ -7086,7 +7116,7 @@
     .chat-caret {
       display: inline-block;
       margin-left: 1px;
-      color: var(--accent);
+      color: var(--accent-ink);
       animation: chat-blink-soft 1s steps(2, start) infinite;
     }
 
@@ -7109,7 +7139,7 @@
       font-family: var(--mono), var(--emoji);
     }
     .chat-badge-model {
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
       border-color: transparent;
     }
@@ -7265,7 +7295,7 @@
       flex-shrink: 0;
     }
     .chat-composer-hint.busy {
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     /* Dictation level meter — the bar only lines up in a monospace face, and
        tabular numerals keep the clock from shifting as the seconds tick. */
@@ -7376,7 +7406,7 @@
       flex-shrink: 0;
     }
     .chat-model-wrap .dot {
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .chat-think-wrap .dot {
       color: var(--orange);
@@ -7486,7 +7516,7 @@
     .chat-steer.on {
       background: var(--accent-soft);
       border-color: var(--accent);
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .chat-steer.on .chat-steer-dot {
       background: var(--accent);
@@ -7516,7 +7546,7 @@
     }
     .chat-listen:hover {
       border-color: var(--accent);
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .chat-listen:focus-visible {
       border-color: var(--accent);
@@ -7559,7 +7589,7 @@
     }
     .chat-attach:hover {
       border-color: var(--accent);
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .chat-attach:focus-visible {
       border-color: var(--accent);
@@ -7594,7 +7624,7 @@
       line-height: 1.4;
       animation: chat-msg-in 0.15s ease both;
     }
-    .chat-attach-chip svg { color: var(--accent); flex-shrink: 0; }
+    .chat-attach-chip svg { color: var(--accent-ink); flex-shrink: 0; }
     .chat-attach-chip-name {
       overflow: hidden;
       text-overflow: ellipsis;
@@ -7805,7 +7835,7 @@
       display: inline-flex;
       align-items: center;
       gap: 3px;
-      color: var(--accent);
+      color: var(--accent-ink);
       font-weight: 600;
     }
     .cf-chip .cf-in svg {
@@ -7853,7 +7883,7 @@
       color: var(--muted);
     }
     .cf-ctx > svg {
-      color: var(--accent);
+      color: var(--accent-ink);
       opacity: 0.9;
     }
     .cf-ctx .cf-ctx-l {
@@ -7923,7 +7953,7 @@
       white-space: nowrap;
     }
     .cf-pay > svg {
-      color: var(--accent);
+      color: var(--accent-ink);
       opacity: 0.9;
     }
     .cf-pay b {
@@ -7955,7 +7985,7 @@
       color: var(--text);
     }
     .cf-go-title svg {
-      color: var(--accent);
+      color: var(--accent-ink);
       opacity: 0.9;
     }
     .cf-go {
@@ -7990,7 +8020,7 @@
       opacity: 0.4;
     }
     .cf-accent {
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .cf-warn {
       color: var(--orange);
@@ -8102,7 +8132,7 @@
       border-radius: var(--r-btn);
       font-size: 12.5px;
       font-weight: 600;
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
       border: 1px solid var(--border);
     }
@@ -8161,7 +8191,7 @@
       font-weight: 600;
       letter-spacing: 0.4px;
       text-transform: uppercase;
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
       border: 1px solid var(--accent);
       border-radius: var(--r-pill);
@@ -8276,7 +8306,7 @@
       padding: 1px 6px;
     }
     .at-chip.team.on .at-chip-count {
-      color: var(--accent);
+      color: var(--accent-ink);
       background: color-mix(in srgb, var(--accent) 16%, transparent);
     }
     .at-chip.team .at-card-pill {
@@ -8364,7 +8394,7 @@
       align-items: center;
       justify-content: center;
       border-radius: var(--r-btn);
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
       border: 1px solid var(--border);
     }
@@ -8726,7 +8756,7 @@
       text-align: center;
     }
     .at-item.on .at-item-mark {
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .at-item-body {
       flex: 1;
@@ -8747,7 +8777,7 @@
     }
     .at-on {
       font-size: 10px;
-      color: var(--accent);
+      color: var(--accent-ink);
     }
     .at-sub {
       flex-shrink: 0;
@@ -8777,7 +8807,7 @@
       opacity: 1;
     }
     .rail-toggle.on {
-      color: var(--accent);
+      color: var(--accent-ink);
       background: var(--accent-soft);
       border-color: var(--accent);
       opacity: 1;
@@ -8950,7 +8980,7 @@ body.layout-settings #sidebar-resizer {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1.1px;
-  color: var(--accent);
+  color: var(--accent-ink);
   margin-bottom: 6px;
 }
 .settings-group-title {
@@ -8978,7 +9008,7 @@ body.layout-settings #sidebar-resizer {
   border: 1px solid color-mix(in srgb, var(--green) 35%, transparent);
 }
 .set-scope-global {
-  color: var(--accent);
+  color: var(--accent-ink);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
 }
@@ -9072,7 +9102,7 @@ body.layout-settings #sidebar-resizer {
 .set-update-verdict.ok { color: var(--green); }
 .set-update-verdict.avail { color: var(--orange); }
 .set-update-verdict.err { color: var(--red); }
-.set-update-verdict.busy { color: var(--accent); }
+.set-update-verdict.busy { color: var(--accent-ink); }
 .set-update-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .set-update-actions .btn-sm.primary:not(:disabled) {
   background: var(--accent);
@@ -9145,7 +9175,7 @@ body.layout-settings #sidebar-resizer {
 .set-auth-login-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; color: var(--text); }
 .set-auth-events { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .set-auth-ev { font-size: 13px; color: var(--text); line-height: 1.5; }
-.set-auth-ev a { color: var(--accent); word-break: break-all; }
+.set-auth-ev a { color: var(--accent-ink); word-break: break-all; }
 .set-auth-ev-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .set-auth-ev-progress { color: var(--muted); }
 .set-auth-code {
@@ -9285,7 +9315,7 @@ body.layout-settings #sidebar-resizer {
 .set-team-pill {
   font-size: 10.5px; font-weight: 700;
   text-transform: uppercase; letter-spacing: .6px;
-  color: var(--accent);
+  color: var(--accent-ink);
   background: var(--accent-soft);
   padding: 2px 8px; border-radius: var(--r-card);
 }
@@ -9410,7 +9440,7 @@ body.layout-settings #sidebar-resizer {
 .set-cost-row:hover { background: var(--accent-hover); }
 .set-cost-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .set-cost-row.default { background: color-mix(in srgb, var(--accent) 7%, transparent); }
-.set-cost-row.default .set-cost-name { color: var(--accent); }
+.set-cost-row.default .set-cost-name { color: var(--accent-ink); }
 .set-cost-table.has-cache .set-cost-row { grid-template-columns: var(--cost-cols, 44px minmax(150px, 1fr) 112px 66px 66px 100px 62px 48px); }
 .set-cost-table:not(.has-cache) .set-cost-row { grid-template-columns: var(--cost-cols, 44px minmax(150px, 1fr) 112px 66px 66px 62px 48px); }
 .set-cost-row:last-child { border-bottom: 0; }
@@ -9425,7 +9455,7 @@ body.layout-settings #sidebar-resizer {
 }
 .set-cost-head:hover { background: var(--surface); }
 .set-cost-def { text-align: center; white-space: nowrap; }
-.set-cost-def .star-ok { color: var(--accent); }
+.set-cost-def .star-ok { color: var(--accent-ink); }
 .set-cost-def .star-off { color: var(--muted); opacity: .5; }
 .set-cost-row .set-cost-def { font-size: 16px; line-height: 1; }
 .set-cost-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -9522,7 +9552,7 @@ body.set-cost-resizing * { user-select: none; }
 .set-defs { display: flex; flex-direction: column; gap: 8px; }
 .set-def-name { font-size: 13.5px; font-weight: 700; color: var(--text); }
 .set-def-name.clickable { cursor: pointer; }
-.set-def-name.clickable:hover { color: var(--accent); }
+.set-def-name.clickable:hover { color: var(--accent-ink); }
 .set-def-file {
   font-size: 11.5px; color: var(--muted);
   font-family: var(--mono), var(--emoji);
@@ -9564,7 +9594,7 @@ body.set-cost-resizing * { user-select: none; }
 }
 .set-def-group-state { font-size: 11.5px; color: var(--muted); white-space: nowrap; margin-left: auto; }
 .set-def-group-btn { flex-shrink: 0; }
-.set-def-group-btn.on { border-color: var(--accent); color: var(--accent); }
+.set-def-group-btn.on { border-color: var(--accent); color: var(--accent-ink); }
 .set-def-group-add { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
 .set-def-chips { gap: 6px; flex: 1; min-width: 0; }
 .set-def-chips .set-chip { padding: 3px 9px; font-size: 11.5px; }
@@ -9741,12 +9771,21 @@ body.set-cost-resizing * { user-select: none; }
   .set-cost-reset { display: none; }
 }
 
-/* Header nav: allow the view toggle (incl. Settings) to wrap so every view
- * button stays reachable on narrow screens instead of overflowing the header. */
+/* Header nav on narrow screens. The shell's bar is a fixed 55px seam that the
+   sidebar brand and pane headers line up with, so the nav must not wrap onto a
+   second line (that row used to hang below the bar, over the pane header).
+   It stays on one line and scrolls inside #header-center instead. */
 @media (max-width: 860px) {
-  header { flex-wrap: wrap; }
-  #header-center { order: 3; flex-basis: 100%; justify-content: flex-start; flex-wrap: wrap; }
-  .view-toggle { flex-wrap: wrap; overflow: visible; border-radius: var(--r-control); }
+  body.layout-form header,
+  body.layout-form .workspace-header { flex-wrap: nowrap; }
+  body.layout-form #header-center {
+    order: 0;
+    flex: 0 1 auto;
+    flex-basis: auto;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+  }
+  body.layout-form .view-toggle { flex-wrap: nowrap; overflow: visible; }
 }
 
 /* ── Global sidebar: Workspaces rail (rail.js) ─────────────────────────────
@@ -9775,7 +9814,7 @@ body.set-cost-resizing * { user-select: none; }
   background: var(--accent-soft);
 }
 .ws-sess.selected .ws-sess-name {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-weight: 600;
 }
 /* Collapsed sidebar: hide the rail header; rail.js renders one chip per
@@ -9928,7 +9967,7 @@ header {
   box-shadow: none;
 }
 header h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.035em; }
-header h1::first-letter { color: var(--accent); }
+header h1::first-letter { color: var(--accent-ink); }
 .brand .subtitle {
   font-family: var(--mono), var(--emoji);
   font-size: 9.5px;
@@ -10259,3 +10298,1793 @@ select, textarea { border-radius: var(--r-control); }
   box-shadow: var(--shadow-panel);
   z-index: var(--z-menu);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PandaCode-inspired workspace shell
+   ───────────────────────────────────────────────────────────────────────────
+   The chrome is dressed in PandaCode's visual language: a warm greige sidebar
+   with a soft bamboo glow, a white conversation field, one rationed yellow
+   primary action that always carries dark ink, hairline rules, small radii and
+   quiet ghost controls. It restyles the shell (header, sidebar, rails, pane
+   headers, conversation, composer, inspector-style side panels, settings) and
+   leaves each view's own layout and behaviour to its plugin.
+
+   Rules here intentionally sit at the end of the sheet so they can replace the
+   earlier "Amber Terminal Noir" chrome without a second copy of every rule.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* ── Shell frame ─────────────────────────────────────────────────────────── */
+
+body.layout-form header,
+body.layout-form .workspace-header {
+  height: 55px;
+  min-height: 55px;
+  padding: 0 18px 0 16px;
+  gap: 16px;
+  /* Never wrap: the bar is a fixed 55px, so a wrapped nav row would sit
+     outside it, on top of the pane header. The nav scrolls instead. */
+  flex-wrap: nowrap;
+  border-bottom: 1px solid rgba(36, 36, 35, 0.055);
+  background: linear-gradient(180deg, #fffbee, #ffffff);
+}
+
+body[data-ds-dark-theme].layout-form header,
+body[data-ds-dark-theme].layout-form .workspace-header {
+  border-bottom-color: rgba(255, 255, 255, 0.055);
+  background: linear-gradient(180deg, #27261e, #1c1c1b);
+}
+
+.header-leading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* Never collapses to zero width: the sidebar toggle must stay clickable when
+     the nav eats the bar (the breadcrumb truncates instead). */
+  min-width: 36px;
+  flex: 1 1 auto;
+}
+
+/* The view switch never wraps to a second line: the header is a fixed 55px
+   bar, so a shrinking window scrolls the nav inside it (wheel/trackpad) while
+   the leading icons and trailing actions stay put and vertically centred. */
+body.layout-form #header-center {
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+  gap: 0;
+  min-width: 0;
+  justify-content: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+body.layout-form #header-center::-webkit-scrollbar { height: 0; }
+
+body.layout-form #header-right {
+  gap: 4px;
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+
+#header-breadcrumb {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.header-divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 6px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  flex-shrink: 0;
+}
+
+/* Shared quiet icon button: 28px square, ghost until hovered. */
+.icon-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms;
+}
+
+.icon-button:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+.icon-button.active {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.icon-button.danger:hover {
+  background: var(--tint-red);
+  color: var(--red);
+}
+
+#sidebar-toggle,
+#btn-phone,
+#btn-wallpaper,
+#btn-theme {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  opacity: 1;
+}
+
+#sidebar-toggle:hover,
+#btn-phone:hover,
+#btn-wallpaper:hover,
+#btn-theme:hover {
+  background: var(--row-hover);
+  color: var(--text);
+  border-color: transparent;
+}
+
+#live-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+#live-dot {
+  width: 6px;
+  height: 6px;
+  box-shadow: none;
+}
+
+#live-dot.green { box-shadow: none; }
+#live-dot.red { box-shadow: none; }
+
+.header-icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.header-icon-btn:hover {
+  background: var(--row-hover);
+  color: var(--text);
+  border-color: transparent;
+}
+
+.header-icon-btn.active {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-ink);
+}
+
+/* Segmented view switch: a single raised track, the active view a white card. */
+body.layout-form .view-toggle {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 2px;
+  padding: 3px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--row-hover);
+  overflow: visible;
+}
+
+body.layout-form .view-toggle button {
+  height: 26px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-body), var(--emoji);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+body.layout-form .view-toggle button:hover {
+  color: var(--text);
+}
+
+body.layout-form .view-toggle button.active {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 550;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+body.layout-form .view-toggle .view-btn.nav-drop-before { box-shadow: inset 2px 0 0 var(--accent-ink); }
+body.layout-form .view-toggle .view-btn.nav-drop-after { box-shadow: inset -2px 0 0 var(--accent-ink); }
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+
+body.layout-form #workspace-sidebar {
+  width: var(--sidebar-w, 248px);
+  border-right: 1px solid var(--border);
+  background:
+    radial-gradient(ellipse at 75% -15%, rgba(255, 216, 72, 0.27), transparent 72%) 0 0/100% 190px no-repeat,
+    var(--surface-2);
+}
+
+body[data-ds-dark-theme].layout-form #workspace-sidebar {
+  background:
+    radial-gradient(ellipse at 75% -15%, rgba(255, 212, 59, 0.11), transparent 72%) 0 0/100% 190px no-repeat,
+    var(--surface-2);
+}
+
+.sidebar-brand {
+  height: 55px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px 0 16px;
+  user-select: none;
+}
+
+.sidebar-logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.sidebar-brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.sidebar-brand-name {
+  font-size: 13px;
+  font-weight: 550;
+  letter-spacing: -0.015em;
+  color: #706952;
+  white-space: nowrap;
+}
+
+body[data-ds-dark-theme] .sidebar-brand-name { color: #bdb59b; }
+
+.sidebar-brand-sub {
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The sidebar's one primary action, exactly like PandaCode's "New task". */
+body.layout-form .sidebar-actions {
+  padding: 2px 14px 10px;
+  display: block;
+}
+
+.primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 37px;
+  padding: 0 10px;
+  border: 1px solid rgba(153, 115, 0, 0.08);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-family: var(--font-body), var(--emoji);
+  font-size: 13px;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms;
+}
+
+.primary-button:hover {
+  background: var(--accent-strong);
+  color: var(--on-accent);
+}
+
+.primary-button svg { flex-shrink: 0; }
+
+.sidebar-projects {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 12px 8px 16px;
+  flex-shrink: 0;
+}
+
+.sidebar-projects-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.ghost-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-body), var(--emoji);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.ghost-button:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+/* Qualified with .chat-rail on purpose: the shared rail rule further down the
+   sheet paints `.chat-rail` with --surface-2 at the same specificity, which
+   used to win here and make the aside's lower half an opaque block instead of
+   letting the sidebar's own fill (and, later, a wallpaper) show through. */
+body.layout-form .chat-rail.sidebar-rail {
+  flex: 1;
+  width: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  border: 0;
+}
+
+body.layout-form #session-list {
+  padding: 0 8px 16px;
+}
+
+/* Collapsed sidebar: logo-only strip, mini session chips. */
+body.layout-form.sidebar-collapsed #workspace-sidebar {
+  width: 56px;
+}
+
+body.sidebar-collapsed .sidebar-brand {
+  height: 55px;
+  padding: 0;
+  justify-content: center;
+}
+
+body.sidebar-collapsed .sidebar-brand-text,
+body.sidebar-collapsed .sidebar-actions,
+body.sidebar-collapsed .sidebar-projects,
+body.sidebar-collapsed .sidebar-brand #btn-clear-all {
+  display: none;
+}
+
+body.sidebar-collapsed .chat-rail-scroll {
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+body.sidebar-collapsed .chat-ws {
+  display: none;
+}
+
+/* ── Rails and list rows ─────────────────────────────────────────────────── */
+
+body.layout-form .chat-rail {
+  width: 248px;
+  background: var(--surface-2);
+}
+
+#chat-workspace-rail {
+  border-right: 1px solid var(--border);
+}
+
+#chat-agent-rail {
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+}
+
+body.layout-form .chat-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 14px 8px 16px;
+  border-bottom: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The chat rail carries the same brand + primary action as the global sidebar,
+   so both sidebars read as the one PandaCode-style shell. */
+.chat-rail-brand {
+  border-bottom: 0;
+}
+
+.chat-rail.folded .chat-rail-brand,
+.chat-rail.folded .chat-rail-actions {
+  display: none;
+}
+
+body.layout-form .chat-ws {
+  gap: 9px;
+  padding: 8px 9px;
+  margin: 1px 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+}
+
+body.layout-form .chat-ws:hover {
+  background: var(--row-hover);
+}
+
+body.layout-form .chat-ws.active {
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
+.chat-ws-caret {
+  width: 14px;
+  height: 20px;
+  font-size: 11px;
+  color: var(--muted);
+  border-radius: 2px;
+}
+
+.chat-ws:hover .chat-ws-caret,
+.chat-ws.active .chat-ws-caret {
+  background: transparent;
+  color: var(--accent-ink);
+}
+
+.chat-ws-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 3px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chat-ws.active .chat-ws-icon {
+  background: var(--accent);
+  border-color: rgba(153, 115, 0, 0.14);
+  color: var(--on-accent);
+}
+
+.chat-ws-name {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--text);
+}
+
+.chat-ws-meta {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.chat-ws.active .chat-ws-meta {
+  color: var(--accent-ink);
+  opacity: 0.9;
+}
+
+.chat-ws.active .chat-ws-meta.live { color: var(--green); }
+.chat-ws.active .chat-ws-meta.warn { color: var(--orange); }
+
+body.layout-form .chat-ws-dot,
+.status-dot,
+.ws-sess .status-dot {
+  width: 6px;
+  height: 6px;
+  box-shadow: none !important;
+}
+
+.chat-ws-dot.green,
+.ws-sess .status-dot.green,
+.chat-ws-dot.orange,
+.ws-sess .status-dot.orange,
+.chat-ws-dot.red,
+.ws-sess .status-dot.red {
+  box-shadow: none;
+  animation: none;
+}
+
+body.layout-form .chat-ws-children {
+  margin: 1px 0 6px 22px;
+  padding-left: 5px;
+  border-left: 1px solid var(--hairline-strong);
+}
+
+/* Session rows: title + a quiet meta line, like a PandaCode task row. */
+body.layout-form .ws-sess {
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  align-items: flex-start;
+}
+
+body.layout-form .ws-sess .status-dot {
+  margin-top: 5px;
+  flex-shrink: 0;
+}
+
+body.layout-form .ws-sess:hover {
+  background: var(--row-hover);
+}
+
+body.layout-form .ws-sess.selected {
+  background: var(--accent-soft);
+}
+
+body.layout-form .ws-sess.selected .ws-sess-name {
+  color: var(--accent-ink);
+  font-weight: 550;
+}
+
+body.layout-form .ws-sess-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+body.layout-form .ws-sess-name {
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-sess-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-sess-meta .ws-sess-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-sess-meta .ws-sess-age {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+body.layout-form .ws-sess .ws-sess-del {
+  width: 18px;
+  height: 18px;
+  line-height: 16px;
+  border-radius: 3px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+
+body.layout-form .ws-sess .ws-sess-del:hover {
+  background: var(--tint-red);
+  color: var(--red);
+}
+
+body.layout-form .ws-sess-fold {
+  padding: 3px 8px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: var(--text-subtle);
+}
+
+body.layout-form .ws-sess-fold:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+/* ── Pane headers and quiet controls ─────────────────────────────────────── */
+
+/* One seam height for the whole top row: the sidebar brand is 55px, so the
+   pane header is too — otherwise its underline stops 11px above the brand's
+   and the chrome reads as two misaligned bars. Narrow windows scroll the
+   toolbar instead of clipping its trailing controls. */
+body.layout-form .pane-header {
+  min-height: 55px;
+  padding: 0 18px;
+  gap: 8px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+body.layout-form .pane-header::-webkit-scrollbar { height: 0; }
+
+body.layout-form #pane-label {
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text);
+  max-width: 320px;
+}
+
+body.layout-form .pane-header .btn-sm {
+  flex-shrink: 0;
+}
+
+/* Filter chips scroll sideways instead of wrapping the pane header taller. */
+body.layout-form .pane-header .filter-chips {
+  flex-wrap: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+body.layout-form .pane-header .filter-chips::-webkit-scrollbar {
+  display: none;
+}
+
+body.layout-form .btn-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--font-body), var(--emoji);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+body.layout-form .btn-sm:hover {
+  background: var(--row-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+body.layout-form .btn-sm.active {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent-ink) 25%, transparent);
+  color: var(--accent-ink);
+}
+
+body.layout-form #search-box,
+body.layout-form #terminal-cwd,
+body.layout-form #checkpoints-label,
+body.layout-form input[type="text"]:not(.chat-input) {
+  font-family: var(--font-body), var(--emoji);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+body.layout-form #search-box:focus,
+body.layout-form #terminal-cwd:focus,
+body.layout-form #checkpoints-label:focus {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+}
+
+body.layout-form .fchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+  user-select: none;
+}
+
+body.layout-form .fchip:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+body.layout-form .fchip.on {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent-ink) 28%, transparent);
+  color: var(--accent-ink);
+}
+
+body.layout-form .fchip.qbtn {
+  font-weight: 550;
+  font-size: 10.5px;
+}
+
+/* Session subnav: a breadcrumb-like identity bar under the pane header. */
+body.layout-form #session-subnav {
+  padding: 10px 18px;
+  gap: 18px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+}
+
+body.layout-form .snav-identity {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+body.layout-form .snav-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+body.layout-form .snav-sid {
+  font-size: 11px;
+}
+
+body.layout-form .snav-stat {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-2);
+  line-height: 1.4;
+}
+
+body.layout-form .snav-stat .snav-label { font-size: 10.5px; letter-spacing: 0; text-transform: none; }
+body.layout-form .snav-stat .snav-value { font-size: 12.5px; font-weight: 550; }
+
+body.layout-form .snav-model,
+body.layout-form .snav-pool {
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  font-size: 11px;
+}
+
+body.layout-form .snav-sid code {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--surface-2);
+}
+
+/* The single/trajectory event feed reads in one centered column. */
+body.layout-form #event-view {
+  padding: 12px 28px 32px;
+}
+
+body.layout-form #event-view > .evt-row,
+body.layout-form #event-view > .turn-header,
+body.layout-form #event-view > .empty-state,
+body.layout-form #event-view > .evt-detail {
+  width: 100%;
+  max-width: 1040px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+body.layout-form .turn-header {
+  border-top: 2px solid var(--accent-ink);
+  background: var(--surface-2);
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+body.layout-form .evt-row {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+body.layout-form .evt-row:hover { background: var(--row-hover); }
+body.layout-form .evt-row .evt-ts { min-width: 72px; font-size: 11px; color: var(--text-subtle); }
+body.layout-form .evt-detail { padding: 10px 12px 10px 92px; background: var(--surface-2); border-radius: 0 0 4px 4px; }
+
+body.layout-form .pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.2px;
+  text-transform: none;
+  font-weight: 500;
+}
+
+/* ── Chat: conversation column, messages and composer ────────────────────── */
+
+body.layout-form .chat-main {
+  background: var(--bg);
+}
+
+/* The global workspace header already carries the warm gradient; the chat
+   header is a slim identity/action toolbar beneath it, not a second banner. */
+body.layout-form .chat-header {
+  height: 55px;
+  min-height: 55px;
+  padding: 0 20px;
+  gap: 12px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--bg);
+}
+
+/* The identity truncates; the action cluster keeps its full width. Without
+   this the name wrapped to two lines in a narrow window and its second line
+   sat under the Markdown/Raw buttons. */
+.chat-header-id { flex: 1 1 auto; min-width: 0; }
+.chat-header-meta { flex: 1 1 auto; min-width: 0; }
+.chat-header-name,
+.chat-header-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Narrow windows: drop the toggle words and the model pill so the workspace
+   identity keeps real width instead of being ellipsized to nothing. */
+@media (max-width: 700px) {
+  body.layout-form .chat-toggle-label,
+  body.layout-form .chat-header-model { display: none; }
+  body.layout-form .chat-header-id { min-width: 96px; }
+}
+
+.chat-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.chat-header-name {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.chat-header-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.chat-header-state {
+  font-size: 9.5px;
+  letter-spacing: 0.4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.chat-header-model {
+  font-family: var(--font-body), var(--emoji);
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.chat-hbtn {
+  width: 26px;
+  height: 26px;
+  border-radius: 3px;
+}
+
+.chat-hbtn.chat-toggle {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+}
+
+.chat-hbtn.chat-toggle.on {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent-ink) 24%, transparent);
+  color: var(--accent-ink);
+}
+
+body.layout-form .chat-messages {
+  padding: 28px 36px 24px;
+  background: none;
+}
+
+/* The "working in your terminal" strip is a peer of the message rows, so it
+   shares their column, avatar box and gap exactly. */
+body.layout-form .chat-ext-live {
+  max-width: 830px;
+  gap: 9px;
+  padding: 0 0 22px;
+  animation: none;
+}
+
+body.layout-form .chat-ext-live-av {
+  width: 23px;
+  height: 23px;
+  margin-top: 0;
+}
+
+body.layout-form .chat-msg {
+  max-width: 830px;
+  gap: 9px;
+  padding: 0 0 22px;
+  margin: 0 auto;
+  border-radius: 0;
+  animation: none;
+}
+
+.chat-msg-avatar {
+  width: 23px;
+  height: 23px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: none;
+  margin-top: 0;
+}
+
+.chat-msg.chat-user .chat-msg-avatar {
+  background: var(--row-hover);
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.chat-msg-body { gap: 2px; }
+
+.chat-msg.chat-user .chat-msg-body {
+  flex: 1;
+  max-width: none;
+  align-items: stretch;
+}
+
+.chat-msg-top {
+  margin-bottom: 2px;
+  gap: 7px;
+  padding: 0;
+  min-height: 22px;
+}
+
+.chat-user .chat-msg-top { justify-content: flex-start; }
+
+.chat-msg-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.chat-user .chat-msg-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.chat-msg-model {
+  font-family: var(--font-body), var(--emoji);
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+.chat-msg-time { font-size: 10.5px; color: var(--text-subtle); }
+
+.chat-act {
+  width: 22px;
+  height: 22px;
+  border-radius: 3px;
+  color: var(--muted);
+}
+
+.chat-act:hover { background: var(--row-hover); color: var(--text); }
+
+/* PandaCode has no bubbles: a user turn is plain text under its meta row.
+   The markup emits the bubble before the meta row, so flip them back. */
+body.layout-form .chat-msg.chat-user .chat-msg-body {
+  display: flex;
+  flex-direction: column;
+}
+
+body.layout-form .chat-msg.chat-user .chat-msg-top {
+  order: -1;
+  padding-left: 32px;
+  margin-bottom: 6px;
+}
+
+body.layout-form .chat-bubble-user {
+  background: transparent;
+  color: var(--text);
+  border: 0;
+  border-radius: 0;
+  padding: 0 0 0 32px;
+  box-shadow: none;
+}
+
+body.layout-form .chat-bubble-user .chat-bubble-text,
+body.layout-form .chat-bubble-user .md-body {
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+body.layout-form .chat-ai-text,
+body.layout-form .chat-msg .md-body {
+  font-size: 13.5px;
+  line-height: 1.72;
+}
+
+body.layout-form .chat-msg .chat-msg-body > .chat-bubble-text {
+  padding-left: 32px;
+}
+
+body.layout-form .chat-msg .markdown {
+  font-size: 13.5px;
+  line-height: 1.72;
+}
+
+body.layout-form .chat-msg .markdown pre,
+body.layout-form .chat-msg pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+body.layout-form .chat-msg .markdown :not(pre) > code {
+  background: var(--surface-2);
+  border-radius: 2px;
+  padding: 1px 4px;
+  font-size: 0.92em;
+}
+
+body.layout-form .chat-thinking {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+body.layout-form .chat-hero-title {
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+body.layout-form .chat-hero-sub {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+body.layout-form .chat-chip {
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: none;
+  padding: 11px 13px;
+  font-size: 12.5px;
+}
+
+body.layout-form .chat-chip:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  transform: none;
+  box-shadow: none;
+}
+
+body.layout-form .chat-chip:hover .chat-chip-icon {
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+/* Composer: a floating white card with a soft shadow and a warm focus ring. */
+body.layout-form .chat-composer {
+  padding: 0 36px 16px;
+}
+
+body.layout-form .chat-composer-top,
+body.layout-form .chat-composer-box {
+  max-width: 830px;
+}
+
+body.layout-form .chat-composer-box {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.025), 0 8px 24px rgba(0, 0, 0, 0.035);
+}
+
+body.layout-form .chat-composer-box:focus-within {
+  border-color: transparent;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 8px 24px rgba(0, 0, 0, 0.035);
+}
+
+body.layout-form #chat-input {
+  min-height: 34px;
+  padding: 14px 16px 8px;
+  font-family: var(--font-body), var(--emoji);
+  font-size: 13.5px;
+  line-height: 1.65;
+  border-radius: 6px;
+}
+
+body.layout-form .chat-composer-bar {
+  padding: 4px 10px 10px;
+  gap: 8px;
+}
+
+body.layout-form #chat-model,
+body.layout-form #chat-thinking {
+  font-family: var(--font-body), var(--emoji);
+  font-size: 11.5px;
+  padding: 4px 24px 4px 10px;
+  border-radius: 3px;
+  border-color: transparent;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+body.layout-form #chat-model:hover,
+body.layout-form #chat-thinking:hover {
+  border-color: var(--border);
+}
+
+body.layout-form .chat-model-label,
+body.layout-form .chat-think-label {
+  font-size: 9.5px;
+  letter-spacing: 0.6px;
+}
+
+body.layout-form .chat-send {
+  width: 31px;
+  height: 31px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: none;
+}
+
+body.layout-form .chat-send:hover {
+  background: var(--accent-strong);
+  color: var(--on-accent);
+  transform: none;
+}
+
+body.layout-form .chat-send:disabled {
+  background: var(--row-hover);
+  color: var(--muted);
+}
+
+body.layout-form .chat-steer {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border-color: var(--border);
+  background: var(--surface);
+  font-size: 11px;
+}
+
+body.layout-form .chat-steer[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent-ink) 25%, transparent);
+  color: var(--accent-ink);
+}
+
+body.layout-form .chat-attach,
+body.layout-form .chat-listen,
+body.layout-form .chat-stop {
+  width: 28px;
+  height: 28px;
+  border-radius: 3px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+body.layout-form .chat-attach:hover,
+body.layout-form .chat-listen:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+body.layout-form .chat-composer-foot,
+body.layout-form .chat-kbd {
+  font-size: 10.5px;
+  color: var(--text-subtle);
+}
+
+body.layout-form .chat-scroll-down {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* ── Agent-team rail cards ───────────────────────────────────────────────── */
+
+body.layout-form .at-sec-head {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+body.layout-form .at-sec-head:hover { background: transparent; }
+
+body.layout-form .ws-team-card,
+body.layout-form .at-agent-card,
+body.layout-form .at-skill-chip,
+body.layout-form .at-ext-chip,
+body.layout-form .at-team-chip {
+  border-radius: 4px;
+  box-shadow: none;
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+/* ── Inspector-style side panels (trajectory inspector, git/files side) ──── */
+
+body.layout-form #trajectory-inspector,
+body.layout-form .git-side,
+body.layout-form #diagram-side {
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+}
+
+body.layout-form .traj-inspector-head,
+body.layout-form .git-side-title {
+  background: linear-gradient(180deg, var(--accent-hover), var(--surface));
+  border-bottom: 1px solid var(--hairline);
+}
+
+body.layout-form .traj-inspector-kicker {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-ink);
+}
+
+body.layout-form .traj-inspector-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+body.layout-form .git-tabs,
+body.layout-form .git-detail-tabs,
+body.layout-form .chat-view-toggle {
+  border-radius: 4px;
+  background: var(--row-hover);
+  padding: 3px;
+  border: 0;
+  gap: 2px;
+}
+
+body.layout-form .git-tab,
+body.layout-form .git-detail-tab,
+body.layout-form .chat-view-btn {
+  border: 0;
+  border-radius: 3px;
+  padding: 4px 9px;
+  font-size: 11.5px;
+  font-family: var(--font-body), var(--emoji);
+  color: var(--muted);
+  background: transparent;
+}
+
+body.layout-form .git-tab.active,
+body.layout-form .git-detail-tab.active,
+body.layout-form .chat-view-btn[aria-pressed="true"] {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 550;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+body.layout-form .git-branch-chip,
+body.layout-form .git-sync {
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 2px 9px;
+  font-size: 11px;
+}
+
+/* ── Settings page ───────────────────────────────────────────────────────── */
+
+body.layout-form .settings-nav {
+  width: 210px;
+  padding: 14px 10px;
+  background: var(--surface-2);
+  border-right: 1px solid var(--border);
+}
+
+body.layout-form .settings-nav-item {
+  padding: 7px 10px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+body.layout-form .settings-nav-item:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+body.layout-form .settings-nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 550;
+}
+
+body.layout-form .settings-nav-item.active::before {
+  display: none;
+}
+
+body.layout-form .settings-content {
+  padding: 28px 32px 48px;
+  background: var(--bg);
+}
+
+body.layout-form .settings-group-kicker {
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  color: var(--accent-ink);
+}
+
+body.layout-form .settings-group-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+body.layout-form .settings-panel {
+  max-width: 780px;
+}
+
+/* ── Modals and menus ────────────────────────────────────────────────────── */
+
+body.layout-form .cp-modal-box,
+body.layout-form .term-menu,
+body.layout-form .git-menu {
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+}
+
+body.layout-form .cp-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+body.layout-form .term-menu button {
+  font-family: var(--font-body), var(--emoji);
+  font-size: 12.5px;
+  border-radius: 3px;
+  padding: 6px 9px;
+}
+
+body.layout-form .term-menu button:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+/* ── Responsive: fold the nav labels before the header overflows ─────────── */
+
+@media (max-width: 1180px) {
+  body.layout-form #header-breadcrumb { display: none; }
+}
+
+@media (max-width: 1040px) {
+  body.layout-form .view-toggle button { padding: 0 7px; font-size: 11.5px; }
+  body.layout-form .chat-rail { width: 220px; }
+  body.layout-form .chat-messages,
+  body.layout-form .chat-composer { padding-left: 22px; padding-right: 22px; }
+}
+
+@media (max-width: 900px) {
+  body.layout-form .header-divider,
+  body.layout-form #live-label { display: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Wallpaper — a background picture the user picks
+   --------------------------------------------------------------------------
+   Every pane in the shell is translucent glass over one fixed body
+   background (see the glassmorphism note in the main sheet). This layer swaps
+   that fixed gradient for the chosen picture: one fixed pseudo-element behind
+   the app, one theme-aware veil over it, and slightly more open chrome so the
+   picture reads through the workspace. Deliberately no backdrop-filter — the
+   picture is static, so the veil is a plain rgba composite, unlike a per-frame
+   blur behind scrolling surfaces.
+
+   wallpaper.js writes --wallpaper-image / --wallpaper-dim / --wallpaper-blur
+   on <body> and toggles .has-wallpaper; index.html re-applies the stored value
+   inline before first paint.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --wallpaper-image: none;
+  --wallpaper-dim: 0.14;
+  --wallpaper-blur: 0px;
+}
+
+/* The veil must live on <body>: a var() inside a custom property is resolved
+   where that property is declared, so a :root veil would freeze the dim level
+   at the default and ignore the inline --wallpaper-dim body carries. */
+body {
+  --wallpaper-veil: rgba(255, 255, 255, var(--wallpaper-dim));
+}
+
+body[data-ds-dark-theme] {
+  --wallpaper-veil: rgba(0, 0, 0, var(--wallpaper-dim));
+}
+
+body.has-wallpaper {
+  /* The canvas is the picture, not the theme field. */
+  background: transparent;
+}
+
+body.has-wallpaper::before {
+  content: "";
+  position: fixed;
+  /* Overscan by the blur radius so a soft edge never shows at the viewport. */
+  inset: calc(var(--wallpaper-blur, 0px) * -2 - 2px);
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--wallpaper-veil), var(--wallpaper-veil)),
+    var(--wallpaper-image);
+  background-size: cover, cover;
+  background-position: center, center;
+  background-repeat: no-repeat, no-repeat;
+  filter: blur(var(--wallpaper-blur, 0px));
+}
+
+/* Chrome opens up so the picture is actually visible: header, sidebar, pane
+   headers and page canvases keep their hierarchy but let the wallpaper in. */
+body.has-wallpaper.layout-form header,
+body.has-wallpaper.layout-form .workspace-header {
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+
+body.has-wallpaper.layout-form #workspace-sidebar {
+  background: color-mix(in srgb, var(--surface-2) 74%, transparent);
+}
+
+/* Every card surface in the shell — message bubbles, event rows, settings
+   panels, chips, tool cards, plugin panels — is painted from these four
+   tokens, so making them translucent here carries the picture through all of
+   them at once instead of enumerating selectors per view. Each surface is a
+   light scrim over its canvas, so nesting still reads as depth: a card is a
+   little denser than the canvas it sits on, never an opaque block. */
+body.has-wallpaper {
+  --surface: color-mix(in srgb, var(--bg) 50%, transparent);
+  --surface-2: color-mix(in srgb, var(--bg) 38%, transparent);
+  --surface-3: color-mix(in srgb, var(--bg) 46%, transparent);
+  --pill-bg: color-mix(in srgb, var(--bg) 42%, transparent);
+  /* Hover/track fills are neutrals, not cards: keep the wash, drop the wall. */
+  --row-hover: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+/* Selection washes (active workspace, selected session, active tab/card) are
+   tinted states rather than surfaces, so they keep the accent but let the
+   picture through too. */
+body.has-wallpaper .chat-ws.active,
+body.has-wallpaper .ws-sess.selected,
+body.has-wallpaper .settings-nav-item.active,
+body.has-wallpaper .at-card.active,
+body.has-wallpaper .at-chip.team,
+body.has-wallpaper .git-tab.active,
+body.has-wallpaper .git-detail-tab.active {
+  background-color: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+
+/* One scrim per page canvas. Every pane used to paint its own opaque field
+   (so the theme gradient shows through the chrome), and the surfaces inside it
+   painted another; in wallpaper mode the outer pane keeps the scrim, the
+   nested canvases go transparent, and nothing stacks into an opaque wall.
+   The scrim lives on the pane rather than on <main> because <main> also holds
+   the sidebar: a scrim there would sit *under* the aside and neuter its own
+   translucency, which is what left half the shell looking wallpaper-less. */
+body.has-wallpaper #single-pane,
+body.has-wallpaper #trajectory-pane,
+body.has-wallpaper #terminal-pane,
+body.has-wallpaper #files-pane,
+body.has-wallpaper #checkpoints-pane,
+body.has-wallpaper #git-pane,
+body.has-wallpaper #settings-pane {
+  background: color-mix(in srgb, var(--bg) 74%, transparent);
+}
+
+/* Chat is a conversation column flanked by two rails, all siblings inside
+   #chat-pane, so each paints its own scrim — the rails a touch more open, like
+   the global sidebar. Tinting #chat-pane as well would stack two scrims. */
+body.has-wallpaper #chat-pane { background: transparent; }
+
+body.has-wallpaper.layout-form .chat-main {
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+}
+
+body.has-wallpaper.layout-form #chat-pane .chat-rail {
+  background: color-mix(in srgb, var(--surface-2) 74%, transparent);
+}
+
+body.has-wallpaper .pane-header,
+body.has-wallpaper .chat-main > .chat-header,
+body.has-wallpaper .files-list,
+body.has-wallpaper #files-diagram,
+body.has-wallpaper .git-main,
+body.has-wallpaper .git-side,
+body.has-wallpaper .settings-content {
+  background-color: transparent;
+}
+
+/* ── Picker panel (wallpaper.js builds it, anchored under the header icon) ── */
+
+.wallpaper-panel {
+  position: fixed;
+  z-index: var(--z-menu, 1000);
+  width: 318px;
+  max-width: calc(100vw - 20px);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card, 6px);
+  background: var(--glass-bg-strong);
+  box-shadow: var(--shadow-panel);
+  color: var(--text);
+  font-family: var(--font-body), var(--emoji);
+  font-size: 13px;
+  animation: wp-in 140ms var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1));
+}
+
+.wallpaper-panel[hidden] { display: none; }
+
+@keyframes wp-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.wp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 9px 9px 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.wp-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.wp-close {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wp-close:hover { background: var(--row-hover); color: var(--text); }
+
+.wp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 13px;
+}
+
+/* Preset washes: one "None" swatch plus the CSS gradient presets. */
+.wp-presets { display: flex; gap: 6px; }
+
+.wp-swatch {
+  flex: 1 1 0;
+  height: 42px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background-color: var(--surface-2);
+  background-size: cover;
+  background-position: center;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 120ms, box-shadow 120ms;
+}
+
+.wp-swatch:hover { border-color: var(--border-strong); }
+
+.wp-swatch.active {
+  border-color: var(--accent-ink);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.wp-swatch-none {
+  font-size: 10.5px;
+  font-weight: 550;
+  letter-spacing: 0.02em;
+  background-image: repeating-linear-gradient(135deg, transparent 0 6px, var(--row-hover) 6px 12px);
+}
+
+.wp-swatch-none.active { color: var(--accent-ink); }
+
+.wp-drop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms, background-color 120ms, color 120ms;
+}
+
+.wp-drop:hover,
+.wallpaper-panel.dragging .wp-drop {
+  border-color: var(--accent-ink);
+  background: var(--accent-hover);
+  color: var(--text);
+}
+
+.wp-drop svg { flex-shrink: 0; }
+
+.wp-drop-text { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+.wp-drop-main { font-size: 12.5px; font-weight: 500; color: var(--text); }
+.wp-drop-sub { font-size: 11px; color: var(--text-subtle); }
+
+.wp-url { display: flex; gap: 6px; }
+
+.wp-url input {
+  flex: 1;
+  min-width: 0;
+  height: 29px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body), var(--emoji);
+  font-size: 12px;
+}
+
+.wp-url input::placeholder { color: var(--text-subtle); }
+.wp-url input:focus { outline: none; border-color: var(--accent-ink); }
+
+.wp-apply {
+  height: 29px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-body), var(--emoji);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.wp-apply:hover { border-color: var(--border-strong); background: var(--row-hover); }
+
+.wp-sliders { display: flex; flex-direction: column; gap: 7px; }
+
+.wp-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.wp-slider > span { width: 30px; flex-shrink: 0; }
+
+.wp-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  height: 16px;
+  accent-color: var(--accent-ink);
+  cursor: pointer;
+}
+
+.wp-slider input[type="range"]:disabled { opacity: 0.45; cursor: default; }
+
+.wp-slider output {
+  width: 34px;
+  flex-shrink: 0;
+  text-align: right;
+  font-family: var(--mono), var(--emoji);
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+
+.wp-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid var(--hairline);
+}
+
+.wp-hint { font-size: 10.5px; color: var(--text-subtle); }
+
+.wp-remove {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-body), var(--emoji);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.wp-remove:hover { border-color: var(--border-strong); color: var(--red); background: var(--tint-red); }
+.wp-remove:disabled { opacity: 0.4; cursor: default; background: transparent; color: var(--muted); }

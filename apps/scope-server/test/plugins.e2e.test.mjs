@@ -262,9 +262,9 @@ describe("plugin host (client)", () => {
       return { w: s.width, h: s.height, r: s.borderRadius };
     });
     assert.equal(box.w, box.h, "gear button is square");
-    const rNum = parseFloat(box.r);
-    const round = box.r.includes("%") ? rNum >= 50 : rNum >= parseFloat(box.w) / 2;
-    assert.ok(round, `gear button is circular (${box.r} on ${box.w})`);
+    // The header's icon buttons are quiet 28px ghost buttons with the app's
+    // small control radius (PandaCode's chrome), not circles.
+    assert.equal(box.r, "3px", `gear button uses the icon-control radius (${box.r})`);
 
     // Narrower than the header's single-row minimum: the nav wraps and the
     // right cluster (live status + Settings) stays pinned — never pushed off.

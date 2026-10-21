@@ -3200,7 +3200,7 @@ describe("subagent workflow plugin (client)", () => {
     assert.equal(mark.title, "Claude Code", "the mark names the provider it stands for");
     assert.equal(mark.glyph, 1, "and draws it");
     assert.ok(mark.size >= 18, `it is a chip on the node, not a bare glyph (${mark.size}px)`);
-    assert.equal(mark.radius, "6px", "on the control radius");
+    assert.equal(mark.radius, "4px", "on the control radius");
     assert.notEqual(mark.bg, "rgba(0, 0, 0, 0)", "with a tinted background");
 
     await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);

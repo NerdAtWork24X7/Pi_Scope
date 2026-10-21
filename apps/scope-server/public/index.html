@@ -13,31 +13,36 @@
 </head>
 
 <body class="layout-form">
-  <script>(function () { try { var t = localStorage.getItem('scope-theme'); if (t !== 'light') t = 'dark'; document.documentElement.style.colorScheme = t === 'dark' ? 'dark' : 'light'; if (t === 'dark') document.body.setAttribute('data-ds-dark-theme', ''); } catch (e) { } })();</script>
+  <script>(function () { try { var t = localStorage.getItem('scope-theme'); if (t !== 'dark') t = 'light'; document.documentElement.style.colorScheme = t === 'dark' ? 'dark' : 'light'; if (t === 'dark') document.body.setAttribute('data-ds-dark-theme', ''); } catch (e) { } })();</script>
+  <!-- Wallpaper, applied before first paint so the picked background never
+       flashes in after boot. wallpaper.js owns every later change; keep the
+       escaping of the url("…") token in sync with imageValue() there. -->
+  <script>(function () { try { var w = JSON.parse(localStorage.getItem('scope-wallpaper') || 'null'); if (!w || !w.value) return; var img = w.kind === 'gradient' ? w.value : 'url("' + String(w.value).replace(/["\\\n]/g, function (c) { return encodeURIComponent(c); }) + '")'; document.body.classList.add('has-wallpaper'); document.body.style.setProperty('--wallpaper-image', img); document.body.style.setProperty('--wallpaper-dim', String(typeof w.dim === 'number' ? w.dim : 0.14)); if (w.blur) document.body.style.setProperty('--wallpaper-blur', w.blur + 'px'); } catch (e) { } })();</script>
 
-  <header>
-    <div class="brand-logo-container" style="display:flex;align-items:center;gap:10px">
-      <img src="logo.png" alt="Pi Scope" height="40" style="flex-shrink:0" />
-      <div class="brand">
-        <h1>Pi Scope</h1>
-        <div class="subtitle">Measure to Improve</div>
-      </div>
+  <header class="workspace-header">
+    <div class="header-leading">
+      <button id="sidebar-toggle" class="icon-button" type="button" onclick="toggleSidebar()"
+        title="Collapse sidebar (more room for the main view)" aria-label="Toggle sidebar" aria-controls="workspace-sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><line x1="9" y1="4" x2="9" y2="20"/></svg></button>
+      <span id="header-breadcrumb"></span>
     </div>
     <div id="header-center">
-      <span id="header-breadcrumb"></span>
       <!-- View buttons are rendered from the plugin registry (plugins.js).
            Every view — built-in or user-installed — is a plugin, so the nav is
            never hand-maintained here. -->
-      <div class="view-toggle" id="view-toggle"></div>
+      <div class="view-toggle" id="view-toggle" role="group" aria-label="Views"></div>
     </div>
     <div id="header-right">
-      <button id="btn-phone" title="Open Pi Scope on your phone — scan the QR on this screen"
-        aria-label="Open on phone"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2.5"/><line x1="11" y1="18.5" x2="13" y2="18.5"/></svg></button>
-      <button id="btn-theme" title="Toggle light / dark theme" onclick="toggleTheme()">🌙</button>
-      <div id="live-indicator">
+      <div id="live-indicator" title="Live stream status">
         <span id="live-dot" class="red"></span>
         <span id="live-label">off</span>
       </div>
+      <span class="header-divider" aria-hidden="true"></span>
+      <button id="btn-phone" class="icon-button" title="Open Pi Scope on your phone — scan the QR on this screen"
+        aria-label="Open on phone"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2.5"/><line x1="11" y1="18.5" x2="13" y2="18.5"/></svg></button>
+      <button id="btn-wallpaper" class="icon-button" type="button" title="Background image"
+        aria-label="Background image" aria-haspopup="dialog" aria-expanded="false"
+        onclick="window.__toggleWallpaper?.()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 15.5 16 11l-6.5 6.5"/></svg></button>
+      <button id="btn-theme" class="icon-button" title="Toggle light / dark theme" aria-label="Toggle light / dark theme" onclick="toggleTheme()">🌙</button>
       <!-- Right-slot nav items (plugins whose nav asks for slot:"right", e.g.
            Settings) render here as icon buttons, next to the live status. -->
       <div id="header-actions" class="header-actions"></div>
@@ -45,31 +50,33 @@
   </header>
 
   <main>
-    <aside>
-      <div class="sidebar-top">
-        <button id="sidebar-show" class="btn-sm" type="button" onclick="toggleSidebar()"
-          title="Show sidebar"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><line x1="9" y1="4" x2="9" y2="20"/></svg></button>
-      </div>
-      <div class="sidebar-toggle-wrap">
-        <button id="sidebar-toggle" class="btn-sm" type="button" onclick="toggleSidebar()"
-          title="Collapse sidebar (more room for the main view)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><line x1="9" y1="4" x2="9" y2="20"/></svg></button>
-        <button id="btn-clear-all" class="btn-sm" type="button"
+    <aside id="workspace-sidebar" aria-label="Workspaces and sessions">
+      <div class="sidebar-brand">
+        <img class="sidebar-logo" src="logo.png" alt="" />
+        <div class="sidebar-brand-text">
+          <span class="sidebar-brand-name">Pi Scope</span>
+          <span class="sidebar-brand-sub">Measure to Improve</span>
+        </div>
+        <button id="btn-clear-all" class="icon-button danger" type="button"
           title="Permanently delete ALL agents and their events from the database. Cannot be undone."
-          aria-label="Clear all agents"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg></button>
+          aria-label="Clear all agents"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg></button>
+      </div>
+      <div class="sidebar-actions">
+        <button id="sidebar-new" class="primary-button" type="button" title="Start a new chat session with pi">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          <span>New session</span>
+        </button>
       </div>
       <!-- Workspaces rail — shared with the Chat view's left rail (see rail.js).
            Replaces the old session list on every non-chat view: a workspace
            click switches the shared working directory (Terminal cds its shell),
            and a session row acts on the active page (Single/Trajectory select
            it; Terminal/Review/Checkpoints/Git switch to its workspace). -->
+      <div class="sidebar-projects">
+        <span class="sidebar-projects-label">Workspaces</span>
+        <button class="ghost-button" id="sidebar-ws-add" type="button" title="Add workspace directory">＋ Add</button>
+      </div>
       <div class="chat-rail sidebar-rail" id="sidebar-rail">
-        <div class="chat-rail-head">
-          <span class="chat-rail-title">Workspaces</span>
-          <div class="chat-rail-head-actions">
-            <button class="chat-ws-add-btn" id="sidebar-ws-add" type="button"
-              title="Add workspace directory">＋ Add</button>
-          </div>
-        </div>
         <div class="chat-rail-scroll" id="session-list"></div>
       </div>
     </aside>
@@ -318,6 +325,19 @@
           <div class="chat-rail-top">
             <button class="chat-hbtn rail-show" id="chat-show-left" type="button" title="Show the workspaces sidebar"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><line x1="9" y1="4" x2="9" y2="20"/></svg></button>
           </div>
+          <div class="sidebar-brand chat-rail-brand">
+            <img class="sidebar-logo" src="logo.png" alt="" />
+            <div class="sidebar-brand-text">
+              <span class="sidebar-brand-name">Pi Scope</span>
+              <span class="sidebar-brand-sub">Measure to Improve</span>
+            </div>
+          </div>
+          <div class="sidebar-actions chat-rail-actions">
+            <button id="chat-new-rail" class="primary-button" type="button" title="Start a new chat session with pi">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              <span>New session</span>
+            </button>
+          </div>
           <div class="chat-rail-head">
             <span class="chat-rail-title">Workspaces</span>
             <div class="chat-rail-head-actions">
@@ -498,6 +518,7 @@
   <script src="plugins-builtin.js"></script>
   <script src="rail.js"></script>
   <script src="app.js"></script>
+  <script src="wallpaper.js"></script>
   <script src="vendor/qrcode-generator.js"></script>
   <script src="phone.js"></script>
   <script src="vendor/xterm.js"></script>

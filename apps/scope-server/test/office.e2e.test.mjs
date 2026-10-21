@@ -59,6 +59,10 @@ async function boot({ sessions = [], team, events, defs, office } = {}) {
   // draw calls is what makes "which rooms are walled" testable without a pixel
   // diff.
   await context.addInitScript(() => {
+    // The office floor is a fixed illustration; its chrome follows the app
+    // theme. Pin the dark theme so the two-theme contrast test measures a real
+    // switch (the desktop shell itself now boots light).
+    try { localStorage.setItem("scope-theme", "dark"); } catch { /* private mode */ }
     window.__officeWallDraws = [];
     const proto = CanvasRenderingContext2D.prototype;
     const orig = proto.drawImage;
@@ -345,7 +349,7 @@ describe("office view", () => {
     assert.ok(Math.abs(centred.left - centred.right) <= 6, `centred horizontally (${centred.left} vs ${centred.right})`);
     assert.ok(Math.abs(centred.top - centred.bottom) <= 6, `and vertically (${centred.top} vs ${centred.bottom})`);
     assert.equal(centred.scrim, "rgba(0, 0, 0, 0.66)", "over the shared scrim");
-    assert.equal(centred.radius, "16px", "on the shared panel radius");
+    assert.equal(centred.radius, "6px", "on the shared panel radius");
     assert.notEqual(centred.shadow, "none", "with the shared panel shadow");
     assert.ok(
       await page.locator("#office-dlg-backdrop .office-dialog").evaluate((el) => el.classList.contains("office-dialog-wide")),

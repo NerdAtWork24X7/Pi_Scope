@@ -107,10 +107,15 @@ body[data-ds-dark-theme] {
 .office-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* The roster readout: a console line, so it speaks the mono face. */
+/* One row, matching every other pane header: the shell's 55px seam stays
+   aligned and a narrow window scrolls the header instead of stacking the
+   counters into three lines. */
 .office-counts {
-  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  display: flex; gap: 12px; align-items: center; flex-wrap: nowrap;
   font-family: var(--mono); font-size: 12px;
   color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .office-count { display: inline-flex; align-items: center; gap: 6px; }
 .office-count.working { color: var(--green); }
@@ -446,7 +451,7 @@ body[data-ds-dark-theme] {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   pointer-events: none;
 }
-.office-pod.working .office-bubble { color: color-mix(in srgb, var(--office-ink) 74%, var(--green)); }
+.office-pod.working .office-bubble { color: color-mix(in srgb, var(--office-ink) 80%, var(--green)); }
 .office-pod.leave .office-bubble { opacity: .85; }
 
 /* A pixel speech bubble at the desk's top-right when a desk needs attention:
@@ -816,7 +821,7 @@ body[data-ds-dark-theme] {
 .office-act:disabled { opacity: .6; cursor: default; }
 
 .office-act.office-settings { padding: 3px; width: 26px; height: 26px; }
-.office-act.office-settings:hover:not(:disabled) { color: var(--accent); }
+.office-act.office-settings:hover:not(:disabled) { color: var(--accent-ink); }
 .office-settings-icon { width: 14px; height: 14px; display: block; }
 
 /* ── The meeting room ────────────────────────────────────────────────────── */
@@ -890,7 +895,7 @@ body[data-ds-dark-theme] {
 .office-kmini-col b { color: var(--text); }
 .office-kmini-col.in_progress { color: var(--green); }
 .office-kmini-col.waiting { color: var(--orange); }
-.office-kmini-col.done { color: var(--accent); }
+.office-kmini-col.done { color: var(--accent-ink); }
 .office-kanban-now {
   font-family: var(--font-body); font-size: 11px;
   color: var(--muted);

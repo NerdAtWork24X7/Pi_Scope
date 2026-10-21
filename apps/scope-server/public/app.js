@@ -288,7 +288,8 @@ function renderAgentSubnav() {
 }
 
 function setSingleSessionControlsVisible(visible) {
-  const display = visible ? "inline-block" : "none";
+  // "" lets the stylesheet own the button's display (flex, for icon + label).
+  const display = visible ? "" : "none";
   if (sessionSubnav) sessionSubnav.style.display = visible ? "" : "none";
   searchBox.style.display = display;
   btnExpandAll.style.display = display;
@@ -301,9 +302,9 @@ function setSingleSessionControlsVisible(visible) {
 // ─── View toggle ────────────────────────────────────────────────────────────
 
 // Apply light/dark theme: body attribute + persistence + terminal re-theme.
-// DeepSeek dark is the default; light swaps in the deepseek-harness light tokens.
+// Warm light is the default (the PandaCode-inspired palette); dark is the toggle.
 window.setTheme = function(theme) {
-  if (theme !== "light" && theme !== "dark") theme = "dark";
+  if (theme !== "light" && theme !== "dark") theme = "light";
   STATE.theme = theme;
   if (theme === "dark") document.body.setAttribute("data-ds-dark-theme", "");
   else document.body.removeAttribute("data-ds-dark-theme");
@@ -510,6 +511,25 @@ function clearSelectedSession() {
 // stays the owner of session selection, so the rail calls back into
 // selectSession / deleteSession rather than touching the store itself.
 
+// Header breadcrumb, PandaCode-style: workspace / view / session. It is the
+// quiet context line beside the sidebar toggle; the segmented nav carries the
+// view itself, so the crumb stays short.
+function renderBreadcrumb() {
+  if (!headerBreadcrumb) return;
+  const spec = window.SCOPE.Plugins?.get(STATE.view);
+  const viewLabel = spec?.nav?.label || spec?.name || STATE.view;
+  const parts = [];
+  if (STATE.cwd) parts.push(STATE.cwd.split(/[\\/]/).filter(Boolean).pop() || STATE.cwd);
+  parts.push(viewLabel);
+  if (STATE.selectedSessionId) {
+    const s = STATE.sessions.find(x => x.session_id === STATE.selectedSessionId);
+    const raw = s?.first_msg ? String(s.first_msg) : (s?.agent_name || "");
+    const name = (typeof window.SCOPE.stripSessionSeed === "function" ? window.SCOPE.stripSessionSeed(raw) : raw) || raw;
+    if (name) parts.push(window.SCOPE.trunc(name, 56));
+  }
+  headerBreadcrumb.textContent = parts.join("  /  ");
+}
+
 function renderSessions() {
   // A selected session that has left the store must not linger on the Single
   // pane (it was deleted or cleared elsewhere). clearSelectedSession re-enters.
@@ -518,6 +538,7 @@ function renderSessions() {
     clearSelectedSession();
     return;
   }
+  renderBreadcrumb();
   window.SCOPE.WorkspaceRail?.render();
 }
 
@@ -1243,6 +1264,14 @@ function patchSessionFromSSE(evt) {
 
 document.getElementById("btn-clear-all")?.addEventListener("click", clearAllSessions);
 
+// Sidebar primary action: open the Chat view and start a fresh pi session. The
+// Chat view owns the new-session flow (chat.js `newSession`), so this only
+// routes there and lets its header button do the work.
+document.getElementById("sidebar-new")?.addEventListener("click", () => {
+  if (STATE.view !== "chat") window.setView?.("chat");
+  requestAnimationFrame(() => document.getElementById("chat-new")?.click());
+});
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function loadSidebarCollapsed() {
@@ -1250,7 +1279,7 @@ function loadSidebarCollapsed() {
 }
 
 function loadTheme() {
-  return localStorage.getItem("scope-theme") === "light" ? "light" : "dark";
+  return localStorage.getItem("scope-theme") === "dark" ? "dark" : "light";
 }
 
 // ─── Exports to window.SCOPE ──────────────────────────────────────────────────

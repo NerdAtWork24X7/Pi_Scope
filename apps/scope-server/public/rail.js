@@ -47,6 +47,24 @@
 
   // ─── Shared, view-agnostic rendering (also used by chat.js) ────────────────
 
+  // Compact age for the meta line under a session row (PandaCode task rows
+  // carry a timestamp on the right; the rail's is relative so it stays short).
+  function ageLabel(ts) {
+    const t = Date.parse(ts || "");
+    if (!Number.isFinite(t)) return "";
+    const secs = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (secs < 60) return "now";
+    if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+    return `${Math.floor(secs / 86400)}d`;
+  }
+
+  // Model name without the provider prefix — the meta line is one short clause.
+  function shortModel(model) {
+    const name = String(model || "").split("/").pop();
+    return name || "";
+  }
+
   // Human-readable pi status + the dot class it maps to.
   function piStatusMeta(st) {
     return st === "green"
@@ -139,11 +157,19 @@
     const tip = label + (statusText ? " — " + statusText : "") +
       (nested && s.parent_session_id ? " — spawned by session " + S.shortId(s.parent_session_id) : "");
     const selected = o.selectedSid === s.session_id ? " selected" : "";
+    const model = shortModel(s.model);
+    const age = ageLabel(s.last_ts);
     return (
       `<div class="ws-sess${nested ? " ws-sess-sub" : ""}${selected}" data-sid="${esc(s.session_id)}" title="${esc(tip)}">` +
       `<span class="status-dot ${st}"></span>` +
       `<div class="ws-sess-body">` +
       `<div class="ws-sess-name" title="${esc(label)}">${esc(row1)}</div>` +
+      (model || age
+        ? `<div class="ws-sess-meta">` +
+          `<span class="ws-sess-model">${esc(model)}</span>` +
+          (age ? `<span class="ws-sess-age">${esc(age)}</span>` : "") +
+          `</div>`
+        : "") +
       `</div>` +
       `<span class="ws-sess-del" data-del="${esc(s.session_id)}" title="Delete this session">&times;</span>` +
       `</div>`

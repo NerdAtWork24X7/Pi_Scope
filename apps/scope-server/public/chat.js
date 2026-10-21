@@ -4763,6 +4763,9 @@
       el.scrollDown.addEventListener("click", () => scrollToBottom(true));
     }
     if (el.btnNew) el.btnNew.addEventListener("click", newSession);
+    // The rail repeats the same primary action so the Chat view keeps the
+    // shell's "one yellow action" in the same place on every screen.
+    document.getElementById("chat-new-rail")?.addEventListener("click", newSession);
     if (el.btnOpen) el.btnOpen.addEventListener("click", openCurrentSessionTimeline);
 
     const viewTog = document.getElementById("chat-view-toggle");

@@ -235,7 +235,7 @@ describe("popup design system (superdesign-alpha)", () => {
       assert.equal(t.weight, "600", "the shared title weight");
       assert.equal(t.family, ramps[0].family, "the shared title face");
     }
-    assert.match(ramps[0].family, /Clash Grotesk|Satoshi/, `the display face (${ramps[0].family})`);
+    assert.match(ramps[0].family, /-apple-system|Segoe UI|BlinkMacSystemFont/, `the display face (${ramps[0].family})`);
     assert.deepEqual(errors, []);
   });
 
@@ -442,7 +442,7 @@ describe("popup design system (superdesign-alpha)", () => {
     });
     assert.equal(sizes[".plugin-settings-close"].w, 28);
     assert.equal(sizes[".plugin-settings-close"].h, 28);
-    assert.equal(sizes[".plugin-settings-close"].radius, "8px");
+    assert.equal(sizes[".plugin-settings-close"].radius, "4px");
     assert.equal(sizes[".plugin-settings-close"].border, "1px");
     assert.deepEqual(errors, []);
     await context.close();

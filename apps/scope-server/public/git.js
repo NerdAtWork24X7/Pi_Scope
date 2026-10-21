@@ -951,7 +951,7 @@
     toolbar.className = "git-edit-toolbar";
     const saveBtn = document.createElement("button");
     saveBtn.className = "btn-sm";
-    saveBtn.style.cssText = "background:var(--accent);color:#fff;border-color:var(--accent)";
+    saveBtn.style.cssText = "background:var(--accent);color:var(--on-accent);border-color:var(--accent)";
     saveBtn.textContent = "Save to working tree";
     saveBtn.onclick = saveFileFromHistory;
     const discardBtn = document.createElement("button");

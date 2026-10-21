@@ -53,6 +53,8 @@
   // header keeps one of its own.
   const THEME_KEY = "scope-theme";
   function setTheme(theme) {
+    // The phone layout keeps its own dark-first "Amber Terminal Noir" skin; the
+    // desktop shell is the one that defaults to the warm light theme.
     const dark = theme !== "light";
     if (dark) document.body.setAttribute("data-ds-dark-theme", "");
     else document.body.removeAttribute("data-ds-dark-theme");

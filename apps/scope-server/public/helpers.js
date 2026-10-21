@@ -309,7 +309,7 @@
     if (evt.type === "llm_request") {
       const p = evt.payload ?? {};
       let html = `${cBtn}${wBtn}`;
-      if (p.system_prompt) html += `<details><summary style="color:var(--accent);cursor:pointer;font-size:12px">system prompt (${p.system_prompt.length} chars)</summary><pre style="max-height:300px;overflow:auto;margin-top:4px;white-space:pre-wrap">${escapeHtml(p.system_prompt)}</pre></details>`;
+      if (p.system_prompt) html += `<details><summary style="color:var(--accent-ink);cursor:pointer;font-size:12px">system prompt (${p.system_prompt.length} chars)</summary><pre style="max-height:300px;overflow:auto;margin-top:4px;white-space:pre-wrap">${escapeHtml(p.system_prompt)}</pre></details>`;
       if (p.tools?.length) html += `<div style="margin:2px 0;color:var(--muted);font-size:11px">${p.tools.length} tools: ${escapeHtml(p.tools.join(", "))}</div>`;
       if (p.request_args && Object.keys(p.request_args).length) html += `<div style="margin:2px 0;color:var(--muted);font-size:11px">args: ${escapeHtml(JSON.stringify(p.request_args))}</div>`;
       html += `<details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">📄 raw JSON</summary><pre style="margin-top:4px">${escapeHtml(JSON.stringify(p, null, 2))}</pre></details>`;
@@ -391,7 +391,7 @@
             // Only show a separate section if it differs from the turn-level
             // response (avoid showing the same text twice).
             if (agentFr !== fr) {
-              agentEndHTML = `<div style="margin:8px 0 4px;color:var(--accent);font-size:12px;font-weight:600">sent to orchestrator · ${e.payload?.message_count ?? "?"} messages</div><pre style="border-left:3px solid var(--accent);padding-left:10px">${escapeHtml(agentFr)}</pre>`;
+              agentEndHTML = `<div style="margin:8px 0 4px;color:var(--accent-ink);font-size:12px;font-weight:600">sent to orchestrator · ${e.payload?.message_count ?? "?"} messages</div><pre style="border-left:3px solid var(--accent);padding-left:10px">${escapeHtml(agentFr)}</pre>`;
             }
             break;
           }
