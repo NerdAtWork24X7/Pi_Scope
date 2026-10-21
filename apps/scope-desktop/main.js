@@ -224,12 +224,20 @@ async function launch() {
 // Native directory picker for the Chat "Add workspace" flow. The renderer
 // (contextIsolation: true) cannot call dialog directly, so the preload bridges
 // it via ipcRenderer.invoke. Returns the chosen absolute path or null.
-ipcMain.handle("pick-directory", async () => {
+/** The folder a picker should open at, when the caller named a real one. */
+function pickerDefaultPath(opts) {
+  const p = typeof opts?.defaultPath === "string" ? opts.defaultPath.trim() : "";
+  if (!p) return undefined;
+  try { return fs.statSync(p).isDirectory() ? p : path.dirname(p); } catch { return undefined; }
+}
+
+ipcMain.handle("pick-directory", async (_event, opts) => {
   try {
     const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
     const result = await dialog.showOpenDialog(win, {
       title: "Select workspace directory",
       properties: ["openDirectory", "createDirectory"],
+      defaultPath: pickerDefaultPath(opts),
     });
     if (result.canceled || !result.filePaths.length) return null;
     return result.filePaths[0];
@@ -243,13 +251,14 @@ ipcMain.handle("pick-directory", async () => {
 // documents of any type, multi-select; returns the chosen absolute paths (an
 // empty array when cancelled). The composer sends these paths to pi, so the
 // file's bytes are never copied — pi reads each file where it already lives.
-ipcMain.handle("pick-files", async () => {
+ipcMain.handle("pick-files", async (_event, opts) => {
   try {
     const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
     const result = await dialog.showOpenDialog(win, {
       title: "Attach files",
       properties: ["openFile", "multiSelections"],
       filters: [{ name: "All Files", extensions: ["*"] }],
+      defaultPath: pickerDefaultPath(opts),
     });
     if (result.canceled || !result.filePaths.length) return [];
     return result.filePaths;

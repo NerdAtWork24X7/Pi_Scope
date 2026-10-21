@@ -11,15 +11,20 @@ contextBridge.exposeInMainWorld("scopeNative", {
   /**
    * Open a native "select directory" dialog.
    * Resolves to the chosen absolute path (string) or null when cancelled.
+   * `opts.defaultPath` (optional) is the folder the dialog opens at — the
+   * Workflow view passes the workspace, so a reference starts where the node
+   * will run.
    */
-  pickDirectory: () => ipcRenderer.invoke("pick-directory"),
+  pickDirectory: (opts) => ipcRenderer.invoke("pick-directory", opts),
 
   /**
    * Open a native "select files" dialog (files, images, documents — any type,
    * multi-select). Resolves to an array of absolute paths ([] when cancelled).
-   * The Chat composer attaches these by path, so no upload is needed.
+   * The Chat composer attaches these by path, so no upload is needed; the
+   * Workflow view's reference picker uses the same dialog.
    */
-  pickFiles: () => ipcRenderer.invoke("pick-files"),
+  pickFiles: (opts) => ipcRenderer.invoke("pick-files", opts),
+
 
   /**
    * The pre-launch port-conflict popup's bridge (see main.js / port-conflict.html).

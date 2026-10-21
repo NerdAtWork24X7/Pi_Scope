@@ -66,6 +66,10 @@
  * the step needs without pasting it into the message. A relative path is resolved against the workspace
  * and canonicalised when it is added; a path that has since gone missing is
  * reported in the run log and marked "(not found)" in the block.
+ * In the desktop app the panel's picker opens the OS file explorer — the same
+ * native dialog the Chat composer attaches files with — so a reference can come
+ * from anywhere on the machine; in a browser tab it falls back to the in-app
+ * browser, which walks the workspace only (`/subagent-workflow/entries`).
  * Every edit is validated server-side: no self-loops, no duplicate edges, no
  * edges into a start node or out of an end node (both take any number of
  * connections in the other direction — that is how a graph fans out and fans
@@ -104,6 +108,17 @@
  * rewiring the graph. A failing agent is retried `retries` times (waiting
  * `retryDelaySec` between attempts) before the run treats it as an error.
  *
+ * ── Web search ──────────────────────────────────────────────────────────────
+ * An **opencode** node carries a *web search* switch (on by default) because
+ * opencode gates its search tool from the project config, not from a CLI flag —
+ * and a fresh install has no such config, so nothing ever turned it on for a
+ * run. Before launching, `applyOpencodeWebSearch` writes
+ * `permission.websearch` / `permission.webfetch` into the node's own
+ * `opencode.json` (merged over the user's keys, never replacing them), and only
+ * when it has to: off ensures `deny`, on writes `allow` only when a config that
+ * applies says otherwise. A JSONC project config owns that folder's settings and
+ * is left untouched, with the run log saying so.
+ *
  * ── Execution model ─────────────────────────────────────────────────────────
  * A run walks the graph from the start node it was started for. A node runs the
  * chosen harness in
@@ -116,6 +131,12 @@
  * node together runs together, and a chain runs one node after another. Output flows along the edges; `end` finishes
  * the run. A failing node aborts the run unless the node opted into
  * `continueOnError`. Runs are capped at a small concurrency limit.
+ *
+ * A child's environment carries `PWD=<the node's cwd>` on POSIX: a shell sets
+ * `PWD` for its children, and a CLI that resolves its project from `$PWD` — as
+ * opencode does — would otherwise read the project the *server* was started from
+ * (the wrong config and permissions) while the process itself ran in the
+ * workspace.
  *
  * A workflow belongs to a project, so the graph lives in the project's own
  * store — `<workspace>/.pi-scope/plugins/.data/subagent-workflow.json`
@@ -139,7 +160,9 @@
  */
 
 import { spawn } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 /** Node kinds. `approval` is a human gate that pauses the run; `loop` repeats
@@ -349,8 +372,9 @@ const DEFAULT_HARNESS_ARGS = "{prompt}";
  *                                `custom` shell commands.
  *
  * Flag forms were taken from the harness's own `--help` (pi: `--tools`/
- * `--skill`/`--extension`, verified against the bundled agent) or its published
- * CLI reference (claude `--allowedTools`, gemini `--allowed-tools`).
+ * `--skill`/`--extension`, verified against the bundled agent; cline, kilo and
+ * opencode `--model`, verified against the installed CLIs) or its published CLI
+ * reference (claude `--allowedTools`, gemini `--allowed-tools`).
  *
  * `promptStdin: true` says the harness reads its prompt from stdin rather than
  * from `args(prompt)`, which then builds the launch with no message at all —
@@ -368,6 +392,19 @@ const HARNESSES: Record<string, any> = {
       skills: null,
       extensions: null,
     },
+  },
+  cline: {
+    // Cline CLI 3.x: `cline [prompt]` is a one-shot headless run (act mode,
+    // auto-approve on by default), and with no prompt on the command line it
+    // reads one from stdin — the route this runner takes, because a multi-line
+    // prompt survives only there (cmd.exe ends a command line at the first
+    // newline). `-m/--model <id>` picks the model for the run.
+    label: "Cline", bin: "cline", args: () => [], modelFlag: "--model",
+    promptStdin: true,
+    // Cline has no command that prints a model catalogue; the Model field keeps
+    // its "Custom…" entry for the ids a signed-in CLI offers.
+    models: [],
+    capabilities: { tools: null, skills: null, extensions: null },
   },
   codex: {
     label: "Codex CLI", bin: "codex", args: (p: string) => ["exec", p], modelFlag: "--model",
@@ -398,12 +435,33 @@ const HARNESSES: Record<string, any> = {
     // provide a message").
     label: "opencode", bin: "opencode", args: () => ["run"], modelFlag: "--model",
     promptStdin: true,
+    // opencode is the one harness with a **web search tool** that a workflow can
+    // switch per node: its project config names it (`permission.websearch`), and
+    // a fresh install has no such file, so nothing ever turned it on for a run.
+    // See `applyOpencodeWebSearch`.
+    webSearch: true,
     models: ["anthropic/claude-sonnet-4-5", "openai/gpt-5", "google/gemini-2.5-pro"],
     // opencode can print its own catalogue — every provider/model it is set up for
     // on this machine, one per line — which is a far better Model list than any
     // short list baked in here (see `cliModelsFor`). Verified against
     // `opencode models`: `provider/model` per line, exit 0, no network needed.
     modelsArgs: ["models"],
+    capabilities: { tools: null, skills: null, extensions: null },
+  },
+  kilo: {
+    // Kilo Code CLI (an opencode-family agent): `kilo run [message]`, with the
+    // message from stdin when it is not on the command line — the same reason as
+    // opencode, and `kilo models` prints the `provider/model` ids it is set up
+    // for, one per line.
+    label: "Kilo Code", bin: "kilo", args: () => ["run"], modelFlag: "--model",
+    promptStdin: true,
+    modelsArgs: ["models"],
+    models: [
+      "z-ai/glm-5.3-flash",
+      "kilo/~deepseek/deepseek-flash-latest",
+      "kilo/~anthropic/claude-sonnet-latest",
+      "kilo/~google/gemini-flash-latest",
+    ],
     capabilities: { tools: null, skills: null, extensions: null },
   },
   aider: {
@@ -566,6 +624,88 @@ function normaliseCapList(raw: any, re: RegExp): string[] {
  * trusted — they were resolved when the user added them — so this only guards
  * against a hand-edited config and a workflow imported from another machine.
  */
+/**
+ * Write a node's message beside the run, for a `custom` command to read through
+ * `SW_PROMPT_FILE`. The path is chosen here (a temp file, 0600), so unlike
+ * `%SW_PROMPT%`/`$SW_PROMPT` the message itself never has to survive the shell's
+ * parsing — quotes, `&`, `%`, `!` and newlines in a reference path included.
+ * Returns the path, or null when the file could not be written (the run then
+ * still has the variables, so it is degraded rather than broken).
+ */
+function writePromptFile(prompt: string): string | null {
+  const file = path.join(os.tmpdir(), `scope-sw-prompt-${crypto.randomUUID()}.txt`);
+  try {
+    fs.writeFileSync(file, prompt, { encoding: "utf8", mode: 0o600 });
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A reference path the way people (and Windows) actually hand one over.
+ *
+ * Explorer's **Copy as path** wraps the path in double quotes, and a path typed
+ * by hand picks up a stray quote or a trailing space. A quote left in place
+ * makes the path look *relative* — `path.isAbsolute('"C:\\a b.md"')` is false —
+ * so it gets resolved against the workspace and reported as "no such file or
+ * folder", which is exactly the failure a Windows path with spaces or brackets
+ * hits. Lifting the quotes off here leaves the route with a real path.
+ */
+function cleanRefPath(raw: unknown): string {
+  let p = String(raw ?? "").trim();
+  // Unwrap twice: a path copied out of a chat message can arrive as `"'…'"`.
+  for (let i = 0; i < 2; i += 1) {
+    const m = /^(["'])([\s\S]*)\1$/.exec(p);
+    if (!m) break;
+    p = m[2].trim();
+  }
+  return p;
+}
+
+/**
+ * Do two reference paths name the same file? On Windows they can differ in case
+ * (a picker returns the spelling that was clicked, `realpath` the one on disk)
+ * and in separator (`C:/Users/me/a b.md` pasted from a URL bar), and both are
+ * still the same file — so the duplicate check compares that way there. POSIX
+ * paths are case-sensitive and compare exactly.
+ */
+function sameRefPath(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (process.platform !== "win32") return false;
+  const norm = (s: string) => s.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/** The largest file the start node's chat box will take, in bytes. */
+const ATTACH_MAX_BYTES = 32 * 1024 * 1024;
+
+/** A dropped file's name, flattened to one safe path segment. A browser drop may
+ *  claim any name at all (`../../etc/passwd`, a Windows path), so separators are
+ *  dropped, anything exotic is underscored, and the result can only ever be a
+ *  file *inside* the attachments folder. */
+function safeAttachName(raw: unknown): string {
+  const base = String(raw ?? "").split(/[\\/]/).pop() || "";
+  const clean = base
+    .replace(/[^\w.\- ]+/g, "_")
+    .replace(/^\.+/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  return clean || "attachment";
+}
+
+/** Is `target` inside `root` (or `root` itself)? Separators and, on Windows, a
+ *  drive letter's case differ between a picked path and a resolved one, so this
+ *  asks `path.relative` — which knows both rules — instead of comparing strings
+ *  against `root + path.sep`. A different drive yields an absolute answer, which
+ *  is not "within". */
+function isWithinPath(root: string, target: string): boolean {
+  if (target === root) return true;
+  const rel = path.relative(root, target);
+  return !!rel && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 function normaliseRefs(raw: any) {
   if (!Array.isArray(raw)) return [];
   const out: any[] = [];
@@ -656,6 +796,103 @@ function buildRefBlock(refs: any[]): { block: string; missing: string[] } {
   return { block: lines.join("\n"), missing };
 }
 
+/**
+ * opencode's own project config, and the permission its web-search **tool** is
+ * gated on. opencode v2 reads `<cwd>/opencode.json` (JSONC is accepted there
+ * too), merges it over the global config, and a `permission.websearch` of
+ * `"allow"` / `"deny"` switches the tool on or off for runs in that folder.
+ */
+const OPENCODE_CONFIG_FILE = "opencode.json";
+const OPENCODE_CONFIG_JSONC = "opencode.jsonc";
+/** The permissions the node's **Web search** switch owns: the search tool and
+ *  the page fetcher beside it, so "off" means the node does not reach the web at
+ *  all rather than swapping one tool for the other. */
+const OPENCODE_WEB_KEYS = ["websearch", "webfetch"];
+const OPENCODE_SCHEMA = "https://opencode.ai/v2/config.json";
+/** A config larger than this is not ours to rewrite. */
+const OPENCODE_CONFIG_MAX = 512_000;
+
+/** Parse a JSON *object* file: `null` when it is missing, unreadable or not an
+ *  object (a config the plugin must leave alone rather than replace). */
+function readJsonConfig(file: string): { present: boolean; config: any | null } {
+  let raw: string;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > OPENCODE_CONFIG_MAX) return { present: true, config: null };
+    raw = fs.readFileSync(file, "utf8");
+  } catch { return { present: false, config: null }; }
+  try {
+    const parsed = JSON.parse(raw);
+    // An array is an object too, but a config object is what can be merged into.
+    return { present: true, config: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null };
+  } catch { return { present: true, config: null }; }
+}
+
+/** opencode's global config file (`$XDG_CONFIG_HOME/opencode/opencode.json`). */
+function opencodeGlobalConfigPath(): string {
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  return path.join(base, "opencode", OPENCODE_CONFIG_FILE);
+}
+
+/**
+ * Make an opencode node's **web search** switch real.
+ *
+ * Web search is a tool, and opencode decides whether a run may use it from the
+ * project's `permission.websearch` / `permission.webfetch` — keys a fresh
+ * install simply does not have, so a workflow never turned them on and a
+ * headless run had no way to. This writes those keys into the workspace's own
+ * `opencode.json`, merging them over whatever is already there (every other key
+ * is preserved), and only when it has to:
+ *
+ *   • **off** → `deny` is ensured, creating the file when it is missing;
+ *   • **on** → `allow` is written only when a config that currently applies says
+ *     otherwise (the project file, or the global one), so a node that is happy
+ *     with the CLI's own default writes nothing at all;
+ *   • a `opencode.jsonc` project config is left alone — its comments are not
+ *     ours to rewrite — and the run log says the switch was not applied.
+ *
+ * Returns a line for the run log, or "" when there was nothing worth saying.
+ */
+function applyOpencodeWebSearch(cwd: string, enabled: boolean): string {
+  const desired = enabled ? "allow" : "deny";
+  const label = enabled ? "on" : "off";
+  const file = path.join(cwd, OPENCODE_CONFIG_FILE);
+  const { present, config } = readJsonConfig(file);
+  if (!present) {
+    // A JSONC project config owns this folder's settings; editing it would mean
+    // rewriting the user's comments, so the toggle is reported instead.
+    let jsonc = false;
+    try { jsonc = fs.statSync(path.join(cwd, OPENCODE_CONFIG_JSONC)).isFile(); } catch { /* none */ }
+    if (jsonc) return `⚠ web search ${label}: ${OPENCODE_CONFIG_JSONC} in this folder owns that setting, so the node did not change it`;
+  } else if (!config) {
+    return `⚠ web search ${label}: ${OPENCODE_CONFIG_FILE} is not a JSON object — left exactly as it is`;
+  }
+  // A `permission` that is not an object (an older, scalar form) cannot be
+  // merged into without throwing away what the user meant, so the file is left
+  // alone and the run says why.
+  const permission = config?.permission;
+  if (permission != null && (typeof permission !== "object" || Array.isArray(permission))) {
+    return `⚠ web search ${label}: ${OPENCODE_CONFIG_FILE} has a non-object "permission" — left exactly as it is`;
+  }
+  const current = OPENCODE_WEB_KEYS.map((k) => permission?.[k]);
+  if (current.every((v) => v === desired)) return "";
+  // Turning a tool on that the CLI already allows needs no file: only an
+  // explicit deny (project or global) has to be overridden for this folder.
+  if (!present && enabled) {
+    const global = readJsonConfig(opencodeGlobalConfigPath()).config;
+    if (!OPENCODE_WEB_KEYS.some((k) => global?.permission?.[k] === "deny")) return "";
+  }
+  const next: any = config ? { ...config } : { $schema: OPENCODE_SCHEMA };
+  next.permission = { ...(permission || {}) };
+  for (const k of OPENCODE_WEB_KEYS) next.permission[k] = desired;
+  try {
+    fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
+  } catch (err: any) {
+    return `⚠ web search ${label}: could not update ${OPENCODE_CONFIG_FILE} (${String(err?.message ?? err)})`;
+  }
+  return `web search ${label} — ${OPENCODE_CONFIG_FILE} now sets ${OPENCODE_WEB_KEYS.map((k) => `permission.${k}`).join(" + ")} to "${desired}"`;
+}
+
 /** A node's data gate: run only when the joined upstream output matches. */
 function normaliseCondition(raw: any) {
   const r = raw && typeof raw === "object" ? raw : {};
@@ -698,6 +935,10 @@ function normaliseAgentConfig(raw: any) {
     // Reference files, injected into the node's message with a description of
     // each (see buildRefBlock).
     refs: normaliseRefs(r.refs),
+    // The node's **web search** switch, on unless turned off: for opencode it is
+    // written into the project's own config before the run (see
+    // `applyOpencodeWebSearch`), and it is inert for a harness with no such tool.
+    webSearch: r.webSearch !== false,
   };
 }
 
@@ -767,6 +1008,9 @@ function normaliseStartConfig(raw: any) {
     description: collapse(r.description).slice(0, DESC_MAX),
     defaultTask: multiline(r.defaultTask).slice(0, PROMPT_MAX),
     triggers: normaliseTriggerConfig(r.triggers),
+    // Files attached to the entry point's chat box: the run's reference material
+    // (see `startRun`). Kept through every save of the node, like an agent's.
+    refs: normaliseRefs(r.refs),
   };
 }
 
@@ -1048,7 +1292,11 @@ export function activate(api: any): void {
       ? api.kit.killTree
       : (child, signal = "SIGTERM") => { try { child?.kill(signal); } catch { /* gone */ } };
   /** The default shell a `custom` node runs when the user typed no command. */
-  const DEFAULT_CUSTOM_COMMAND = isWindows() ? "echo %SW_PROMPT%" : 'echo "$SW_PROMPT"';
+  // On Windows the message is read from its **file**: `%SW_PROMPT%` is expanded
+  // by cmd before parsing, so a quote or `&` in it becomes shell syntax. POSIX
+  // shells pass a double-quoted variable through untouched, so it stays simple
+  // there (and `$SW_PROMPT_FILE` is available on both).
+  const DEFAULT_CUSTOM_COMMAND = isWindows() ? 'type "%SW_PROMPT_FILE%"' : 'echo "$SW_PROMPT"';
 
   const hasProjectStore = typeof api.projectStore === "function";
   const storeFor = (workspace: string) => (hasProjectStore ? api.projectStore(workspace) : api.store);
@@ -1293,6 +1541,9 @@ export function activate(api: any): void {
       // node's Model dropdown asks the binary for the rest of its list itself, so
       // this says *what* to ask and lets the form say so while it waits.
       modelsArgs: Array.isArray(h.modelsArgs) && h.modelsArgs.length ? h.modelsArgs : null,
+      // Can this harness take a per-node **web search** switch? Only opencode
+      // publishes one a workflow can set (see `applyOpencodeWebSearch`).
+      webSearch: !!h.webSearch,
       // Which of skills / tools / extensions this harness can be told about,
       // and the flag each maps to — `null` means "no such flag".
       capabilities: {
@@ -1788,9 +2039,20 @@ export function activate(api: any): void {
       ? wf.nodes.find((n: any) => n.type === "start" && n.id === startId)
       : wf.nodes.find((n: any) => n.type === "start");
     if (!start) throw new Error(startId ? "no such start node" : "the workflow has no start node");
+    // A start node's reference files are the run's **material**: they are what the
+    // message is about, so they travel with it — a file dropped on its chat box
+    // reaches the agents through `{task}` without each of them being pointed at
+    // it. The task itself stays the user's own words (the turn in the chat, the
+    // history label); `material` is what the nodes read.
+    const startRefs = buildRefBlock(start.config?.refs || []);
+    // Tagged the way a node's own references are, so the agent can tell the
+    // user's ask from the material it points at — even though this block rides
+    // inside `{task}`.
+    const refsBlock = startRefs.block ? `<reference files/folder>\n${startRefs.block}\n</reference files/folder>` : "";
+    const material = refsBlock ? `${task ? `${task}\n\n` : ""}${refsBlock}` : task;
     const run: any = {
       id: `run_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`,
-      workspace, startId: start.id, status: "running", task, startedAt: Date.now(), finishedAt: 0, seq: 0,
+      workspace, startId: start.id, status: "running", task, material, startedAt: Date.now(), finishedAt: 0, seq: 0,
       nodes: {}, log: [], children: new Set<any>(), sessions: new Set<string>(),
     };
     for (const n of wf.nodes) {
@@ -1849,12 +2111,21 @@ export function activate(api: any): void {
     }
     for (const n of wf.nodes) if (!reachable.has(n.id)) run.nodes[n.id].status = "skipped";
 
-    // The start node is instant: its output is the run's task.
+    // The start node is instant: its output is the run's material — the message
+    // plus any files attached to it, so `{input}` carries the same thing `{task}`
+    // does.
     const ss = run.nodes[start.id];
     ss.status = "done";
-    ss.output = run.task;
+    ss.output = run.material || run.task;
     ss.startedAt = ss.finishedAt = Date.now();
     logLine(run, start.id, "status", `start → ${run.task || "(empty task)"}`);
+    if (run.material !== run.task) {
+      logLine(run, start.id, "status", `attached: ${(start.config?.refs || []).map((r: any) => r.path).join(", ")}`);
+    }
+    const startRefs = buildRefBlock(start.config?.refs || []);
+    if (startRefs.missing.length) {
+      logLine(run, start.id, "status", `⚠ reference file(s) not found: ${startRefs.missing.join(", ")}`);
+    }
 
     const running = new Set<string>();      // node ids currently executing
     const runningByParent = new Map<string, Set<string>>();
@@ -2115,7 +2386,9 @@ export function activate(api: any): void {
       const it = loopContextFor(node.id);
       return tmpl
         .replace(/\{input\}/g, input)
-        .replace(/\{task\}/g, run.task)
+        // `{task}` is the run's **material**: the message plus the files attached
+        // to the start node's chat box.
+        .replace(/\{task\}/g, run.material || run.task)
         .replace(/\{iteration\}/g, it ? String(it.iteration) : "")
         .replace(/\{iterations\}/g, it ? String(it.iterations) : "")
         .replace(/\{loop\}/g, it ? it.loop : "")
@@ -2289,7 +2562,7 @@ export function activate(api: any): void {
       const it = loopContextFor(node.id);
       const rendered = tmpl
         .replace(/\{input\}/g, upstreamOutput(node))
-        .replace(/\{task\}/g, run.task)
+        .replace(/\{task\}/g, run.material || run.task)
         .replace(/\{iteration\}/g, it ? String(it.iteration) : "")
         .replace(/\{iterations\}/g, it ? String(it.iterations) : "")
         .replace(/\{loop\}/g, it ? it.loop : "")
@@ -2441,7 +2714,15 @@ export function activate(api: any): void {
         const it = loopContextFor(node.id);
         const env = {
           ...process.env,
-          SW_PROMPT: prompt, SW_TASK: run.task, SW_NODE: node.name, SW_WORKFLOW: wf.name,
+          // A child inherits the *shell's* `PWD`, not the working directory the
+          // runner hands it, and opencode picks its project (and so its config
+          // and permissions) from `$PWD` rather than `getcwd()`. Without this a
+          // node launched in the workspace still read the project the *server*
+          // was started from — the wrong config, the wrong permission for its
+          // web search, the wrong AGENTS.md — while looking like it ran in the
+          // workspace. Windows has no PWD to correct.
+          ...(isWindows() ? {} : { PWD: cwd }),
+          SW_PROMPT: prompt, SW_PROMPT_FILE: "", SW_TASK: run.material || run.task, SW_NODE: node.name, SW_WORKFLOW: wf.name,
           SW_MODEL: node.config.model || "",
           SW_ITERATION: it ? String(it.iteration) : "",
           SW_ITERATIONS: it ? String(it.iterations) : "",
@@ -2458,13 +2739,26 @@ export function activate(api: any): void {
         // Whether this node's prompt travels on the child's stdin instead of the
         // command line (a `promptStdin` harness — see HARNESSES.opencode).
         let promptOnStdin = false;
+        // A custom node's message, written beside the run for it to read (see
+        // `promptFile` below). Removed however the child ends.
+        let promptFile: string | null = null;
         if (node.config.harness === "custom") {
           // A custom node is a shell one-liner, so it runs through the platform's
           // shell — `$SHELL -c` on POSIX, the command processor on Windows, where
           // the node's variables are `%SW_PROMPT%`-style (see DEFAULT_CUSTOM_COMMAND
           // and the hint in the node's settings popup).
+          //
+          // The message also goes to a **file**, and that is the route to prefer
+          // on Windows: `%SW_PROMPT%` is expanded by cmd *before* the line is
+          // parsed, so a message carrying `&`, `|`, `<`, `>`, `^`, `%` or a
+          // newline (a reference path with spaces/brackets in it does) is read as
+          // shell syntax and truncates or mangles the command. The file's own
+          // path is one this runner chose (no user text), so nothing in the
+          // message can reach cmd's parser.
+          promptFile = writePromptFile(prompt);
+          if (promptFile) env.SW_PROMPT_FILE = promptFile;
           const template = node.config.command && node.config.command.trim() ? node.config.command : DEFAULT_CUSTOM_COMMAND;
-          const plan = planCommand(template.replace(/\{prompt\}/g, prompt).replace(/\{task\}/g, run.task));
+          const plan = planCommand(template.replace(/\{prompt\}/g, prompt).replace(/\{task\}/g, run.material || run.task));
           cmd = plan.file;
           args = plan.args;
         } else {
@@ -2492,6 +2786,21 @@ export function activate(api: any): void {
           }
         }
 
+        // opencode's web search is a permission in the project's own config, so
+        // the node's switch has to be written there before it launches — in the
+        // folder the node runs in, which is where opencode reads it from.
+        if (node.config.harness === "opencode") {
+          const note = applyOpencodeWebSearch(cwd, node.config.webSearch !== false);
+          if (note) logLine(run, node.id, "status", note);
+        }
+
+        /** Remove the prompt file once the child is gone (or never started). */
+        const dropPromptFile = () => {
+          if (!promptFile) return;
+          try { fs.rmSync(promptFile, { force: true }); } catch { /* already gone */ }
+          promptFile = null;
+        };
+
         let child: any;
         try {
           // spawnCli owns the platform's launch rules: a `.cmd` shim is run
@@ -2500,6 +2809,7 @@ export function activate(api: any): void {
           // exist (`ignore` leaves it closed, and it would read nothing).
           child = spawnCli(cmd, args, { cwd, env, stdio: [promptOnStdin ? "pipe" : "ignore", "pipe", "pipe"] });
         } catch (err: any) {
+          dropPromptFile();
           resolve({ text: "", code: null, error: `failed to spawn ${cmd}: ${err?.message ?? err}` });
           return;
         }
@@ -2572,12 +2882,14 @@ export function activate(api: any): void {
           if (timer) clearTimeout(timer);
           run.children.delete(child);
           flush();
+          dropPromptFile();
           resolve({ text: cleanRunText(output), code: null, error: `failed to run ${cmd}: ${fail?.message ?? fail}` });
         });
         child.on("close", (code: number | null) => {
           if (timer) clearTimeout(timer);
           run.children.delete(child);
           flush();
+          dropPromptFile();
           const error = timedOut ? `timed out after ${node.config.timeoutSec}s`
             : code === 0 ? undefined
             : (errorFromStderr(errBuf) || `exited with code ${code}`);
@@ -2881,7 +3193,10 @@ export function activate(api: any): void {
     const root = validateCwd(workspace) || workspace;
     const rel = String(ctx.url.searchParams.get("path") ?? "").trim();
     const target = rel ? path.resolve(root, rel) : root;
-    if (target !== root && !target.startsWith(root + path.sep)) {
+    // `path.relative` is the containment test: it settles separators and, on
+    // Windows, the drive letter's case, which a `startsWith(root + sep)` misses
+    // whenever the two spellings came from different places.
+    if (!isWithinPath(root, target)) {
       return jsonResponse({ error: "outside the workspace" }, 400);
     }
     let dirents: any[];
@@ -2903,6 +3218,45 @@ export function activate(api: any): void {
       rel: path.relative(root, target).split(path.sep).join("/"),
       entries,
     };
+  });
+
+  /**
+   * A file dropped on the start node's chat box, stored in the workspace.
+   *
+   * A browser drop carries bytes, not a path (and Electron no longer exposes
+   * one), so the bytes are written under the workspace's own
+   * `.pi-scope/attachments/` and the absolute path is returned — the chat then
+   * adds it as a reference of that start node, which is what the run's material
+   * carries. Names are flattened and sanitised: a dropped file may be called
+   * `a/../../b`, and this must never write outside the workspace's folder.
+   */
+  api.route("POST", "/subagent-workflow/attach", async (ctx: any) => {
+    let body: any;
+    try { body = await parseBody(ctx); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const workspace = workspaceOf(body?.cwd);
+    const root = validateCwd(workspace) || workspace;
+    const name = safeAttachName(String(body?.name ?? ""));
+    const data = String(body?.data ?? "");
+    if (!data) return jsonResponse({ error: "missing file data" }, 400);
+    const b64 = data.replace(/^data:[^;,]*;base64,/, "").replace(/\s+/g, "");
+    let bytes: Buffer;
+    try { bytes = Buffer.from(b64, "base64"); } catch { return jsonResponse({ error: "invalid file data" }, 400); }
+    if (!bytes.length) return jsonResponse({ error: "empty file" }, 400);
+    if (bytes.length > ATTACH_MAX_BYTES) {
+      return jsonResponse({ error: `file too large (max ${Math.floor(ATTACH_MAX_BYTES / (1024 * 1024))} MB)` }, 413);
+    }
+    const dir = path.join(root, ".pi-scope", "attachments");
+    const target = path.join(dir, `${Date.now().toString(36)}-${name}`);
+    // Belt and braces: the flattened name cannot escape, but a realpath check
+    // keeps that true if the sanitiser ever loosens.
+    if (!isWithinPath(root, target)) return jsonResponse({ error: "invalid file name" }, 400);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(target, bytes);
+    } catch (err: any) {
+      return jsonResponse({ error: String(err?.message ?? err) }, 500);
+    }
+    return jsonResponse({ ok: true, path: target, name, bytes: bytes.length });
   });
 
   api.route("GET", "/subagent-workflow/run", (ctx: any) => {
@@ -3171,6 +3525,9 @@ export function activate(api: any): void {
                 tools: patch.tools != null ? patch.tools : node.config.tools,
                 extensions: patch.extensions != null ? patch.extensions : node.config.extensions,
                 refs: patch.refs != null ? patch.refs : node.config.refs,
+                // The web-search switch: `false` is a real choice, so it is
+                // carried through the patch rather than defaulted away.
+                webSearch: patch.webSearch != null ? patch.webSearch : node.config.webSearch,
               });
             } else if (node.type === "approval") {
               node.config = normaliseApprovalConfig({
@@ -3289,13 +3646,19 @@ export function activate(api: any): void {
       // the machine that will read it, which only the server can do.
       case "addRef": {
         const nodeId = String(body.nodeId ?? "").trim();
-        const raw = String(body.path ?? "").trim();
+        // Quoted by "Copy as path", or carrying a stray quote: unwrap it before
+        // anything asks whether the path is absolute (see `cleanRefPath`).
+        const raw = cleanRefPath(body.path);
         if (!nodeId) return jsonResponse({ error: "missing nodeId" }, 400);
         if (!raw) return jsonResponse({ error: "missing path" }, 400);
         if (raw.length > REF_PATH_MAX) return jsonResponse({ error: `paths may be up to ${REF_PATH_MAX} characters` }, 400);
         const node = readState(workspace).nodes.find((n: any) => n.id === nodeId);
         if (!node) return jsonResponse({ error: "no such node" }, 404);
-        if (node.type !== "agent") return jsonResponse({ error: "only an agent node can be given reference files" }, 400);
+        // A start node carries references too: its chat box attaches files to the
+        // *message*, and they ride along in the run's material (see `startRun`).
+        if (node.type !== "agent" && node.type !== "start") {
+          return jsonResponse({ error: "only an agent or start node can be given reference files" }, 400);
+        }
         // A relative path is taken against this request's workspace and the
         // result canonicalised, so two spellings of one file cannot both be
         // added, and the run inlines a path the agent can actually open.
@@ -3308,9 +3671,9 @@ export function activate(api: any): void {
         }
         // A folder is stored with a trailing separator, so the injected block
         // reads as "this is a directory" without the agent having to stat it.
-        try { if (fs.statSync(abs).isDirectory() && !abs.endsWith(path.sep)) abs += path.sep; } catch { /* raced away */ }
+        try { if (fs.statSync(abs).isDirectory() && !abs.endsWith(path.sep) && !abs.endsWith("/")) abs += path.sep; } catch { /* raced away */ }
         const refs = node.config.refs || [];
-        if (refs.some((r: any) => r.path === abs)) {
+        if (refs.some((r: any) => sameRefPath(r.path, abs))) {
           return jsonResponse({ error: "that file is already a reference of this node" }, 409);
         }
         if (refs.length >= REF_MAX) {

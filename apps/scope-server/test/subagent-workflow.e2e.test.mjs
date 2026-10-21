@@ -77,6 +77,10 @@ let claudeLog;  // argv the fake claude was invoked with
 let geminiLog;  // argv the fake gemini was invoked with
 let opencodeRuns; // how often the fake opencode ran (its `models` answer is cached)
 let opencodePromptLog; // the argv + stdin the fake opencode's *run* was handed
+let clineArgv;   // the argv the fake cline was handed
+let clinePrompt; // …and the prompt it read off stdin
+let kiloArgv;    // the argv the fake kilo was handed
+let kiloPrompt;  // …and the prompt it read off stdin
 
 /** A fake harness binary that records its argv and the SW_* env it was given,
  *  then prints a marker — so a node's flags can be asserted end to end. */
@@ -122,6 +126,31 @@ function writeModelsStubHarness(dir, runsLog, promptLog) {
     // is always multi-line, so an argv prompt would arrive truncated.
     `{ printf 'argv: %s\\n' "$@" ; printf 'stdin: '; cat; printf '\\n'; } >> ${JSON.stringify(promptLog)}`,
     `printf 'OPENCODE_RUN_OK\\n'`,
+    "exit 0",
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, script);
+  fs.chmodSync(file, 0o755);
+}
+
+/**
+ * A fake prompt-on-stdin harness (Cline, Kilo): `models` answers a catalogue the
+ * way the real CLI does, and a run records the argv it was handed plus the
+ * prompt it reads off stdin — both CLIs take the message from stdin when it is
+ * not an argument, which is how the plugin sends a multi-line prompt.
+ */
+function writeStdinStubHarness(dir, name, argvLog, promptLog, marker) {
+  const file = path.join(dir, name);
+  const script = [
+    "#!/bin/sh",
+    `if [ "$1" = "models" ]; then`,
+    `  printf '${name}/models/one\\n'`,
+    `  printf '${name}/models/two\\n'`,
+    "  exit 0",
+    "fi",
+    `{ printf '%s\\n' "$@"; } >> ${JSON.stringify(argvLog)}`,
+    `{ printf 'stdin: '; cat; printf '\\n'; } >> ${JSON.stringify(promptLog)}`,
+    `printf '${marker}\\n'`,
     "exit 0",
     "",
   ].join("\n");
@@ -377,6 +406,12 @@ before(async () => {
   opencodeRuns = path.join(tmpDir, "opencode-runs.log");
   opencodePromptLog = path.join(tmpDir, "opencode-prompt.log");
   writeModelsStubHarness(stubDir, opencodeRuns, opencodePromptLog);
+  clineArgv = path.join(tmpDir, "cline-argv.log");
+  clinePrompt = path.join(tmpDir, "cline-prompt.log");
+  writeStdinStubHarness(stubDir, "cline", clineArgv, clinePrompt, "CLINE_RUN_OK");
+  kiloArgv = path.join(tmpDir, "kilo-argv.log");
+  kiloPrompt = path.join(tmpDir, "kilo-prompt.log");
+  writeStdinStubHarness(stubDir, "kilo", kiloArgv, kiloPrompt, "KILO_RUN_OK");
 
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
@@ -539,12 +574,17 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal((await refsOf())[0].note, "the API contract");
     assert.ok((await refsOf())[0].id, "a reference carries its own id");
 
-    // The same file twice, a path that is not there, and a node that has no
-    // message of its own are all refused rather than stored.
+    // The same file twice, a path that is not there, and a node kind that has no
+    // material of its own are all refused rather than stored.
     assert.equal((await act("addRef", { nodeId: agent.id, path: "docs/design.md" }, solo)).res.status, 409);
     assert.equal((await act("addRef", { nodeId: agent.id, path: "/nope/missing.md" }, solo)).res.status, 400);
+    // A start node *does* take references — they are the run's material, what
+    // its chat box attaches (covered in full by the chat-box tests) — while an
+    // end node runs nothing, so it has nothing to be given.
     const start = s.nodes.find((n) => n.type === "start");
-    assert.equal((await act("addRef", { nodeId: start.id, path: "notes.txt" }, solo)).res.status, 400);
+    assert.ok((await act("addRef", { nodeId: start.id, path: "notes.txt" }, solo)).res.ok);
+    const end = s.nodes.find((n) => n.type === "end");
+    assert.equal((await act("addRef", { nodeId: end.id, path: "notes.txt" }, solo)).res.status, 400);
     assert.equal((await act("addRef", { nodeId: "node_ghost", path: "notes.txt" }, solo)).res.status, 404);
 
     // A folder is stored with its trailing separator, so the injected block says
@@ -565,6 +605,49 @@ describe("subagent workflow plugin (server)", () => {
     // it does not edit alone.
     assert.ok((await act("updateNode", { id: agent.id, config: { prompt: "{input}" } }, solo)).res.ok);
     assert.equal((await refsOf()).length, 1, "saving the node keeps its references");
+  });
+
+  test("takes a reference path the way Windows hands one over: quoted, spaced, metacharacters", async () => {
+    // Explorer's *Copy as path* quotes the path, and a real Windows path is full
+    // of characters a shell reads as syntax (spaces, `&`, brackets, `#`, `%`).
+    // None of that is the path's problem: it has to resolve exactly as typed
+    // once the quotes are off, or the node reports "no such file or folder" for
+    // a file that is right there.
+    const solo = path.join(tmpDir, "ws-refs-windows");
+    fs.mkdirSync(path.join(solo, "My Files"), { recursive: true });
+    const tricky = path.join(solo, "My Files", "a & b (draft) #2.md");
+    fs.writeFileSync(tricky, "# Draft\n");
+    const quotedFile = path.join(solo, "it's quoted.md");
+    fs.writeFileSync(quotedFile, "# Quoted\n");
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const refsOf = async () => (await snapshot(solo)).nodes.find((n) => n.id === agent.id).config.refs;
+    const real = fs.realpathSync(tricky);
+
+    // A quoted absolute path (what "Copy as path" puts on the clipboard) is
+    // stored canonical, quotes and all removed.
+    const quoted = await act("addRef", { nodeId: agent.id, path: `"${tricky}"`, note: "draft" }, solo);
+    assert.ok(quoted.res.ok, quoted.data?.error);
+    assert.deepEqual((await refsOf()).map((r) => r.path), [real]);
+
+    // The same file again, quoted or not, is still the same reference.
+    assert.equal((await act("addRef", { nodeId: agent.id, path: tricky }, solo)).res.status, 409);
+    assert.equal((await act("addRef", { nodeId: agent.id, path: ` "${real}" ` }, solo)).res.status, 409);
+
+    // A relative path with the same characters, single quotes included, resolves
+    // against the workspace the way the in-app browser sends it.
+    const rel = await act("addRef", { nodeId: agent.id, path: "'My Files/a & b (draft) #2.md'" }, solo);
+    assert.equal(rel.res.status, 409, "it names the reference already added");
+    const single = await act("addRef", { nodeId: agent.id, path: `'${quotedFile}'` }, solo);
+    assert.ok(single.res.ok, single.data?.error);
+    assert.deepEqual((await refsOf()).map((r) => r.path), [real, fs.realpathSync(quotedFile)]);
+
+    // A quoted path that is genuinely missing is still refused — and the error
+    // names the path after the quotes came off, not the quoted blob.
+    const gone = await act("addRef", { nodeId: agent.id, path: `"${path.join(solo, "not here.md")}"` }, solo);
+    assert.equal(gone.res.status, 400);
+    assert.match(gone.data.error, /no such file or folder: .*not here\.md$/);
+    assert.doesNotMatch(gone.data.error, /"/, "the quotes are not echoed back");
   });
 
   test("lists the workspace's folders and files for the reference browser", async () => {
@@ -640,6 +723,103 @@ describe("subagent workflow plugin (server)", () => {
       `expected a missing-reference report, got: ${JSON.stringify(second.log.map((l) => l.text))}`,
     );
     assert.match(second.nodes[agent.id].outputTail, /gone\.md \(not found\)/);
+  });
+
+  test("turns opencode's web search on and off through the workspace's own config", async () => {
+    // opencode gates its web-search *tool* on `permission.websearch` in the
+    // project's `opencode.json` — a key a fresh install simply does not have. The
+    // node's switch is written there before the run, so "on by default" is a
+    // guarantee rather than whatever the CLI happened to default to.
+    const solo = path.join(tmpDir, "ws-websearch");
+    fs.mkdirSync(solo, { recursive: true });
+    const cfgPath = path.join(solo, "opencode.json");
+    const readCfg = () => JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const setNode = async (webSearch) => {
+      const r = await act("updateNode", { id: agent.id, name: "searcher", config: {
+        harness: "opencode", prompt: "search please", webSearch,
+      } }, solo);
+      assert.ok(r.res.ok, r.data?.error);
+    };
+
+    // The switch is on unless it is turned off, and the harness says it has one.
+    const harnesses = (await api(`/${PLUGIN}/harnesses`)).data.harnesses;
+    assert.equal(harnesses.find((h) => h.id === "opencode").webSearch, true);
+    assert.equal(harnesses.find((h) => h.id === "claude").webSearch, false);
+    const seeded = (await snapshot(solo)).nodes.find((n) => n.id === agent.id);
+    assert.equal(seeded.config.webSearch, true, "a node is on by default");
+
+    // The workspace keeps the last run, so a fresh start is waited for by id.
+    const runStarted = async (w) => {
+      const started = await runApi("start", { task: "go" }, w);
+      assert.ok(started.res.ok, started.data?.error);
+      const id = started.data.run.id;
+      const deadline = Date.now() + 25_000;
+      while (Date.now() < deadline) {
+        const live = await liveRun(w);
+        if (live && live.id === id && live.status !== "running") return live;
+        await sleep(120);
+      }
+      throw new Error(`run ${id} did not finish`);
+    };
+
+    // On, with no project config: the CLI already allows it, so nothing is
+    // written into the workspace and the run says nothing about it.
+    await setNode(true);
+    let run = await runStarted(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+    assert.equal(fs.existsSync(cfgPath), false, "an allowed default needs no file");
+    assert.equal(run.log.some((l) => /web search/.test(l.text)), false);
+
+    // Off: `deny` is ensured, creating the project config when there is none —
+    // and the run reports what it did.
+    await setNode(false);
+    run = await runStarted(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+    assert.deepEqual(readCfg(), {
+      $schema: "https://opencode.ai/v2/config.json",
+      // The search tool and the page fetcher beside it: "off" means this node
+      // does not reach the web, not that it swaps one tool for the other.
+      permission: { websearch: "deny", webfetch: "deny" },
+    });
+    assert.ok(run.log.some((l) => /web search off/.test(l.text)), JSON.stringify(run.log.map((l) => l.text)));
+
+    // Back on: the existing deny is turned into allow, and the user's other
+    // settings in that file are kept exactly as they were.
+    fs.writeFileSync(cfgPath, JSON.stringify({
+      $schema: "https://opencode.ai/v2/config.json",
+      model: "zen/gpt-5",
+      permission: { websearch: "deny", webfetch: "deny", edit: "ask" },
+      theme: "system",
+    }, null, 2));
+    await setNode(true);
+    run = await runStarted(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+    const merged = readCfg();
+    assert.equal(merged.permission.websearch, "allow");
+    assert.equal(merged.permission.webfetch, "allow");
+    assert.equal(merged.permission.edit, "ask", "other permissions survive");
+    assert.equal(merged.model, "zen/gpt-5", "and so does the rest of the config");
+    assert.equal(merged.theme, "system");
+
+    // A JSONC project config owns that setting — it is reported, never rewritten.
+    const jsonc = path.join(tmpDir, "ws-websearch-jsonc");
+    fs.mkdirSync(jsonc, { recursive: true });
+    const jsoncFile = path.join(jsonc, "opencode.jsonc");
+    fs.writeFileSync(jsoncFile, '{\n  // our house config\n  "permission": { "websearch": "allow" }\n}\n');
+    const before = fs.readFileSync(jsoncFile, "utf8");
+    const s2 = await snapshot(jsonc);
+    const agent2 = s2.nodes.find((n) => n.type === "agent");
+    assert.ok((await act("updateNode", { id: agent2.id, name: "jsonc", config: {
+      harness: "opencode", prompt: "search please", webSearch: false,
+    } }, jsonc)).res.ok);
+    const run2 = await runStarted(jsonc);
+    assert.equal(run2.status, "done", JSON.stringify(run2.log));
+    assert.equal(fs.readFileSync(jsoncFile, "utf8"), before, "the jsonc file is untouched");
+    assert.equal(fs.existsSync(path.join(jsonc, "opencode.json")), false);
+    assert.ok(run2.log.some((l) => /web search off: opencode\.jsonc/.test(l.text)),
+      JSON.stringify(run2.log.map((l) => l.text)));
   });
 
   test("adds, configures and moves nodes; writes land in the plugin's store", async () => {
@@ -1288,6 +1468,143 @@ describe("subagent workflow plugin (server)", () => {
     ]);
   });
 
+  test("launches Cline and Kilo Code as headless runs with the prompt on stdin", async () => {
+    // Cline (`cline [prompt]`) and Kilo (`kilo run [message]`) both read their
+    // message from stdin when it is not on the command line — the route this
+    // runner takes for every harness whose prompt is multi-line. Each keeps its
+    // own subcommand and takes `--model` for the node's model.
+    const harnessList = (await api(`/${PLUGIN}/harnesses`)).data.harnesses;
+    const byId = Object.fromEntries(harnessList.map((h) => [h.id, h]));
+    assert.ok(byId.cline, "Cline is offered");
+    assert.ok(byId.kilo, "Kilo Code is offered");
+    assert.equal(byId.cline.modelFlag, "--model");
+    assert.equal(byId.cline.modelsArgs, null, "Cline has no models command");
+    assert.deepEqual(byId.kilo.modelsArgs, ["models"], "Kilo can print its own catalogue");
+    assert.equal(byId.kilo.modelFlag, "--model");
+    for (const id of ["cline", "kilo"]) assert.equal(byId[id].webSearch, false, "no web-search switch for " + id);
+
+    // Kilo's catalogue is what its CLI reports, parsed from stdout.
+    const kiloModels = await api(`/${PLUGIN}/models?harness=kilo`);
+    assert.ok(kiloModels.res.ok, kiloModels.data?.error);
+    assert.deepEqual(kiloModels.data.models, ["kilo/models/one", "kilo/models/two"]);
+    assert.match(kiloModels.data.source, /^kilo models$/);
+
+    const cases = [
+      { harness: "cline", argv: clineArgv, prompt: clinePrompt, marker: "CLINE_RUN_OK", sub: [] },
+      { harness: "kilo", argv: kiloArgv, prompt: kiloPrompt, marker: "KILO_RUN_OK", sub: ["run"] },
+    ];
+    for (const c of cases) {
+      const solo = path.join(tmpDir, `ws-${c.harness}-run`);
+      fs.mkdirSync(solo, { recursive: true });
+      const s = await snapshot(solo);
+      const agent = s.nodes.find((n) => n.type === "agent");
+      assert.ok((await act("updateNode", { id: agent.id, name: c.harness, config: {
+        harness: c.harness, model: `${c.harness}/some-model`, prompt: "do {task}",
+      } }, solo)).res.ok);
+
+      fs.rmSync(c.argv, { force: true });
+      fs.rmSync(c.prompt, { force: true });
+      assert.ok((await runApi("start", { task: "the job" }, solo)).res.ok);
+      const run = await waitRun(solo);
+      assert.equal(run.status, "done", JSON.stringify(run.log));
+      assert.match(run.nodes[agent.id].outputTail, new RegExp(c.marker));
+
+      // The launch is the CLI's own command line, with the model after it — and
+      // no message (a multi-line prompt cannot ride an argv on Windows).
+      assert.deepEqual(fs.readFileSync(c.argv, "utf8").trim().split("\n"),
+        [...c.sub, "--model", `${c.harness}/some-model`]);
+      // …and the whole tagged prompt goes down stdin.
+      const handed = fs.readFileSync(c.prompt, "utf8");
+      assert.match(handed, /^stdin: <user query>\ndo the job\n<\/user query>\n$/);
+    }
+  });
+
+  test("fails a node at once, naming the binary, when its provider CLI is missing", async () => {
+    // A provider that is not installed is a *configuration* problem, not a run:
+    // the node has to say which binary is missing (and where to point at one)
+    // instead of spawning nothing, hanging until a timeout, or reporting a bare
+    // ENOENT — the failures a workflow is worst at diagnosing.
+    const solo = path.join(tmpDir, "ws-missing-cli");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+
+    // 1. A built-in provider pinned to a binary that has since been removed (an
+    //    uninstalled CLI, a moved path): the override is what failed, and the
+    //    message carries the path it tried.
+    const goneBin = path.join(tmpDir, "gone-cline-cli");
+    fs.writeFileSync(goneBin, "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(goneBin, 0o755);
+    const pinned = await api(`/${PLUGIN}/harness-paths`, {
+      method: "POST", body: JSON.stringify({ harness: "cline", path: goneBin }),
+    });
+    assert.ok(pinned.res.ok, pinned.data?.error);
+    assert.equal(pinned.data.harnesses.find((h) => h.id === "cline").resolved, goneBin,
+      "the pinned path is what the provider resolves to");
+    fs.rmSync(goneBin, { force: true });
+
+    try {
+      const upd = await act("updateNode", { id: agent.id, name: "no-binary", config: {
+        harness: "cline", prompt: "do {task}",
+      } }, solo);
+      assert.ok(upd.res.ok, upd.data?.error);
+
+      const t0 = Date.now();
+      const started = await runApi("start", { task: "run it" }, solo);
+      assert.ok(started.res.ok, started.data?.error);
+      const run = await waitRun(solo);
+      const elapsed = Date.now() - t0;
+      assert.equal(run.status, "error");
+      assert.equal(run.nodes[agent.id].status, "error");
+      assert.match(run.nodes[agent.id].error, /the configured binary for cline is not executable/);
+      assert.ok(run.nodes[agent.id].error.includes(goneBin),
+        `the path it tried is named: ${run.nodes[agent.id].error}`);
+      // Nothing was spawned, so there is nothing to wait for: the node settles
+      // far sooner than any harness timeout could fire.
+      assert.ok(elapsed < 5000, `the node took ${elapsed}ms to report a missing CLI`);
+      assert.doesNotMatch(run.nodes[agent.id].error, /failed to spawn|ENOENT/,
+        "the missing binary is reported before any spawn is attempted");
+    } finally {
+      // Back to auto-detection, so the rest of the file sees the real CLI.
+      await api(`/${PLUGIN}/harness-paths`, {
+        method: "POST", body: JSON.stringify({ harness: "cline", path: "" }),
+      });
+    }
+
+    // 2. A harness of the user's own whose binary has been uninstalled: the plain
+    //    "not found on PATH" message, with where to fix it. It is offered while
+    //    its binary is there, and the node still refuses to run without it.
+    const ghostBin = path.join(tmpDir, "ghost-cli");
+    fs.writeFileSync(ghostBin, "#!/bin/sh\nprintf 'GHOST_OK\\n'\n");
+    fs.chmodSync(ghostBin, 0o755);
+    const saved = await api(`/${PLUGIN}/user-harnesses`, {
+      method: "POST", body: JSON.stringify({ action: "save", name: "Ghost CLI", bin: ghostBin }),
+    });
+    assert.ok(saved.res.ok, saved.data?.error);
+    const ghost = saved.data.harnesses.find((h) => h.label === "Ghost CLI");
+    assert.ok(ghost, "the harness was defined");
+    assert.equal(ghost.available, true, "it is available while its binary is there");
+    fs.rmSync(ghostBin, { force: true });
+
+    try {
+      const upd = await act("updateNode", { id: agent.id, name: "ghost", config: {
+        harness: ghost.id, prompt: "do {task}",
+      } }, solo);
+      assert.ok(upd.res.ok, upd.data?.error);
+
+      const started = await runApi("start", { task: "run it" }, solo);
+      assert.ok(started.res.ok, started.data?.error);
+      const run = await waitRun(solo);
+      assert.equal(run.status, "error");
+      assert.match(run.nodes[agent.id].error,
+        /ghost-cli was not found on PATH — install it, or set a binary path in Settings → Plugins → Workflow/);
+    } finally {
+      await api(`/${PLUGIN}/user-harnesses`, {
+        method: "POST", body: JSON.stringify({ action: "remove", id: ghost.id }),
+      });
+    }
+  });
+
   test("keeps a harness's escape sequences and split characters out of its message", async () => {
     const solo = path.join(tmpDir, "ws-escapes");
     fs.mkdirSync(solo, { recursive: true });
@@ -1355,6 +1672,40 @@ describe("subagent workflow plugin (server)", () => {
     // The node's own result is untouched: all three banners are still in it.
     assert.equal((run.nodes[agent.id].outputTail.match(/build ·/g) || []).length, 3,
       "collapsing the log does not rewrite the harness's output");
+  });
+
+  test("hands a custom command its message as a file, so quotes and metacharacters survive", async () => {
+    // `$SW_PROMPT`/`%SW_PROMPT%` is the convenient route, but on Windows the
+    // message is expanded into the command line *before* cmd parses it — a
+    // quote, `&` or a line break in it becomes shell syntax. So the runner also
+    // writes the message to a temp file and exports its path; the command reads
+    // the message from there, untouched.
+    const solo = path.join(tmpDir, "ws-prompt-file");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+
+    const prompt = 'A&B "quoted" 100% <tag> {task}';
+    const upd = await act("updateNode", { id: agent.id, name: "prompt-file", config: {
+      harness: "custom",
+      command: 'printf "FILE=%s\\n" "$SW_PROMPT_FILE"; cat "$SW_PROMPT_FILE"',
+      prompt,
+    } }, solo);
+    assert.ok(upd.res.ok, upd.data?.error);
+
+    const started = await runApi("start", { task: "special & 50%" }, solo);
+    assert.ok(started.res.ok, started.data?.error);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+
+    const out = run.nodes[agent.id].outputTail;
+    const [, file] = out.match(/^FILE=(.+)$/m) || [];
+    assert.ok(file, `the command was told where the message is: ${out}`);
+    // The message arrived exactly as written — the tags the runner adds around
+    // the query included, nothing interpreted on the way.
+    assert.match(out, /<user query>\nA&B "quoted" 100% <tag> special & 50%\n<\/user query>/);
+    // …and the file is gone once the command has finished with it.
+    assert.equal(fs.existsSync(file.trim()), false, `the prompt file was cleaned up: ${file}`);
   });
 
   test("reports a failed harness's own error line, not the status banner it repainted", async () => {
@@ -3070,6 +3421,182 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
+  test("the start node's panel is a chat box, and each message it sends is the run's task", async () => {
+    const solo = path.join(tmpDir, "ws-start-chat");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildCustomGraph(solo);
+    await act("updateNode", { id: g.start.id, config: { defaultTask: "the stored default" } }, solo);
+    const { page, context, errors } = await openWorkflow(solo);
+
+    // The entry point opens a composer, not a read-only pane.
+    await page.click(`.sw-node[data-id="${g.start.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "Start");
+    const box = page.locator("#sw-msg-body .sw-chat-input");
+    assert.equal(await box.count(), 1, "the start node gets a chat box");
+    assert.equal(await page.locator("#sw-msg-body .sw-chat-send").isDisabled(), true,
+      "Send waits for something to send");
+
+    // “Default task” fills the box from the graph — it does not run by itself.
+    await page.click("#sw-msg-body [data-chat-default]");
+    assert.equal(await box.inputValue(), "the stored default");
+    assert.equal((await liveRun(solo)), null, "filling the box starts nothing");
+    await box.fill("");
+
+    // Shift+Enter is a line break, not a send: a multi-line task is legitimate.
+    await box.click();
+    await box.type("line one");
+    await box.press("Shift+Enter");
+    await box.type("line two");
+    assert.equal(await box.inputValue(), "line one\nline two");
+    assert.equal((await liveRun(solo)), null, "a newline does not start a run");
+
+    // Enter sends the message, and the run's task *is* that message.
+    await box.press("Enter");
+    await page.waitForFunction(() =>
+      document.querySelectorAll(".sw-node.sw-run-done").length >= 4, null, { timeout: 25_000 });
+    const done = await waitRun(solo);
+    assert.equal(done.status, "done", JSON.stringify(done.log));
+    assert.equal(done.task, "line one\nline two", "the message became the run task");
+    assert.equal(done.startId, g.start.id, "from the start node whose box it was");
+    assert.match(done.nodes[g.first.id].outputTail, /A1\[line one\nline two\]/, "the workflow ran it");
+
+    // The turn is in the conversation, the draft is cleared, and the box is
+    // still there (a finished run repaints the panel around it).
+    await page.waitForFunction(() => document.querySelectorAll("#sw-msg-body .sw-chat-turn").length === 1);
+    assert.match(await page.textContent("#sw-msg-body .sw-chat-bubble"), /line one\nline two/);
+    assert.match(await page.textContent("#sw-msg-body .sw-chat-reply-head"), /done/,
+      "the turn says how the run ended");
+    // The turn reads as ask → answer: the workflow's final output is the reply.
+    assert.match(await page.textContent("#sw-msg-body .sw-chat-answer"), /A1\[line one/, "the run's answer is in the turn");
+    assert.equal(await box.inputValue(), "", "the sent message leaves the box empty");
+    assert.equal(await page.locator("#sw-msg-body .sw-chat-input").count(), 1);
+
+    // The composer stays anchored at the bottom of the sidebar (its own stream
+    // scrolls, the panel does not), and the box grows with the message up to a
+    // cap instead of running off the panel.
+    const layout = await page.evaluate(() => {
+      const side = document.getElementById("sw-msg-side").getBoundingClientRect();
+      const bar = document.querySelector("#sw-msg-body .sw-chat-composer").getBoundingClientRect();
+      const stream = document.querySelector("#sw-msg-body .sw-chat-stream").getBoundingClientRect();
+      return { sideBottom: Math.round(side.bottom), barBottom: Math.round(bar.bottom), barH: Math.round(bar.height), streamH: Math.round(stream.height) };
+    });
+    assert.ok(layout.barBottom <= layout.sideBottom, `the composer sits inside the sidebar (${layout.barBottom} ≤ ${layout.sideBottom})`);
+    assert.ok(layout.streamH > layout.barH, `the conversation gets the room (${layout.streamH} > ${layout.barH})`);
+    const grew = await page.evaluate(async () => {
+      const box = document.querySelector("#sw-msg-body .sw-chat-input");
+      const before = box.getBoundingClientRect().height;
+      box.focus();
+      box.value = "1\n2\n3\n4\n5\n6\n7\n8\n9";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((r) => requestAnimationFrame(r));
+      const after = box.getBoundingClientRect().height;
+      box.value = "";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      return { before: Math.round(before), after: Math.round(after) };
+    });
+    assert.ok(grew.after > grew.before, `the box grows with the message (${grew.before} → ${grew.after})`);
+    assert.ok(grew.after <= 160, `and stops at the cap (${grew.after} ≤ 160)`);
+
+    // Reopening the node keeps its conversation — the run is the turn, not a
+    // transient toast — and the draft typed since survives a focus change.
+    await page.fill("#sw-msg-body .sw-chat-input", "draft in progress");
+    await page.click(`.sw-node[data-id="${g.a2.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "a2");
+    await page.click(`.sw-node[data-id="${g.start.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "Start");
+    assert.equal(await page.inputValue("#sw-msg-body .sw-chat-input"), "draft in progress");
+    assert.equal(await page.locator("#sw-msg-body .sw-chat-turn").count(), 1, "the run is still a turn");
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("a message sent while a run is going is queued and sent when it settles", async () => {
+    const solo = path.join(tmpDir, "ws-start-queue");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildCustomGraph(solo);
+    // A slow first step, so there is a run to be busy with.
+    assert.ok((await act("updateNode", { id: g.first.id, config: {
+      harness: "custom", command: `${echoQuery("A1")}; sleep 2`, prompt: "{task}",
+    } }, solo)).res.ok);
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.click(`.sw-node[data-id="${g.start.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "Start");
+
+    const box = page.locator("#sw-msg-body .sw-chat-input");
+    await box.fill("first");
+    await box.press("Enter");
+    const t0 = Date.now();
+    while (Date.now() - t0 < 15_000) {
+      const r = await liveRun(solo);
+      if (r?.status === "running") break;
+      await sleep(100);
+    }
+    assert.equal((await liveRun(solo))?.status, "running", "the first run is going");
+
+    // The box is not dead while it runs: the message is queued, visibly.
+    await box.fill("second");
+    await box.press("Enter");
+    await page.waitForFunction(() => /queued: second/.test(document.querySelector("#sw-msg-body .sw-chat-notice")?.textContent || ""));
+    assert.equal(await box.inputValue(), "", "the queued message leaves the box");
+    assert.equal((await liveRun(solo))?.task, "first", "the running run is untouched");
+
+    // …and it is sent the moment the first settles: two turns, in order.
+    await page.waitForFunction(() =>
+      document.querySelectorAll("#sw-msg-body .sw-chat-turn").length === 2, null, { timeout: 40_000 });
+    const bubbles = await page.$$eval("#sw-msg-body .sw-chat-bubble", (els) => els.map((e) => e.textContent.trim()));
+    assert.deepEqual(bubbles, ["first", "second"]);
+    const runs = (await api(`/${PLUGIN}/history?cwd=${enc(solo)}`)).data.history;
+    assert.deepEqual(runs.map((r) => r.task).sort(), ["first", "second"], "both messages ran");
+    assert.match(await page.textContent("#sw-msg-body .sw-chat-turn:last-child .sw-chat-answer"), /A1\[second\]/);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("a file dropped on the start chat box becomes the run's reference material", async () => {
+    const solo = path.join(tmpDir, "ws-start-attach");
+    fs.mkdirSync(solo, { recursive: true });
+    const g = await buildCustomGraph(solo);
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.click(`.sw-node[data-id="${g.start.id}"] .sw-node-name`);
+    await page.waitForFunction(() => document.querySelector("#sw-msg-title")?.textContent === "Start");
+
+    // A drop hands the page bytes, not a path — the plugin stores them in the
+    // workspace and adds the stored file as a reference of the start node.
+    await page.evaluate(() => {
+      const chat = document.querySelector("#sw-msg-body .sw-chat");
+      const dt = new DataTransfer();
+      dt.items.add(new File(["# notes\nImportant context.\n"], "design notes.md", { type: "text/markdown" }));
+      chat.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+    });
+    await page.waitForFunction(() => document.querySelectorAll("#sw-msg-body .sw-chat-chip").length === 1,
+      null, { timeout: 15_000 });
+    assert.match(await page.textContent("#sw-msg-body .sw-chat-chip-name"), /design notes\.md/);
+
+    const startNode = () => snapshot(solo).then((s) => s.nodes.find((n) => n.id === g.start.id));
+    const refs = (await startNode()).config.refs;
+    assert.equal(refs.length, 1, "one reference on the start node");
+    assert.match(refs[0].path, /\.pi-scope[\\/]attachments[\\/].*design notes\.md$/);
+    assert.ok(fs.existsSync(refs[0].path), "the dropped bytes were stored in the workspace");
+
+    // The attachment is the *run's* material: a message sent from here carries
+    // it, so the workflow can read the file the user dropped.
+    await page.fill("#sw-msg-body .sw-chat-input", "use the notes");
+    await page.press("#sw-msg-body .sw-chat-input", "Enter");
+    await page.waitForFunction(() => document.querySelectorAll(".sw-node.sw-run-done").length >= 4, null, { timeout: 25_000 });
+    const done = await waitRun(solo);
+    assert.equal(done.status, "done", JSON.stringify(done.log));
+    assert.equal(done.task, "use the notes", "the turn stays the user's words");
+    assert.match(done.nodes[g.first.id].outputTail, /design notes\.md/, "the file reached the workflow");
+    assert.match(done.nodes[g.first.id].outputTail, /<reference files\/folder>/);
+
+    // Removing the chip removes the reference too.
+    await page.click("#sw-msg-body .sw-chat-chip-x");
+    await page.waitForFunction(() => document.querySelectorAll("#sw-msg-body .sw-chat-chip").length === 0);
+    assert.equal((await startNode()).config.refs.length, 0);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
   test("the messages sidebar appears only for the clicked node, not as one mixed feed", async () => {
     const solo = path.join(tmpDir, "ws-msgs-ui");
     fs.mkdirSync(solo, { recursive: true });
@@ -4010,6 +4537,187 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 
+  test("attaching a reference keeps the provider and message the panel has not saved", async () => {
+    // A reference edit is its own server call, so it must not rebuild the node
+    // panel from storage: doing that dropped an unsaved provider (an opencode
+    // node was saved as the seeded `claude`) and the message the user had typed.
+    const solo = path.join(tmpDir, "ws-ref-keep");
+    fs.mkdirSync(path.join(solo, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(solo, "docs", "design.md"), "# Design notes\n\nBody.\n");
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const stored = async () => (await snapshot(solo)).nodes.find((n) => n.id === agent.id);
+
+    const runsBefore = fs.existsSync(opencodePromptLog) ? fs.readFileSync(opencodePromptLog, "utf8").length : 0;
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-f-harness");
+    await page.selectOption("#sw-f-harness", "opencode");
+    await page.fill("#sw-f-prompt", "Reply with exactly: PONG");
+
+    // Add a reference from the workspace browser.
+    await page.click("#sw-ref-browse");
+    await page.waitForSelector('#sw-ref-picker [data-pick-nav="docs"]');
+    await page.click('#sw-ref-picker [data-pick-nav="docs"] .sw-pick-name');
+    await page.waitForSelector('#sw-ref-picker [data-pick-file="docs/design.md"]');
+    await page.click('#sw-ref-picker [data-pick-file="docs/design.md"] .sw-pick-name');
+    await page.waitForFunction(() => document.querySelectorAll(".sw-ref-row").length === 1);
+
+    // The panel is exactly as the user left it — and the browser is still open,
+    // so a second file can be picked without reopening it.
+    assert.equal(await page.inputValue("#sw-f-harness"), "opencode", "the chosen provider survives a reference edit");
+    assert.equal(await page.inputValue("#sw-f-prompt"), "Reply with exactly: PONG", "so does the unsaved message");
+    assert.equal(await page.locator("#sw-ref-picker").isHidden(), false, "and the browser stays open");
+
+    // With the browser open the add controls stay below the rows, never painted
+    // over them (the reference row used to be squeezed into a 0-height box).
+    const geom = await page.evaluate(() => {
+      const r = (sel) => document.querySelector(sel).getBoundingClientRect();
+      return { rowBottom: r(".sw-ref-row").bottom, addTop: r(".sw-ref-add").top };
+    });
+    assert.ok(geom.addTop >= geom.rowBottom - 1, `the add row sits under the rows (${geom.addTop} vs ${geom.rowBottom})`);
+
+    // Save keeps all three.
+    await page.click("#sw-save");
+    let after = await stored();
+    for (let i = 0; i < 50 && after.config.harness !== "opencode"; i++) {
+      await sleep(100);
+      after = await stored();
+    }
+    assert.equal(after.config.harness, "opencode", "the saved node runs the provider that was chosen");
+    assert.equal(after.config.prompt, "Reply with exactly: PONG");
+    assert.deepEqual(after.config.refs.map((x) => x.path), [fs.realpathSync(path.join(solo, "docs", "design.md"))]);
+
+    // …and a run really spawns opencode, with the reference block in the prompt
+    // it reads from stdin.
+    assert.ok((await runApi("start", { task: "ref keep" }, solo)).res.ok);
+    const run = await waitRun(solo);
+    assert.equal(run.status, "done", JSON.stringify(run.log));
+    assert.match(run.nodes[agent.id].outputTail || "", /OPENCODE_RUN_OK/);
+    const handed = fs.readFileSync(opencodePromptLog, "utf8").slice(runsBefore);
+    assert.match(handed, /<reference files\/folder>/);
+    assert.match(handed, /design\.md/);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("a node has a web search switch, on by default and only where it can work", async () => {
+    // opencode publishes a web-search tool a workflow can switch per node. The
+    // panel shows it for that provider only, and its state survives the Model
+    // block being rebuilt (the CLI's own model list arrives asynchronously).
+    const solo = path.join(tmpDir, "ws-websearch-ui");
+    fs.mkdirSync(solo, { recursive: true });
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const stored = async () => (await snapshot(solo)).nodes.find((n) => n.id === agent.id);
+
+    const { page, context, errors } = await openWorkflow(solo);
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-f-harness");
+
+    // A harness with no such tool has no switch to flip.
+    await page.selectOption("#sw-f-harness", "claude");
+    assert.equal(await page.locator("#sw-f-websearch").count(), 0);
+
+    // opencode has one, on by default.
+    await page.selectOption("#sw-f-harness", "opencode");
+    await page.waitForSelector("#sw-f-websearch");
+    assert.equal(await page.isChecked("#sw-f-websearch"), true, "on by default");
+
+    // Off, then a provider round-trip: the Model block is rebuilt from scratch
+    // (twice) and the choice must still be there.
+    await page.uncheck("#sw-f-websearch");
+    await page.selectOption("#sw-f-harness", "custom");
+    assert.equal(await page.locator("#sw-f-websearch").count(), 0);
+    await page.selectOption("#sw-f-harness", "opencode");
+    await page.waitForSelector("#sw-f-websearch");
+    assert.equal(await page.isChecked("#sw-f-websearch"), false, "the switch survives a provider change");
+
+    await page.click("#sw-save");
+    let after = await stored();
+    for (let i = 0; i < 50 && after.config.webSearch !== false; i++) {
+      await sleep(100);
+      after = await stored();
+    }
+    assert.equal(after.config.harness, "opencode");
+    assert.equal(after.config.webSearch, false, "the switch is saved with the node");
+
+    // Reopening the node shows the saved state.
+    await page.keyboard.press("Escape");
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-f-websearch");
+    assert.equal(await page.isChecked("#sw-f-websearch"), false);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("asks the OS file explorer for a reference when the desktop bridge is present", async () => {
+    // The desktop preload exposes pickFiles/pickDirectory; the Workflow panel
+    // uses them so a file or folder anywhere on the machine can be a reference,
+    // and falls back to the workspace browser in a plain browser tab.
+    const solo = path.join(tmpDir, "ws-native-ref");
+    fs.mkdirSync(path.join(solo, "docs"), { recursive: true });
+    const pickedFile = path.join(solo, "docs", "design.md");
+    fs.writeFileSync(pickedFile, "# Design notes\n");
+    const pickedDir = path.join(solo, "docs");
+    // One folder outside the workspace, which only a native dialog can reach.
+    const outside = path.join(tmpDir, "outside-refs");
+    fs.mkdirSync(outside, { recursive: true });
+    const outsideFile = path.join(outside, "brief.md");
+    fs.writeFileSync(outsideFile, "# Brief\n");
+    const s = await snapshot(solo);
+    const agent = s.nodes.find((n) => n.type === "agent");
+    const refsOf = async () => (await snapshot(solo)).nodes.find((n) => n.id === agent.id).config.refs;
+
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.addInitScript((v) => {
+      try { localStorage.setItem("scope-cwd", v.cwd); } catch { /* private */ }
+      window.__pickCancel = false;
+      window.__pickCalls = [];
+      window.scopeNative = {
+        pickFiles: () => {
+          window.__pickCalls.push("files");
+          return Promise.resolve(window.__pickCancel ? [] : v.files);
+        },
+        pickDirectory: () => {
+          window.__pickCalls.push("dir");
+          return Promise.resolve(window.__pickCancel ? null : v.dir);
+        },
+      };
+    }, { cwd: solo, files: [pickedFile, outsideFile], dir: pickedDir });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e?.message ?? e)));
+    await page.goto(`${base}/?token=${TOKEN}#view=${PLUGIN}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#subagent-workflow-pane .sw-node");
+    await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
+    await page.waitForSelector("#sw-refs");
+
+    // Files: every path the dialog returned becomes a reference, including one
+    // from outside the workspace, and the in-app browser never opens.
+    await page.click("#sw-ref-browse");
+    await page.waitForFunction(() => document.querySelectorAll(".sw-ref-row").length === 2);
+    assert.deepEqual((await refsOf()).map((r) => r.path), [fs.realpathSync(pickedFile), fs.realpathSync(outsideFile)]);
+    assert.ok(await page.locator("#sw-ref-picker").isHidden(), "the explorer replaced the workspace browser");
+    assert.deepEqual(await page.evaluate(() => window.__pickCalls), ["files"]);
+
+    // A folder goes through the directory dialog, stored with its separator.
+    await page.click("#sw-ref-folder");
+    await page.waitForFunction(() => document.querySelectorAll(".sw-ref-row").length === 3);
+    assert.equal((await refsOf())[2].path, `${fs.realpathSync(pickedDir)}/`);
+    assert.deepEqual(await page.evaluate(() => window.__pickCalls), ["files", "dir"]);
+
+    // Cancelling the dialog adds nothing at all.
+    await page.evaluate(() => { window.__pickCancel = true; });
+    await page.click("#sw-ref-browse");
+    await page.click("#sw-ref-folder");
+    await sleep(200);
+    assert.equal((await refsOf()).length, 3, "a cancelled pick is not an error and not a reference");
+    assert.match(await page.textContent(".sw-ref-row:last-child .sw-ref-path"), /docs\/$/);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
   test("shows a node's output beside its message, with the references under it", async () => {
     const solo = path.join(tmpDir, "ws-node-output");
     fs.mkdirSync(solo, { recursive: true });
@@ -4211,3 +4919,4 @@ describe("subagent workflow plugin (client)", () => {
     await context.close();
   });
 });
+

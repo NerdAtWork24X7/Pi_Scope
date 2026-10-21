@@ -2,8 +2,9 @@
  * client.js — the "Subagent Workflow" view.
  *
  * A canvas for wiring **coding-agent harnesses** into a fan-out DAG. Each agent
- * node runs one harness — Claude Code, Codex CLI, Gemini CLI, opencode, Aider,
- * Cursor Agent, the app's own Pi runner, or a custom shell command — configured
+ * node runs one harness — Claude Code, Cline, Codex CLI, Gemini CLI, Kilo Code,
+ * opencode, Aider, Cursor Agent, the app's own Pi runner, or a custom shell
+ * command — configured
  * in a popup opened from the **gear on the node itself**. Drag from a node's output port onto another
  * node's input port to connect them; a run walks the graph from the **start**
  * node to the **end** node, server-side and in the background, streaming every
@@ -86,6 +87,9 @@
       '<rect x="7.25" y="1.2" width="1.5" height="13.6" rx=".75" transform="rotate(45 8 8)"/>' +
       '<rect x="7.25" y="1.2" width="1.5" height="13.6" rx=".75" transform="rotate(90 8 8)"/>' +
       '<rect x="7.25" y="1.2" width="1.5" height="13.6" rx=".75" transform="rotate(135 8 8)"/></g>'),
+    cline: svg16('<rect x="2.2" y="3" width="11.6" height="10" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.3"/>' +
+      '<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M5 6.4 7 8l-2 1.6M8.4 9.6h2.6"/>'),
+    kilo: svg16('<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M4 2.4v11.2M4 8.2 10.2 2.4M4 8.2l6.2 5.4"/>'),
     codex: svg16('<path fill="none" stroke="currentColor" stroke-width="1.3" d="M8 1.7 13.5 4.85v6.3L8 14.3 2.5 11.15v-6.3z"/>' +
       '<circle cx="8" cy="8" r="1.9" fill="currentColor"/>'),
     gemini: svg16('<path fill="currentColor" d="M8 1c.5 3.5 1.7 4.7 5.2 5.2C9.7 6.7 8.5 7.9 8 11.4 7.5 7.9 6.3 6.7 2.8 6.2 6.3 5.7 7.5 4.5 8 1Z"/>' +
@@ -172,6 +176,10 @@
    * now, opened from the gear on the node itself.
    */
   let dlg = null;
+  /** The open node's **web search** switch, kept outside the DOM: the Model
+   *  block is rebuilt whenever the provider changes or the CLI's model list
+   *  arrives, and an unsaved choice has to survive that. */
+  let dlgWebSearch = true;
   let drag = null;
   let groupDrag = null;
   let groupResize = null;
@@ -281,9 +289,9 @@
         // run's per-node *output tails* (the end node's final output among them)
         // only arrive on a full read: the incremental polls that streamed it
         // carried none. Re-read once so the canvas shows what the workflow
-        // produced without a reload.
+        // produced without a reload — then send anything the chat queued.
         void refreshHistory();
-        void refresh();
+        void refresh().then(() => drainChatQueue());
       } else if (isNewRun) {
         void refreshHistory();
       }
@@ -1563,6 +1571,9 @@
   /** Open the popup on `{ kind, id }`, or close it with nothing. */
   function openDialog(next) {
     dlg = next || null;
+    // A newly opened panel starts from what the node has stored.
+    const opened = dlg && dlg.kind === "node" ? nodeById(dlg.id) : null;
+    dlgWebSearch = opened ? opened.config?.webSearch !== false : true;
     if (!modalEl || !dlgEl) return;
     modalEl.hidden = !dlg;
     document.removeEventListener("keydown", dialogKeys);
@@ -1696,8 +1707,9 @@
   }
 
   function harnessOptions(current) {
-    const list = harnesses.length ? harnesses : [{ id: "claude", label: "Claude Code" }, { id: "codex", label: "Codex CLI" },
-      { id: "gemini", label: "Gemini CLI" }, { id: "opencode", label: "opencode" }, { id: "aider", label: "Aider" },
+    const list = harnesses.length ? harnesses : [{ id: "claude", label: "Claude Code" }, { id: "cline", label: "Cline" },
+      { id: "codex", label: "Codex CLI" }, { id: "gemini", label: "Gemini CLI" }, { id: "kilo", label: "Kilo Code" },
+      { id: "opencode", label: "opencode" }, { id: "aider", label: "Aider" },
       { id: "cursor", label: "Cursor Agent" }, { id: "pi", label: "Pi (built-in)" }, { id: "custom", label: "Custom command" }];
     const opts = list.map((h) => {
       const unavailable = h.available === false;
@@ -1782,7 +1794,7 @@
    * list does not contain — an older id, or one typed as "Custom…" — is kept and
    * shown in the free-text box rather than being dropped on the next save.
    */
-  function modelFieldHtml(hid, current) {
+  function modelFieldHtml(hid, current, webSearch) {
     const value = current || "";
     if (hid === "custom") {
       return `<label class="sw-field"><span>Model <em>(optional)</em></span>` +
@@ -1827,11 +1839,34 @@
       : bare.length > 1
         ? `<div class="sw-hint sw-warn">⚠ <code>${esc(value)}</code> is offered by ${bare.length} providers (${esc(bare.join(", "))}) — pick one above: pi resolves <code>provider/model</code>.</div>`
         : pi ? `<div class="sw-hint">Stored as typed — it is not in this app's catalogue.</div>` : "";
+    // opencode is the one harness with a web-search tool a workflow can switch
+    // per node (its project config's `permission.websearch`). The box is a
+    // sibling of the field's label, not inside it: a control nested in a label
+    // makes the label's target ambiguous.
+    const webSearchRow = meta.webSearch
+      ? `<div class="sw-websearch">` +
+          `<label class="sw-check"><input type="checkbox" id="sw-f-websearch"${webSearch === false ? "" : " checked"}>` +
+          `<span>Web search</span></label>` +
+          `<div class="sw-hint">opencode's own web search tool for this node's runs. It is written into the workspace's ` +
+            `<code>opencode.json</code> as <code>permission.websearch</code> before the node launches — on writes ` +
+            `<code>allow</code>, off writes <code>deny</code>.</div>` +
+        `</div>`
+      : "";
     return `<label class="sw-field"><span>Model <em>(optional)</em></span>` +
       `<select class="set-select" id="sw-f-model">${opts}</select>` +
       `<input class="set-input sw-model-custom" id="sw-f-model-custom" value="${escAttr(known ? "" : value)}" ` +
         `placeholder="provider/model" style="display:${known || !value ? "none" : ""}">` +
-      `<div class="sw-hint">${hint}${meta.modelFlag ? ` Passed as <code>${esc(meta.modelFlag)}</code>.` : ""}</div>` + warn + `</label>`;
+      `<div class="sw-hint">${hint}${meta.modelFlag ? ` Passed as <code>${esc(meta.modelFlag)}</code>.` : ""}</div>` + warn + `</label>` +
+      webSearchRow;
+  }
+
+  /** The web-search switch as the open form has it. A provider without the row
+   *  reports the node's stored value, so rebuilding the Model block can never
+   *  silently turn the tool off. */
+  function readWebSearchField() {
+    const box = dlgEl?.querySelector("#sw-f-websearch");
+    if (box) dlgWebSearch = box.checked;
+    return dlgWebSearch;
   }
 
   /** The model the form is showing: the select's value, or the free-text
@@ -1879,12 +1914,16 @@
     const sel = dlgEl.querySelector("#sw-f-harness");
     if (!wrap || !sel) return;
     const current = readModelField();
-    wrap.innerHTML = modelFieldHtml(sel.value, current);
+    wrap.innerHTML = modelFieldHtml(sel.value, current, readWebSearchField());
     bindModelField();
   }
 
   /** Wire "Custom…" on the model select to its free-text box. */
   function bindModelField() {
+    // The web-search switch lives in this block, so a change is remembered here:
+    // the block (and the box with it) is replaced when the provider changes.
+    const web = dlgEl.querySelector("#sw-f-websearch");
+    if (web) web.addEventListener("change", () => { dlgWebSearch = web.checked; });
     const sel = dlgEl.querySelector("#sw-f-model");
     if (!sel || sel.tagName !== "SELECT") return;
     const custom = dlgEl.querySelector("#sw-f-model-custom");
@@ -1897,25 +1936,43 @@
 
   /** A path as the panel lists it: relative to the workspace when it is inside
    *  it, absolute otherwise. What is stored — and what the agent is given — is
-   *  always the absolute path. */
+   *  always the absolute path. Both sides are normalised to `/` first: the
+   *  server stores a realpath, which on Windows is backslashed, while `cwd`
+   *  reaches this page from the host — so a raw `startsWith` would miss every
+   *  path on that platform and print absolute paths where it should print
+   *  `docs/design.md`. */
   function refDisplayPath(p) {
     const full = String(p || "");
-    const root = `${cwd || ""}/`;
-    return cwd && full.startsWith(root) ? full.slice(root.length) : full;
+    const norm = (s) => String(s || "").replace(/\\/g, "/");
+    const root = `${norm(cwd).replace(/\/+$/, "")}/`;
+    const candidate = norm(full);
+    if (!cwd || root === "/") return full;
+    if (candidate.startsWith(root)) return candidate.slice(root.length);
+    // Windows paths differ in case between a picker and a realpath, so that
+    // platform compares case-insensitively (POSIX paths are case-sensitive).
+    if (serverPlatform === "win32" && candidate.toLowerCase().startsWith(root.toLowerCase())) {
+      return candidate.slice(root.length);
+    }
+    return full;
   }
 
-  /**
-   * The node's **reference files**: the paths handed to its agent along with the
-   * user message, each with a description. Adding, describing and removing are
-   * their own server calls rather than part of the panel's save, because the
-   * path has to be resolved and checked where the file actually is — and a path
-   * the user typed is only canonical once the server has realpath'd it.
-   */
-  function refsFieldHtml(n) {
+  /** Is a stored reference a folder? The server keeps the platform's trailing
+   *  separator (`/` on POSIX, `\` on Windows), so both count. */
+  const refIsDir = (p) => /[\\/]$/.test(String(p || ""));
+
+  /** The reference rows — or the empty-state target — as they stand in `n`. */
+  function refRowsHtml(n) {
     const refs = Array.isArray(n.config?.refs) ? n.config.refs : [];
+    if (!refs.length) {
+      return `<div class="sw-ref-empty" id="sw-refs-empty">` +
+          `<span class="sw-ref-empty-glyph" aria-hidden="true">📎</span>` +
+          `<span class="sw-ref-empty-title">No references yet</span>` +
+          `<span class="sw-ref-empty-hint">Add a file or folder below — it is sent with this node's message so its agent can read it.</span>` +
+        `</div>`;
+    }
     const rows = refs.map((r) => {
       const shown = refDisplayPath(r.path);
-      const dir = String(r.path || "").endsWith("/");
+      const dir = refIsDir(r.path);
       return `<div class="sw-ref-row" data-ref="${escAttr(r.id)}">` +
         `<span class="sw-ref-icon" title="${dir ? "folder" : "file"}">${dir ? "📁" : "📄"}</span>` +
         `<span class="sw-ref-path" title="${escAttr(r.path)}">${esc(shown)}</span>` +
@@ -1924,21 +1981,34 @@
         `<button class="sw-ref-del" type="button" data-ref-del="${escAttr(r.id)}" ` +
           `title="Remove ${escAttr(shown)}">×</button></div>`;
     }).join("");
+    return `<div class="sw-ref-list">${rows}</div>`;
+  }
+
+  /**
+   * The node's **reference files**: the paths handed to its agent along with the
+   * user message, each with a description. Adding, describing and removing are
+   * their own server calls rather than part of the panel's save, because the
+   * path has to be resolved and checked where the file actually is — and a path
+   * the user typed is only canonical once the server has realpath'd it.
+   *
+   * The list lives in its own box (`#sw-ref-body`) precisely because those calls
+   * repaint it on their own: see `syncRefsField`.
+   */
+  function refsFieldHtml(n) {
     return `<div class="sw-field sw-fld-refs sw-refs" id="sw-refs">` +
         `<span>Reference files &amp; folders <em>(optional)</em></span>` +
-        (refs.length ? `<div class="sw-ref-list">${rows}</div>`
-                     : `<div class="sw-ref-empty" id="sw-refs-empty">` +
-                         `<span class="sw-ref-empty-glyph" aria-hidden="true">📎</span>` +
-                         `<span class="sw-ref-empty-title">No references yet</span>` +
-                         `<span class="sw-ref-empty-hint">Add a file or folder below — it is sent with this node's message so its agent can read it.</span>` +
-                       `</div>`) +
+        `<div class="sw-ref-body" id="sw-ref-body">${refRowsHtml(n)}</div>` +
         `<div class="sw-ref-add">` +
           `<input class="set-input" id="sw-ref-path" spellcheck="false" autocomplete="off" ` +
             `placeholder="docs/architecture.md or src/ — relative to the workspace">` +
           `<input class="set-input" id="sw-ref-note" spellcheck="false" autocomplete="off" ` +
             `placeholder="What it is (sent with the path)">` +
           `<button class="btn-sm" id="sw-ref-add-btn" type="button" title="Add this file or folder as a reference of this node">Add</button>` +
-          `<button class="btn-sm" id="sw-ref-browse" type="button" title="Pick a file or folder from the workspace">Browse…</button>` +
+          // The two native pickers: the desktop app opens the OS file explorer,
+          // which can reach anywhere on the machine. In a plain browser (no
+          // `scopeNative` bridge) both fall back to the in-app workspace browser.
+          `<button class="btn-sm" id="sw-ref-browse" type="button" title="Pick files in your file explorer">Browse files…</button>` +
+          `<button class="btn-sm" id="sw-ref-folder" type="button" title="Pick a folder in your file explorer">Folder…</button>` +
         `</div>` +
         // The browser renders into this box: the workspace's own folders and
         // files, so a path is picked rather than remembered.
@@ -1948,14 +2018,94 @@
   }
 
   /**
-   * Add a reference by path, whatever produced the path: the Add button under a
-   * typed one, or a row of the browser. The server resolves and canonicalises it
-   * either way, so what is stored is what the agent will be given.
+   * Repaint just the reference list of the open popup — never the whole panel.
+   *
+   * A reference edit is its own server call, not a node save, so everything else
+   * the user has typed must survive it. `paint()` rebuilds the open popup from
+   * what is *stored* (see `renderDialog`), which used to throw away an unsaved
+   * provider, model and message the moment a reference was added — and closed a
+   * picker mid-browse. An opencode node picked in the panel was silently saved
+   * as the seeded `claude`, whose binary is often not installed, so the run then
+   * failed on a provider the user never chose.
    */
-  async function addRefPath(n, p) {
-    if (!p) { S.toast?.("Give the reference a path", "err"); return; }
-    const note = dlgEl.querySelector("#sw-ref-note")?.value.trim() || "";
-    await run_(() => post("addRef", { nodeId: n.id, path: p, note }), "Reference added");
+  function syncRefsField() {
+    if (!dlgEl || !dlg || dlg.kind !== "node" || !dlg.id) return;
+    const n = nodeById(dlg.id);
+    const body = dlgEl.querySelector("#sw-ref-body");
+    if (!n || !body) return;
+    body.innerHTML = refRowsHtml(n);
+    wireRefRows(n);
+  }
+
+  /**
+   * A reference edit: adopt the graph the server returned, repaint the canvas and
+   * the reference list, and leave the rest of the open panel untouched.
+   */
+  async function refAction(fn, okMsg) {
+    try {
+      wf = await fn();
+      renderStatus();
+      renderNodes();
+      syncRefsField();
+      syncPolling();
+      if (okMsg) S.toast?.(okMsg);
+    } catch (err) { S.toast?.(String(err.message || err), "err"); }
+  }
+
+  /**
+   * Add a reference by path, whatever produced the path: the Add button under a
+   * typed one, a row of the browser, or a native file/folder pick. The server
+   * resolves and canonicalises it either way, so what is stored is what the
+   * agent will be given. `noteOverride` lets a caller pass its own description.
+   */
+  async function addRefPath(n, p, noteOverride) {
+    const target = String(p || "").trim();
+    if (!target) { S.toast?.("Give the reference a path", "err"); return; }
+    const noteEl = dlgEl.querySelector("#sw-ref-note");
+    const note = noteOverride != null ? String(noteOverride) : (noteEl?.value.trim() || "");
+    await refAction(async () => {
+      const state = await post("addRef", { nodeId: n.id, path: target, note });
+      // The path has been taken, so clear the boxes: the next reference starts
+      // from an empty field instead of repeating the last description.
+      const pathEl = dlgEl.querySelector("#sw-ref-path");
+      if (pathEl) pathEl.value = "";
+      if (noteEl) noteEl.value = "";
+      return state;
+    }, "Reference added");
+  }
+
+  /** The desktop bridge's native dialogs (see apps/scope-desktop/preload.js). */
+  const nativeBridge = () => (typeof window !== "undefined" && window.scopeNative ? window.scopeNative : null);
+
+  /**
+   * Ask the OS file explorer for paths. The desktop app opens a native dialog —
+   * the same bridge the Chat composer attaches files with — so a reference can
+   * be picked from anywhere on the machine, including outside the workspace,
+   * which the in-app browser deliberately cannot reach.
+   *
+   * Returns true when the bridge owned the interaction (a pick *or* a cancel),
+   * and false when there is no native bridge, so the caller can fall back to the
+   * in-app browser in a plain browser tab.
+   */
+  async function pickNativeRefs(n, folder) {
+    const bridge = nativeBridge();
+    if (!bridge) return false;
+    // Open the dialog at the workspace, so the first pick is the folder the
+    // node will actually run in (the preload ignores it when it is not a dir).
+    const opts = cwd ? { defaultPath: cwd } : undefined;
+    let picked = null;
+    try {
+      picked = folder
+        ? await (typeof bridge.pickDirectory === "function" ? bridge.pickDirectory(opts) : null)
+        : await (typeof bridge.pickFiles === "function" ? bridge.pickFiles(opts) : []);
+    } catch (err) {
+      S.toast?.(`The file dialog could not open: ${String(err?.message ?? err)}`, "err");
+      return true;
+    }
+    // A cancelled dialog returns null (folder) or [] (files): nothing to add.
+    const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+    for (const p of paths) await addRefPath(n, p);
+    return true;
   }
 
   /**
@@ -2008,7 +2158,24 @@
     box.querySelector("[data-pick-close]")?.addEventListener("click", (ev) => { ev.preventDefault(); box.hidden = true; box.innerHTML = ""; });
   }
 
-  /** Wire the reference list: add, describe, remove. */
+  /** Wire the reference rows themselves: describe on blur, remove on click. */
+  function wireRefRows(n) {
+    const body = dlgEl.querySelector("#sw-ref-body");
+    if (!body) return;
+    // A description saves on its own (silently on success — a toast per blur
+    // would be noise) and a failed save says so.
+    for (const el of body.querySelectorAll(".sw-ref-note")) {
+      el.addEventListener("change", () => {
+        const refId = el.closest(".sw-ref-row")?.dataset.ref;
+        if (refId) refAction(() => post("updateRef", { nodeId: n.id, refId, note: el.value.trim() }));
+      });
+    }
+    for (const btn of body.querySelectorAll("[data-ref-del]")) {
+      btn.addEventListener("click", () => refAction(() => post("removeRef", { nodeId: n.id, refId: btn.dataset.refDel }), "Reference removed"));
+    }
+  }
+
+  /** Wire the reference list: add, pick, describe, remove. */
   function wireRefs(n) {
     const wrap = dlgEl.querySelector("#sw-refs");
     if (!wrap) return;
@@ -2017,24 +2184,20 @@
     const add = () => {
       const p = pathEl.value.trim();
       if (!p) { S.toast?.("Give the reference a path", "err"); pathEl.focus(); return; }
-      addRefPath(n, p);
+      void addRefPath(n, p);
     };
     wrap.querySelector("#sw-ref-add-btn").addEventListener("click", add);
-    wrap.querySelector("#sw-ref-browse").addEventListener("click", () => openRefPicker(n, ""));
+    // Native dialogs first (desktop), the workspace browser otherwise.
+    wrap.querySelector("#sw-ref-browse")?.addEventListener("click", async () => {
+      if (!(await pickNativeRefs(n, false))) void openRefPicker(n, "");
+    });
+    wrap.querySelector("#sw-ref-folder")?.addEventListener("click", async () => {
+      if (!(await pickNativeRefs(n, true))) void openRefPicker(n, "");
+    });
     for (const el of [pathEl, noteEl]) {
       el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
     }
-    // A description saves on its own (silently on success — a toast per blur
-    // would be noise) and a failed save says so.
-    for (const el of wrap.querySelectorAll(".sw-ref-note")) {
-      el.addEventListener("change", () => {
-        const refId = el.closest(".sw-ref-row")?.dataset.ref;
-        if (refId) run_(() => post("updateRef", { nodeId: n.id, refId, note: el.value.trim() }));
-      });
-    }
-    for (const btn of wrap.querySelectorAll("[data-ref-del]")) {
-      btn.addEventListener("click", () => run_(() => post("removeRef", { nodeId: n.id, refId: btn.dataset.refDel }), "Reference removed"));
-    }
+    wireRefRows(n);
   }
 
   function renderNodeDialog(n) {
@@ -2054,14 +2217,20 @@
         `<label class="sw-field sw-fld-provider"><span class="sw-field-label">Provider <span id="sw-harness-icon">${harnessIcon(c.harness, providerLabel(c.harness))}</span></span>` +
           `<select class="set-select" id="sw-f-harness">${harnessOptions(c.harness)}</select>` +
           `<div class="sw-hint" id="sw-harness-hint"></div></label>` +
-        `<div class="sw-fld-model" id="sw-model-wrap">${modelFieldHtml(c.harness, c.model)}</div>` +
+        `<div class="sw-fld-model" id="sw-model-wrap">${modelFieldHtml(c.harness, c.model, c.webSearch)}</div>` +
         `<label class="sw-field sw-fld-prompt"><span>User message</span>` +
           `<textarea class="set-input sw-textarea" id="sw-f-prompt" rows="5" spellcheck="false" placeholder="{input}">${esc(c.prompt || "")}</textarea>` +
           `<div class="sw-hint"><code>{input}</code> = what the nodes before this one produced, <code>{task}</code> = the run task.</div></label>` +
         `<label class="sw-field sw-fld-command sw-only-custom" id="sw-custom-wrap"><span>Command</span>` +
           `<input class="set-input" id="sw-f-command" value="${escAttr(c.command || "")}" placeholder="my-agent -p &quot;${customVar("SW_PROMPT")}&quot;">` +
           `<div class="sw-hint">What this provider runs. <code>${esc(customVar("SW_PROMPT"))}</code>, <code>${esc(customVar("SW_TASK"))}</code>, <code>${esc(customVar("SW_NODE"))}</code> and <code>${esc(customVar("SW_REFS"))}</code> are set for it.` +
-            (serverPlatform === "win32" ? ` Run through <code>cmd.exe</code>.` : ` Run through your shell.`) + `</div></label>` +
+            (serverPlatform === "win32" ? ` Run through <code>cmd.exe</code>.` : ` Run through your shell.`) +
+            // The message also lands in a temp file: the safe route for text
+            // with quotes, `&` or line breaks, which cmd re-reads as syntax
+            // when a variable holding them is expanded.
+            ` The message is also in <code>${esc(customVar("SW_PROMPT_FILE"))}</code>, readable with` +
+            (serverPlatform === "win32" ? ` <code>type "%SW_PROMPT_FILE%"</code>` : ` <code>cat "$SW_PROMPT_FILE"</code>`) +
+            ` — use it when the message may contain quotes, <code>&amp;</code> or several lines.` + `</div></label>` +
         refsFieldHtml(n) +
         // The node's result, beside the message that produced it: the wide
         // panel's right column, and under the references on a narrow one.
@@ -2095,7 +2264,7 @@
       fields =
         `<label class="sw-field sw-fld-prompt"><span>User message <em>(run task)</em></span>` +
           `<textarea class="set-input sw-textarea" id="sw-f-task" rows="4" spellcheck="false" placeholder="What should this workflow do?">${esc(n.config?.defaultTask || "")}</textarea>` +
-          `<div class="sw-hint">The run's task: every node can read it as <code>{task}</code> (and a command as <code>${esc(customVar("SW_TASK"))}</code>). Every node wired off this start runs in parallel.</div></label>` +
+          `<div class="sw-hint">The run's task: every node can read it as <code>{task}</code> (and a command as <code>${esc(customVar("SW_TASK"))}</code>). ▶ Run and triggers use this default — the node's chat box in the messages sidebar sends a message of its own instead. Every node wired off this start runs in parallel.</div></label>` +
         `<div class="sw-field sw-start-triggers"><span>Triggers</span>` +
           triggersFormHtml(n.config?.triggers || {}, {
             compact: true,
@@ -2156,7 +2325,8 @@
       // instead of the whole form, which would throw away an unsaved message.
       harnessSel.addEventListener("change", () => {
         const model = readModelField();
-        dlgEl.querySelector("#sw-model-wrap").innerHTML = modelFieldHtml(harnessSel.value, model);
+        const webOn = readWebSearchField();
+        dlgEl.querySelector("#sw-model-wrap").innerHTML = modelFieldHtml(harnessSel.value, model, webOn);
         bindModelField();
         syncCustom();
         // The new provider's list may be its CLI's to report — ask it (the field
@@ -2232,6 +2402,9 @@
         ...stored,
         harness: dlgEl.querySelector("#sw-f-harness")?.value || "claude",
         model: readModelField(),
+        // Only opencode publishes a web-search tool; for anything else the
+        // stored value rides through `...stored` untouched.
+        webSearch: readWebSearchField(),
         prompt: read("#sw-f-prompt", stored.prompt || ""),
         // Only rendered while the provider is a custom command; otherwise the
         // stored one is kept untouched.
@@ -2889,6 +3062,33 @@
   let msgSideEl = null, msgBodyEl = null, msgTitleEl = null, msgSubEl = null, msgSig = "";
   /** How many of one agent's lines a section shows (the newest ones). */
   const MSG_LINES_MAX = 60;
+  /**
+   * The start node's **chat box**: the draft typed into it, per node, so a
+   * repaint (a poll tick, a status change) never eats what is being typed, and
+   * switching nodes and coming back keeps it. Remembered per browser as well, so
+   * a reload does not lose a half-written task.
+   */
+  const chatDrafts = new Map();
+  // Keyed by workspace as well as node: two workspaces' seed graphs share ids
+  // (`node_start`), and one's half-written message must not appear in the other.
+  const chatDraftKey = (id) => `scope-sw-chat-draft:${cwd}:${id}`;
+  function readChatDraft(id) {
+    if (chatDrafts.has(id)) return chatDrafts.get(id);
+    let v = "";
+    try { v = localStorage.getItem(chatDraftKey(id)) || ""; } catch { /* private mode */ }
+    chatDrafts.set(id, v);
+    return v;
+  }
+  function writeChatDraft(id, value) {
+    chatDrafts.set(id, value);
+    try {
+      if (value) localStorage.setItem(chatDraftKey(id), value);
+      else localStorage.removeItem(chatDraftKey(id));
+    } catch { /* private mode */ }
+  }
+  /** The start node whose chat box is open. Focus is taken only when the panel
+   *  *opens*, never on a repaint while the user is typing somewhere else. */
+  let chatOpenFor = null;
 
   /** The log lines the sidebar reads: the live run's buffer, or a reopened
    *  run's stored log. */
@@ -3126,6 +3326,149 @@
       `</div>`;
   }
 
+  /** A message typed while a run was going, waiting for it to settle — one per
+   *  start node, so the box is never dead while the workflow is busy. */
+  const chatQueue = new Map();
+
+  /** A dropped file's bytes, base64 — what `/chat/attach` takes when the page
+   *  has no way to hand over a real path (a browser drop, not a desktop pick). */
+  function readFileBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || "").replace(/^data:[^;]*;base64,/, ""));
+      reader.onerror = () => reject(reader.error || new Error("could not read file"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /** The file a reference path names, for a chip. Both separators count. */
+  const refName = (p) => {
+    const parts = String(p || "").replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : String(p || "");
+  };
+
+  /**
+   * What a run answered: its **end node's** final output, else the last node that
+   * produced anything, else the failure — so each turn in the chat reads as
+   * ask → answer, live while the run is going and after it settles.
+   */
+  function runAnswer(rec) {
+    const states = rec && rec.nodes && typeof rec.nodes === "object" ? rec.nodes : null;
+    if (!states) return { text: "", error: "" };
+    for (const end of nodes().filter((n) => n.type === "end")) {
+      const t = String(states[end.id]?.outputTail || "").trim();
+      if (t) return { text: t, error: "" };
+    }
+    for (const n of nodes().filter((x) => x.type !== "start" && x.type !== "end")) {
+      const t = String(states[n.id]?.outputTail || "").trim();
+      if (t) return { text: t, error: "" };
+    }
+    const failed = Object.values(states).find((s) => s && s.error);
+    return { text: "", error: String(failed?.error || "") };
+  }
+
+  /** The files attached to that start node — the run's reference material. */
+  function startRefsOf(n) {
+    return Array.isArray(n?.config?.refs) ? n.config.refs : [];
+  }
+
+  /**
+   * The runs one start node began, oldest first, capped. A run recorded before
+   * start nodes carried ids (`startId: null`) belongs to the only start node on
+   * the canvas; with several, it is not guessed at. The live run is the newest
+   * turn whether or not it has finished.
+   */
+  function startTurns(n) {
+    const starts = nodes().filter((x) => x.type === "start");
+    const mine = (rec) => (rec && rec.startId ? rec.startId === n.id : starts.length === 1 && starts[0].id === n.id);
+    const out = historyList.filter(mine);
+    const live = run && run.id && mine(run) ? run : null;
+    if (live && !out.some((h) => h.id === live.id)) out.push(live);
+    return out.slice(-20);
+  }
+
+  /**
+   * A start node's sidebar: its **conversation**, not a reading pane. Each turn
+   * is a task the user sent — the run it started, its status and size — and the
+   * box at the bottom sends the next one. Enter sends, Shift+Enter is a newline,
+   * the draft survives a repaint, and a finished turn can be reopened in the
+   * history picker.
+   */
+  function startChatHtml(n) {
+    const turns = startTurns(n);
+    const streaming = run?.status === "running";
+    const draft = readChatDraft(n.id);
+    const queued = chatQueue.get(n.id) || "";
+    const refs = startRefsOf(n);
+
+    // One turn is a conversation pair, the way a chat reads: what was asked,
+    // then what the workflow answered (the run's final output, streaming in
+    // while it goes). An older turn reopens that run when clicked.
+    const rows = turns.map((t) => {
+      const when = t.finishedAt || t.startedAt;
+      const time = when ? new Date(when).toLocaleTimeString([], { hour12: false }) : "";
+      const live = !!(run && t.id === run.id);
+      const state = String(t.status || "started");
+      const count = typeof t.nodes === "number" ? t.nodes : Object.keys(t.nodes || {}).length;
+      const answer = runAnswer(t);
+      const meta = [state, time, count ? `${count} node${count === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+      return `<div class="sw-chat-turn${live ? " live" : ""}"${live ? "" : ` data-run="${escAttr(t.id)}"`} ` +
+          `title="${live ? "This run" : "Open this run"}">` +
+          `<div class="sw-chat-msg sw-chat-user">` +
+            `<div class="sw-chat-bubble">${esc(t.task || "—")}</div>` +
+          `</div>` +
+          `<div class="sw-chat-msg sw-chat-bot">` +
+            `<span class="sw-chat-avatar" aria-hidden="true">${nodeGlyph("start")}</span>` +
+            `<div class="sw-chat-reply">` +
+              `<div class="sw-chat-reply-head"><span class="sw-chat-state sw-st-${escAttr(state)}">${esc(meta)}</span></div>` +
+              (answer.text ? `<pre class="sw-chat-answer">${esc(answer.text)}</pre>`
+                : answer.error ? `<div class="sw-msg-err">${esc(answer.error)}</div>`
+                : state === "running" ? `<div class="sw-chat-typing" aria-live="polite"><i></i><i></i><i></i><span>working</span></div>`
+                : `<div class="sw-msg-none">No output yet.</div>`) +
+            `</div>` +
+          `</div>` +
+        `</div>`;
+    }).join("");
+
+    const chips = refs.map((r) => `<span class="sw-chat-chip" title="${escAttr(r.path)}">` +
+        `<span class="sw-chat-chip-name">📎 ${esc(refName(r.path))}</span>` +
+        `<button type="button" class="sw-chat-chip-x" data-chat-unref="${escAttr(r.id)}" ` +
+          `title="Remove ${escAttr(refName(r.path))}" aria-label="Remove attachment">✕</button></span>`).join("");
+
+    const canDefault = !!(n.config?.defaultTask || "").trim();
+    return `<div class="sw-chat" data-start="${escAttr(n.id)}">` +
+        `<div class="sw-chat-stream" tabindex="0" aria-label="Conversation with ${escAttr(n.name)}">` +
+          `<div class="sw-chat-thread">` +
+            (rows || `<div class="sw-chat-empty">` +
+              `<div class="sw-chat-empty-icon" aria-hidden="true">${nodeGlyph("start")}</div>` +
+              `<div class="sw-chat-empty-title">Message ${esc(n.name)}</div>` +
+              `<div class="sw-msg-none">Your message is the run's task: every node wired from this entry point answers it.</div>` +
+            `</div>`) +
+          `</div>` +
+        `</div>` +
+        (chips ? `<div class="sw-chat-attach" aria-label="Attached files">${chips}</div>` : "") +
+        (queued || streaming ? `<div class="sw-chat-notice">` +
+          (streaming ? `<span class="sw-chat-notice-text">▶ a run is going — Stop ends it</span>` : "") +
+          (queued ? `<span class="sw-chat-notice-text">🕘 queued: ${esc(S.trunc ? S.trunc(queued, 60) : queued)}</span>` +
+            `<button class="btn-sm sw-chat-uncueue" type="button" data-chat-uncueue="1">Cancel</button>` : "") +
+        `</div>` : "") +
+        `<form class="sw-chat-composer" data-chat="${escAttr(n.id)}">` +
+          `<div class="sw-chat-shell">` +
+            `<textarea class="sw-chat-input" rows="1" spellcheck="true" ` +
+              `placeholder="Message ${escAttr(n.name)}" aria-label="Message to start the run">${esc(draft)}</textarea>` +
+            `<button class="sw-chat-send" type="submit" aria-label="Send" title="Send (Enter)"${draft.trim() ? "" : " disabled"}>⇧</button>` +
+          `</div>` +
+          `<div class="sw-chat-bar">` +
+            `<button class="sw-chat-tool" type="button" data-chat-attach="1" title="Attach files to this message">📎 Attach</button>` +
+            (canDefault ? `<button class="sw-chat-tool" type="button" data-chat-default="1" title="Put this node's default task in the box">Default</button>` : "") +
+            (streaming ? `<button class="sw-chat-tool sw-chat-stop" type="button" data-chat-stop="1">■ Stop</button>` : "") +
+            `<span class="sw-chat-hint">Enter to send · Shift+Enter for a new line</span>` +
+          `</div>` +
+          `<input type="file" class="sw-chat-file" multiple hidden>` +
+        `</form>` +
+      `</div>`;
+  }
+
   /** The sidebar with one node in focus: exactly what that node is about. */
   function focusedHtml(n, waiting) {
     if (n.type === "agent") {
@@ -3140,15 +3483,9 @@
                        : `<div class="sw-msg-none">Nothing is wired into this gate.</div>`);
     }
     if (n.type === "end") return endOutputHtml(n);
-    // This start's own task when the run being read came from it; otherwise the
-    // task it would use, so a sibling workflow's run is never shown here as this
-    // entry point's material.
-    const shown = viewRun()?.startId === n.id ? viewRun()?.task : (n.config?.defaultTask || viewRun()?.task);
-    return `<div class="sw-msg-section">` +
-        `<div class="sw-msg-sec-head"><span class="sw-node-glyph">▶</span>` +
-          `<span class="sw-msg-sec-name">${esc(n.name)}</span>` +
-          `<span class="sw-msg-sec-tag">start</span></div>` +
-        `<pre class="sw-msg-pre">${esc(shown || "—")}</pre></div>`;
+    // The start node is the workflow's entry point, so its panel is where a run
+    // is *sent*: a chat box whose turns are the tasks this entry point ran.
+    return startChatHtml(n);
   }
 
   /** The sidebar with nothing in focus: every agent, then any gate, then the end. */
@@ -3190,7 +3527,11 @@
     const focus = focusedNode();
     main?.classList.toggle("no-focus", !focus);
     msgSideEl?.classList.toggle("has-focus", !!focus);
-    if (!focus && msgBodyEl && msgBodyEl.innerHTML) msgBodyEl.innerHTML = "";
+    if (!focus && msgBodyEl && msgBodyEl.innerHTML) {
+      msgBodyEl.innerHTML = "";
+      msgBodyEl.classList.remove("sw-chat-open");
+      chatOpenFor = null;
+    }
   }
 
   /**
@@ -3220,13 +3561,181 @@
       notes.set(card.dataset.gate, card.querySelector(".sw-msg-note")?.value ?? "");
     }
     msgTitleEl.textContent = focus.name;
-    msgSubEl.textContent = `${focus.type === "agent" ? providerLabel(focus.config?.harness) : focus.type} · messages`;
+    msgSubEl.textContent = `${focus.type === "agent" ? providerLabel(focus.config?.harness) : focus.type} · ` +
+      (focus.type === "start" ? "chat" : "messages");
+    msgBodyEl.classList.toggle("sw-chat-open", focus.type === "start");
     msgBodyEl.innerHTML = focusedHtml(focus, waiting);
     for (const card of msgBodyEl.querySelectorAll(".sw-msg-gate")) {
       const note = notes.get(card.dataset.gate);
       const box = card.querySelector(".sw-msg-note");
       if (note && box) box.value = note;
     }
+    wireStartChat(focus);
+  }
+
+  /**
+   * Make the start node's chat box work: auto-grow the box, send on Enter (a
+   * newline stays Shift+Enter), keep the draft and the Send button in step, and
+   * put the caret in the box when the panel opens — never on a repaint, so a
+   * live run cannot pull focus out from under whatever else the user is doing.
+   */
+  function wireStartChat(focus) {
+    const box = msgBodyEl?.querySelector(".sw-chat-input");
+    if (!box || focus.type !== "start") { chatOpenFor = null; return; }
+    const form = box.closest(".sw-chat-composer");
+    const send = form?.querySelector(".sw-chat-send");
+    const stream = msgBodyEl.querySelector(".sw-chat-stream");
+    const chatEl = msgBodyEl.querySelector(".sw-chat");
+    const startId = focus.id;
+
+    // Attachments: a file dropped on (or picked into) the chat box becomes a
+    // reference of this **start node**, so it rides along with every message
+    // sent from here — the run's material, not one turn's.
+    const addChatRefs = async (paths) => {
+      let added = 0;
+      for (const p of paths) {
+        if (!p) continue;
+        try {
+          wf = await post("addRef", { nodeId: startId, path: p });
+          added += 1;
+        } catch (err) { S.toast?.(String(err.message || err), "err"); }
+      }
+      if (added) {
+        msgSig = "";
+        renderNodes();
+        renderMessages();
+        S.toast?.(added === 1 ? "Attached" : `${added} files attached`);
+      }
+    };
+    const uploadOne = async (file) => {
+      const data = await readFileBase64(file);
+      const { res, data: out } = await S.api("/subagent-workflow/attach", {}, { cwd, name: file.name, data });
+      if (!res.ok || !out?.ok) throw new Error(out?.error || `HTTP ${res.status}`);
+      return out.path;
+    };
+    const addFiles = async (files) => {
+      if (!files.length) return;
+      chatEl?.classList.add("busy");
+      try {
+        const paths = [];
+        for (const file of files) {
+          try { paths.push(await uploadOne(file)); }
+          catch (err) { S.toast?.(`${file.name}: ${String(err.message || err)}`, "err"); }
+        }
+        await addChatRefs(paths);
+      } finally { chatEl?.classList.remove("busy"); }
+    };
+    const fileInput = form?.querySelector(".sw-chat-file");
+    form?.querySelector("[data-chat-attach]")?.addEventListener("click", async () => {
+      const bridge = nativeBridge();
+      if (bridge && typeof bridge.pickFiles === "function") {
+        let picked = [];
+        try { picked = await bridge.pickFiles(cwd ? { defaultPath: cwd } : undefined); }
+        catch (err) { S.toast?.(`The file dialog could not open: ${String(err?.message ?? err)}`, "err"); return; }
+        await addChatRefs(Array.isArray(picked) ? picked : picked ? [picked] : []);
+        return;
+      }
+      fileInput?.click();
+    });
+    fileInput?.addEventListener("change", async () => {
+      const files = [...(fileInput.files || [])];
+      fileInput.value = "";
+      await addFiles(files);
+    });
+    if (chatEl) {
+      chatEl.addEventListener("dragover", (e) => { e.preventDefault(); chatEl.classList.add("drop"); });
+      chatEl.addEventListener("dragleave", (e) => { if (!chatEl.contains(e.relatedTarget)) chatEl.classList.remove("drop"); });
+      chatEl.addEventListener("drop", (e) => {
+        e.preventDefault();
+        chatEl.classList.remove("drop");
+        void addFiles([...(e.dataTransfer?.files || [])]);
+      });
+    }
+
+    const grow = () => {
+      box.style.height = "auto";
+      box.style.height = `${Math.min(box.scrollHeight, 160)}px`;
+      box.style.overflowY = box.scrollHeight > 160 ? "auto" : "hidden";
+    };
+    const sync = () => {
+      if (send) send.disabled = !box.value.trim();
+    };
+    box.addEventListener("input", () => {
+      writeChatDraft(focus.id, box.value);
+      grow();
+      sync();
+    });
+    box.addEventListener("keydown", (e) => {
+      // Enter sends; Shift+Enter (and a paste) keeps the line break — the task
+      // may legitimately be several lines, and it is the run's material.
+      if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+      e.preventDefault();
+      void sendStartChat(focus.id, box.value);
+    });
+    form?.addEventListener("submit", (e) => {
+      e.preventDefault();
+      void sendStartChat(focus.id, box.value);
+    });
+    grow();
+    sync();
+    // A reopened run's turns are read from the newest back: keep the box in view.
+    if (stream) stream.scrollTop = stream.scrollHeight;
+    if (chatOpenFor !== focus.id) {
+      chatOpenFor = focus.id;
+      box.focus({ preventScroll: true });
+      box.setSelectionRange(box.value.length, box.value.length);
+    }
+  }
+
+  /**
+   * Send the chat box's message as a run from that start node — the run's task
+   * *is* the message, so the workflow answers what was asked rather than the
+   * node's stored default. Refused while a run is going: the engine runs one at
+   * a time per workspace, and the box's own Stop button is how that one ends.
+   */
+  async function sendStartChat(nodeId, text) {
+    const task = String(text || "").trim();
+    if (!task) { S.toast?.("Give the workflow something to do", "err"); return; }
+    // Busy? The message is **queued**, not lost: the box stays usable while a
+    // run is going and the queued message is sent as soon as it settles.
+    if (run?.status === "running") {
+      chatQueue.set(nodeId, task);
+      writeChatDraft(nodeId, "");
+      msgSig = "";
+      renderMessages();
+      S.toast?.("Queued — it sends when this run finishes");
+      return;
+    }
+    try {
+      const data = await postRun("start", { startId: nodeId, task });
+      writeChatDraft(nodeId, "");
+      historyRun = null; // a new run takes the canvas back to the live view
+      historySig = "";
+      adoptRun(data.run, true);
+      paint();
+      syncPolling();
+      S.toast?.("Workflow run started");
+    } catch (err) {
+      S.toast?.(String(err.message || err), "err");
+    }
+  }
+
+  /**
+   * Send whatever was queued while the last run was going — one message, the
+   * oldest, so a queue never turns into a burst of overlapping runs. Called when
+   * a run settles (and after a decision that ends one).
+   */
+  async function drainChatQueue() {
+    if (run?.status === "running" || !chatQueue.size) return;
+    for (const [nodeId, task] of chatQueue) {
+      chatQueue.delete(nodeId);
+      const n = nodeById(nodeId);
+      if (!n || n.type !== "start") continue;
+      await sendStartChat(nodeId, task);
+      return;
+    }
+    msgSig = "";
+    renderMessages();
   }
 
   /** The selection moved: repaint the canvas highlights and the sidebar. */
@@ -3388,7 +3897,7 @@
       adoptRun(data.run, true);
       paintRun();
       syncPolling();
-      if (data.run?.status !== "running") void refreshHistory();
+      if (data.run?.status !== "running") { void refreshHistory(); void drainChatQueue(); }
       S.toast?.(approve ? "Approved" : "Rejected");
     } catch (err) {
       S.toast?.(String(err.message || err), "err");
@@ -3421,6 +3930,8 @@
       paint();
       syncPolling();
       void refreshHistory();
+      // A message typed while the run was going goes out now that it is over.
+      void drainChatQueue();
     } catch (err) {
       S.toast?.(String(err.message || err), "err");
     }
@@ -3554,6 +4065,48 @@
       if (ap) { e.preventDefault(); decideApproval(ap.closest(".sw-msg-gate"), ap.dataset.approve, true); return; }
       const rj = e.target.closest?.("[data-reject]");
       if (rj) { e.preventDefault(); decideApproval(rj.closest(".sw-msg-gate"), rj.dataset.reject, false); return; }
+      // The start node's chat box: a past turn reopens that run, “Default task”
+      // fills the box from the graph, and Stop ends the run the box is watching.
+      const turn = e.target.closest?.(".sw-chat-turn[data-run]");
+      if (turn) { e.preventDefault(); void selectHistory(turn.dataset.run); return; }
+      const def = e.target.closest?.("[data-chat-default]");
+      if (def) {
+        e.preventDefault();
+        const chat = def.closest(".sw-chat");
+        const n = chat && nodeById(chat.dataset.start);
+        const box = chat?.querySelector(".sw-chat-input");
+        if (n && box) {
+          box.value = String(n.config?.defaultTask || "");
+          box.dispatchEvent(new Event("input", { bubbles: true }));
+          box.focus();
+        }
+        return;
+      }
+      const stop = e.target.closest?.("[data-chat-stop]");
+      if (stop) { e.preventDefault(); void stopRun(); return; }
+      const unref = e.target.closest?.("[data-chat-unref]");
+      if (unref) {
+        e.preventDefault();
+        const chat = unref.closest(".sw-chat");
+        void (async () => {
+          try {
+            wf = await post("removeRef", { nodeId: chat.dataset.start, refId: unref.dataset.chatUnref });
+            msgSig = "";
+            renderNodes();
+            renderMessages();
+          } catch (err) { S.toast?.(String(err.message || err), "err"); }
+        })();
+        return;
+      }
+      const uncueue = e.target.closest?.("[data-chat-uncueue]");
+      if (uncueue) {
+        e.preventDefault();
+        const chat = uncueue.closest(".sw-chat");
+        chatQueue.delete(chat?.dataset.start || "");
+        msgSig = "";
+        renderMessages();
+        return;
+      }
       const sec = e.target.closest?.(".sw-msg-section[data-node]");
       if (!sec) return;
       selected = { kind: "node", id: sec.dataset.node };
@@ -3821,7 +4374,7 @@
     id: "subagent-workflow",
     name: "Subagent Workflow",
     description:
-      "Wire coding-agent harnesses (Claude Code, Codex CLI, Gemini CLI, opencode, Aider, Cursor, Pi, or a custom command) into a fan-out workflow and run it server-side, watching each node stream its output.",
+      "Wire coding-agent harnesses (Claude Code, Cline, Codex CLI, Gemini CLI, Kilo Code, opencode, Aider, Cursor, Pi, or a custom command) into a fan-out workflow and run it server-side, watching each node stream its output. A node takes reference files and folders from the file explorer, and an opencode node carries its own web-search switch.",
     nav: { label: "Workflow", order: 75, group: "timeline", title: "Design and run a multi-harness workflow" },
     view: {
       pane: "#subagent-workflow-pane",
