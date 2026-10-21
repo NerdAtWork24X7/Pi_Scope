@@ -555,8 +555,8 @@
     if (typeof window.scopeNative?.pickDirectory === "function") {
       try {
         const dir = await window.scopeNative.pickDirectory();
-        if (dir) { await submitAdd(dir); return; }
-        // cancelled — fall back to manual entry
+        if (dir) await submitAdd(dir);
+        return; // picked or cancelled — either way no path to type
       } catch { /* dialog failed — fall back to manual entry */ }
     }
     R.adding = true;

@@ -28,13 +28,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { readStoredKeys } from "./api-keys.ts";
 import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spawnCli, killTree } from "../../shared/shell.ts";
-import { DEFAULT_CHAT_HARNESS, buildHarnessLaunch, normalizeHarnessId } from "./harnesses.ts";
+import { DEFAULT_CHAT_HARNESS, buildHarnessLaunch, chatHarness, normalizeHarnessId, resolveHarnessBin } from "./harnesses.ts";
+import { AcpSession } from "./acp-client.ts";
 import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 // Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
 // PATH (force-loading the Pi Scope extension). Must be imported before PI_BIN is
 // used so chat subprocesses launch the bundled agent, not a global install.
 import { PI_BIN, PI_LAUNCH } from "./pi-bundle.ts";
-import { AGENT_PI_DIR, SCOPE_BROWSERS_DIR, SCOPE_VENV_DIR, holdsPlaywrightBrowser } from "./agent-dir.ts";
+import { AGENT_DIR, AGENT_PI_DIR, SCOPE_BROWSERS_DIR, SCOPE_VENV_DIR, holdsPlaywrightBrowser } from "./agent-dir.ts";
 
 const ENCODER = new TextEncoder();
 
@@ -145,7 +146,7 @@ setInterval(() => {
   for (const [id, sess] of harnessSessions) {
     if (sess.run) continue;
     if (now - sess.lastUsed > IDLE_TIMEOUT) {
-      killHarnessChild(sess);
+      closeHarnessRunner(sess);
       harnessSessions.delete(id);
     }
   }
@@ -852,6 +853,14 @@ interface HarnessChatSession {
   model: string;
   harness: string;
   child: ChildProcess | null;
+  /** The live ACP session for an ACP harness (Gemini/opencode/Kilo/Cline), or
+   *  null for a one-shot print-mode CLI. Kept across prompts: it IS the
+   *  conversation's context, which is also what makes the harness's own slash
+   *  commands and permission requests work. */
+  acp: AcpSession | null;
+  /** The model/mode last pushed into that session (so a change is applied once). */
+  acpModel?: string;
+  acpMode?: string;
   run: ChatRun | null;
   lastUsed: number;
   dead: boolean;
@@ -867,6 +876,65 @@ interface HarnessChatSession {
 }
 
 const harnessSessions = new Map<string, HarnessChatSession>();
+
+// ─── ACP session ids that survive a server restart ─────────────────────────
+// An ACP session is the conversation: its id is what `session/load` needs to
+// continue after the server (or the CLI) went away. Kept in the agent dir, next
+// to the other app state, and keyed by the chat session id the view already
+// stores — so reopening a conversation after a restart resumes the SAME agent
+// session instead of pretending the earlier turns never happened.
+const ACP_SESSIONS_MAX = 200;
+
+/** Resolved per call so a test can point it at a temp file (`SCOPE_ACP_SESSIONS_FILE`). */
+function acpSessionsFile(): string {
+  return String(process.env.SCOPE_ACP_SESSIONS_FILE || "").trim()
+    || path.join(AGENT_DIR, "chat-acp-sessions.json");
+}
+
+type AcpSessionRecord = { harness: string; cwd: string; acpSessionId: string; at: number };
+
+function readAcpSessions(): Record<string, AcpSessionRecord> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(acpSessionsFile(), "utf8"));
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAcpSessions(all: Record<string, AcpSessionRecord>): void {
+  try {
+    const entries = Object.entries(all)
+      .filter(([, v]) => v && v.acpSessionId)
+      .sort((a, b) => (b[1].at || 0) - (a[1].at || 0))
+      .slice(0, ACP_SESSIONS_MAX);
+    const file = acpSessionsFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(Object.fromEntries(entries), null, 2));
+  } catch { /* read-only agent dir — resume just stays in-process */ }
+}
+
+/** The ACP session id to resume for a chat conversation, when it still matches
+ *  this harness and workspace. */
+export function acpResumeId(sid: string, harness: string, cwd: string): string {
+  const record = readAcpSessions()[sid];
+  if (!record) return "";
+  return record.harness === harness && record.cwd === cwd ? String(record.acpSessionId || "") : "";
+}
+
+function rememberAcpSession(sid: string, harness: string, cwd: string, acpSessionId: string): void {
+  if (!sid || !acpSessionId) return;
+  const all = readAcpSessions();
+  all[sid] = { harness, cwd, acpSessionId, at: Date.now() };
+  writeAcpSessions(all);
+}
+
+function forgetAcpSession(sid: string): void {
+  const all = readAcpSessions();
+  if (!(sid in all)) return;
+  delete all[sid];
+  writeAcpSessions(all);
+}
 
 /** ANSI SGR/cursor sequences a CLI writes around its answer. */
 function stripHarnessAnsi(text: string): string {
@@ -909,11 +977,20 @@ function killHarnessChild(sess: HarnessChatSession): void {
   if (child) killTree(child, "SIGTERM");
 }
 
+/** Tear down whatever is running a harness conversation: a print-mode child or a
+ *  live ACP session. */
+function closeHarnessRunner(sess: HarnessChatSession): void {
+  killHarnessChild(sess);
+  const acp = sess.acp;
+  sess.acp = null;
+  if (acp) acp.close();
+}
+
 /** Discard a harness conversation's record without touching its runner. */
 function dropHarnessSession(id: string): void {
   const sess = harnessSessions.get(id);
   if (!sess) return;
-  killHarnessChild(sess);
+  closeHarnessRunner(sess);
   sess.dead = true;
   harnessSessions.delete(id);
 }
@@ -926,7 +1003,7 @@ function dropHarnessSession(id: string): void {
  * next prompt starts a fresh one with the transcript preamble.
  */
 function startHarnessChat(
-  opts: { cwd: string; model?: string; prompt: string; sessionId?: string; libraryBlock?: string },
+  opts: { cwd: string; model?: string; mode?: string; prompt: string; sessionId?: string; libraryBlock?: string },
   harnessId: string,
 ): Response {
   const prompt = String(opts.prompt || "");
@@ -959,6 +1036,7 @@ function startHarnessChat(
       dead: false,
       prompted: false,
       fresh: noSession,
+      acp: null,
       stopRequested: false,
       runState: null,
       lastRun: null,
@@ -1005,6 +1083,119 @@ function startHarnessChat(
       if (transcript) parts.push(transcript);
       parts.push(prompt);
       const message = parts.join("\n\n");
+
+      // An ACP harness runs as a LIVE SESSION, not a print-mode child: the CLI
+      // keeps the conversation between prompts, its own slash commands are
+      // dispatched in `session/prompt`, and a permission request is rendered as
+      // an answerable card instead of being silently refused. Claude Code and
+      // Codex have no ACP server, so they keep the one-shot adapters below.
+      const spec = chatHarness(harnessId, workflowHarnessSettings());
+      if (spec?.commandsVia === "acp") {
+        const file = resolveHarnessBin(spec.id, workflowHarnessSettings());
+        if (!file) {
+          owned.run = null;
+          owned.runState = null;
+          owned.lastRun = { outcome: "error", at: Date.now() };
+          const error = `${spec.label} was not found on PATH — install it, or point the app at its binary`;
+          finishRun(run, { type: "error", message: error }, { type: "done", sessionId: sid, model, harness: harnessId, error });
+          return;
+        }
+        let text = "";
+        const finishAcp = (error?: string) => {
+          if (owned.run !== run) return;
+          const finalText = stripHarnessAnsi(text).trim();
+          if (finalText) runEmit(run, { type: "final", text: finalText });
+          if (finalText) rememberHarnessTurn(owned, prompt, finalText);
+          const aborted = owned.stopRequested;
+          owned.run = null;
+          owned.runState = null;
+          owned.stopRequested = false;
+          owned.lastRun = { outcome: aborted ? "aborted" : error ? "error" : "done", at: Date.now() };
+          const done = { type: "done", sessionId: sid, model, harness: harnessId, aborted };
+          if (error && !aborted) finishRun(run, { type: "error", message: error }, { ...done, error });
+          else finishRun(run, done);
+        };
+        // Every turn builds its own handler set: the session outlives the run,
+        // and a reused session must stream into THIS run's subscribers.
+        const acpHandlers = {
+          onText: (delta: string) => {
+            owned.lastUsed = Date.now();
+            text = (text + delta).slice(-HARNESS_OUTPUT_MAX_CHARS);
+            run.sawText = true;
+            runEmit(run, { type: "text", delta });
+          },
+          onThought: (delta: string) => runEmit(run, { type: "thinking", delta }),
+          onToolStart: (name: string, args: string) => runEmit(run, { type: "tool_start", name, args }),
+          onToolEnd: (name: string) => runEmit(run, { type: "tool_end", name }),
+          onPermission: (request: { id: string; title: string; options: Array<{ label: string }> }) => {
+            // The chat's existing select-dialog card answers this: its reply
+            // reaches answerChatUi, which resolves the ACP request by option
+            // label. The card is remembered on the run so a reloaded page
+            // re-shows a request the agent is still blocked on.
+            const dialog = {
+              type: "ui_select",
+              id: request.id,
+              title: request.title,
+              options: request.options.map((o) => o.label),
+            };
+            run.openUi.set(request.id, dialog);
+            runEmit(run, dialog);
+          },
+          onNotice: (message: string, kind: "info" | "warning" | "error") =>
+            runEmit(run, { type: "ui_notify", message, kind }),
+        };
+        const openAcp = () => {            const session = new AcpSession({
+            file,
+            args: spec.acpArgs || [],
+            cwd: owned.cwd,
+            env: chatChildEnv(owned.cwd),
+            model,
+            // Continue a session this chat had before the server restarted.
+            resumeSessionId: acpResumeId(sid, harnessId, owned.cwd),
+            handlers: acpHandlers,
+          });
+          owned.acp = session;
+          return session;
+        };
+        void (async () => {
+          try {
+            // A live session is reused; its handlers are re-pointed at this run
+            // so text/tool/permission events reach the page that is watching now.
+            const reused = !!(owned.acp && owned.acp.alive);
+            const session = reused ? owned.acp! : openAcp();
+            session.setHandlers(acpHandlers);
+            await session.start();
+            // The agent may have created a new session (first prompt, or a resume
+            // the CLI refused): keep its id for the next restart.
+            rememberAcpSession(sid, harnessId, owned.cwd, session.sessionId);
+            const requestedMode = String(opts.mode || "").trim();
+            // A model/mode change made in the composer applies to the live
+            // session instead of being ignored until a new one is started.
+            if (model && model !== owned.acpModel && await session.setModel(model)) owned.acpModel = model;
+            if (requestedMode && requestedMode !== owned.acpMode && await session.setMode(requestedMode)) owned.acpMode = requestedMode;
+            if (owned.run !== run) return;
+            const modes = session.availableModes;
+            if (modes.length) {
+              runEmit(run, { type: "session_modes", sessionId: sid, modes, mode: session.mode });
+            }
+            // The session itself is the conversation, so a follow-up carries only
+            // the new message. The transcript preamble is for a FRESH session (a
+            // one-shot CLI, or an ACP session that died and had to be restarted).
+            await session.prompt(reused ? prompt : message);
+            finishAcp();
+          } catch (error: any) {
+            const detail = stripHarnessAnsi(String(error?.message ?? error)).trim();
+            const acp = owned.acp;
+            // A dead/refusing session must not be reused for the next prompt.
+            if (acp) {
+              acp.close();
+              if (owned.acp === acp) owned.acp = null;
+            }
+            finishAcp(detail || `${spec.label} ended without a message`);
+          }
+        })();
+        return;
+      }
 
       // The Workflow page is where a user re-points a CLI or defines a custom
       // harness; both apply here, so the Chat prompt runs the same binary that
@@ -1142,7 +1333,7 @@ function startHarnessChat(
  *  after the agent settles) and a JSON `{ queued: true }` response is returned
  *  instead of a stream — the in-flight stream keeps delivering events to the
  *  client. */
-export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; harness?: string; streamingBehavior?: string; libraryBlock?: string; resumeSeed?: (sessionFile: string, sessionId: string, reason: string) => string } & ChatSpawnExtras): Response {
+export function startChat(opts: { cwd: string; model?: string; mode?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; harness?: string; streamingBehavior?: string; libraryBlock?: string; resumeSeed?: (sessionFile: string, sessionId: string, reason: string) => string } & ChatSpawnExtras): Response {
   const { cwd, prompt } = opts;
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   if (!prompt || !prompt.trim()) {
@@ -1550,6 +1741,8 @@ export function killChatSession(id: string): void {
     finishHarnessRunAsStopped(hsess);
     dropHarnessSession(id);
   }
+  // A new conversation never resumes the old one, even after a restart.
+  forgetAcpSession(id);
 }
 
 /** End an in-flight harness run because its conversation is being discarded
@@ -1577,7 +1770,7 @@ export function chatSessionPid(id: string): number | null {
   }
   const hsess = harnessSessions.get(id);
   if (!hsess || hsess.dead) return null;
-  const pid = Number(hsess.child?.pid);
+  const pid = Number(hsess.child?.pid ?? hsess.acp?.pid);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
@@ -1633,8 +1826,18 @@ export function pushChatPrefs(id: string, opts: { model?: string; thinkingLevel?
  *  dismissed when `cancelled`). Returns false when the session is gone/dead so
  *  the client can surface a stale-dialog error. */
 export function answerChatUi(id: string, uiId: string, opts: { value?: string; cancelled?: boolean }): boolean {
+  if (!uiId) return false;
+  // An ACP permission request is a dialog of its own kind: the reply selects one
+  // of the options the AGENT offered, so it must go back over JSON-RPC rather
+  // than down pi's stdin.
+  const hsess = harnessSessions.get(id);
+  if (hsess?.acp && String(uiId).startsWith("acp-")) {
+    const ok = hsess.acp.answerPermission(uiId, String(opts?.value ?? ""), opts?.cancelled === true);
+    if (ok) hsess.run?.openUi.delete(uiId);
+    return ok;
+  }
   const sess = sessions.get(id);
-  if (!sess || sess.dead || sess.proc.exitCode !== null || !uiId) return false;
+  if (!sess || sess.dead || sess.proc.exitCode !== null) return false;
   const body = opts?.cancelled ? { cancelled: true } : { value: String(opts?.value ?? "") };
   try {
     sess.proc.stdin.write(JSON.stringify({ type: "extension_ui_response", id: uiId, ...body }) + "\n");
@@ -1659,6 +1862,14 @@ export function stopChat(id: string): boolean {
     const hsess = harnessSessions.get(id);
     if (!hsess || !hsess.run) return false;
     hsess.stopRequested = true;
+    // An ACP session is cancelled, not killed: the CLI keeps the conversation
+    // (and any session-scoped context) for the next prompt.
+    if (hsess.acp) {
+      hsess.acp.cancel();
+      hsess.acp.cancelPermissions();
+      finishHarnessRunAsStopped(hsess);
+      return true;
+    }
     killHarnessChild(hsess);
     // End the run here instead of waiting for the child's `close`: a CLI that
     // started its own children (a shell wrapper's `sleep`, a node worker) can

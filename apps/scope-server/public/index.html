@@ -386,6 +386,9 @@
               <span class="chat-composer-hint" id="chat-composer-hint"></span>
             </div>
             <div class="chat-composer-box">
+              <!-- Slash-command menu for the selected harness. Opens when the draft
+                   starts with "/" (see updateSlash in chat.js). -->
+              <div class="chat-slash" id="chat-slash" role="listbox" aria-label="Slash commands" hidden></div>
               <div class="chat-attachments" id="chat-attachments" hidden></div>
               <textarea id="chat-input" rows="1" placeholder="Message the pi coding agent…" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off" enterkeyhint="send"></textarea>
               <div class="chat-composer-bar">
@@ -398,6 +401,11 @@
                   <span class="dot">◆</span>
                   <span class="chat-model-label">Model</span>
                   <select id="chat-model"></select>
+                </span>
+                <span class="chat-mode-wrap" id="chat-mode-wrap" title="Agent mode advertised by this harness (ACP sessions)" hidden>
+                  <span class="dot">◐</span>
+                  <span class="chat-mode-label">Mode</span>
+                  <select id="chat-mode"></select>
                 </span>
                 <span class="chat-think-wrap" title="Thinking level — applied to the next session (pi resolves it at agent start)">
                   <span class="dot">●</span>

@@ -97,6 +97,60 @@ other harnesses show their documented aliases. The list is cached for five
 minutes and is re-asked after a failure, so signing in or editing the CLI's
 configuration shows up without a restart.
 
+Gemini CLI is launched with `--skip-trust` and Codex CLI with
+`--skip-git-repo-check`: the workspace picked in this app is the trust boundary,
+and neither CLI has a TTY to answer its own trust prompt (Gemini's ACP discovery
+uses `--skip-trust` for the same reason).
+
+Typing `/` in the composer opens that harness's own slash commands, filtered as
+you type; Enter/Tab inserts the command, arrows move and Esc closes. The list is
+**discovered from the harness itself** — nothing is copied into this repo — and
+it is scoped to the chat's workspace, because project skills and custom commands
+are directory scoped:
+
+| Harness | Asked over |
+| --- | --- |
+| Pi | `pi --mode rpc` → `get_commands` (extension commands, prompt templates, skills) |
+| Claude Code | `claude -p` stream-json → control_request `initialize` (names, descriptions, argument hints) |
+| Codex CLI | `codex app-server` → `skills/list` (installed skills) |
+| Gemini CLI | ACP (`gemini --acp`) → `available_commands_update` |
+| opencode | ACP (`opencode acp`) → `available_commands_update` |
+| Kilo Code | ACP (`kilo acp`) → `available_commands_update` |
+| Cline | ACP (`cline --acp`) → `available_commands_update` |
+
+The ACP harnesses (Gemini CLI, opencode, Kilo Code, Cline) are driven as **live
+sessions**, not one-shot print runs: `acp-client.ts` starts the CLI's ACP server,
+creates a session in the chat's workspace, streams `agent_message_chunk` /
+`tool_call` updates, and keeps the session for the next message — so the agent
+remembers the conversation and the harness's own slash commands are dispatched by
+`session/prompt`. A `session/request_permission` is rendered as the chat's normal
+answerable card (Allow once / Reject, whatever options the agent offered); the
+answer goes back over JSON-RPC, and an unanswered card is cancelled on Stop or
+when the session is closed. Calls the agent makes to the *client* (fs, terminal)
+are refused: the harness runs its own tools. Claude Code and Codex CLI have no
+ACP server and keep their native protocols.
+
+The session id is kept in the agent dir (`chat-acp-sessions.json`, keyed by the
+chat session), so a **server restart** continues the same agent session with
+`session/load` — a CLI that refuses the id falls back to a fresh session. A
+model or mode picked in the composer is pushed into the live session
+(`session/set_model` / `session/set_mode`) instead of waiting for a new one, and
+the modes the agent advertises get their own composer pill (Gemini's Plan/YOLO,
+opencode's build/plan). A workflow node also runs an ACP harness as a live
+session (`createAcpSession` through the plugin kit); because a run is unattended,
+it answers the agent's permission request with the offered allow option and
+writes the decision to the run log.
+
+Discovery runs on demand (`GET /chat/harness-commands?harness=&cwd=`), never
+submits a prompt, asks for metadata only, and kills the child as soon as it
+answers. Answers are cached for five minutes per harness+binary+directory and
+concurrent opens share one process; a failure is retried rather than cached, and
+the menu shows what went wrong plus a refresh control. Aider and Cursor Agent
+publish no command interface to a pipe, so they show no menu rather than a
+made-up list — and a harness that advertises none says so in the menu. An
+external harness also hides the Pi-only Agent Team rail, since the
+teams/models/tools there are read by `pi` and no other CLI.
+
 Custom harnesses and per-harness binary paths defined in **Settings → Plugins →
 Workflow** are shared into Chat: a CLI only has to be described once. The
 `SCOPE_HARNESS_BIN_<ID>` environment variable still wins over a Workflow path.

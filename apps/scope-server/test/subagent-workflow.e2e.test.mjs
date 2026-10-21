@@ -98,6 +98,39 @@ function writeStubHarness(dir, name, log, marker) {
 }
 
 /**
+ * A fake ACP agent (for `runAcpNode`): answers the handshake, streams a marker,
+ * then asks for permission before finishing. A workflow has no dialog surface,
+ * so the plugin's own policy has to answer it — and say so in the run log.
+ */
+function writeAcpStub(dir) {
+  const agent = [
+    'import * as readline from "node:readline";',
+    'const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");',
+    'let promptId = 0;',
+    'const rl = readline.createInterface({ input: process.stdin });',
+    'rl.on("line", (line) => {',
+    '  let f; try { f = JSON.parse(line); } catch { return; }',
+    '  if (f.method === "initialize") return send({ jsonrpc: "2.0", id: f.id, result: { protocolVersion: 1 } });',
+    '  if (f.method === "session/new") return send({ jsonrpc: "2.0", id: f.id, result: { sessionId: "wf-acp" } });',
+    '  if (f.id === 90) {',
+    '    send({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: " ACP_SESSION_OK" } } } });',
+    '    return send({ jsonrpc: "2.0", id: promptId, result: { stopReason: "end_turn" } });',
+    '  }',
+    '  if (f.method === "session/prompt") {',
+    '    promptId = f.id;',
+    '    send({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ACP_SESSION_OK" } } } });',
+    '    send({ jsonrpc: "2.0", id: 90, method: "session/request_permission", params: { toolCall: { title: "Run bash: echo hi" }, options: [{ optionId: "allow-once", name: "Allow once" }, { optionId: "reject", name: "Reject" }] } });',
+    '  }',
+    '});',
+  ].join("\n");
+  fs.writeFileSync(path.join(dir, "acp-agent.mjs"), agent);
+  const file = path.join(dir, "cline-acp");
+  fs.writeFileSync(file, `#!/bin/sh\nexec node "$(dirname "$0")/acp-agent.mjs" "$@"\n`);
+  fs.chmodSync(file, 0o755);
+  return file;
+}
+
+/**
  * A fake `opencode` whose `models` subcommand prints a catalogue the way the real
  * CLI does — one `provider/model` per line, exit 0 — mixed with the noise a real
  * one can carry (an SGR escape, a human sentence, a blank line). Every
@@ -820,6 +853,43 @@ describe("subagent workflow plugin (server)", () => {
     assert.equal(fs.existsSync(path.join(jsonc, "opencode.json")), false);
     assert.ok(run2.log.some((l) => /web search off: opencode\.jsonc/.test(l.text)),
       JSON.stringify(run2.log.map((l) => l.text)));
+  });
+
+  test("runs an ACP harness as a live session and logs its permission decision", async () => {
+    const solo = path.join(tmpDir, "ws-acp-run");
+    fs.mkdirSync(solo, { recursive: true });
+    const bin = writeAcpStub(tmpDir);
+    const pinned = await api(`/${PLUGIN}/harness-paths`, {
+      method: "POST", body: JSON.stringify({ harness: "cline", path: bin }),
+    });
+    assert.ok(pinned.res.ok, pinned.data?.error);
+    try {
+      const s = await snapshot(solo);
+      const agent = s.nodes.find((n) => n.type === "agent");
+      const upd = await act("updateNode", { id: agent.id, name: "acp-node", config: {
+        harness: "cline", prompt: "do {task}",
+      } }, solo);
+      assert.ok(upd.res.ok, upd.data?.error);
+
+      const started = await runApi("start", { task: "the thing" }, solo);
+      assert.ok(started.res.ok, started.data?.error);
+      const run = await waitRun(solo);
+      assert.equal(run.nodes[agent.id].status, "done", JSON.stringify(run.log));
+      // The agent's streamed text is the node's output, exactly like stdout of a
+      // print-mode harness…
+      assert.match(run.nodes[agent.id].outputTail, /ACP_SESSION_OK/);
+      // …and the permission request was answered (a workflow has no card), with
+      // the decision written to the run log.
+      assert.ok(
+        run.log.some((l) => /approved: Run bash: echo hi \(Allow once\)/.test(l.text)),
+        JSON.stringify(run.log.map((l) => l.text)),
+      );
+    } finally {
+      // Back to auto-detection for the rest of the suite.
+      await api(`/${PLUGIN}/harness-paths`, {
+        method: "POST", body: JSON.stringify({ harness: "cline", path: "" }),
+      });
+    }
   });
 
   test("adds, configures and moves nodes; writes land in the plugin's store", async () => {

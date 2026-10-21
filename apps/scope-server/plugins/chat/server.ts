@@ -58,6 +58,7 @@ export function activate(api: any): void {
     attachChatRun,
     chatHarnesses,
     chatHarnessModels,
+    chatHarnessCommands,
     sttStatus,
     startStt,
     stopStt,
@@ -108,6 +109,25 @@ export function activate(api: any): void {
       return jsonResponse({ harness, models: [], source: null, error: "this host cannot list harness models" });
     }
     const result = await chatHarnessModels(harness);
+    return jsonResponse({ harness, ...result });
+  });
+
+  // ── GET /chat/harness-commands?harness=<id>&cwd=<dir> (its own commands) ─
+  // The composer's `/` menu asks the SELECTED harness for the slash commands it
+  // actually advertises (ACP `available_commands_update`, Claude's initialize
+  // response, Codex's skill list, pi's `get_commands`) instead of showing a
+  // copied table that drifts when the CLI is upgraded. `cwd` matters: project
+  // skills and custom commands are directory scoped. Kept off
+  // /chat/harnesses so the picker paints before any CLI is started.
+  api.route("GET", "/chat/harness-commands", async (ctx) => {
+    const harness = (ctx.url.searchParams.get("harness") || "").trim();
+    if (!harness) return jsonResponse({ error: "missing harness" }, 400);
+    const requested = (ctx.url.searchParams.get("cwd") || "").trim();
+    const cwd = (requested && validateCwd(requested)) || terminalCwd();
+    if (typeof chatHarnessCommands !== "function") {
+      return jsonResponse({ harness, commands: [], source: null, error: "this host cannot read harness commands" });
+    }
+    const result = await chatHarnessCommands(harness, cwd);
     return jsonResponse({ harness, ...result });
   });
 

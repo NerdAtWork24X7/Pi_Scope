@@ -124,6 +124,86 @@ test("switching back to Pi restores its model catalogue", async () => {
   assert.match(await page.textContent("#chat-header-model"), /gemini|deepseek|anthropic/);
 });
 
+test("an external harness hides the pi-only Agent Team rail", async () => {
+  await boot();
+  assert.equal(await page.locator("#chat-agent-rail").isVisible(), true, "Pi shows its agent team");
+  assert.equal(await page.locator("#chat-resizer-r").isVisible(), true);
+
+  await page.selectOption("#chat-harness", "claude");
+  await page.waitForFunction(() => document.body.classList.contains("chat-external-harness"));
+  assert.equal(await page.locator("#chat-agent-rail").isVisible(), false, "a CLI has no Pi agent team");
+  assert.equal(await page.locator("#chat-resizer-r").isVisible(), false, "its drag handle goes with it");
+
+  await page.selectOption("#chat-harness", "pi");
+  await page.waitForFunction(() => !document.body.classList.contains("chat-external-harness"));
+  assert.equal(await page.locator("#chat-agent-rail").isVisible(), true, "selecting Pi brings the rail back");
+});
+
+test("typing / offers the commands the selected harness itself advertises", async () => {
+  await boot();
+  await page.selectOption("#chat-harness", "claude");
+  await page.waitForFunction(() => document.body.classList.contains("chat-external-harness"));
+
+  await page.fill("#chat-input", "/");
+  await page.waitForSelector("#chat-slash:not([hidden]) .chat-slash-item");
+  let cmds = await page.$$eval("#chat-slash .chat-slash-cmd", (els) => els.map((e) => e.textContent));
+  assert.deepEqual(cmds, ["/compact", "/model", "/status"], "what Claude Code answered");
+  assert.match(await page.textContent("#chat-slash .chat-slash-head"), /Claude Code/);
+
+  // The list comes from the harness, scoped to this workspace — never from a
+  // table shipped in this repo.
+  const asked = mock.requestsFor("/chat/harness-commands", "GET").at(-1);
+  assert.equal(asked.query.harness, "claude");
+  assert.equal(asked.query.cwd, WS, "project commands/skills are directory scoped");
+
+  // Arrows move the highlighted row.
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await page.textContent("#chat-slash .chat-slash-item.active .chat-slash-cmd"), "/model");
+
+  // The query filters by command name.
+  await page.fill("#chat-input", "/mo");
+  await page.waitForFunction(() =>
+    document.querySelectorAll("#chat-slash .chat-slash-cmd").length === 1);
+  assert.equal(await page.textContent("#chat-slash .chat-slash-cmd"), "/model");
+
+  // Enter inserts the command instead of sending it.
+  await page.keyboard.press("Enter");
+  assert.equal(await page.inputValue("#chat-input"), "/model ", "command inserted with room for arguments");
+  await page.waitForFunction(() => document.getElementById("chat-slash").hidden === true);
+  assert.equal(await page.locator("#chat-slash").isVisible(), false, "the menu closes after inserting");
+  assert.equal(mock.requestsFor("/chat", "POST").length, 0, "nothing was sent yet");
+
+  // A harness that publishes no command interface opens no menu at all.
+  await page.selectOption("#chat-harness", "aider");
+  await page.fill("#chat-input", "/");
+  assert.equal(await page.locator("#chat-slash").isVisible(), false);
+  assert.equal(mock.requestsFor("/chat/harness-commands", "GET")
+    .some((r) => r.query.harness === "aider"), false, "no CLI was started for a harness without one");
+
+  // A harness with an interface but no commands says so instead of showing a
+  // guessed list.
+  await page.selectOption("#chat-harness", "pi");
+  await page.fill("#chat-input", "/");
+  await page.waitForSelector("#chat-slash:not([hidden]) .chat-slash-status");
+  assert.match(await page.textContent("#chat-slash .chat-slash-status"), /did not advertise any commands/);
+  assert.equal(await page.locator("#chat-slash .chat-slash-item").count(), 0);
+});
+
+test("a harness that cannot answer explains why the menu is empty", async () => {
+  await boot();
+  mock.setHarnessCommands("opencode", { error: "opencode: the harness exited before answering" });
+  await page.selectOption("#chat-harness", "opencode");
+  await page.fill("#chat-input", "/");
+  await page.waitForSelector("#chat-slash:not([hidden]) .chat-slash-status.err");
+  assert.match(await page.textContent("#chat-slash .chat-slash-status"), /exited before answering/);
+
+  // The refresh control asks again (the server re-runs discovery).
+  const before = mock.requestsFor("/chat/harness-commands", "GET").length;
+  await page.locator("#chat-slash [data-slash-refresh]").dispatchEvent("mousedown");
+  await page.waitForTimeout(150);
+  assert.ok(mock.requestsFor("/chat/harness-commands", "GET").length > before, "refresh re-asks the harness");
+});
+
 // The model pill is per harness: a model picked for one CLI must never be
 // carried into another's list (it would be appended to keep a stale selection
 // and read as a Pi model sitting in Claude Code's picker).

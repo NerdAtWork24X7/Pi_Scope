@@ -69,6 +69,11 @@ export interface ChatHarness {
   models: string[];
   /** The CLI's own model listing command, when it has one. */
   modelsArgs?: string[];
+  /** How the composer's `/` menu learns this CLI's own commands (see
+   *  harness-commands.ts). Absent = the CLI publishes no command interface. */
+  commandsVia?: "pi-rpc" | "claude-control" | "codex-skills" | "acp";
+  /** Arguments that start the CLI's ACP server (`commandsVia: "acp"`). */
+  acpArgs?: string[];
   /** Defined in Settings → Plugins → Workflow rather than shipped here. */
   user?: boolean;
 }
@@ -86,6 +91,7 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
     promptStdin: false,
     modelFlag: "--model",
     models: [],
+    commandsVia: "pi-rpc",
   },
   claude: {
     id: "claude",
@@ -95,24 +101,33 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
     promptStdin: false,
     modelFlag: "--model",
     models: ["sonnet", "opus", "haiku", "claude-sonnet-4-5", "claude-opus-4-1"],
+    commandsVia: "claude-control",
   },
   codex: {
     id: "codex",
     label: "Codex CLI",
     bin: "codex",
-    args: (prompt) => ["exec", prompt],
+    // `--skip-git-repo-check`: a Chat workspace need not be a git checkout, and
+    // Codex otherwise refuses to start outside a trusted repository.
+    args: (prompt) => ["exec", "--skip-git-repo-check", prompt],
     promptStdin: false,
     modelFlag: "--model",
     models: ["gpt-5-codex", "gpt-5", "gpt-5-mini", "o3", "o4-mini"],
+    commandsVia: "codex-skills",
   },
   gemini: {
     id: "gemini",
     label: "Gemini CLI",
     bin: "gemini",
-    args: (prompt) => ["-p", prompt],
+    // `--skip-trust`: the workspace was picked in this app, and Gemini otherwise
+    // aborts every non-interactive run in a directory it has not been taught to
+    // trust (there is no TTY here to answer its prompt).
+    args: (prompt) => ["-p", prompt, "--skip-trust"],
     promptStdin: false,
     modelFlag: "--model",
     models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"],
+    commandsVia: "acp",
+    acpArgs: ["--acp", "--skip-trust"],
   },
   opencode: {
     id: "opencode",
@@ -124,6 +139,8 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
     models: ["anthropic/claude-sonnet-4-5", "openai/gpt-5", "google/gemini-2.5-pro"],
     // Verified against the installed CLI: one `provider/model` id per line.
     modelsArgs: ["models"],
+    commandsVia: "acp",
+    acpArgs: ["acp"],
   },
   cline: {
     id: "cline",
@@ -133,6 +150,8 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
     promptStdin: true,
     modelFlag: "--model",
     models: [],
+    commandsVia: "acp",
+    acpArgs: ["--acp"],
   },
   kilo: {
     id: "kilo",
@@ -148,6 +167,8 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
       "kilo/~google/gemini-flash-latest",
     ],
     modelsArgs: ["models"],
+    commandsVia: "acp",
+    acpArgs: ["acp"],
   },
   aider: {
     id: "aider",
@@ -359,6 +380,8 @@ export interface ChatHarnessInfo {
   promptStdin: boolean;
   /** The CLI's own model listing command, when it has one. */
   modelsArgs: string[] | null;
+  /** Whether the CLI publishes its commands (the `/` menu asks it on demand). */
+  hasCommands: boolean;
   /** Defined in Settings → Plugins → Workflow. */
   user: boolean;
 }
@@ -383,6 +406,7 @@ export function chatHarnessList(settings: HarnessSettings = EMPTY_HARNESS_SETTIN
       modelFlag: spec.modelFlag,
       promptStdin: spec.promptStdin,
       modelsArgs: spec.modelsArgs ? spec.modelsArgs.slice() : null,
+      hasCommands: !!spec.commandsVia,
       user: !!spec.user,
     };
   });

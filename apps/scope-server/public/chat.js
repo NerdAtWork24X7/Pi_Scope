@@ -137,6 +137,8 @@
     harnessesAt: 0,    // when that snapshot was fetched
     harnessModels: new Map(), // harness id → { models, source, error, at } from its own CLI
     harnessModelFetches: new Map(), // in-flight GET /chat/harness-models, one per harness
+    slashCommands: new Map(), // `${harness}\0${cwd}` → { commands, source, error, at } from the harness itself
+    slashFetches: new Map(), // in-flight GET /chat/harness-commands, one per harness+cwd
     modelSig: "",      // the harness/model list last painted into the model <select>
     chatSessionId: null,
     resumeFile: null,  // pi session file to continue (set when a recorded session is opened)
@@ -156,6 +158,9 @@
     footer: null,          // /chat/footer snapshot { branch, thinking, modelMeta, goUsage }
     footerFetchedAt: 0,
     thinkingLevel: null,   // selected thinking level (defaults to footer.thinking)
+    acpModes: [],          // modes the ACP harness advertised (session_modes event)
+    acpMode: "",           // the mode this chat asked for (session/set_mode)
+    acpModeHarness: null,  // which harness those modes belong to
     showThinking: loadBool("scope-chat-show-thinking", false), // global fold/unfold of thought blocks
     view: loadChatView(), // assistant-text render mode: "markdown" | "raw"
     thoughtAutoScroll: loadBool("scope-chat-thought-autoscroll", true), // keep the open Thought block pinned to its newest line
@@ -449,6 +454,8 @@
     el.state = $("#chat-header-state");
     el.model = $("#chat-model");
     el.harness = $("#chat-harness");
+    el.mode = $("#chat-mode");
+    el.modeWrap = $("#chat-mode-wrap");
     el.input = $("#chat-input");
     el.send = $("#chat-send");
     el.hint = $("#chat-composer-hint");
@@ -469,6 +476,7 @@
     el.attach = $("#chat-attach");
     el.attachInput = $("#chat-attach-input");
     el.attachments = $("#chat-attachments");
+    el.slash = $("#chat-slash");
   }
 
   // ─── Selectors / data ─────────────────────────────────────────────────────
@@ -558,6 +566,7 @@
     // The header's sidebar toggle is the chat view's collapse control; label it
     // for the rail's current state (other views relabel it for the aside).
     window.__chatSyncSidebarToggle?.();
+    syncHarnessChrome();
     loadAgentTeam();
     renderWorkspaces();
     renderAgents();
@@ -3135,6 +3144,15 @@
       case "tool_end":
         streamToolEnd(body, m, ev.name || "");
         break;
+      case "session_modes":
+        // The ACP agent's modes (Gemini's plan/yolo, opencode's build/plan…).
+        // Rendered as a third composer pill, so a mode is selectable in the app
+        // instead of only at the CLI.
+        CH.acpModes = Array.isArray(ev.modes) ? ev.modes.filter((m) => m && m.id) : [];
+        CH.acpMode = typeof ev.mode === "string" ? ev.mode : CH.acpMode;
+        CH.acpModeHarness = currentHarness();
+        renderChatMode();
+        break;
       case "session":
         // The server announces the real subprocess session id at stream start
         // (it generates one when the request didn't carry one), so answers to
@@ -3259,6 +3277,7 @@
     // Keep Send enabled while a turn streams so the user can steer / queue a
     // follow-up; the stop button appears in its place of action.
     el.send.disabled = !on;
+    if (!on) closeSlash();
     // Losing the composer (workspace cleared) must not leave the host mic open.
     if (!on && CH.listening) void finishListening();
     updateListenButton();
@@ -3456,6 +3475,27 @@
     // Same no-churn rule as the model select: rewriting an open dropdown
     // closes it and drops focus.
     if (el.harness.innerHTML !== html) el.harness.innerHTML = html;
+    syncHarnessChrome();
+  }
+
+  // Pi-only chrome: the Agent Team rail edits pi's agent-team configuration
+  // (teams, models, tools, skills), which no external CLI reads. While another
+  // harness drives the conversation the rail — and its drag handle — is hidden;
+  // selecting Pi again brings it back with the layout state it had.
+  function syncHarnessChrome() {
+    const external = !isPiHarness();
+    document.body.classList.toggle("chat-external-harness", external);
+    // A command menu opened for the previous harness cannot apply to this one.
+    if (external) closeSlash();
+    // Modes belong to the harness that advertised them; the next ACP session
+    // re-reports its own. Only a real harness change resets them (this function
+    // also runs when the catalogue refreshes).
+    if (CH.acpModeHarness !== currentHarness()) {
+      CH.acpModeHarness = currentHarness();
+      CH.acpModes = [];
+      CH.acpMode = "";
+      renderChatMode();
+    }
   }
 
   // Reset the composer's model to the selected harness's own default. Pi keeps
@@ -3591,6 +3631,28 @@
   // present. Persisting the choice (POST /agent-team setThinkingLevel) is wired
   // in the change handler; pi resolves the level at agent start, so the re-arm
   // after the toggle makes it take effect on the next prompt.
+  // The ACP harness's own modes (Gemini's Plan/YOLO, opencode's build/plan…).
+  // Hidden unless the live session advertised some; the choice is sent with the
+  // next prompt, which applies it with `session/set_mode`.
+  function renderChatMode() {
+    if (!el.mode || !el.modeWrap) return;
+    const modes = Array.isArray(CH.acpModes) ? CH.acpModes : [];
+    if (!modes.length) {
+      CH.acpMode = "";
+      if (el.mode.innerHTML) el.mode.innerHTML = "";
+      el.modeWrap.hidden = true;
+      return;
+    }
+    if (CH.acpMode && !modes.some((m) => m.id === CH.acpMode)) CH.acpMode = modes[0].id;
+    let html = "";
+    for (const m of modes) {
+      const label = m.name || m.id;
+      html += `<option value="${esc(m.id)}"${m.id === CH.acpMode ? " selected" : ""} title="${esc(m.description || label)}">${esc(label)}</option>`;
+    }
+    if (el.mode.innerHTML !== html) el.mode.innerHTML = html;
+    el.modeWrap.hidden = false;
+  }
+
   function renderComposerThinking() {
     if (!el.thinking) return;
     el.thinking.disabled = !!el.input?.disabled || !isPiHarness();
@@ -3609,6 +3671,181 @@
     // unconditional innerHTML swap resets the element — closing an open
     // dropdown and dropping focus mid-interaction.
     if (el.thinking.innerHTML !== html) el.thinking.innerHTML = html;
+  }
+
+  // ─── Slash commands (composer) ───────────────────────────────────────────
+  // A draft that starts with "/" opens the SELECTED harness's own command list.
+  // Nothing is copied into this app: /chat/harness-commands asks that harness
+  // for the commands IT advertises (ACP available_commands for gemini/opencode/
+  // kilo/cline, Claude Code's initialize response, Codex's skill list, pi's
+  // get_commands). A harness with no such interface shows no menu. Enter/Tab
+  // inserts the command into the message, arrows move, Esc closes.
+  const slash = { open: false, items: [], active: 0, query: null, loading: false, status: "", failed: false };
+  const SLASH_TTL = 5 * 60 * 1000;
+
+  /** Commands are directory scoped: a project's skills/custom commands only
+   *  exist in its checkout. */
+  function slashCwd() {
+    return CH.workspace || "";
+  }
+  function slashKey(id = currentHarness()) {
+    return `${id}\u0000${slashCwd()}`;
+  }
+  function slashEntry() {
+    return CH.slashCommands.get(slashKey()) || null;
+  }
+  function slashCommands() {
+    const entry = slashEntry();
+    return entry && Array.isArray(entry.commands) ? entry.commands : [];
+  }
+
+  // Ask the selected harness for its commands. Cached in the page (and for five
+  // minutes on the server); the request is deduplicated per harness+workspace
+  // so opening the menu twice never starts two CLIs.
+  async function loadSlashCommands(force) {
+    const id = currentHarness();
+    const key = slashKey(id);
+    const cached = CH.slashCommands.get(key);
+    if (!force && cached && Date.now() - cached.at < SLASH_TTL) return cached;
+    if (CH.slashFetches.has(key)) return CH.slashFetches.get(key);
+    const pending = (async () => {
+      let entry = { commands: [], source: null, error: "", at: Date.now() };
+      try {
+        const { res, data } = await window.SCOPE.api("/chat/harness-commands", { harness: id, cwd: slashCwd() });
+        if (res.ok && data) {
+          entry = {
+            commands: Array.isArray(data.commands)
+              ? data.commands.filter((c) => c && typeof c.command === "string" && /^\/\S+$/.test(c.command))
+                .map((c) => ({ command: c.command, description: typeof c.description === "string" ? c.description : "" }))
+              : [],
+            source: typeof data.source === "string" ? data.source : null,
+            error: typeof data.error === "string" ? data.error : "",
+            at: Date.now(),
+          };
+        }
+      } catch { /* server unreachable — the menu explains it below */ }
+      CH.slashCommands.set(key, entry);
+      return entry;
+    })();
+    CH.slashFetches.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      CH.slashFetches.delete(key);
+    }
+  }
+
+  // Kick off discovery for the harness on screen; repaints the menu when it lands
+  // if the user is still looking at the same draft.
+  function ensureSlashCommands(force) {
+    const id = currentHarness();
+    const key = slashKey(id);
+    const cached = CH.slashCommands.get(key);
+    if (!force && cached && Date.now() - cached.at < SLASH_TTL) return;
+    if (CH.slashFetches.has(key)) return;
+    void loadSlashCommands(force).then(() => {
+      if (slash.open && slashKey() === key) updateSlash();
+    });
+  }
+
+  /** Text after the leading "/" while the whole draft is one command token. */
+  function slashQuery() {
+    if (!el.input) return null;
+    const m = /^\/(\S*)$/.exec(el.input.value);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function closeSlash() {
+    if (!slash.open) return;
+    slash.open = false;
+    slash.items = [];
+    slash.active = 0;
+    slash.query = null;
+    slash.loading = false;
+    slash.status = "";
+    slash.failed = false;
+    if (el.slash) {
+      el.slash.hidden = true;
+      el.slash.innerHTML = "";
+    }
+  }
+
+  function paintSlash() {
+    if (!el.slash) return;
+    const rows = slash.items.map((c, i) =>
+      `<button type="button" class="chat-slash-item${i === slash.active ? " active" : ""}"` +
+      ` data-slash="${esc(c.command)}" role="option" aria-selected="${i === slash.active ? "true" : "false"}">` +
+      `<span class="chat-slash-cmd">${esc(c.command)}</span>` +
+      `<span class="chat-slash-desc">${esc(c.description || "")}</span></button>`).join("");
+    el.slash.innerHTML =
+      `<div class="chat-slash-head"><span>Slash commands</span>` +
+      `<span class="chat-slash-harness">${esc(harnessLabel())}` +
+      `<button type="button" class="chat-slash-refresh" data-slash-refresh title="Ask ${esc(harnessLabel())} for its commands again" aria-label="Refresh commands">&#8635;</button>` +
+      `</span></div>` +
+      `<div class="chat-slash-list">${rows}</div>` +
+      (slash.status ? `<div class="chat-slash-status${slash.failed ? " err" : ""}">${esc(slash.status)}</div>` : "");
+    el.slash.hidden = false;
+    slash.open = true;
+  }
+
+  /** Recompute the menu from the composer's draft (called on every input). */
+  function updateSlash() {
+    const q = slashQuery();
+    if (q === null) { closeSlash(); return; }
+    const id = currentHarness();
+    const info = harnessInfo(id);
+    // The harness publishes no command interface (Aider, Cursor Agent, a custom
+    // Workflow CLI): no menu is more honest than an invented list.
+    if (info && info.hasCommands === false) { closeSlash(); return; }
+    if (!CH.slashCommands.has(slashKey(id))) ensureSlashCommands();
+    const entry = slashEntry();
+    const all = slashCommands();
+    const loading = CH.slashFetches.has(slashKey(id));
+    // Filtering is by command name only: matching descriptions too would keep
+    // surprising rows in the list (typing "/co" matching "account status").
+    const items = q ? all.filter((c) => c.command.toLowerCase().startsWith("/" + q)) : all;
+    slash.loading = loading;
+    slash.failed = !!(entry && entry.error);
+    if (loading && !all.length) {
+      slash.status = `Reading commands from ${harnessLabel(id)}…`;
+    } else if (entry && entry.error) {
+      slash.status = entry.error;
+    } else if (entry && !all.length) {
+      slash.status = `${harnessLabel(id)} did not advertise any commands.`;
+    } else if (!items.length) {
+      slash.status = q ? `No command matches /${q}.` : "";
+    } else {
+      slash.status = "";
+    }
+    // Nothing to show yet and nothing to say about it: keep the composer clean.
+    if (!all.length && !slash.status) { closeSlash(); return; }
+    // A changed query starts at the top; arrows moving within the same list keep
+    // the highlighted row.
+    if (q !== slash.query) slash.active = 0;
+    slash.query = q;
+    slash.items = items;
+    if (slash.active >= items.length) slash.active = Math.max(0, items.length - 1);
+    paintSlash();
+  }
+
+  function moveSlash(delta) {
+    if (!slash.open || !slash.items.length) return;
+    slash.active = (slash.active + delta + slash.items.length) % slash.items.length;
+    paintSlash();
+  }
+
+  /** Put a command into the composer, ready for its arguments. */
+  function insertSlash(item) {
+    if (!item || !el.input) return;
+    el.input.value = `${item.command} `;
+    closeSlash();
+    try { el.input.focus({ preventScroll: true }); } catch { /* ignore */ }
+    try {
+      const n = el.input.value.length;
+      el.input.setSelectionRange(n, n);
+    } catch { /* ignore */ }
+    autoGrow(el.input);
+    setHint(item.description || item.command, "");
   }
 
   // ─── Composer footer (pi custom-footer port) ────────────────────────────
@@ -4385,13 +4622,14 @@
     }
     syncCurThread();
     el.input.value = "";
+    closeSlash();
     clearAttachments();
     autoGrow(el.input);
     try {
       const res = await fetch(window.apiUrl("/chat"), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd: CH.workspace, model, harness: currentHarness(), thinkingLevel: CH.thinkingLevel || "", prompt, sessionId: t.key || (t.kind === "session" ? t.sid : "") || "", sessionFile: t.resumeFile || "", streamingBehavior }),
+        body: JSON.stringify({ cwd: CH.workspace, model, harness: currentHarness(), thinkingLevel: CH.thinkingLevel || "", mode: CH.acpMode || "", prompt, sessionId: t.key || (t.kind === "session" ? t.sid : "") || "", sessionFile: t.resumeFile || "", streamingBehavior }),
       });
       const ct = res.headers.get("content-type") || "";
       if (res.ok && ct.includes("ndjson")) {
@@ -4513,6 +4751,7 @@
     scrollToBottom(true);
 
     el.input.value = "";
+    closeSlash();
     clearAttachments();
     autoGrow(el.input);
 
@@ -4529,6 +4768,7 @@
           // Thinking levels are resolved by pi's RPC; an external CLI has no
           // equivalent here, so it is only sent on the Pi path.
           thinkingLevel: isPiHarness() ? (CH.thinkingLevel || "") : "",
+          mode: isPiHarness() ? "" : (CH.acpMode || ""),
           prompt,
           // A recorded-session thread resumes its own pi session file: the
           // server keys a subprocess per session id and switch_session onto the
@@ -4592,8 +4832,8 @@
     if (typeof window.scopeNative?.pickDirectory === "function") {
       try {
         const dir = await window.scopeNative.pickDirectory();
-        if (dir) { submitAddWorkspace(dir); return; }
-        // cancelled — fall back to manual entry
+        if (dir) await submitAddWorkspace(dir);
+        return; // picked or cancelled — either way no path to type
       } catch { /* dialog failed — fall back to manual entry */ }
     }
     addWorkspaceRow();
@@ -5044,6 +5284,9 @@
         CH.harness = el.harness.value || "pi";
         try { localStorage.setItem(CHAT_HARNESS_KEY, CH.harness); } catch { /* private mode */ }
         resetModelForHarness();
+        // The open menu belonged to the previous CLI's commands.
+        closeSlash();
+        syncHarnessChrome();
         void loadHarnessModels(CH.harness);
         if (CH.workspace && !CH.chatHistory.length) {
           const ft = freeThread(CH.workspace);
@@ -5091,6 +5334,7 @@
       // sessions and sent with every prompt (server pushes it to the running pi
       // subprocess via RPC set_thinking_level), so it applies from the next
       // message without respawning.
+      if (el.mode) el.mode.addEventListener("change", () => { CH.acpMode = el.mode.value; });
       el.thinking.addEventListener("change", () => {
         const level = el.thinking.value;
         CH.thinkingLevel = level;
@@ -5108,6 +5352,21 @@
     if (el.listen) {
       el.listen.addEventListener("click", () => (CH.listening ? void finishListening() : void startListening()));
       renderSttButton();
+    }
+    if (el.slash) {
+      // mousedown (not click) keeps the composer focused: the textarea never
+      // blurs, so the menu is still on screen when the command is inserted.
+      el.slash.addEventListener("mousedown", (e) => {
+        if (e.target.closest?.("[data-slash-refresh]")) {
+          e.preventDefault();
+          ensureSlashCommands(true);
+          return;
+        }
+        const item = e.target.closest?.(".chat-slash-item");
+        if (!item) return;
+        e.preventDefault();
+        insertSlash(slash.items.find((c) => c.command === item.dataset.slash));
+      });
     }
     if (el.attach) el.attach.addEventListener("click", () => void pickAttachments());
     if (el.attachInput) el.attachInput.addEventListener("change", () => {
@@ -5149,6 +5408,26 @@
     }
     if (el.input) {
       el.input.addEventListener("keydown", (e) => {
+        // The slash menu owns its navigation keys while it is open.
+        if (slash.open) {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            moveSlash(e.key === "ArrowDown" ? 1 : -1);
+            return;
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            closeSlash();
+            return;
+          }
+          if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+            e.preventDefault();
+            // While the list is still loading there is nothing to insert: keep
+            // the draft intact instead of sending "/" to the agent.
+            if (slash.items.length) insertSlash(slash.items[slash.active]);
+            return;
+          }
+        }
         // Enter has two jobs: confirming an IME candidate mid-composition, and
         // sending. Without the isComposing guard the confirmation keystroke
         // sends a half-finished word — very visible on Android, where Enter
@@ -5159,7 +5438,8 @@
           sendPrompt();
         }
       });
-      el.input.addEventListener("input", () => autoGrow(el.input));
+      el.input.addEventListener("input", () => { autoGrow(el.input); updateSlash(); });
+      el.input.addEventListener("blur", () => closeSlash());
       el.input.addEventListener("compositionstart", () => { inputComposing = true; });
       el.input.addEventListener("compositionend", () => { inputComposing = false; });
     }

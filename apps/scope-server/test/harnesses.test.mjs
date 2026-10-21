@@ -54,6 +54,23 @@ test("the catalogue starts with Pi and knows the common CLIs", () => {
   }
 });
 
+test("the catalogue says which harnesses publish their own commands", () => {
+  const list = chatHarnessList();
+  const publishes = (id) => list.find((h) => h.id === id).hasCommands;
+  // A discovery interface exists for these: ACP (gemini/opencode/kilo/cline),
+  // Claude's initialize response, Codex's skills/list, pi's get_commands.
+  for (const id of ["pi", "claude", "codex", "gemini", "opencode", "cline", "kilo"]) {
+    assert.equal(publishes(id), true, `${id} can be asked for its commands`);
+  }
+  // Aider and Cursor Agent publish no command interface to a pipe: the composer
+  // must not invent a list for them.
+  for (const id of ["aider", "cursor"]) {
+    assert.equal(publishes(id), false, `${id} advertises nothing`);
+  }
+  // No harness ships a copied command table any more.
+  assert.ok(list.every((h) => !("slashCommands" in h)), "commands are discovered, never baked in");
+});
+
 test("harness ids normalize and unknown ids are reported instead of hidden", () => {
   assert.equal(normalizeHarnessId("  Claude "), "claude");
   assert.equal(normalizeHarnessId(""), "pi");

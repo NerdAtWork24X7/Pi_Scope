@@ -33,6 +33,8 @@ import {
 } from "./plugins.ts";
 import { startChat, startChatSession, killChatSession, stopChat, chatSessionPid, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatPendingDialog, chatLiveRuns, attachChatRun } from "./chat.ts";
 import { chatHarnessList, discoverHarnessModels } from "./harnesses.ts";
+import { discoverHarnessCommands } from "./harness-commands.ts";
+import { AcpSession } from "./acp-client.ts";
 import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
 import { buildSessionSeed } from "./session-seed.ts";
@@ -4617,6 +4619,17 @@ const pluginKit = {
   // `cursor-agent --list-models`), asked on demand so the Chat model pill shows
   // what the tool on THIS machine is set up for instead of a curated handful.
   chatHarnessModels: (id: string) => discoverHarnessModels(id, workflowHarnessSettings()),
+  // The commands a harness's OWN session advertises (ACP `available_commands`
+  // for gemini/opencode/kilo/cline, the Claude initialize response, Codex's
+  // skill list, pi's `get_commands`). Asked on demand by the composer's `/`
+  // menu so the list can never drift from the installed CLI.
+  chatHarnessCommands: (id: string, cwd: string) =>
+    discoverHarnessCommands(id, workflowHarnessSettings(), { cwd }),
+  // A live Agent Client Protocol session for a plugin that runs an ACP-capable
+  // harness itself (the Workflow's nodes). Handed over rather than imported:
+  // plugins are packaged outside the server bundle, so only the kit resolves
+  // back into the host's modules.
+  createAcpSession: (opts: any) => new AcpSession(opts),
   sttStatus, startStt, stopStt,
   // The live shared cwd (mutable; the STT status fallback needs its current value).
   terminalCwd: () => TERMINAL_CWD,

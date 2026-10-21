@@ -401,19 +401,26 @@ const HARNESSES: Record<string, any> = {
     // newline). `-m/--model <id>` picks the model for the run.
     label: "Cline", bin: "cline", args: () => [], modelFlag: "--model",
     promptStdin: true,
+    // ACP-capable: a node runs as a live session when the host hands over the
+    // client (see `runAcpNode`). `--acp` needs a signed-in CLI.
+    acpArgs: ["--acp"],
     // Cline has no command that prints a model catalogue; the Model field keeps
     // its "Custom…" entry for the ids a signed-in CLI offers.
     models: [],
     capabilities: { tools: null, skills: null, extensions: null },
   },
   codex: {
-    label: "Codex CLI", bin: "codex", args: (p: string) => ["exec", p], modelFlag: "--model",
+    label: "Codex CLI", bin: "codex", args: (p: string) => ["exec", "--skip-git-repo-check", p], modelFlag: "--model",
     models: ["gpt-5-codex", "gpt-5", "gpt-5-mini", "o3", "o4-mini"],
     capabilities: { tools: null, skills: null, extensions: null },
   },
   gemini: {
-    label: "Gemini CLI", bin: "gemini", args: (p: string) => ["-p", p], modelFlag: "--model",
+    // `--skip-trust`: a workflow node's folder was chosen in this app, and Gemini
+    // otherwise aborts every non-interactive run it has not been taught to trust
+    // (there is no TTY here to answer the prompt).
+    label: "Gemini CLI", bin: "gemini", args: (p: string) => ["-p", p, "--skip-trust"], modelFlag: "--model",
     models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"],
+    acpArgs: ["--acp", "--skip-trust"],
     capabilities: {
       // Comma-separated tool names that bypass the confirmation prompt.
       tools: { flag: "--allowed-tools", style: "csv" },
@@ -435,6 +442,7 @@ const HARNESSES: Record<string, any> = {
     // provide a message").
     label: "opencode", bin: "opencode", args: () => ["run"], modelFlag: "--model",
     promptStdin: true,
+    acpArgs: ["acp"],
     // opencode is the one harness with a **web search tool** that a workflow can
     // switch per node: its project config names it (`permission.websearch`), and
     // a fresh install has no such file, so nothing ever turned it on for a run.
@@ -455,6 +463,7 @@ const HARNESSES: Record<string, any> = {
     // for, one per line.
     label: "Kilo Code", bin: "kilo", args: () => ["run"], modelFlag: "--model",
     promptStdin: true,
+    acpArgs: ["acp"],
     modelsArgs: ["models"],
     models: [
       "z-ai/glm-5.3-flash",
@@ -1291,6 +1300,10 @@ export function activate(api: any): void {
     typeof api.kit.killTree === "function"
       ? api.kit.killTree
       : (child, signal = "SIGTERM") => { try { child?.kill(signal); } catch { /* gone */ } };
+  // A live ACP session (see `runAcpNode`). Feature-detected: an older host has no
+  // factory, and an ACP harness then falls back to its one-shot invocation.
+  const createAcpSession: ((opts: any) => any) | null =
+    typeof api.kit.createAcpSession === "function" ? api.kit.createAcpSession : null;
   /** The default shell a `custom` node runs when the user typed no command. */
   // On Windows the message is read from its **file**: `%SW_PROMPT%` is expanded
   // by cmd before parsing, so a quote or `&` in it becomes shell syntax. POSIX
@@ -2008,6 +2021,10 @@ export function activate(api: any): void {
     // `spawnCli` started, so signal-the-child alone would leave the agent alive.
     for (const child of run.children) killTree(child, "SIGTERM");
     run.children.clear();
+    // ACP sessions are not children of the run's process tree: close each one so
+    // its CLI (and anything it spawned) stops with the run.
+    for (const session of run.acpSessions || []) { try { session.close(); } catch { /* gone */ } }
+    (run.acpSessions || []).clear?.();
     if (typeof api.kit.stopChat === "function") {
       for (const sid of run.sessions) { try { api.kit.stopChat(sid); } catch { /* gone */ } }
       run.sessions.clear();
@@ -2053,7 +2070,7 @@ export function activate(api: any): void {
     const run: any = {
       id: `run_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`,
       workspace, startId: start.id, status: "running", task, material, startedAt: Date.now(), finishedAt: 0, seq: 0,
-      nodes: {}, log: [], children: new Set<any>(), sessions: new Set<string>(),
+      nodes: {}, log: [], children: new Set<any>(), sessions: new Set<string>(), acpSessions: new Set<any>(),
     };
     for (const n of wf.nodes) {
       run.nodes[n.id] = { status: "pending", output: "", error: "", exitCode: null, startedAt: null, finishedAt: null, bypassed: false, approval: null, decision: null };
@@ -2736,6 +2753,11 @@ export function activate(api: any): void {
         };
         let cmd: string;
         let args: string[];
+        // The harness's catalogue entry (null for a `custom` shell command), and
+        // its ACP server args when it has one. ACP-capable harnesses run as a live
+        // session below instead of a one-shot child.
+        let spec: any = null;
+        let acpArgs: string[] | null = null;
         // Whether this node's prompt travels on the child's stdin instead of the
         // command line (a `promptStdin` harness — see HARNESSES.opencode).
         let promptOnStdin = false;
@@ -2762,8 +2784,9 @@ export function activate(api: any): void {
           cmd = plan.file;
           args = plan.args;
         } else {
-          const spec = allHarnesses()[node.config.harness] as any;
+          spec = allHarnesses()[node.config.harness] as any;
           if (!spec || !spec.bin) { resolve({ text: "", code: null, error: `unknown harness: ${node.config.harness}` }); return; }
+          acpArgs = Array.isArray(spec.acpArgs) ? spec.acpArgs.slice() : null;
           // A stdin harness is launched with no message at all: its prompt is
           // written to the pipe below, where a multi-line prompt cannot be lost.
           promptOnStdin = !!spec.promptStdin;
@@ -2792,6 +2815,88 @@ export function activate(api: any): void {
         if (node.config.harness === "opencode") {
           const note = applyOpencodeWebSearch(cwd, node.config.webSearch !== false);
           if (note) logLine(run, node.id, "status", note);
+        }
+
+        /**
+         * Run an ACP-capable harness as a live session.
+         *
+         * The node's turn is one `session/prompt`: text streams into the node's
+         * output exactly like a print-mode harness's stdout, tool calls become
+         * log rows, and a permission request is answered from the node's own
+         * policy — a workflow runs unattended, so there is no card to click. The
+         * most restrictive-looking refusal option is never chosen; the agent's
+         * own allow option is, and the decision is written to the run log so it
+         * is visible afterwards. A request with only refusals is cancelled.
+         */
+        const runAcpNode = () => {
+          let output = "";
+          let pending = "";
+          let timedOut = false;
+          const session = createAcpSession!({
+            file: cmd,
+            args: acpArgs || [],
+            cwd,
+            env,
+            model: node.config.model || "",
+            handlers: {
+              onText: (delta: string) => {
+                output = (output + delta).slice(-RUN_OUTPUT_MAX);
+                s.output = cleanRunText(output);
+                pending += delta;
+                let nl: number;
+                while ((nl = pending.indexOf("\n")) >= 0) {
+                  logLine(run, node.id, "stream", pending.slice(0, nl));
+                  pending = pending.slice(nl + 1);
+                }
+              },
+              onToolStart: (name: string, args: string) =>
+                logLine(run, node.id, "status", `⚙ ${name}${args ? `: ${String(args).slice(0, 160)}` : ""}`),
+              onPermission: (request: any) => {
+                const refusal = /reject|deny|refuse|cancel|no\b/i;
+                const option = (request.options || []).find((o: any) =>
+                  !refusal.test(String(o.label)) && !/reject/i.test(String(o.kind || "")),
+                );
+                if (!option) {
+                  logLine(run, node.id, "status", `⛔ refused permission: ${request.title}`);
+                  session.answerPermission(request.id, "", true);
+                  return;
+                }
+                logLine(run, node.id, "status", `✔ approved: ${request.title} (${option.label})`);
+                session.answerPermission(request.id, option.label, false);
+              },
+            },
+          });
+          run.acpSessions.add(session);
+          const timer = node.config.timeoutSec
+            ? setTimeout(() => { timedOut = true; session.cancel(); session.close(); }, node.config.timeoutSec * 1000)
+            : null;
+          void (async () => {
+            let error = "";
+            try {
+              await session.start();
+              await session.prompt(prompt);
+            } catch (err: any) {
+              error = timedOut
+                ? `timed out after ${node.config.timeoutSec}s`
+                : String(err?.message ?? err) || "the harness failed";
+            } finally {
+              if (timer) clearTimeout(timer);
+              run.acpSessions.delete(session);
+              if (pending.trim()) logLine(run, node.id, "stream", pending);
+              session.close();
+            }
+            resolve({
+              text: cleanRunText(output),
+              code: error ? null : 0,
+              ...(error ? { error } : {}),
+            });
+          })();
+        };
+
+        // ACP first: a harness that speaks it gets a live session, not a child.
+        if (acpArgs && createAcpSession) {
+          runAcpNode();
+          return;
         }
 
         /** Remove the prompt file once the child is gone (or never started). */
