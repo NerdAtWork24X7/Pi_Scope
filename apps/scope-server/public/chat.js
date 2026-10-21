@@ -61,6 +61,15 @@
     } catch { /* private mode */ }
     return "markdown";
   }
+  // The coding-agent CLI the composer drives. "pi" is the app's own agent (the
+  // long-lived RPC subprocess); every other value is an external harness whose
+  // CLI is launched per prompt (see chat.ts "External harness conversations").
+  // Remembered per browser, like the other composer toggles.
+  const CHAT_HARNESS_KEY = "scope-chat-harness";
+  function loadChatHarness() {
+    try { return String(localStorage.getItem(CHAT_HARNESS_KEY) || "").trim() || "pi"; }
+    catch { return "pi"; }
+  }
   function saveCollapsedSecs() {
     try { localStorage.setItem("scope-chat-team-collapsed", JSON.stringify([...CH.collapsedSecs])); } catch {}
   }
@@ -122,6 +131,13 @@
   const CH = {
     workspace: null,   // selected cwd
     chatModel: null,   // model used for the live chat
+    modelHarness: null, // harness chatModel belongs to (a model never leaks across harnesses)
+    harness: loadChatHarness(), // coding-agent CLI driving this chat ("pi" = built-in)
+    harnesses: null,   // GET /chat/harnesses snapshot (id, label, available, models…)
+    harnessesAt: 0,    // when that snapshot was fetched
+    harnessModels: new Map(), // harness id → { models, source, error, at } from its own CLI
+    harnessModelFetches: new Map(), // in-flight GET /chat/harness-models, one per harness
+    modelSig: "",      // the harness/model list last painted into the model <select>
     chatSessionId: null,
     resumeFile: null,  // pi session file to continue (set when a recorded session is opened)
     chatBusy: false,
@@ -432,6 +448,7 @@
     el.avatar = $("#chat-avatar");
     el.state = $("#chat-header-state");
     el.model = $("#chat-model");
+    el.harness = $("#chat-harness");
     el.input = $("#chat-input");
     el.send = $("#chat-send");
     el.hint = $("#chat-composer-hint");
@@ -441,7 +458,6 @@
     el.scrollDown = $("#chat-scroll-down");
     el.btnNew = $("#chat-new");
     el.btnOpen = $("#chat-open-session");
-    el.toggleLeft = $("#chat-toggle-left");
     el.toggleRight = $("#chat-toggle-right");
     el.composer = $("#chat-composer");
     el.footer = $("#chat-composer-footer");
@@ -539,6 +555,9 @@
   function onView() {
     CH.sessions = (state.sessions || []).filter(isChatSession);
     adoptFreeThreads();
+    // The header's sidebar toggle is the chat view's collapse control; label it
+    // for the rail's current state (other views relabel it for the aside).
+    window.__chatSyncSidebarToggle?.();
     loadAgentTeam();
     renderWorkspaces();
     renderAgents();
@@ -883,6 +902,13 @@
         selectWorkspace((data.chatWorkspaces || []).includes(p) ? p : (added || p));
       } else if (err) {
         err.textContent = data?.error || `HTTP ${res.status}`;
+      } else {
+        // Added from the native picker (no typed row on screen): re-open the row
+        // so the failure is visible instead of a silent no-op.
+        CH.adding = true;
+        renderWorkspaces();
+        const box = document.getElementById("chat-ws-add-err");
+        if (box) box.textContent = data?.error || `HTTP ${res.status}`;
       }
     } catch (e) {
       if (err) err.textContent = String(e?.message || e);
@@ -1832,7 +1858,11 @@
   // server actually ran — hence it is called from renderComposerModel too, so
   // the pill self-heals on the next render no matter how the workspace was set.
   function ensureChatModel() {
-    if (!CH.chatModel && CH.workspace) CH.chatModel = defaultChatModel();
+    // Only Pi takes the app's catalogue default. An external harness keeps ""
+    // (its CLI's configured model); seeding a pi model here made a harness
+    // remembered from the last visit show "google/gemini-…" the moment a
+    // workspace was clicked.
+    if (!CH.chatModel && CH.workspace && isPiHarness()) CH.chatModel = defaultChatModel();
   }
 
   // Reset the CURRENT workspace's free conversation to a brand-new chat: kill
@@ -1869,7 +1899,7 @@
     t.firstPrompt = null;
     t.adopted = false;
     t.sid = null;
-    CH.chatModel = defaultChatModel();
+    CH.chatModel = isPiHarness() ? defaultChatModel() : "";
     bindThread(t);
     renderComposerModel();
     renderChat();
@@ -1880,6 +1910,9 @@
   // `pi --mode rpc` is already running before the first prompt is typed.
   async function ensureChatSession() {
     if (!CH.workspace) return;
+    // Only Pi has a subprocess worth pre-spawning; an external harness CLI is
+    // launched when a prompt actually arrives, so there is nothing idle to arm.
+    if (!isPiHarness()) return;
     const t = freeThread(CH.workspace);
     if (t.key || t.busy) return;
     // A run is already in flight for this workspace's conversation: pre-spawning
@@ -1888,7 +1921,7 @@
     await ensureLiveRuns();
     if (liveRunForFreeThread(CH.workspace)) return;
     try {
-      const { res, data } = await window.SCOPE.api("/chat/start", {}, { cwd: CH.workspace, model: CH.chatModel || defaultChatModel() });
+      const { res, data } = await window.SCOPE.api("/chat/start", {}, { cwd: CH.workspace, model: CH.chatModel || defaultChatModel(), harness: currentHarness() });
       if (res.ok && data?.sessionId) {
         t.key = data.sessionId;
         syncCurThread();
@@ -3217,8 +3250,11 @@
     if (!el.input || !el.send || !el.model) return;
     el.input.disabled = !on;
     el.model.disabled = !on;
-    if (el.thinking) el.thinking.disabled = !on;
-    if (el.steer) el.steer.disabled = !on;
+    if (el.harness) el.harness.disabled = !on;
+    // Thinking levels are a Pi concept; an external CLI has no equivalent flag
+    // here, so the control is shown disabled rather than pretending it applies.
+    if (el.thinking) el.thinking.disabled = !on || !isPiHarness();
+    if (el.steer) el.steer.disabled = !on || !isPiHarness();
     if (el.attach) el.attach.disabled = !on;
     // Keep Send enabled while a turn streams so the user can steer / queue a
     // follow-up; the stop button appears in its place of action.
@@ -3227,7 +3263,11 @@
     if (!on && CH.listening) void finishListening();
     updateListenButton();
     if (el.stop) el.stop.classList.toggle("show", CH.chatBusy || !!externalStopSid());
-    if (el.input) el.input.placeholder = "Message the pi coding agent…";
+    if (el.input) {
+      el.input.placeholder = isPiHarness()
+        ? "Message the pi coding agent…"
+        : `Message ${harnessLabel()}…`;
+    }
   }
 
   function updateHeader() {
@@ -3257,8 +3297,13 @@
     }
     el.name.textContent = base;
     el.sub.textContent = CH.workspace;
-    el.headerModel.textContent = CH.chatModel || "";
-    el.headerModel.title = CH.chatModel || "";
+    // Pi reads as just its model; an external harness names itself first, since
+    // the same model id can mean different things to different CLIs.
+    const headerText = isPiHarness()
+      ? (CH.chatModel || "")
+      : [harnessLabel(), CH.chatModel || "default"].filter(Boolean).join(" · ");
+    el.headerModel.textContent = headerText;
+    el.headerModel.title = headerText;
     const orch = wsSessions(CH.workspace).find((s) => (s.agent_name || "").toLowerCase() === "orchestrator");
     const st = orch ? S.activityStatus(orch) : "gray";
     // The visible session may be working somewhere this page does not drive (a
@@ -3303,9 +3348,172 @@
     }
   }
 
-  // ─── Composer / model chooser ─────────────────────────────────────────────
+  // ─── Composer / harness + model chooser ──────────────────────────────────
+  // The harness pill selects WHICH coding agent answers (Pi, Claude Code, Codex
+  // CLI, opencode, …); the model pill next to it selects the model for that
+  // harness. Pi's list is the app's enabled-model catalogue; an external CLI's
+  // list is the curated aliases its own docs publish (an empty list means the
+  // CLI's configured default, shown as "default").
+  function harnessList() {
+    return Array.isArray(CH.harnesses) ? CH.harnesses : [];
+  }
+  function harnessInfo(id) {
+    const key = String(id || currentHarness());
+    return harnessList().find((h) => h && h.id === key) || null;
+  }
+  function currentHarness() {
+    return CH.harness || "pi";
+  }
+  function isPiHarness() {
+    return currentHarness() === "pi";
+  }
+  function harnessLabel(id) {
+    const key = String(id || currentHarness());
+    const h = harnessInfo(key);
+    if (h?.label) return h.label;
+    return key === "pi" ? "Pi" : key;
+  }
+
+  // Fetch the harness catalogue once at boot (and on demand when a picker is
+  // opened after the server was unreachable). Five minutes is plenty: a CLI is
+  // installed/removed far less often than a page is reloaded.
+  async function fetchHarnesses(force) {
+    if (!force && CH.harnesses && Date.now() - CH.harnessesAt < 300_000) return;
+    try {
+      const { res, data } = await window.SCOPE.api("/chat/harnesses");
+      if (!res.ok || !Array.isArray(data?.harnesses)) return;
+      CH.harnesses = data.harnesses;
+      CH.harnessesAt = Date.now();
+      // A remembered harness that this install no longer knows (or that was
+      // removed) falls back to Pi instead of sending an id the server rejects.
+      if (!harnessInfo(CH.harness)) CH.harness = "pi";
+      renderComposerHarness();
+      renderComposerModel();
+      updateHeader();
+      // The catalogue lists the curated aliases; the selected harness's own CLI
+      // is asked for its real list in the background.
+      void loadHarnessModels(CH.harness);
+    } catch { /* server unreachable — keep the single Pi fallback option */ }
+  }
+
+  // Ask a harness's own CLI for the models it is configured for. Cached in the
+  // page (and on the server) for five minutes; a failure leaves the curated
+  // aliases in place, so the picker is never empty. Repainting is skipped when
+  // the user has already moved to another harness.
+  const HARNESS_MODELS_TTL = 5 * 60 * 1000;
+  async function loadHarnessModels(id, force) {
+    if (!id || id === "pi") return;
+    const cached = CH.harnessModels.get(id);
+    if (!force && cached && Date.now() - cached.at < HARNESS_MODELS_TTL) return;
+    if (CH.harnessModelFetches.has(id)) return CH.harnessModelFetches.get(id);
+    const pending = (async () => {
+      try {
+        const { res, data } = await window.SCOPE.api("/chat/harness-models", { harness: id });
+        if (!res.ok || !data) return;
+        const models = Array.isArray(data.models)
+          ? data.models.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
+          : [];
+        CH.harnessModels.set(id, {
+          models,
+          source: typeof data.source === "string" ? data.source : null,
+          error: typeof data.error === "string" ? data.error : null,
+          at: Date.now(),
+        });
+      } catch { /* keep the curated list */ }
+      finally {
+        CH.harnessModelFetches.delete(id);
+        if (id === currentHarness()) {
+          renderComposerModel();
+          fitComposerSelects();
+        }
+      }
+    })();
+    CH.harnessModelFetches.set(id, pending);
+    return pending;
+  }
+
+  // Paint the harness <select>. Runs before the catalogue arrives too: a single
+  // Pi option keeps the pill honest and clickable on a cold boot.
+  function renderComposerHarness() {
+    if (!el.harness) return;
+    const known = harnessList();
+    // An empty list means the catalogue has not arrived yet — do NOT fall back to
+    // Pi here, or a harness remembered from the last visit would be discarded
+    // before its own entry was ever seen (see fetchHarnesses, which validates the
+    // remembered id against the real list).
+    if (known.length && !known.some((h) => h.id === CH.harness)) CH.harness = "pi";
+    const list = known.length ? known : [{ id: "pi", label: "Pi (built-in)", available: true }];
+    let html = "";
+    for (const h of list) {
+      const label = h.available === false ? `${h.label} · not installed` : h.label;
+      const title = h.available === false
+        ? `${h.label} was not found on PATH — install it, or set ${h.bin ? `SCOPE_HARNESS_BIN_${String(h.id).toUpperCase().replace(/[^A-Z0-9]/g, "_")}` : "its binary"}`
+        : h.user
+          ? `${h.resolved || h.label} — custom harness (Settings → Plugins → Workflow)`
+          : (h.resolved || h.label);
+      html += `<option value="${esc(h.id)}"${h.id === CH.harness ? " selected" : ""} title="${esc(title)}">${esc(label)}</option>`;
+    }
+    // Same no-churn rule as the model select: rewriting an open dropdown
+    // closes it and drops focus.
+    if (el.harness.innerHTML !== html) el.harness.innerHTML = html;
+  }
+
+  // Reset the composer's model to the selected harness's own default. Pi keeps
+  // the app's catalogue default; an external CLI starts at the first alias its
+  // spec lists (or "" = let the CLI decide).
+  function resetModelForHarness() {
+    // Whatever model was chosen belongs to the PREVIOUS harness; the model pill
+    // offers only the newly selected CLI's own list from here on.
+    CH.modelHarness = currentHarness();
+    if (isPiHarness()) {
+      CH.chatModel = defaultChatModel();
+      return;
+    }
+    // "default" (no --model) for an external CLI: its configured model is a
+    // better choice than the first name in a list this app only curates.
+    CH.chatModel = "";
+  }
+
   function renderComposerModel() {
     if (!el.model) return;
+    if (!isPiHarness()) {
+      // An external harness: the models its own CLI reports (when it can list
+      // them) or the curated aliases, always led by "default" — an empty model
+      // string, which lets the CLI use the model it is configured for. That is
+      // the only safe preselect for a list of hundreds of provider ids.
+      const id = currentHarness();
+      const h = harnessInfo(id);
+      const found = CH.harnessModels.get(id);
+      const list = found && found.models.length ? found.models : (h?.models || []);
+      // A model chosen for ANOTHER harness is meaningless to this CLI (a pi
+      // `provider/model` id, a Claude alias, …). Drop it back to this harness's
+      // default instead of appending it to the list — the pill must only ever
+      // offer the selected harness's models.
+      if (CH.chatModel && CH.modelHarness !== id) CH.chatModel = "";
+      const opts = [""];
+      for (const m of list) if (m && !opts.includes(m)) opts.push(m);
+      // Never silently drop a selection of THIS harness (e.g. one just
+      // discovered, or an id the current CLI no longer lists): keep it
+      // selectable.
+      if (CH.chatModel && !opts.includes(CH.chatModel)) opts.push(CH.chatModel);
+      // Rebuilding thousands of <option>s on every poll is the expensive part,
+      // so only touch the DOM when the list or the selection actually changed.
+      const sig = `${id}\u0000${found?.at || 0}\u0000${list.length}\u0000${list[0] || ""}\u0000${CH.chatModel || ""}`;
+      if (CH.modelSig !== sig) {
+        CH.modelSig = sig;
+        let html = "";
+        for (const m of opts) {
+          const label = m || "default";
+          const title = m || `the ${harnessLabel(id)} default`;
+          html += `<option value="${esc(m)}"${m === (CH.chatModel || "") ? " selected" : ""} title="${esc(title)}">${esc(label)}</option>`;
+        }
+        el.model.innerHTML = html;
+      }
+      fitComposerSelects();
+      renderComposerThinking();
+      return;
+    }
+    CH.modelSig = "";
     // Seed a model when the workspace was opened without a rail click (see
     // ensureChatModel) so the pill always names the model the agent will run.
     ensureChatModel();
@@ -3345,7 +3553,7 @@
     if (!el.model || !el.thinking) return;
     const box = el.composer ? el.composer.querySelector(".chat-composer-box") : null;
     const maxW = box ? Math.max(150, box.clientWidth - 32) : 560;
-    for (const sel of [el.model, el.thinking]) {
+    for (const sel of [el.harness, el.model, el.thinking]) {
       if (!sel) continue;
       const o = sel.options[sel.selectedIndex];
       if (!o) { sel.style.width = ""; continue; }
@@ -3385,6 +3593,10 @@
   // after the toggle makes it take effect on the next prompt.
   function renderComposerThinking() {
     if (!el.thinking) return;
+    el.thinking.disabled = !!el.input?.disabled || !isPiHarness();
+    el.thinking.title = isPiHarness()
+      ? "Thinking level — applied to the next session (pi resolves it at agent start)"
+      : `${harnessLabel()} has no thinking-level flag here — the control applies to Pi only`;
     const meta = CH.chatModel ? footerModelMeta(CH.chatModel) : null;
     const current = CH.thinkingLevel || CH.footer?.thinking || "high";
     const opts = (meta?.thinkingLevels && meta.thinkingLevels.length ? meta.thinkingLevels : ["off", "low", "medium", "high"]).slice();
@@ -4153,6 +4365,13 @@
   async function sendWhileBusy(text) {
     const t = curThread();
     if (!t) return;
+    // Pi accepts a queued steer/follow-up on its running subprocess; an external
+    // harness is a one-shot CLI with no mid-run channel, so a second message has
+    // to wait for the child to finish instead of being silently dropped.
+    if (!isPiHarness()) {
+      setHint(`${harnessLabel()} runs one prompt at a time — wait for this turn to finish`, "busy");
+      return;
+    }
     const model = CH.chatModel || defaultChatModel();
     const streamingBehavior = CH.steer ? "steer" : "followUp";
     const attPaths = pendingAttachmentPaths();
@@ -4172,7 +4391,7 @@
       const res = await fetch(window.apiUrl("/chat"), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ cwd: CH.workspace, model, thinkingLevel: CH.thinkingLevel || "", prompt, sessionId: t.key || (t.kind === "session" ? t.sid : "") || "", sessionFile: t.resumeFile || "", streamingBehavior }),
+        body: JSON.stringify({ cwd: CH.workspace, model, harness: currentHarness(), thinkingLevel: CH.thinkingLevel || "", prompt, sessionId: t.key || (t.kind === "session" ? t.sid : "") || "", sessionFile: t.resumeFile || "", streamingBehavior }),
       });
       const ct = res.headers.get("content-type") || "";
       if (res.ok && ct.includes("ndjson")) {
@@ -4194,7 +4413,7 @@
           queue: [],
           after: null,
         };
-        setHint("pi is thinking…", "busy");
+        setHint(isPiHarness() ? "pi is thinking…" : `${harnessLabel()} is working…`, "busy");
         updateHeader();
         scrollToBottom(true);
         await consumeChatStream(res, t);
@@ -4258,7 +4477,7 @@
     // Sending turns the canvas into a live conversation (not a session replay).
     t.openSid = null;
 
-    const model = CH.chatModel || defaultChatModel();
+    const model = CH.chatModel || (isPiHarness() ? defaultChatModel() : "");
     const prompt = withAttachmentBlock(text, attPaths);
     const gen = ++t.gen;
     const beforeIdx = t.history.length; // rollback point if the server refuses
@@ -4266,7 +4485,7 @@
     t.suppressed = false;
     t.liveRun = null; // this turn is OURS (no longer an adopted run)
     setComposerEnabled(true);
-    setHint("pi is thinking…", "busy");
+    setHint(isPiHarness() ? "pi is thinking…" : `${harnessLabel()} is working…`, "busy");
 
     const userMsg = { role: "user", text, attachments: attPaths.slice(), ts: Date.now() };
     const aiMsg = { role: "assistant", text: "", thinking: "", tools: [], usage: null, model, ts: Date.now(), streaming: true };
@@ -4304,14 +4523,20 @@
         body: JSON.stringify({
           cwd: CH.workspace,
           model,
-          thinkingLevel: CH.thinkingLevel || "",
+          // Which coding agent answers this turn. `pi` is the app's own runner;
+          // anything else is a one-shot CLI the server launches per prompt.
+          harness: currentHarness(),
+          // Thinking levels are resolved by pi's RPC; an external CLI has no
+          // equivalent here, so it is only sent on the Pi path.
+          thinkingLevel: isPiHarness() ? (CH.thinkingLevel || "") : "",
           prompt,
           // A recorded-session thread resumes its own pi session file: the
           // server keys a subprocess per session id and switch_session onto the
           // file. A free thread uses its pre-spawn key (or lets the server
-          // allocate one on first prompt).
+          // allocate one on first prompt). An external harness has no pi
+          // session file to switch onto, so it is never sent there.
           sessionId: t.key || (t.kind === "session" ? t.sid : "") || "",
-          sessionFile: t.resumeFile || "",
+          sessionFile: isPiHarness() ? (t.resumeFile || "") : "",
         }),
       });
       if (res.status === 409) {
@@ -4616,8 +4841,23 @@
     return {
       rail: document.getElementById(left ? "chat-workspace-rail" : "chat-agent-rail"),
       resizer: document.getElementById(left ? "chat-resizer-l" : "chat-resizer-r"),
-      btn: document.getElementById(left ? "chat-toggle-left" : "chat-toggle-right"),
+      // The workspace rail has no collapse button of its own: the app header's
+      // sidebar toggle ("Collapse sidebar (more room for the main view)") is the
+      // one control that folds it — see syncHeaderSidebarToggle.
+      btn: left ? null : document.getElementById("chat-toggle-right"),
     };
+  }
+
+  // Mirror the left rail's folded state onto the header's sidebar button, which
+  // is the chat view's only collapse control (the rail head used to repeat it).
+  function syncHeaderSidebarToggle(open) {
+    const btn = document.getElementById("sidebar-toggle");
+    if (!btn) return;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.setAttribute("aria-label", open ? "Collapse sidebar" : "Expand sidebar");
+    btn.title = open
+      ? "Collapse sidebar (more room for the main view)"
+      : "Expand sidebar";
   }
 
   function setRailVisible(side, open) {
@@ -4632,9 +4872,19 @@
         ? (side === "left" ? "Collapse the workspaces sidebar" : "Collapse the agent team sidebar")
         : (side === "left" ? "Show the workspaces sidebar" : "Show the agent team sidebar");
     }
+    if (side === "left") syncHeaderSidebarToggle(open);
     rail.title = open ? "" : (side === "left" ? "Show the workspaces sidebar" : "Show the agent team sidebar");
     try { localStorage.setItem("scope-chat-rail-" + side, open ? "open" : "folded"); } catch {}
   }
+
+  // Hooks the app shell calls: the header's sidebar toggle folds the Chat view's
+  // workspace rail (the global aside is hidden here), and the shell asks chat.js
+  // to label that button whenever the view is shown.
+  window.__chatToggleSidebar = function () { toggleRail("left"); };
+  window.__chatSyncSidebarToggle = function () {
+    const rail = document.getElementById("chat-workspace-rail");
+    if (rail) syncHeaderSidebarToggle(!rail.classList.contains("folded"));
+  };
 
   function toggleRail(side) {
     const { rail } = railEls(side);
@@ -4672,6 +4922,10 @@
   // ─── Init ─────────────────────────────────────────────────────────────────
   function init() {
     cache();
+    // The harness list decides the composer's first pill and its model options;
+    // fetching it at boot means selecting a workspace never waits on it.
+    renderComposerHarness();
+    void fetchHarnesses(true);
 
     const lw = parseInt(localStorage.getItem("scope-chat-ws-width") || "250", 10);
     const rw = parseInt(localStorage.getItem("scope-chat-agent-width") || "290", 10);
@@ -4687,7 +4941,6 @@
     const storedRail = (k) => { try { return localStorage.getItem(k) === "open"; } catch { return false; } };
     setRailVisible("left", storedRail("scope-chat-rail-left"));
     setRailVisible("right", storedRail("scope-chat-rail-right"));
-    if (el.toggleLeft) el.toggleLeft.addEventListener("click", () => toggleRail("left"));
     if (el.toggleRight) el.toggleRight.addEventListener("click", () => toggleRail("right"));
     // The folded strip keeps a "show" button at its top — clicking it re-opens
     // the sidebar (the strip itself also re-opens on click as a fallback).
@@ -4782,9 +5035,40 @@
     if (el.wsAdd) {
       el.wsAdd.addEventListener("click", openAddWorkspace);
     }
+    if (el.harness) {
+      // Which agent answers from here on. Persisted per browser; the model pill
+      // is reset to that harness's own default because a model id carries a
+      // different meaning to each CLI. A Pi pre-spawn armed for the previous
+      // choice is dropped so the next Pi prompt starts a clean session.
+      el.harness.addEventListener("change", () => {
+        CH.harness = el.harness.value || "pi";
+        try { localStorage.setItem(CHAT_HARNESS_KEY, CH.harness); } catch { /* private mode */ }
+        resetModelForHarness();
+        void loadHarnessModels(CH.harness);
+        if (CH.workspace && !CH.chatHistory.length) {
+          const ft = freeThread(CH.workspace);
+          ft.key = null;
+          if (ft === curThread()) syncCurThread();
+        }
+        renderComposerModel();
+        renderComposerThinking();
+        updateHeader();
+        renderChatFooter();
+        fitComposerSelects();
+        if (isPiHarness()) ensureChatSession();
+        const h = harnessInfo(currentHarness());
+        if (h && h.available === false) {
+          const env = `SCOPE_HARNESS_BIN_${String(h.id).toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+          setHint(`${h.label} was not found on PATH — install it, or set ${env} to its path`, "err");
+        } else {
+          setHint(`harness: ${harnessLabel()} — next message uses ${CH.chatModel || "default"}`, "");
+        }
+      });
+    }
     if (el.model) {
       el.model.addEventListener("change", () => {
         CH.chatModel = el.model.value;
+        CH.modelHarness = currentHarness();
         updateHeader();
         renderChatFooter();
         renderComposerThinking();
@@ -4793,13 +5077,13 @@
         // differs, and pi honors --model when switch_session resumes a recorded
         // file — so the new model applies to this conversation from the next
         // message on, whether or not a session is open.
-        if (!CH.chatHistory.length && CH.workspace) {
+        if (!CH.chatHistory.length && CH.workspace && isPiHarness()) {
           const ft = freeThread(CH.workspace);
           ft.key = null;
           if (ft === curThread()) syncCurThread();
           ensureChatSession();
         }
-        setHint(`next message uses ${CH.chatModel}`, "");
+        setHint(`next message uses ${CH.chatModel || "default"}${isPiHarness() ? "" : ` · ${harnessLabel()}`}`, "");
       });
     }
     if (el.thinking) {

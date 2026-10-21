@@ -33,7 +33,7 @@ after(async () => {
 });
 
 /** Open the app with one theme selected (index.html reads this at boot). */
-async function open(theme) {
+async function open(theme, view = "chat") {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   await context.addInitScript((t) => {
     try { localStorage.setItem("scope-theme", t); } catch { /* private mode */ }
@@ -41,7 +41,7 @@ async function open(theme) {
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e?.message ?? e)));
-  await page.goto(`${mock.base}/?token=test-token#view=chat`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${mock.base}/?token=test-token#view=${view}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => !!document.getElementById("view-toggle") && !!window.SCOPE?.toast);
   return { context, page, errors };
 }
@@ -124,6 +124,79 @@ describe("theme palette", () => {
       assert.equal(await token(lp, name), want, `light ${name}`);
     }
     await lc.close();
+  });
+
+  test("dropdown menus wear the app's menu chrome, not the browser's blue", async (t) => {
+    // The list a <select> opens is browser-painted, so it used to ignore the
+    // palette: Chrome's popup surface plus a system-blue checked row. The
+    // stylesheet opts into customizable select and dresses the picker with the
+    // same tokens as every other anchored menu. Assert that through the DOM the
+    // user actually opens — the picker and one of its rows, per theme.
+    for (const theme of ["light", "dark"]) {
+      const { context, page, errors } = await open(theme, "settings");
+      await page.waitForSelector(".set-select:visible");
+      if (!(await page.evaluate(() => CSS.supports("appearance", "base-select")))) {
+        await context.close();
+        t.skip("this browser has no customizable select");
+        return;
+      }
+
+      // The tokens the picker must consume, read off a probe (computed values).
+      const want = await page.evaluate(() => {
+        const probe = document.createElement("div");
+        probe.style.cssText = "position:fixed;left:-9999px;background:var(--glass-bg-strong);" +
+          "border:1px solid var(--border);border-radius:var(--r-card);box-shadow:var(--shadow-panel)" +
+          ";color:var(--accent-ink);";
+        document.body.appendChild(probe);
+        const cs = getComputedStyle(probe);
+        const wash = document.createElement("div");
+        wash.style.cssText = "position:fixed;left:-9999px;background:var(--accent-soft)";
+        document.body.appendChild(wash);
+        const out = {
+          bg: cs.backgroundColor,
+          border: cs.borderTopColor,
+          radius: cs.borderRadius,
+          shadow: cs.boxShadow,
+          checkedBg: getComputedStyle(wash).backgroundColor,
+          checkedInk: cs.color,
+        };
+        wash.remove();
+        probe.remove();
+        return out;
+      });
+
+      await page.locator(".set-select:visible").first().click();
+      await page.waitForFunction(() => [...document.querySelectorAll(".set-select")].some((s) => s.matches(":open")));
+      const got = await page.evaluate(() => {
+        const sel = [...document.querySelectorAll(".set-select")].find((s) => s.matches(":open"));
+        const picker = getComputedStyle(sel, "::picker(select)");
+        const checked = sel.options[sel.selectedIndex];
+        return {
+          pickerAppearance: picker.appearance,
+          bg: picker.backgroundColor,
+          border: picker.borderTopColor,
+          radius: picker.borderRadius,
+          shadow: picker.boxShadow,
+          checkedBg: getComputedStyle(checked).backgroundColor,
+          checkedInk: getComputedStyle(checked).color,
+          checkedIsSelected: checked.selected,
+        };
+      });
+
+      // The panel chrome below is only painted when the picker itself opts into
+      // base-select; without it Chrome keeps its native list (computed styles
+      // still resolve, so the appearance is the assertion that proves it).
+      assert.equal(got.pickerAppearance, "base-select", `${theme}: the picker opts into the styled list`);
+      assert.equal(got.bg, want.bg, `${theme}: the picker uses the anchored-menu surface`);
+      assert.equal(got.border, want.border, `${theme}: the picker uses the hairline`);
+      assert.equal(got.radius, want.radius, `${theme}: the picker uses the menu radius`);
+      assert.equal(got.shadow, want.shadow, `${theme}: the picker uses the menu shadow`);
+      assert.equal(got.checkedIsSelected, true);
+      assert.equal(got.checkedBg, want.checkedBg, `${theme}: the checked row wears the accent wash, not system blue`);
+      assert.equal(got.checkedInk, want.checkedInk, `${theme}: the checked row's ink is the accent ink`);
+      assert.deepEqual(errors, []);
+      await context.close();
+    }
   });
 
   test("with no stored choice the app boots in the warm light theme", async () => {

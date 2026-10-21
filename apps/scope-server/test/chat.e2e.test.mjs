@@ -1921,6 +1921,51 @@ describe("global sidebar workspace rail", () => {
   });
 });
 
+// ─── Chat: the header toggle folds the Chat view's own workspace rail ───────
+// Chat hides the global aside and renders the same rail inside the view, so it
+// used to carry a second collapse button in that rail's head. The header's
+// sidebar toggle is now the ONE collapse control there; the rail head keeps only
+// ＋ Add.
+describe("chat sidebar toggle", () => {
+  const railFolded = () => page.evaluate(() =>
+    document.getElementById("chat-workspace-rail").classList.contains("folded"));
+
+  test("the header button is the only collapse control and folds the chat rail", async () => {
+    await boot({ sessions: [makeSession(SESS_A)] });
+    assert.equal(await page.locator("#chat-toggle-left").count(), 0, "no duplicate collapse button in the rail head");
+    assert.equal(await page.locator("#chat-ws-add").isVisible(), true, "＋ Add stays in the rail head");
+
+    const toggle = page.locator("#sidebar-toggle");
+    assert.equal(await railFolded(), false);
+    assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+
+    await toggle.click();
+    await page.waitForFunction(() =>
+      document.getElementById("chat-workspace-rail").classList.contains("folded"));
+    assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+    assert.match(await toggle.getAttribute("title"), /Expand sidebar/);
+    assert.equal(await page.locator("#chat-resizer-l").isVisible(), false, "the resizer folds away with the rail");
+
+    await toggle.click();
+    await page.waitForFunction(() =>
+      !document.getElementById("chat-workspace-rail").classList.contains("folded"));
+    assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+    assert.match(await toggle.getAttribute("title"), /Collapse sidebar/);
+  });
+
+  test("leaving Chat hands the same button back to the global aside", async () => {
+    await boot({ sessions: [makeSession(SESS_A)] });
+    await page.click("#sidebar-toggle");
+    await page.waitForFunction(() =>
+      document.getElementById("chat-workspace-rail").classList.contains("folded"));
+
+    await page.evaluate(() => window.setView("single"));
+    await page.waitForFunction(() => document.getElementById("sidebar-toggle").getAttribute("aria-expanded") === "true");
+    assert.match(await page.getAttribute("#sidebar-toggle", "title"), /Collapse sidebar/);
+    assert.equal(await page.evaluate(() => document.body.classList.contains("sidebar-collapsed")), false);
+  });
+});
+
 // ─── Recovering a live run after the page is reloaded ──────────────────────
 // Reported flow: the agent is working in Chat, the user switches page (clicking
 // Chat hard-reloads the document) and comes back — the canvas looked idle, the

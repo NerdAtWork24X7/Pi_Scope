@@ -248,12 +248,10 @@
   function renderAddRow(prefix, canBrowse) {
     return (
       `<div class="chat-ws-add-row">` +
-      `<div class="chat-ws-add-fields">` +
       `<input class="chat-ws-add-input" id="${prefix}-ws-add-input" type="text" placeholder="/path/to/workspace" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off" />` +
       (canBrowse
         ? `<button class="chat-ws-browse" id="${prefix}-ws-browse" type="button" title="Browse for a directory">Browse…</button>`
         : "") +
-      `</div>` +
       `<div class="chat-ws-add-err" id="${prefix}-ws-add-err"></div>` +
       `</div>`
     );
@@ -486,6 +484,13 @@
         selectWorkspace((data.chatWorkspaces || []).includes(p) ? p : (added || p));
       } else if (err) {
         err.textContent = data?.error || `HTTP ${res.status}`;
+      } else {
+        // Added from the native picker (no typed row on screen): re-open the row
+        // so the failure is visible instead of a silent no-op.
+        R.adding = true;
+        render();
+        const box = R.root.querySelector("#sidebar-ws-add-err");
+        if (box) box.textContent = data?.error || `HTTP ${res.status}`;
       }
     } catch (e) {
       if (err) err.textContent = String(e?.message || e);
@@ -542,7 +547,18 @@
     else if (e.key === "Escape") { e.preventDefault(); R.adding = false; render(); }
   }
 
-  function openAddWorkspace() {
+  // Use the host's directory picker when it exists (the desktop app): ＋ Add
+  // adds a workspace straight from the file manager, with no path to type. The
+  // inline typed row is only the fallback for a plain browser (or a cancelled
+  // dialog), mirroring the Chat view's own ＋ Add (see chat.js openAddWorkspace).
+  async function openAddWorkspace() {
+    if (typeof window.scopeNative?.pickDirectory === "function") {
+      try {
+        const dir = await window.scopeNative.pickDirectory();
+        if (dir) { await submitAdd(dir); return; }
+        // cancelled — fall back to manual entry
+      } catch { /* dialog failed — fall back to manual entry */ }
+    }
     R.adding = true;
     render();
   }
@@ -570,7 +586,7 @@
       R.wired = true;
       R.root.addEventListener("click", onRootClick);
       R.root.addEventListener("keydown", onRootKeydown);
-      if (R.addBtn) R.addBtn.addEventListener("click", openAddWorkspace);
+      if (R.addBtn) R.addBtn.addEventListener("click", () => void openAddWorkspace());
     }
     void loadAgentTeam();
     render();

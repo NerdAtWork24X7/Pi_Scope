@@ -363,6 +363,13 @@ window.setView = function(mode) {
   if (sessionSubnav) sessionSubnav.style.display = (viewUsesSessionSubnav(mode) && STATE.selectedSessionId) ? "flex" : "none";
   renderSessions();
   spec?.view?.onShow?.();
+  // Chat labels the header toggle for its own workspace rail; every other view
+  // labels it for the global aside.
+  if (mode === "chat" && typeof window.__chatSyncSidebarToggle === "function") {
+    window.__chatSyncSidebarToggle();
+  } else {
+    applySidebarCollapsed();
+  }
   saveURLState();
 };
 
@@ -1089,6 +1096,12 @@ sysPromptBtn?.addEventListener("click", openSysPrompt);
 // status dot. Hides filters/search/sort/hide-after entirely. Works the same
 // in single / trajectory views — only the click handler differs.
 window.toggleSidebar = function() {
+  // The Chat view hides the global aside and owns an in-layout workspace rail,
+  // so the header button folds THAT rail instead of the invisible one.
+  if (STATE.view === "chat" && typeof window.__chatToggleSidebar === "function") {
+    window.__chatToggleSidebar();
+    return;
+  }
   STATE.sidebarCollapsed = !STATE.sidebarCollapsed;
   localStorage.setItem("scope-sidebar-collapsed", STATE.sidebarCollapsed ? "1" : "0");
   applySidebarCollapsed();
@@ -1097,8 +1110,15 @@ window.toggleSidebar = function() {
 
 function applySidebarCollapsed() {
   document.body.classList.toggle("sidebar-collapsed", STATE.sidebarCollapsed);
+  // In Chat the button drives the view's own workspace rail — chat.js labels it.
+  if (STATE.view === "chat" && typeof window.__chatSyncSidebarToggle === "function") {
+    window.__chatSyncSidebarToggle();
+    return;
+  }
   const btn = document.getElementById("sidebar-toggle");
   if (btn) {
+    btn.setAttribute("aria-expanded", STATE.sidebarCollapsed ? "false" : "true");
+    btn.setAttribute("aria-label", STATE.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar");
     btn.title = STATE.sidebarCollapsed
       ? "Expand sidebar"
       : "Collapse sidebar (more room for the main view)";

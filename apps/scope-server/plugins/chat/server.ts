@@ -56,6 +56,8 @@ export function activate(api: any): void {
     answerChatUi,
     chatLiveRuns,
     attachChatRun,
+    chatHarnesses,
+    chatHarnessModels,
     sttStatus,
     startStt,
     stopStt,
@@ -84,16 +86,48 @@ export function activate(api: any): void {
     return stream;
   });
 
+  // ── GET /chat/harnesses (coding-agent CLIs the composer can drive) ──────
+  // Pi is one of them, but it runs through the host's own chat runner; the rest
+  // are external CLIs (Claude Code, Codex CLI, opencode, …) resolved against this
+  // machine's PATH. `available` is what the picker uses to mark an install as
+  // missing instead of failing the first prompt with an ENOENT.
+  api.route("GET", "/chat/harnesses", () => {
+    const harnesses = typeof chatHarnesses === "function" ? chatHarnesses() : [];
+    return jsonResponse({ harnesses, default: "pi" });
+  });
+
+  // ── GET /chat/harness-models?harness=<id> (the CLI's own model list) ────
+  // `opencode models`, `kilo models` and `cursor-agent --list-models` print the
+  // models that CLI is actually configured for, which no baked-in list can
+  // know. Kept off the harnesses response so the picker paints immediately: the
+  // page shows the curated aliases first and repaints when this answers.
+  api.route("GET", "/chat/harness-models", async (ctx) => {
+    const harness = (ctx.url.searchParams.get("harness") || "").trim();
+    if (!harness) return jsonResponse({ error: "missing harness" }, 400);
+    if (typeof chatHarnessModels !== "function") {
+      return jsonResponse({ harness, models: [], source: null, error: "this host cannot list harness models" });
+    }
+    const result = await chatHarnessModels(harness);
+    return jsonResponse({ harness, ...result });
+  });
+
   // ── POST /chat/start (pre-spawn the pi session for a workspace) ────────
   // Called when the user selects a workspace in the Chat view so `pi --mode
-  // rpc` is already running before the first prompt is typed.
+  // rpc` is already running before the first prompt is typed. An external
+  // harness has nothing to pre-spawn — its CLI is launched per prompt — so the
+  // request is answered without inventing a session id.
   api.route("POST", "/chat/start", async (ctx) => {
     const { value: parsed, error } = await jsonBody(ctx.req);
     if (error) return error;
     const absCwd = requireCwd(parsed?.cwd);
     if (absCwd instanceof Response) return absCwd;
-    const r = startChatSession({ cwd: absCwd, model: typeof parsed.model === "string" ? parsed.model : "" });
-    return jsonResponse({ ...r, cwd: absCwd, model: (parsed.model || "").trim() || "google/gemini-2.5-flash-lite" });
+    const harness = typeof parsed.harness === "string" ? parsed.harness.trim().toLowerCase() : "";
+    const model = (typeof parsed.model === "string" ? parsed.model : "").trim() || "google/gemini-2.5-flash-lite";
+    if (harness && harness !== "pi") {
+      return jsonResponse({ sessionId: "", reused: false, cwd: absCwd, model, harness });
+    }
+    const r = startChatSession({ cwd: absCwd, model });
+    return jsonResponse({ ...r, cwd: absCwd, model, harness: "pi" });
   });
 
   // ── POST /chat (real-time prompt to the pi coding agent) ───────────────
@@ -108,6 +142,10 @@ export function activate(api: any): void {
       // injects at the start of a fresh conversation (and never again in it).
       libraryBlock: libraryBlockFor(absCwd),
       model: typeof parsed.model === "string" ? parsed.model : "",
+      // The composer's harness choice. Empty/`pi` is the original path (a
+      // long-lived `pi --mode rpc` subprocess); anything else is a one-shot CLI
+      // streamed by chat.ts's harness adapter.
+      harness: typeof parsed.harness === "string" ? parsed.harness : "",
       // The composer's thinking-level choice; pushed to the subprocess via RPC
       // set_thinking_level so it applies without a respawn (pi otherwise caches
       // settings.json's defaultThinkingLevel at boot).

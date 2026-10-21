@@ -53,6 +53,25 @@ export const MODEL_META = {
   },
 };
 
+/** The harness catalogue GET /chat/harnesses serves. Claude Code is installed,
+ *  Codex CLI is not — the picker must show both states. */
+export const DEFAULT_HARNESSES = [
+  { id: "pi", label: "Pi (built-in)", bin: null, resolved: null, available: true, models: [], modelFlag: "--model", promptStdin: false },
+  { id: "claude", label: "Claude Code", bin: "claude", resolved: "/usr/local/bin/claude", available: true, models: ["sonnet", "opus", "haiku"], modelFlag: "--model", promptStdin: false },
+  { id: "codex", label: "Codex CLI", bin: "codex", resolved: null, available: false, models: ["gpt-5-codex", "gpt-5"], modelFlag: "--model", promptStdin: false },
+  { id: "opencode", label: "opencode", bin: "opencode", resolved: "/usr/local/bin/opencode", available: true, models: ["anthropic/claude-sonnet-4-5"], modelFlag: "--model", promptStdin: true },
+];
+
+/** The model lists the CLIs "report" in the mock (see /chat/harness-models). */
+export function defaultHarnessModels() {
+  return {
+    opencode: {
+      models: ["acme/discovered-coder", "acme/discovered-fast", "openai/gpt-5"],
+      source: "opencode models",
+    },
+  };
+}
+
 let pluginSnapshotCache = null;
 
 /**
@@ -186,6 +205,11 @@ export async function startMockBackend() {
     chatWorkspacesRemoved: [],
     // Subagent definitions (agents/*.md) as GET /settings returns them.
     agentDefs: [],
+    // The coding-agent CLIs GET /chat/harnesses reports (see DEFAULT_HARNESSES).
+    harnesses: DEFAULT_HARNESSES.map((h) => ({ ...h, models: h.models.slice() })),
+    // What each CLI answers for GET /chat/harness-models. opencode is the one
+    // with a real listing command; the rest keep their curated aliases.
+    harnessModels: defaultHarnessModels(),
     // The Office plugin's own state, per workspace: its name, the Kanban task
     // queue and the runner switch. The real plugin keeps this in its own store
     // behind `/office` (plugins/office/server.ts), NOT in the team snapshot.
@@ -266,6 +290,7 @@ export async function startMockBackend() {
         sessionId,
         cwd: body.cwd || state.cwd,
         model: body.model || "",
+        harness: body.harness || "pi",
         fresh: /^pre-\d+$/.test(sessionId),
         prompted: true,
         resumedFile: body.sessionFile || null,
@@ -703,9 +728,26 @@ export async function startMockBackend() {
     }
 
     // ── Chat session lifecycle ─────────────────────────────────────────────
+    if (pathname === "/chat/harnesses" && method === "GET") {
+      return sendJSON(res, { harnesses: state.harnesses, default: "pi" });
+    }
+    if (pathname === "/chat/harness-models" && method === "GET") {
+      const harness = String(parsed.searchParams.get("harness") || "").trim();
+      const found = state.harnessModels[harness] || { models: [], source: null };
+      return sendJSON(res, {
+        harness,
+        models: found.models,
+        source: found.source ?? null,
+        ...(found.error ? { error: found.error } : {}),
+      });
+    }
     if (pathname === "/chat/start" && method === "POST") {
+      // An external harness has nothing to pre-spawn, exactly like the real route.
+      if (body.harness && body.harness !== "pi") {
+        return sendJSON(res, { sessionId: "", reused: false, cwd: body.cwd || state.cwd, model: body.model || "", harness: body.harness });
+      }
       const sessionId = `pre-${++sessionSeq}`;
-      return sendJSON(res, { sessionId, reused: false, cwd: body.cwd || state.cwd, model: body.model || "" });
+      return sendJSON(res, { sessionId, reused: false, cwd: body.cwd || state.cwd, model: body.model || "", harness: "pi" });
     }
     if (pathname === "/chat/kill" || pathname === "/chat/stop") return sendJSON(res, { ok: true });
     if (pathname === "/chat/prefs") return sendJSON(res, { ok: true, sent: 2 });
@@ -1043,6 +1085,12 @@ export async function startMockBackend() {
     setEvents(sid, events) { state.eventsBySid[sid] = events; },
     /** Seed the subagent definitions (agents/*.md) that GET /settings returns. */
     setAgentDefs(defs) { state.agentDefs = defs.map((d) => ({ ...d })); },
+    /** Seed the harness catalogue GET /chat/harnesses reports. */
+    setHarnesses(list) { state.harnesses = list.map((h) => ({ ...h, models: (h.models || []).slice() })); },
+    /** Seed what a harness's CLI reports for GET /chat/harness-models. */
+    setHarnessModels(id, { models = [], source = null, error = null } = {}) {
+      state.harnessModels[id] = { models: models.slice(), source, ...(error ? { error } : {}) };
+    },
     /** Seed the reference library (files/folders injected at conversation start). */
     setLibrary(entries) { state.team.library = entries.map((e) => ({ ...e })); },
     /** Seed the Office plugin's own state for a workspace (name / queue / runner). */
@@ -1092,6 +1140,8 @@ export async function startMockBackend() {
       state.chatWorkspaces = [];
       state.chatWorkspacesRemoved = [];
       state.agentDefs = [];
+      state.harnesses = DEFAULT_HARNESSES.map((h) => ({ ...h, models: h.models.slice() }));
+      state.harnessModels = defaultHarnessModels();
       state.office = {};
       state.runStatus = {};
       state.liveRuns = new Map();

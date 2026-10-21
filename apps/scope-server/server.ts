@@ -32,6 +32,8 @@ import {
   storeFor,
 } from "./plugins.ts";
 import { startChat, startChatSession, killChatSession, stopChat, chatSessionPid, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatPendingDialog, chatLiveRuns, attachChatRun } from "./chat.ts";
+import { chatHarnessList, discoverHarnessModels } from "./harnesses.ts";
+import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
 import { buildSessionSeed } from "./session-seed.ts";
 import { noteExternalProcess, externalProcessFor, killExternalProcess, findProcessBySessionFile } from "./external-process.ts";
@@ -3443,7 +3445,9 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ error: `unknown action: ${action}` }, 400);
     } catch (err: any) {
       console.error("POST /pi-update failed:", err);
-      return jsonResponse({ error: "internal server error" }, 500);
+      // Surface the underlying failure (e.g. npm's stderr) so a client that
+      // started the install learns why it failed, not just "internal error".
+      return jsonResponse({ error: String(err?.message ?? err) }, 500);
     }
   }
 
@@ -4604,6 +4608,15 @@ const pluginKit = {
   // its stream, or one that never had it, can restore the working state) and
   // how to attach a fresh reader to one still in flight.
   chatLiveRuns, attachChatRun,
+  // The coding-agent CLIs the Chat composer offers (Claude Code, Codex CLI,
+  // opencode, …), each resolved against this machine's PATH so the picker can
+  // say which ones are actually installed. `pi` is listed too but runs through
+  // the host's chat runner.
+  chatHarnesses: () => chatHarnessList(workflowHarnessSettings()),
+  // The models a harness's own CLI reports (`opencode models`, `kilo models`,
+  // `cursor-agent --list-models`), asked on demand so the Chat model pill shows
+  // what the tool on THIS machine is set up for instead of a curated handful.
+  chatHarnessModels: (id: string) => discoverHarnessModels(id, workflowHarnessSettings()),
   sttStatus, startStt, stopStt,
   // The live shared cwd (mutable; the STT status fallback needs its current value).
   terminalCwd: () => TERMINAL_CWD,

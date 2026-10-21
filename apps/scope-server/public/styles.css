@@ -5762,15 +5762,15 @@ body.layout-form #trajectory-inspector {
       background: var(--accent-soft);
     }
     .chat-ws-add-row {
-      padding: 4px 8px 10px;
-    }
-    .chat-ws-add-fields {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       gap: 6px;
+      padding: 4px 8px 10px;
     }
     .chat-ws-add-input {
-      width: 100%;
+      flex: 1 1 0;
+      min-width: 0;
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: var(--r-btn);
@@ -5790,6 +5790,7 @@ body.layout-form #trajectory-inspector {
       white-space: nowrap;
     }
     .chat-ws-add-err {
+      flex-basis: 100%;
       color: var(--red, #e5534b);
       font-size: 11px;
       margin-top: 4px;
@@ -7375,7 +7376,8 @@ body.layout-form #trajectory-inspector {
       padding: 6px 14px 10px;
     }
     .chat-model-wrap,
-    .chat-think-wrap {
+    .chat-think-wrap,
+    .chat-harness-wrap {
       display: inline-flex;
       align-items: center;
       gap: 6px;
@@ -7384,7 +7386,8 @@ body.layout-form #trajectory-inspector {
       flex: 0 1 auto;
     }
     .chat-model-wrap .chat-model-label,
-    .chat-think-wrap .chat-think-label {
+    .chat-think-wrap .chat-think-label,
+    .chat-harness-wrap .chat-harness-label {
       max-width: 74px;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -7401,7 +7404,8 @@ body.layout-form #trajectory-inspector {
       flex-shrink: 0;
     }
     .chat-model-wrap .dot,
-    .chat-think-wrap .dot {
+    .chat-think-wrap .dot,
+    .chat-harness-wrap .dot {
       font-size: 10px;
       flex-shrink: 0;
     }
@@ -7411,8 +7415,12 @@ body.layout-form #trajectory-inspector {
     .chat-think-wrap .dot {
       color: var(--orange);
     }
+    .chat-harness-wrap .dot {
+      color: var(--green, var(--accent-ink));
+    }
     .chat-model-label,
-    .chat-think-label {
+    .chat-think-label,
+    .chat-harness-label {
       font-size: 10px;
       font-weight: 700;
       color: var(--muted);
@@ -7421,7 +7429,8 @@ body.layout-form #trajectory-inspector {
       flex-shrink: 0;
     }
     #chat-model,
-    #chat-thinking {
+    #chat-thinking,
+    #chat-harness {
       border: 1px solid var(--border);
       background: var(--surface-2);
       color: var(--text);
@@ -7435,16 +7444,19 @@ body.layout-form #trajectory-inspector {
       outline: none;
     }
     #chat-model:hover,
-    #chat-thinking:hover {
+    #chat-thinking:hover,
+    #chat-harness:hover {
       border-color: var(--accent);
     }
     #chat-model:focus-visible,
-    #chat-thinking:focus-visible {
+    #chat-thinking:focus-visible,
+    #chat-harness:focus-visible {
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.16);
     }
     #chat-model:disabled,
-    #chat-thinking:disabled {
+    #chat-thinking:disabled,
+    #chat-harness:disabled {
       opacity: 0.55;
     }
     .chat-send {
@@ -10058,6 +10070,75 @@ input[type=number]:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* ── Dropdown menus ─────────────────────────────────────────────────────── */
+/* A <select>'s list is drawn by the browser, not by the page, so it does not
+   inherit the palette: Chrome paints the popup with its own color-scheme
+   surface and highlights the checked row in system blue, which reads as a
+   foreign control next to the warm greige/yellow chrome (especially in dark
+   mode, where the highlight turns pale blue). These rules give the list the
+   same chrome as every other anchored menu in the app.
+
+   The option colors are the fallback for engines without customizable select
+   (they apply to the rows Chrome and Firefox draw). Where the engine supports
+   `appearance: base-select`, the picker itself becomes stylable, so the list
+   gets the shared menu panel (glass surface · hairline · r-card · shadow) and
+   its checked row wears the rationed accent instead of the system blue. */
+select option,
+select optgroup {
+  background-color: var(--surface);
+  color: var(--text);
+}
+select option:checked {
+  background-color: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+@supports (appearance: base-select) {
+  select {
+    appearance: base-select;
+    /* The base-select button wraps long labels; the app's pills size to a
+       single line, so keep the selected label on one row. */
+    white-space: nowrap;
+  }
+  select::picker-icon {
+    color: var(--muted);
+  }
+
+  /* The picker is the same floating card as .git-menu/.term-menu (see
+     "Anchored popups" above). Kept in @supports selector() so an engine that
+     knows base-select but not the picker pseudo-element still styles the
+     closed control without dropping the whole block. */
+  @supports selector(::picker(select)) {
+    /* Both the control and the picker opt in: with only the control doing so,
+       Chrome paints its native list (and ignores the panel chrome below). */
+    ::picker(select) {
+      appearance: base-select;
+      background: var(--glass-bg-strong);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--r-card);
+      box-shadow: var(--shadow-panel);
+      padding: 4px;
+      margin-top: 4px;
+    }
+    select option {
+      padding: 6px 10px;
+      border-radius: var(--r-btn);
+      background-color: transparent;
+      color: var(--text);
+      font: inherit;
+    }
+    select option:hover {
+      background-color: var(--row-hover);
+      color: var(--text);
+    }
+    select option:checked {
+      background-color: var(--accent-soft);
+      color: var(--accent-ink);
+    }
+  }
+}
+
 /* ── Panes, rails, settings nav ─────────────────────────────────────────── */
 .pane-header { border-bottom: 1px solid var(--hairline); font-family: var(--font-display); }
 .pane-header > span:first-child { font-weight: 600; letter-spacing: -0.01em; }
@@ -10960,13 +11041,21 @@ body.layout-form .pane-header .btn-sm {
   flex-shrink: 0;
 }
 
-/* Filter chips scroll sideways instead of wrapping the pane header taller. */
+/* Filter chips scroll sideways instead of wrapping the pane header taller.
+   The chips themselves must not shrink either: a shrinking flex item wraps its
+   label onto a second line, which made the toolbar a row of 41px pills next to
+   28px buttons (and dragged the separator with them). */
 body.layout-form .pane-header .filter-chips {
   flex-wrap: nowrap;
   min-width: 0;
   max-width: 100%;
   overflow-x: auto;
   scrollbar-width: none;
+}
+
+body.layout-form .pane-header .filter-chips > * {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 body.layout-form .pane-header .filter-chips::-webkit-scrollbar {
@@ -11106,9 +11195,12 @@ body.layout-form .snav-sid code {
   background: var(--surface-2);
 }
 
-/* The single/trajectory event feed reads in one centered column. */
+/* The event feed shares the pane header's column: same 18px gutter, no
+   narrower centred column — the rows used to start ~57px inside the header and
+   the session bar, which read as misaligned chrome rather than a deliberate
+   measure. */
 body.layout-form #event-view {
-  padding: 12px 28px 32px;
+  padding: 12px 18px 32px;
 }
 
 body.layout-form #event-view > .evt-row,
@@ -11116,9 +11208,9 @@ body.layout-form #event-view > .turn-header,
 body.layout-form #event-view > .empty-state,
 body.layout-form #event-view > .evt-detail {
   width: 100%;
-  max-width: 1040px;
-  margin-left: auto;
-  margin-right: auto;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
 }
 
 body.layout-form .turn-header {
@@ -11437,9 +11529,28 @@ body.layout-form .chat-composer {
   padding: 0 36px 16px;
 }
 
+/* The composer card, its hint above and the two footer lines all sit in ONE
+   column: the same 830px column the message rows use (`.chat-msg` is centred
+   with `margin: 0 auto`). The box used to be left-aligned with `max-width`
+   while the footer was centred at 940px with its own side padding, so on a
+   wide window the input and the footer under it did not line up. */
 body.layout-form .chat-composer-top,
 body.layout-form .chat-composer-box {
+  width: 100%;
   max-width: 830px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+body.layout-form .chat-composer-top {
+  margin-bottom: 3px;
+}
+
+body.layout-form .chat-composer-footer,
+body.layout-form .chat-composer-foot {
+  max-width: 830px;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 body.layout-form .chat-composer-box {
@@ -11469,7 +11580,8 @@ body.layout-form .chat-composer-bar {
 }
 
 body.layout-form #chat-model,
-body.layout-form #chat-thinking {
+body.layout-form #chat-thinking,
+body.layout-form #chat-harness {
   font-family: var(--font-body), var(--emoji);
   font-size: 11.5px;
   padding: 4px 24px 4px 10px;
@@ -11480,12 +11592,14 @@ body.layout-form #chat-thinking {
 }
 
 body.layout-form #chat-model:hover,
-body.layout-form #chat-thinking:hover {
+body.layout-form #chat-thinking:hover,
+body.layout-form #chat-harness:hover {
   border-color: var(--border);
 }
 
 body.layout-form .chat-model-label,
-body.layout-form .chat-think-label {
+body.layout-form .chat-think-label,
+body.layout-form .chat-harness-label {
   font-size: 9.5px;
   letter-spacing: 0.6px;
 }

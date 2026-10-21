@@ -27,7 +27,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readStoredKeys } from "./api-keys.ts";
-import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spawnCli } from "../../shared/shell.ts";
+import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spawnCli, killTree } from "../../shared/shell.ts";
+import { DEFAULT_CHAT_HARNESS, buildHarnessLaunch, normalizeHarnessId } from "./harnesses.ts";
+import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 // Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
 // PATH (force-loading the Pi Scope extension). Must be imported before PI_BIN is
 // used so chat subprocesses launch the bundled agent, not a global install.
@@ -138,6 +140,15 @@ setInterval(() => {
       sessions.delete(id);
     }
   }
+  // A harness conversation is not a process at all: its child exists only for
+  // the duration of a run, so an idle entry is just memory with a transcript.
+  for (const [id, sess] of harnessSessions) {
+    if (sess.run) continue;
+    if (now - sess.lastUsed > IDLE_TIMEOUT) {
+      killHarnessChild(sess);
+      harnessSessions.delete(id);
+    }
+  }
 }, 60_000).unref();
 
 function enqueueRaw(controller: ReadableStreamDefaultController<Uint8Array>, line: string): boolean {
@@ -173,19 +184,22 @@ function runEmit(run: ChatRun, obj: any) {
   }
 }
 
-/** Finish a run: hand the terminal events (error, then done) to every attached
- *  reader, close them, and drop the run (the idle session stays alive for the
- *  next prompt). */
-function endRun(sess: ChatSession, ...events: any[]) {
-  const run = sess.run;
-  if (!run) return;
-  sess.run = null;
+/** Hand a finished run its terminal events and close every attached reader.
+ *  Shared by both session kinds (a pi subprocess and an external harness CLI). */
+function finishRun(run: ChatRun, ...events: any[]) {
   run.openUi.clear();
   for (const c of run.subs) {
     for (const ev of events) enqueue(c, ev);
     try { c.close(); } catch { /* already closed */ }
   }
   run.subs.clear();
+}
+
+function endRun(sess: ChatSession, ...events: any[]) {
+  const run = sess.run;
+  if (!run) return;
+  sess.run = null;
+  finishRun(run, ...events);
 }
 
 /** Turn pi's raw provider failure into one line a user can act on.
@@ -808,6 +822,318 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
   return sess;
 }
 
+// ─── External harness conversations ─────────────────────────────────────────
+//
+// Every harness other than Pi is a one-shot CLI: it takes a message, prints an
+// answer and exits. There is no long-lived RPC process to attach a reader to, no
+// pi session file to resume and no tool-event protocol to translate, so a
+// conversation is kept here instead: one record per session id, with the turns
+// so far carried into the next prompt as a bounded transcript block. That is
+// enough for a follow-up ("now rename it") to make sense to the CLI without
+// pretending these tools have pi's session semantics.
+//
+// The record implements the same run/replay/attach bookkeeping a pi session does,
+// so GET /chat/status and GET /chat/attach work for a harness run unchanged — a
+// page that reloads mid-run still reconnects to it instead of losing the turn.
+
+/** How much of the conversation is carried into an external harness prompt. */
+const HARNESS_TRANSCRIPT_MAX_CHARS = 12_000;
+/** How many of its own turns a conversation remembers (memory, not a transcript
+ *  store: the Chat view's own thread remains the authoritative history). */
+const HARNESS_HISTORY_MAX_TURNS = 60;
+/** Cap on one harness turn's retained output (for the final snapshot/history). */
+const HARNESS_OUTPUT_MAX_CHARS = 400_000;
+/** stderr kept for a failure report. */
+const HARNESS_STDERR_MAX_CHARS = 8_000;
+
+interface HarnessChatSession {
+  id: string;
+  cwd: string;
+  model: string;
+  harness: string;
+  child: ChildProcess | null;
+  run: ChatRun | null;
+  lastUsed: number;
+  dead: boolean;
+  prompted: boolean;
+  /** The run was created by a prompt that named no session (the workspace's own
+   *  new conversation), so a reloaded page can adopt it into that free thread. */
+  fresh: boolean;
+  stopRequested: boolean;
+  runState: "running" | null;
+  lastRun: { outcome: "done" | "error" | "aborted"; at: number } | null;
+  history: Array<{ role: "user" | "assistant"; text: string }>;
+  librarySent: boolean;
+}
+
+const harnessSessions = new Map<string, HarnessChatSession>();
+
+/** ANSI SGR/cursor sequences a CLI writes around its answer. */
+function stripHarnessAnsi(text: string): string {
+  return String(text).replace(ANSI_RE, "");
+}
+
+/** The earlier turns of a harness conversation as one prompt preamble, newest
+ *  turns kept when the budget is exceeded. Empty for the first prompt. */
+function harnessTranscriptBlock(history: HarnessChatSession["history"]): string {
+  const lines: string[] = [];
+  let used = 0;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const turn = history[i];
+    const body = String(turn.text || "").trim();
+    if (!body) continue;
+    const entry = `${turn.role === "user" ? "User" : "Assistant"}: ${body}`;
+    // Always keep the newest turn, even when it alone is larger than the budget.
+    if (lines.length && used + entry.length > HARNESS_TRANSCRIPT_MAX_CHARS) break;
+    lines.unshift(entry);
+    used += entry.length + 2;
+  }
+  return lines.length
+    ? `[Earlier in this conversation]\n${lines.join("\n\n")}\n[End of earlier conversation]`
+    : "";
+}
+
+/** Record a completed turn for the next prompt's preamble. */
+function rememberHarnessTurn(sess: HarnessChatSession, user: string, assistant: string): void {
+  sess.history.push({ role: "user", text: user });
+  if (assistant) sess.history.push({ role: "assistant", text: assistant });
+  if (sess.history.length > HARNESS_HISTORY_MAX_TURNS) {
+    sess.history.splice(0, sess.history.length - HARNESS_HISTORY_MAX_TURNS);
+  }
+}
+
+/** Stop a harness child (and its own children — Windows runs it via cmd.exe). */
+function killHarnessChild(sess: HarnessChatSession): void {
+  const child = sess.child;
+  sess.child = null;
+  if (child) killTree(child, "SIGTERM");
+}
+
+/** Discard a harness conversation's record without touching its runner. */
+function dropHarnessSession(id: string): void {
+  const sess = harnessSessions.get(id);
+  if (!sess) return;
+  killHarnessChild(sess);
+  sess.dead = true;
+  harnessSessions.delete(id);
+}
+
+/**
+ * Run ONE prompt through an external harness CLI and stream its output as the
+ * Chat NDJSON protocol. The run owns the readers exactly like a pi run does; the
+ * CLI is a child of this request's execution, not of a per-conversation
+ * subprocess, so the conversation record (`sess`) outlives the child and the
+ * next prompt starts a fresh one with the transcript preamble.
+ */
+function startHarnessChat(
+  opts: { cwd: string; model?: string; prompt: string; sessionId?: string; libraryBlock?: string },
+  harnessId: string,
+): Response {
+  const prompt = String(opts.prompt || "");
+  const sid = (opts.sessionId || "").trim() || crypto.randomUUID();
+  const model = (opts.model || "").trim();
+  const noSession = !(opts.sessionId || "").trim();
+
+  let sess = harnessSessions.get(sid);
+  if (sess && (sess.dead || sess.harness !== harnessId || sess.cwd !== opts.cwd)) {
+    // A different harness (or workspace) on the same id starts a new
+    // conversation: the old turns belong to another agent's context.
+    dropHarnessSession(sid);
+    sess = undefined;
+  }
+  if (sess?.run) {
+    return new Response(JSON.stringify({ error: "a prompt is already running" }), {
+      status: 409,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (!sess) {
+    sess = {
+      id: sid,
+      cwd: opts.cwd,
+      model,
+      harness: harnessId,
+      child: null,
+      run: null,
+      lastUsed: Date.now(),
+      dead: false,
+      prompted: false,
+      fresh: noSession,
+      stopRequested: false,
+      runState: null,
+      lastRun: null,
+      history: [],
+      librarySent: false,
+    };
+    harnessSessions.set(sid, sess);
+  }
+  sess.model = model;
+  sess.lastUsed = Date.now();
+  sess.prompted = true;
+  sess.stopRequested = false;
+  sess.fresh = sess.fresh || noSession;
+  const owned = sess;
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const run: ChatRun = {
+        subs: new Set([controller]),
+        log: [],
+        bytes: 0,
+        prompt,
+        startedAt: Date.now(),
+        openUi: new Map(),
+        promptRetries: 0,
+        providerError: null,
+        sawText: false,
+        resend: null,
+      };
+      owned.run = run;
+      owned.runState = "running";
+      owned.lastRun = null;
+      runEmit(run, { type: "session", sessionId: sid, model, harness: harnessId });
+
+      // Compose the message: an optional reference library on a new conversation,
+      // the bounded transcript of the earlier turns, then this prompt.
+      const parts: string[] = [];
+      const library = String(opts.libraryBlock || "").trim();
+      if (library && !owned.librarySent && !owned.history.length) {
+        owned.librarySent = true;
+        parts.push(library);
+      }
+      const transcript = harnessTranscriptBlock(owned.history);
+      if (transcript) parts.push(transcript);
+      parts.push(prompt);
+      const message = parts.join("\n\n");
+
+      // The Workflow page is where a user re-points a CLI or defines a custom
+      // harness; both apply here, so the Chat prompt runs the same binary that
+      // page shows as available.
+      const launch = buildHarnessLaunch(harnessId, { prompt: message, model }, workflowHarnessSettings());
+      if (!launch.ok) {
+        owned.run = null;
+        owned.runState = null;
+        owned.lastRun = { outcome: "error", at: Date.now() };
+        finishRun(
+          run,
+          { type: "error", message: launch.error },
+          { type: "done", sessionId: sid, model, harness: harnessId, error: launch.error },
+        );
+        return;
+      }
+
+      let child: ChildProcess;
+      try {
+        child = spawnCli(launch.file, launch.args, {
+          cwd: owned.cwd,
+          // The same child env a pi chat gets: stored API keys, the workspace's
+          // venv / node dirs and the Playwright browser path. A CLI harness reads
+          // its own credentials, but it inherits everything a terminal would see.
+          env: chatChildEnv(owned.cwd),
+          // A stdin harness needs a pipe; an argv harness gets `ignore` so it can
+          // never block waiting on input that will not arrive.
+          stdio: [launch.promptOnStdin ? "pipe" : "ignore", "pipe", "pipe"],
+        });
+      } catch (err: any) {
+        owned.run = null;
+        owned.runState = null;
+        owned.lastRun = { outcome: "error", at: Date.now() };
+        const message = `failed to start ${launch.file}: ${err?.message ?? err}`;
+        finishRun(
+          run,
+          { type: "error", message },
+          { type: "done", sessionId: sid, model, harness: harnessId, error: message },
+        );
+        return;
+      }
+      owned.child = child;
+      // Hand a stdin harness its message and close the pipe so it starts at once.
+      if (launch.promptOnStdin) {
+        child.stdin?.on("error", () => { /* the CLI exited before reading it */ });
+        child.stdin?.end(launch.prompt);
+      }
+
+      let output = "";
+      let errBuf = "";
+      const decoder = new TextDecoder();
+      child.stdout?.on("data", (chunk: Buffer) => {
+        const text = decoder.decode(chunk, { stream: true });
+        if (!text) return;
+        owned.lastUsed = Date.now();
+        output = (output + text).slice(-HARNESS_OUTPUT_MAX_CHARS);
+        const clean = stripHarnessAnsi(text);
+        if (clean) {
+          run.sawText = true;
+          runEmit(run, { type: "text", delta: clean });
+        }
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        owned.lastUsed = Date.now();
+        errBuf = (errBuf + text).slice(-HARNESS_STDERR_MAX_CHARS);
+        runEmit(run, { type: "stderr", text });
+      });
+      const finish = (error?: string) => {
+        // A second terminal event (error + close, or a killChatSession that already
+        // ended the run) must not emit into readers that have been closed.
+        if (owned.run !== run) return;
+        if (owned.child === child) owned.child = null;
+        // A character (or escape sequence) the streaming decoder was holding.
+        const tail = decoder.decode();
+        if (tail) output += tail;
+        const text = stripHarnessAnsi(output).trim();
+        if (text) runEmit(run, { type: "final", text });
+        if (text) rememberHarnessTurn(owned, prompt, text);
+        const aborted = owned.stopRequested;
+        owned.run = null;
+        owned.runState = null;
+        owned.stopRequested = false;
+        owned.lastRun = { outcome: aborted ? "aborted" : error ? "error" : "done", at: Date.now() };
+        const done = { type: "done", sessionId: sid, model, harness: harnessId, aborted };
+        if (error && !aborted) {
+          finishRun(run, { type: "error", message: error }, { ...done, error });
+        } else {
+          finishRun(run, done);
+        }
+      };
+      child.on("error", (err: any) => {
+        finish(`failed to run ${launch.file}: ${err?.message ?? err}`);
+      });
+      child.on("close", (code: number | null) => {
+        if (owned.stopRequested) {
+          finish();
+          return;
+        }
+        if (code === 0) {
+          // A CLI that answered nothing is a failure even with exit 0: surfacing
+          // its stderr is what tells the user why (a missing login, an unknown
+          // model flag), instead of an empty bubble reading "(no text response)".
+          if (!run.sawText) {
+            const detail = stripHarnessAnsi(errBuf).trim().split(/\r?\n/).filter(Boolean).slice(-3).join(" ");
+            finish(detail || `${launch.harness.label} exited without a message`);
+            return;
+          }
+          finish();
+          return;
+        }
+        const detail = stripHarnessAnsi(errBuf).trim().split(/\r?\n/).filter(Boolean).slice(-3).join(" ");
+        finish(detail || `${launch.harness.label} exited with code ${code}`);
+      });
+    },
+    // A reload abandons the response but does not stop the CLI: the run keeps
+    // accumulating into its replay log, and GET /chat/attach picks it back up.
+    cancel() {
+      const run = owned.run;
+      if (run) run.subs.delete(controller);
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-cache", "x-accel-buffering": "no" },
+  });
+}
+
 /** Spawn/queue a prompt to a (possibly reused) pi subprocess and return a
  *  streaming NDJSON Response. `cwd` must already be validated by the caller.
  *
@@ -816,11 +1142,19 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
  *  after the agent settles) and a JSON `{ queued: true }` response is returned
  *  instead of a stream — the in-flight stream keeps delivering events to the
  *  client. */
-export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; streamingBehavior?: string; libraryBlock?: string; resumeSeed?: (sessionFile: string, sessionId: string, reason: string) => string } & ChatSpawnExtras): Response {
+export function startChat(opts: { cwd: string; model?: string; thinkingLevel?: string; prompt: string; sessionId?: string; sessionFile?: string; harness?: string; streamingBehavior?: string; libraryBlock?: string; resumeSeed?: (sessionFile: string, sessionId: string, reason: string) => string } & ChatSpawnExtras): Response {
   const { cwd, prompt } = opts;
   const model = (opts.model || "").trim() || "google/gemini-2.5-flash-lite";
   if (!prompt || !prompt.trim()) {
     return new Response(JSON.stringify({ error: "prompt required" }), { status: 400, headers: { "content-type": "application/json" } });
+  }
+  // Every harness except Pi is a one-shot CLI with its own streaming adapter; it
+  // never touches the pi subprocess map, the session-file resume path or the
+  // RPC pref commands below. `pi` (or a request naming no harness at all) keeps
+  // the original path byte for byte.
+  const harnessId = normalizeHarnessId(opts.harness);
+  if (harnessId !== DEFAULT_CHAT_HARNESS) {
+    return startHarnessChat(opts, harnessId);
   }
 
   const sid = (opts.sessionId || "").trim() || crypto.randomUUID();
@@ -1078,7 +1412,7 @@ export function startChatSession(opts: { cwd: string; model?: string }): { sessi
  *  abandoned but pi keeps working), so a task dispatcher that outlived its page
  *  can tell a live run from a genuinely orphaned one. */
 export function chatRunStatus(id: string): { present: boolean; active: boolean; outcome: "done" | "error" | "aborted" | null } {
-  const sess = sessions.get(id);
+  const sess = sessions.get(id) ?? harnessSessions.get(id);
   if (!sess) return { present: false, active: false, outcome: null };
   return { present: true, active: sess.runState === "running" && !sess.dead, outcome: sess.lastRun?.outcome ?? null };
 }
@@ -1117,6 +1451,8 @@ interface ChatLiveRun {
   sessionId: string;
   cwd: string;
   model: string;
+  /** The harness driving the run (`pi` for the built-in runner). */
+  harness: string;
   active: boolean;
   fresh: boolean; // a workspace's own "new conversation" subprocess
   prompted: boolean; // has ever been prompted (vs an idle pre-spawn)
@@ -1134,10 +1470,28 @@ export function chatLiveRuns(): ChatLiveRun[] {
       sessionId: id,
       cwd: sess.cwd,
       model: sess.model,
+      harness: "pi",
       active: !!run && sess.runState === "running",
       fresh: sess.fresh,
       prompted: sess.prompted,
       resumedFile: sess.resumedFile,
+      startedAt: run ? run.startedAt : null,
+      prompt: run ? run.prompt : "",
+    });
+  }
+  for (const [id, sess] of harnessSessions) {
+    if (sess.dead) continue;
+    const run = sess.run;
+    out.push({
+      sessionId: id,
+      cwd: sess.cwd,
+      model: sess.model,
+      harness: sess.harness,
+      active: !!run && sess.runState === "running",
+      fresh: sess.fresh,
+      prompted: sess.prompted,
+      // A harness conversation has no pi session file to resume.
+      resumedFile: null,
       startedAt: run ? run.startedAt : null,
       prompt: run ? run.prompt : "",
     });
@@ -1155,9 +1509,13 @@ export function chatLiveRuns(): ChatLiveRun[] {
  *  answered); the still-open ones are re-emitted as `ui_open` so the page can
  *  render and answer the question pi is blocked on. */
 export function attachChatRun(id: string): Response | null {
+  // A harness run lives in its own map (its child only exists while a prompt is
+  // in flight), but it owns the same run log/subscriber machinery.
   const sess = sessions.get(id);
-  const run = sess?.run;
-  if (!sess || !run || sess.dead || sess.proc.exitCode !== null) return null;
+  const piRun = sess && !sess.dead && sess.proc.exitCode === null ? sess.run : null;
+  const harnessSess = piRun ? null : harnessSessions.get(id);
+  const run = piRun || (harnessSess && !harnessSess.dead ? harnessSess.run : null);
+  if (!run) return null;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       for (const entry of run.log) {
@@ -1183,9 +1541,28 @@ export function attachChatRun(id: string): Response | null {
 /** Kill a specific chat subprocess by session ID. */
 export function killChatSession(id: string): void {
   const sess = sessions.get(id);
-  if (!sess) return;
-  try { sess.proc.kill(); } catch { /* already dead */ }
-  sessions.delete(id);
+  if (sess) {
+    try { sess.proc.kill(); } catch { /* already dead */ }
+    sessions.delete(id);
+  }
+  const hsess = harnessSessions.get(id);
+  if (hsess) {
+    finishHarnessRunAsStopped(hsess);
+    dropHarnessSession(id);
+  }
+}
+
+/** End an in-flight harness run because its conversation is being discarded
+ *  (a new chat / killed session), so no reader is left waiting on a child that
+ *  is about to be killed. */
+function finishHarnessRunAsStopped(sess: HarnessChatSession): void {
+  const run = sess.run;
+  if (!run) return;
+  sess.run = null;
+  sess.runState = null;
+  sess.stopRequested = false;
+  sess.lastRun = { outcome: "aborted", at: Date.now() };
+  finishRun(run, { type: "done", sessionId: sess.id, model: sess.model, harness: sess.harness, aborted: true });
 }
 
 /** The OS pid of the live chat subprocess serving a session, or null when this
@@ -1194,8 +1571,13 @@ export function killChatSession(id: string): void {
  *  session never signals the very subprocess Stop is already aborting. */
 export function chatSessionPid(id: string): number | null {
   const sess = sessions.get(id);
-  if (!sess || sess.dead || sess.proc.exitCode !== null) return null;
-  const pid = Number(sess.proc.pid);
+  if (sess && !sess.dead && sess.proc.exitCode === null) {
+    const pid = Number(sess.proc.pid);
+    if (Number.isInteger(pid) && pid > 0) return pid;
+  }
+  const hsess = harnessSessions.get(id);
+  if (!hsess || hsess.dead) return null;
+  const pid = Number(hsess.child?.pid);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
@@ -1209,7 +1591,18 @@ export function chatSessionPid(id: string): number | null {
  *  effect on the running agent immediately rather than on the next new session. */
 export function pushChatPrefs(id: string, opts: { model?: string; thinkingLevel?: string }): { ok: boolean; sent: number } {
   const sess = sessions.get(id);
-  if (!sess || sess.dead || sess.proc.exitCode !== null) return { ok: false, sent: 0 };
+  if (!sess) {
+    // An external harness has no long-lived process to push into: the model is
+    // read at the next spawn, and thinking levels are a pi concept (the CLI has
+    // no equivalent flag here), so the update is recorded rather than sent.
+    const hsess = harnessSessions.get(id);
+    if (!hsess || hsess.dead) return { ok: false, sent: 0 };
+    const model = (opts.model || "").trim();
+    if (!model) return { ok: true, sent: 0 };
+    hsess.model = model;
+    return { ok: true, sent: 1 };
+  }
+  if (sess.dead || sess.proc.exitCode !== null) return { ok: false, sent: 0 };
   const model = (opts.model || "").trim();
   const level = (opts.thinkingLevel || "").trim();
   let sent = 0;
@@ -1260,7 +1653,20 @@ export function answerChatUi(id: string, uiId: string, opts: { value?: string; c
  *  the abort, which closes the in-flight stream with `aborted: true`. */
 export function stopChat(id: string): boolean {
   const sess = sessions.get(id);
-  if (!sess) return false;
+  if (!sess) {
+    // A harness child has no RPC abort; stopping the run means stopping the CLI
+    // (and everything it launched). The close handler reports `aborted: true`.
+    const hsess = harnessSessions.get(id);
+    if (!hsess || !hsess.run) return false;
+    hsess.stopRequested = true;
+    killHarnessChild(hsess);
+    // End the run here instead of waiting for the child's `close`: a CLI that
+    // started its own children (a shell wrapper's `sleep`, a node worker) can
+    // keep the stdout pipe open for a while after the direct child is signalled,
+    // and the user pressed Stop — the readers must not sit on "working".
+    finishHarnessRunAsStopped(hsess);
+    return true;
+  }
   const wasActive = !!sess.run;
   if (wasActive) sess.stopRequested = true;
   try {
@@ -1398,4 +1804,6 @@ export function shutdownChatSessions(): void {
     try { sess.proc.kill(); } catch { /* ignore */ }
   }
   sessions.clear();
+  for (const [, sess] of harnessSessions) killHarnessChild(sess);
+  harnessSessions.clear();
 }

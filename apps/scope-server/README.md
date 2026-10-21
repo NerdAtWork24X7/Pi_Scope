@@ -44,6 +44,8 @@ wherever the agent was started from.
 | `SCOPE_PROVIDER_CACHE_FILE` | `<agentDir>/../Provider_Cache/model_provider.json` | Override where the kilo / tokenharbor extension model cache is read from. The default is derived from the agent dir's parent, which is where the extension's `model-cache.ts` writes it (`~/.pi-scope/Provider_Cache` for Pi Scope, `~/.pi/Provider_Cache` for a global pi) |
 | `SCOPE_SKILLS_DIR` | `<agentDir>/skills` | Override the skills directory scanned for the agent-team sidebar |
 | `SCOPE_EXTRA_PATH` | — | Colon-separated extra dirs prepended to `PATH` for chat-spawned `pi` subprocesses (e.g. `SCOPE_EXTRA_PATH=/path/to/.venv/bin`) |
+| `SCOPE_HARNESS_BIN_<ID>` | — | Absolute path to a coding-agent CLI the Chat composer offers when it is installed where a desktop launch does not search (e.g. `SCOPE_HARNESS_BIN_CLAUDE=/opt/claude/bin/claude`, `SCOPE_HARNESS_BIN_OPENCODE=~/.opencode/bin/opencode`). Ids are `claude`, `codex`, `gemini`, `opencode`, `cline`, `kilo`, `aider`, `cursor`, plus any custom harness id |
+| `SCOPE_WORKFLOW_STORE` | `<plugins dir>/.data/subagent-workflow.json` | Where Chat reads the Workflow plugin's harness settings (binary overrides and custom harnesses). The default follows `SCOPE_PLUGINS_DIR` |
 | `SCOPE_PYTHON_VENV` | `<agentDir>/../.venv` | The shared Python venv (built with `uv` by `apps/scope-desktop/pi-python-install.mjs`) for every Python-dependent element. The default is derived from the agent dir's parent (`~/.pi-scope/.venv` for Pi Scope, `~/.pi/.venv` for a global pi). Its `bin` is prepended to the chat/agent `PATH`. Override to relocate it |
 | `PLAYWRIGHT_BROWSERS_PATH` | `<agentDir>/../playwright-browsers` | Where Playwright's Chromium build lives (installed by `pi-python-install.mjs`). Derived from the agent dir's parent (`~/.pi-scope/playwright-browsers` for Pi Scope, `~/.pi/playwright-browsers` for a global pi) so the Node `browser` extension and the Python elements share one build. An inherited value wins |
 | `SCOPE_KEYS_JSON` | `<agentDir>/api-keys.json` | API keys entered in Settings → API Keys (owner-only file, mode 0600) |
@@ -78,6 +80,26 @@ every chat-spawned `pi` subprocess, so an extension that reads `process.env`
 living in a shell profile. A stored key overrides the inherited environment; the
 Settings page shows each key's effective source. Secrets never leave the server
 — the UI only receives a masked preview.
+
+## Chat harnesses
+
+The Chat composer can drive more than the bundled `pi` agent. Its harness picker
+lists **Pi** (the default, with the app's full model catalogue) and the external
+CLIs **Claude Code**, **Codex CLI**, **Gemini CLI**, **opencode**, **Cline**,
+**Kilo Code**, **Aider** and **Cursor Agent**. The picker marks a CLI that is not
+installed and remembers the choice per browser; a prompt from an external harness
+runs that CLI non-interactively and streams its output as the chat reply.
+
+A harness's model list comes from its own CLI when it has a listing command —
+`opencode models`, `kilo models`, `cursor-agent --list-models` — so the pill shows
+the providers/models that CLI is actually set up for, not a baked-in list. The
+other harnesses show their documented aliases. The list is cached for five
+minutes and is re-asked after a failure, so signing in or editing the CLI's
+configuration shows up without a restart.
+
+Custom harnesses and per-harness binary paths defined in **Settings → Plugins →
+Workflow** are shared into Chat: a CLI only has to be described once. The
+`SCOPE_HARNESS_BIN_<ID>` environment variable still wins over a Workflow path.
 
 ## Herdr cwd integration
 
