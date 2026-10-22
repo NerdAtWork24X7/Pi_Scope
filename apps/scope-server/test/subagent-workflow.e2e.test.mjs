@@ -4933,6 +4933,16 @@ describe("subagent workflow plugin (client)", () => {
       assert.ok(values.includes(id), `${id} was offered (${values.slice(0, 6).join(", ")}…)`);
     }
     assert.ok(values.includes("__custom__"), "and a way to name a model of one's own");
+    // A long catalogue is navigable by typing: the picker filters as you type,
+    // and Enter takes the first match.
+    await page.click("#sw-f-model");
+    await page.waitForSelector(".scope-sel-pop:not([hidden])");
+    await page.keyboard.type("qwen");
+    await page.waitForFunction(() => document.querySelectorAll(".scope-sel-opt").length === 1);
+    assert.match(await page.textContent(".scope-sel-opt"), /qwen3/);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator(".scope-sel-pop").isHidden(), true, "Esc closes without picking");
+    assert.equal(await page.inputValue("#sw-f-model"), "", "and the model is unchanged");
     // Grouped by provider: the provider half is part of what opencode is handed.
     assert.ok((await page.$$eval("#sw-f-model optgroup", (o) => o.map((x) => x.label))).includes("local"));
     assert.match(await page.textContent("#sw-model-wrap .sw-hint"), /opencode models/,
@@ -4985,6 +4995,114 @@ describe("subagent workflow plugin (client)", () => {
     // …and the repeat edge follows the step it re-runs.
     const d = await page.$eval(`#subagent-workflow-pane path.sw-edge[data-edge="${fb.id}"]`, (p) => p.getAttribute("d"));
     assert.match(d, /1100/, `the feedback edge re-routed to the moved step (${d})`);
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
+  test("a start node's chat is stored per entry point and cleared on demand", async () => {
+    const solo = path.join(tmpDir, "ws-chat-api");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const start = seeded.nodes.find((n) => n.type === "start");
+    const other = (await act("addNode", { type: "start", x: 120, y: 520 }, solo)).data.nodes.at(-1);
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    assert.ok((await act("updateNode", { id: agent.id, name: "echo", config: {
+      harness: "custom", command: "printf 'OK[%s]' \"$SW_PROMPT\"", prompt: "{task}",
+    } }, solo)).res.ok);
+
+    // More messages than the run history keeps: the chat log must still have
+    // every one of them, with its answer, in the order they were sent.
+    for (let i = 1; i <= 12; i++) {
+      const started = await runApi("start", { startId: start.id, task: `message ${i}` }, solo);
+      assert.ok(started.res.ok, started.data?.error);
+      const run = await waitRun(solo);
+      assert.equal(run.status, "done", JSON.stringify(run.log));
+    }
+    let data = await snapshot(solo);
+    assert.equal(data.history.length, 10, "the run picker still keeps ten runs");
+    assert.equal(data.chat.length, 12, "the conversation keeps every message");
+    assert.deepEqual(data.chat.map((t) => t.task), Array.from({ length: 12 }, (_, i) => `message ${i + 1}`));
+    assert.ok(data.chat.every((t) => t.startId === start.id), "each turn belongs to the start it was sent from");
+    assert.equal(data.chat.at(-1).status, "done");
+    assert.match(String(data.chat.at(-1).answer), /message 12/, "the answer is stored with the message");
+
+    // Clearing one entry point's chat leaves the other start and the run
+    // history alone.
+    const otherTurn = await runApi("start", { startId: other.id, task: "other chat" }, solo);
+    assert.ok(otherTurn.res.ok, otherTurn.data?.error);
+    await waitRun(solo);
+    const cleared = await act("clearChat", { startId: start.id }, solo);
+    assert.ok(cleared.res.ok, cleared.data?.error);
+    assert.deepEqual(cleared.data.chat.map((t) => t.task), ["other chat"], "only that chat was cleared");
+    data = await snapshot(solo);
+    assert.equal(data.chat.length, 1, "the store agrees");
+    assert.ok(data.history.length > 0, "the runs remain in the run picker");
+
+    // A restart must not resurrect the cleared conversation, and the surviving
+    // one is a fresh read (the store is the source of truth).
+    assert.equal((await api(`/${PLUGIN}/history?cwd=${enc(solo)}`)).data.chat.length, 1);
+  });
+
+  test("the chat box keeps what was said when the next message is sent, and clears it", async () => {
+    const solo = path.join(tmpDir, "ws-chat-ui");
+    fs.mkdirSync(solo, { recursive: true });
+    const seeded = await snapshot(solo);
+    const start = seeded.nodes.find((n) => n.type === "start");
+    const agent = seeded.nodes.find((n) => n.type === "agent");
+    assert.ok((await act("updateNode", { id: agent.id, name: "echo", config: {
+      harness: "custom", command: "printf 'ANSWER[%s]' \"$SW_PROMPT\"", prompt: "{task}",
+    } }, solo)).res.ok);
+
+    const { page, context, errors } = await openWorkflow(solo);
+    const dialogs = [];
+    page.on("dialog", (d) => { dialogs.push(d.message()); void d.accept(); });
+    await page.click(`.sw-node[data-id="${start.id}"]`);
+    await page.waitForSelector(".sw-chat-composer .sw-chat-input");
+
+    const send = async (text, n) => {
+      await page.fill(".sw-chat-input", text);
+      await page.press(".sw-chat-input", "Enter");
+      // The turn appears at once; its answer lands when the run settles.
+      await page.waitForFunction((len) => document.querySelectorAll(".sw-chat-turn").length === len, n, { timeout: 10_000 });
+      await page.waitForFunction(() => {
+        const states = [...document.querySelectorAll(".sw-chat-state")];
+        return states.length && /done/.test(states[states.length - 1].textContent || "");
+      }, null, { timeout: 20_000 });
+    };
+
+    await send("first question", 1);
+    await send("second question", 2);
+    await send("third question", 3);
+
+    // Every message is still there, oldest first, and the latest is the last
+    // row — a new send must never push the conversation away.
+    const bubbles = await page.locator(".sw-chat-user .sw-chat-bubble").allInnerTexts();
+    assert.deepEqual(bubbles, ["first question", "second question", "third question"]);
+    const lastAnswer = await page.locator(".sw-chat-turn").last().locator(".sw-chat-answer").innerText();
+    assert.match(lastAnswer, /third question/, "the newest turn shows its own answer");
+
+    // A reload reads them back from the store.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".sw-node");
+    await page.click(`.sw-node[data-id="${start.id}"]`);
+    await page.waitForFunction(() => document.querySelectorAll(".sw-chat-turn").length === 3);
+    assert.deepEqual(await page.locator(".sw-chat-user .sw-chat-bubble").allInnerTexts(),
+      ["first question", "second question", "third question"]);
+
+    // The Clear history button asks first, empties the conversation, and leaves
+    // the runs in the picker.
+    await page.click("[data-chat-clear]");
+    await page.waitForFunction(() => document.querySelectorAll(".sw-chat-turn").length === 0);
+    assert.match(dialogs.at(-1) || "", /Clear 3 messages from/);
+    assert.equal((await snapshot(solo)).chat.length, 0, "the store was cleared");
+    assert.ok((await snapshot(solo)).history.length >= 3, "the run history still has the runs");
+    assert.equal(await page.locator(".sw-chat-empty").count(), 1, "the empty state is back");
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".sw-node");
+    await page.click(`.sw-node[data-id="${start.id}"]`);
+    await page.waitForSelector(".sw-chat-composer");
+    assert.equal(await page.locator(".sw-chat-turn").count(), 0, "a reload does not resurrect it");
     assert.deepEqual(errors, []);
     await context.close();
   });

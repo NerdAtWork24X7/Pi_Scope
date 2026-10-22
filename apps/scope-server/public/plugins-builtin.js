@@ -144,7 +144,7 @@
         if (current && !list.includes(current)) modelOptions.push({ value: current, label: current });
         return (
           ctx.field("Commit message model", "used by Git → ✨ generate",
-            ctx.selectControl(modelOptions, current, 'data-act="setGitCommitModel"')) +
+            ctx.selectControl(modelOptions, current, 'data-act="setGitCommitModel" data-model-select')) +
           ctx.field("Commit message template", "how the generated message should look",
             `<textarea class="set-input" rows="7" data-act="setGitCommitTemplate" spellcheck="false" ` +
             `style="width:100%;min-height:120px;resize:vertical" ` +

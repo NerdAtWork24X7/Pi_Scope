@@ -559,7 +559,7 @@
   function modelSelect(current, attrs, emptyLabel, cls) {
     const sel = String(current || "");
     return (
-      `<select class="set-input set-select${cls ? " " + cls : ""}" ${attrs || ""}>` +
+      `<select class="set-input set-select${cls ? " " + cls : ""}" data-model-select ${attrs || ""}>` +
       (emptyLabel == null
         ? ""
         : `<option value=""${sel ? "" : " selected"}>${esc(emptyLabel)}</option>`) +

@@ -62,6 +62,9 @@
   --surface: #121212;
   --surface-alt: #141414;
   --bg-deep: #080808;
+  /* Text-entry fields: one step above the panel they sit on, so a field always
+     reads as a box (the shared model-picker search uses this token too). */
+  --field-bg: #171717;
 
   /* Text: three steps, no fourth. */
   --text: #ffffff;
@@ -1437,7 +1440,7 @@ body {
   padding: 10px 12px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-control);
-  background: var(--bg);
+  background: var(--field-bg);
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 16px;
@@ -1451,7 +1454,7 @@ body {
   padding: 10px 12px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-control);
-  background: var(--bg);
+  background: var(--field-bg);
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 16px; /* >=16px, same reason as the composer: no iOS focus zoom */

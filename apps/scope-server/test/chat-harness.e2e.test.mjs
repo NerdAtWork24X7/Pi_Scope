@@ -85,6 +85,27 @@ test("the model pill shows the models the harness's own CLI reports", async () =
   assert.equal(asked.query.harness, "opencode", "the CLI was asked for its own list");
 });
 
+test("the model pill is searchable, and the picked model rides on the next prompt", async () => {
+  await boot();
+  const pill = page.locator("#chat-model");
+  await pill.waitFor();
+  const all = await pill.locator("option").count();
+  await pill.click();
+  await page.waitForSelector(".scope-sel-pop:not([hidden])");
+  assert.equal(await page.locator(".scope-sel-opt").count(), all, "the whole catalogue is offered");
+  await page.keyboard.type("gemini");
+  const rows = await page.locator(".scope-sel-opt .scope-sel-name").allInnerTexts();
+  assert.ok(rows.length > 0 && rows.length < all, `typing narrows the list (${rows})`);
+  assert.ok(rows.every((t) => /gemini/i.test(t)), "only matching models remain");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelector(".scope-sel-pop")?.hidden === true);
+  const chosen = await pill.inputValue();
+  assert.match(chosen, /gemini/i, "Enter picked the first match");
+
+  await send(page, mock, "use the picked model");
+  assert.equal(mock.requestsFor("/chat", "POST").at(-1).body.model, chosen);
+});
+
 test("a prompt carries the selected harness and omits pi-only fields", async () => {
   const env = await boot();
   await page.selectOption("#chat-harness", "opencode");

@@ -75,6 +75,14 @@ async function waitForHealth(timeoutMs = 20_000) {
   throw new Error("server did not become healthy");
 }
 
+async function api(pathname, init = {}) {
+  const res = await fetch(`${base}${pathname}`, {
+    ...init,
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...(init.headers || {}) },
+  });
+  return { res, data: await res.json().catch(() => null) };
+}
+
 /** Open the Settings page on `sec` and wait for the panel to render. */
 async function openSection(sec) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -95,9 +103,15 @@ before(async () => {
   fs.mkdirSync(stubDir, { recursive: true });
   writeStubPi(stubDir);
 
-  // The provider the app already knows about, before any refresh.
-  fs.writeFileSync(path.join(agentDir, "models-store.json"),
-    JSON.stringify({ firstprovider: { models: [{ id: "first-model", cost: { input: 3, output: 4 } }] } }, null, 2));
+  // The providers the app already knows about, before any refresh. More than
+  // one model is what makes the default-model picker searchable.
+  fs.writeFileSync(path.join(agentDir, "models-store.json"), JSON.stringify({
+    firstprovider: { models: [
+      { id: "first-model", cost: { input: 3, output: 4 } },
+      { id: "first-fast", cost: { input: 1, output: 1 } },
+    ] },
+    secondprovider: { models: [{ id: "second-model", cost: { input: 5, output: 6 } }] },
+  }, null, 2));
 
   // A local models.dev stand-in, so the release-cache half never hits the network.
   const devPort = await freePort();
@@ -174,6 +188,33 @@ describe("settings → models → model update", () => {
       "the Update tab no longer offers the model refresh");
 
     assert.deepEqual(errors, [], "no page errors");
+    await page.close();
+  });
+
+  test("the default-model picker filters the catalogue as you type", async () => {
+    const { page, errors } = await openSection("models");
+    const sel = page.locator('select[data-model-select][data-act="setDefaultModel"]');
+    await sel.waitFor();
+    const all = await sel.locator("option").count();
+    assert.ok(all > 2, `the catalogue offers more than one model (${all})`);
+
+    await sel.click();
+    await page.waitForSelector(".scope-sel-pop:not([hidden])");
+    assert.equal(await page.locator(".scope-sel-opt").count(), all, "every option is listed to start with");
+    await page.keyboard.type("fast");
+    const rows = await page.locator(".scope-sel-opt .scope-sel-name").allInnerTexts();
+    assert.equal(rows.length, 1, `one row matches (${rows})`);
+    assert.match(rows[0], /fast/);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.querySelector(".scope-sel-pop")?.hidden === true);
+    assert.equal(await sel.inputValue(), "firstprovider/first-fast", "Enter picks the match");
+    let saved = "";
+    for (let i = 0; i < 50 && saved !== "firstprovider/first-fast"; i++) {
+      saved = (await api("/settings")).data.defaultModel;
+      if (saved !== "firstprovider/first-fast") await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(saved, "firstprovider/first-fast", "the pick is written like any other change");
+    assert.deepEqual(errors, []);
     await page.close();
   });
 

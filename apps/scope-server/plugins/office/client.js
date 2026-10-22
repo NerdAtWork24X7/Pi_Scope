@@ -1048,7 +1048,7 @@
     return (
       `<label class="office-model-row" title="${escAttr(hint)}">` +
         `<span class="office-model-label">model</span>` +
-        `<select class="office-model-select${isOrch ? " office-orch-model" : ""}"${id} ` +
+        `<select class="office-model-select${isOrch ? " office-orch-model" : ""}"${id} data-model-select ` +
           `data-model-for="${isOrch ? "orchestrator" : "member"}"${who} ` +
           `aria-label="${escAttr(isOrch ? "The orchestrator's model" : `The model ${shown} runs on`)}">` +
           modelOptions(agent, isOrch ? orchModel() : memberModel(teamName, agent.key)) +
@@ -1913,7 +1913,7 @@
             `<input class="office-input" id="office-hire-display" maxlength="64" placeholder="Bob" ` +
             `spellcheck="false" autocomplete="off">`) +
           dialogField("Model", "optional — every provider's models",
-            `<select class="office-input" id="office-hire-model">` +
+            `<select class="office-input" id="office-hire-model" data-model-select>` +
               `<option value="">team default</option>` +
               modelOptionsHtml("") +
             `</select>`) +

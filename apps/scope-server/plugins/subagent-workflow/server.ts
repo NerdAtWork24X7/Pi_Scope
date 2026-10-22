@@ -220,6 +220,20 @@ const HISTORY_MAX = 10;
 const HISTORY_LOG_MAX = 120;
 const HISTORY_LOG_LINE_MAX = 1000;
 
+/**
+ * A start node's **chat log** — what its chat box sent and what the workflow
+ * answered — kept apart from the run history on purpose. The history is a
+ * picker of complete runs: capped small, each carrying its whole log. A
+ * conversation is long-lived and needs only each turn's message, status and
+ * answer, so it lives in its own store and is capped much higher. Sharing the
+ * history's cap is what dropped a chat's older messages after ten runs, and
+ * sharing its record shape would have made every message cost a full run log.
+ */
+const CHAT_KEY = "chat";
+const CHAT_MAX = 200;
+const CHAT_TASK_MAX = 4000;
+const CHAT_ANSWER_MAX = 8000;
+
 /** Live run caps. */
 const MAX_CONCURRENT = 4;
 const RUN_LOG_MAX = 400;
@@ -1777,6 +1791,117 @@ export function activate(api: any): void {
     } catch (err: any) {
       api.log(`could not record run ${run.id}: ${err?.message ?? err}`);
     }
+    syncChatTurn(run);
+  }
+
+  // ─── Chat log ────────────────────────────────────────────────────────────
+
+  /** The stored chat log for a workspace: start node id → its turns, oldest
+   *  first. */
+  function readChatMap(workspace: string): Record<string, any[]> {
+    const all = storeFor(workspace).get(CHAT_KEY, {});
+    const map = all && typeof all === "object" && !Array.isArray(all) ? all[workspace] : null;
+    return map && typeof map === "object" && !Array.isArray(map) ? map : {};
+  }
+  function writeChatMap(workspace: string, map: Record<string, any[]>): void {
+    const store = storeFor(workspace);
+    const all = store.get(CHAT_KEY, {});
+    const next = all && typeof all === "object" && !Array.isArray(all) ? { ...all } : {};
+    next[workspace] = map;
+    store.set(CHAT_KEY, next);
+  }
+
+  /** What a settled run answered: its end node's result, else the last node's —
+   *  the same order the client reads a live run in. */
+  function runAnswerText(run: any): string {
+    if (!run || !run.nodes) return "";
+    let wf: any = null;
+    try { wf = readState(run.workspace); } catch { wf = null; }
+    const wfNodes: any[] = Array.isArray(wf?.nodes) ? wf.nodes : [];
+    const outputOf = (id: string) => String(run.nodes[id]?.outputTail ?? run.nodes[id]?.output ?? "").trim();
+    for (const end of wfNodes.filter((n: any) => n && n.type === "end")) {
+      const text = outputOf(end.id);
+      if (text) return text;
+    }
+    for (const n of wfNodes) {
+      if (!n || n.type === "start" || n.type === "end") continue;
+      const text = outputOf(n.id);
+      if (text) return text;
+    }
+    return "";
+  }
+
+  /**
+   * Upsert one run's turn in its start node's chat log. Called from `saveRun`,
+   * which runs when a run starts and whenever a node settles — so a message is
+   * stored the moment it is sent, survives a reload mid-run, and gains its
+   * answer as soon as the run finishes.
+   */
+  function syncChatTurn(run: any): void {
+    if (!run || !run.workspace || !run.startId) return;
+    try {
+      const map = readChatMap(run.workspace);
+      const list = Array.isArray(map[run.startId]) ? map[run.startId].slice() : [];
+      const at = list.findIndex((t) => t && t.id === run.id);
+      const prev = at >= 0 ? list[at] : null;
+      const settled = run.status !== "running" && run.status !== "waiting";
+      const failed = Object.values(run.nodes || {}).find((s: any) => s && s.status === "error") as any;
+      const turn = {
+        id: run.id,
+        startId: run.startId,
+        task: clipText(String(run.task ?? ""), CHAT_TASK_MAX),
+        status: String(run.status || prev?.status || "started"),
+        startedAt: run.startedAt || prev?.startedAt || null,
+        finishedAt: run.finishedAt || prev?.finishedAt || null,
+        answer: settled ? clipText(runAnswerText(run), CHAT_ANSWER_MAX, true) : (prev?.answer || ""),
+        error: settled ? clipText(String(failed?.error || prev?.error || ""), CHAT_ANSWER_MAX) : (prev?.error || ""),
+      };
+      if (at >= 0) list[at] = turn; else list.push(turn);
+      map[run.startId] = list.slice(-CHAT_MAX);
+      writeChatMap(run.workspace, map);
+    } catch (err: any) {
+      api.log(`could not record chat turn ${run.id}: ${err?.message ?? err}`);
+    }
+  }
+
+  /**
+   * Every turn of a workspace's chats, oldest first. A turn still marked
+   * running (or waiting on a gate) whose process is gone can never finish — its
+   * children died with the app — so it is served as `interrupted`, exactly like
+   * a run record in the same position.
+   */
+  function readChat(workspace: string): any[] {
+    const map = readChatMap(workspace);
+    const live = RUNS.get(workspace);
+    let changed = false;
+    const out: any[] = [];
+    for (const [startId, list] of Object.entries(map)) {
+      if (!Array.isArray(list)) continue;
+      for (const raw of list) {
+        if (!raw || typeof raw !== "object") continue;
+        const turn = raw.startId === startId ? raw : { ...raw, startId };
+        if ((turn.status === "running" || turn.status === "waiting") && (!live || live.id !== turn.id)) {
+          turn.status = "interrupted";
+          changed = true;
+        }
+        out.push(turn);
+      }
+    }
+    if (changed) {
+      const next: Record<string, any[]> = {};
+      for (const turn of out) (next[turn.startId] ||= []).push(turn);
+      writeChatMap(workspace, next);
+    }
+    return out.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  }
+
+  /** Forget one start node's chat log (or every one, when no id is given). The
+   *  run records stay: they are the run picker, not the conversation. */
+  function clearChat(workspace: string, startId?: string): void {
+    const map = readChatMap(workspace);
+    if (startId) delete map[startId];
+    else for (const key of Object.keys(map)) delete map[key];
+    writeChatMap(workspace, map);
   }
 
   /**
@@ -3131,6 +3256,9 @@ export function activate(api: any): void {
       ...readState(workspace), workspace,
       run: publicRun(RUNS.get(workspace)),
       history: readHistory(workspace).map(summariseRun),
+      // The start nodes' conversations: what each chat box sent and what the
+      // workflow answered, kept apart from the (smaller) run history.
+      chat: readChat(workspace),
       triggers: triggersFor(workspace),
     };
   });
@@ -3168,10 +3296,10 @@ export function activate(api: any): void {
     const workspace = workspaceOf(ctx.url.searchParams.get("cwd"));
     const list = readHistory(workspace);
     const id = ctx.url.searchParams.get("id");
-    if (!id) return { workspace, history: list.map(summariseRun) };
+    if (!id) return { workspace, history: list.map(summariseRun), chat: readChat(workspace) };
     const rec = list.find((r) => r && r.id === id);
     if (!rec) return jsonResponse({ error: "no such run" }, 404);
-    return { workspace, run: rec };
+    return { workspace, run: rec, chat: readChat(workspace) };
   });
 
   // `platform` rides along so the node's settings popup can say `$SW_PROMPT` or
@@ -3390,7 +3518,9 @@ export function activate(api: any): void {
       const task = multiline(body.task).slice(0, PROMPT_MAX) || startNodeTask(workspace, startId);
       try {
         const run = await startRun(workspace, task, startId);
-        return jsonResponse({ workspace, run: publicRun(run) });
+        // The chat log already carries this turn (saveRun records it at start),
+        // so the page can paint the new message without a second round trip.
+        return jsonResponse({ workspace, run: publicRun(run), chat: readChat(workspace) });
       } catch (err: any) {
         return jsonResponse({ error: String(err?.message ?? err) }, 409);
       }
@@ -3425,6 +3555,16 @@ export function activate(api: any): void {
     const action = String(body?.action ?? "");
 
     switch (action) {
+      case "clearChat": {
+        // A start node's chat box asks for this: its own conversation is
+        // deleted, the run records it produced stay in the run picker.
+        const startId = String(body.startId ?? body.nodeId ?? "").trim() || undefined;
+        if (startId && !startNodeFor(workspace, startId)) {
+          return jsonResponse({ error: "no such start node" }, 404);
+        }
+        clearChat(workspace, startId);
+        return jsonResponse({ ok: true, workspace, chat: readChat(workspace) });
+      }
       case "setWorkflowName": {
         const name = collapse(body.name).slice(0, NAME_MAX);
         const state = commit(workspace, (current) => { current.name = name || "My Workflow"; return current; });

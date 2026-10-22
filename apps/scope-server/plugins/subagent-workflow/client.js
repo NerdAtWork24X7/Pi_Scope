@@ -135,6 +135,10 @@
   /** Run history: the summaries the server keeps, and the record being viewed. */
   let historyList = [];
   let historyRun = null;
+  /** The start nodes' chat logs — every message sent from a chat box and the
+   *  answer it got, oldest first. Kept apart from `historyList`: the run
+   *  history is capped small (it carries whole logs), a conversation is not. */
+  let chatLog = [];
   /** This workspace's triggers (schedule + event watch), as the server sees them. */
   let triggers = null;
   let harnesses = [];
@@ -262,6 +266,7 @@
       wf = data;
       adoptRun(data.run, true);
       historyList = Array.isArray(data.history) ? data.history : [];
+      if (Array.isArray(data.chat)) chatLog = data.chat;
       triggers = data.triggers || null;
       loadError = null;
     } catch (err) {
@@ -1853,7 +1858,7 @@
         `</div>`
       : "";
     return `<label class="sw-field"><span>Model <em>(optional)</em></span>` +
-      `<select class="set-select" id="sw-f-model">${opts}</select>` +
+      `<select class="set-select" id="sw-f-model" data-model-select>${opts}</select>` +
       `<input class="set-input sw-model-custom" id="sw-f-model-custom" value="${escAttr(known ? "" : value)}" ` +
         `placeholder="provider/model" style="display:${known || !value ? "none" : ""}">` +
       `<div class="sw-hint">${hint}${meta.modelFlag ? ` Passed as <code>${esc(meta.modelFlag)}</code>.` : ""}</div>` + warn + `</label>` +
@@ -3373,18 +3378,30 @@
   }
 
   /**
-   * The runs one start node began, oldest first, capped. A run recorded before
-   * start nodes carried ids (`startId: null`) belongs to the only start node on
-   * the canvas; with several, it is not guessed at. The live run is the newest
-   * turn whether or not it has finished.
+   * One start node's conversation, oldest first: every turn its chat box
+   * recorded (the server keeps them apart from the run history, so a long
+   * conversation outlives the ten runs the run picker keeps), plus the live run
+   * until the server has stored it — a send shows up immediately. A turn
+   * recorded before start nodes carried ids (`startId: null`) belongs to the
+   * only start node on the canvas; with several, it is not guessed at.
    */
-  function startTurns(n) {
+  function chatTurnsFor(n) {
     const starts = nodes().filter((x) => x.type === "start");
     const mine = (rec) => (rec && rec.startId ? rec.startId === n.id : starts.length === 1 && starts[0].id === n.id);
-    const out = historyList.filter(mine);
-    const live = run && run.id && mine(run) ? run : null;
-    if (live && !out.some((h) => h.id === live.id)) out.push(live);
-    return out.slice(-20);
+    const out = (Array.isArray(chatLog) ? chatLog : []).filter(mine);
+    // Only a run that is still going is folded in (its answer streams from the
+    // node state). A settled one belongs to the stored log alone — otherwise a
+    // cleared conversation would put its last run back on screen, since the
+    // server keeps the finished run for the canvas.
+    const live = run && run.id && (run.status === "running" || run.status === "waiting") && mine(run) ? run : null;
+    if (live && !out.some((t) => t.id === live.id)) {
+      out.push({
+        id: live.id, startId: n.id, task: live.task || "", status: live.status,
+        startedAt: live.startedAt || Date.now(), finishedAt: live.finishedAt || null,
+        answer: "", error: "",
+      });
+    }
+    return out.slice().sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   }
 
   /**
@@ -3395,7 +3412,7 @@
    * history picker.
    */
   function startChatHtml(n) {
-    const turns = startTurns(n);
+    const turns = chatTurnsFor(n);
     const streaming = run?.status === "running";
     const draft = readChatDraft(n.id);
     const queued = chatQueue.get(n.id) || "";
@@ -3403,17 +3420,21 @@
 
     // One turn is a conversation pair, the way a chat reads: what was asked,
     // then what the workflow answered (the run's final output, streaming in
-    // while it goes). An older turn reopens that run when clicked.
+    // while it goes). A turn whose run is still in the run history opens that
+    // run when clicked.
     const rows = turns.map((t) => {
       const when = t.finishedAt || t.startedAt;
       const time = when ? new Date(when).toLocaleTimeString([], { hour12: false }) : "";
       const live = !!(run && t.id === run.id);
       const state = String(t.status || "started");
-      const count = typeof t.nodes === "number" ? t.nodes : Object.keys(t.nodes || {}).length;
-      const answer = runAnswer(t);
+      const count = typeof t.nodes === "number" ? t.nodes : (live && run?.nodes ? Object.keys(run.nodes).length : 0);
+      // A live run answers out of its own node state (so the reply streams); a
+      // stored turn carries the answer its run produced when it settled.
+      const answer = live ? runAnswer(run) : { text: t.answer || "", error: t.error || "" };
+      const reopenable = !live && historyList.some((h) => h && h.id === t.id);
       const meta = [state, time, count ? `${count} node${count === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
-      return `<div class="sw-chat-turn${live ? " live" : ""}"${live ? "" : ` data-run="${escAttr(t.id)}"`} ` +
-          `title="${live ? "This run" : "Open this run"}">` +
+      return `<div class="sw-chat-turn${live ? " live" : ""}"${reopenable ? ` data-run="${escAttr(t.id)}"` : ""} ` +
+          `title="${live ? "This run" : reopenable ? "Open this run" : "This message's run is no longer in the run history"}">` +
           `<div class="sw-chat-msg sw-chat-user">` +
             `<div class="sw-chat-bubble">${esc(t.task || "—")}</div>` +
           `</div>` +
@@ -3462,6 +3483,7 @@
             `<button class="sw-chat-tool" type="button" data-chat-attach="1" title="Attach files to this message">📎 Attach</button>` +
             (canDefault ? `<button class="sw-chat-tool" type="button" data-chat-default="1" title="Put this node's default task in the box">Default</button>` : "") +
             (streaming ? `<button class="sw-chat-tool sw-chat-stop" type="button" data-chat-stop="1">■ Stop</button>` : "") +
+            (turns.length ? `<button class="sw-chat-tool sw-chat-clear" type="button" data-chat-clear="1" title="Delete this chat's messages (the runs stay in the run history)">🗑 Clear history</button>` : "") +
             `<span class="sw-chat-hint">Enter to send · Shift+Enter for a new line</span>` +
           `</div>` +
           `<input type="file" class="sw-chat-file" multiple hidden>` +
@@ -3553,7 +3575,11 @@
     const waiting = !historyRun && run?.status === "running" ? waitingNodes().map((n) => n.id) : [];
     const entries = logEntries();
     const last = entries.length ? entries[entries.length - 1].seq : 0;
-    const sig = `${historyRun ? historyRun.id : "live"}|${focus.id}|${entries.length}|${last}|${waiting.join(",")}`;
+    // A start node's conversation is part of what it is showing: a turn that is
+    // added, settles or is cleared has to repaint even when no log line moved.
+    const chat = focus.type === "start" ? chatTurnsFor(focus) : [];
+    const chatSig = chat.length ? `${chat.length}:${chat[chat.length - 1].id}:${chat[chat.length - 1].status}` : "";
+    const sig = `${historyRun ? historyRun.id : "live"}|${focus.id}|${entries.length}|${last}|${waiting.join(",")}|${chatSig}`;
     if (sig === msgSig) return;
     msgSig = sig;
     const notes = new Map();
@@ -3676,6 +3702,9 @@
       e.preventDefault();
       void sendStartChat(focus.id, box.value);
     });
+    form?.querySelector("[data-chat-clear]")?.addEventListener("click", () => {
+      void clearChatHistory(focus.id);
+    });
     grow();
     sync();
     // A reopened run's turns are read from the newest back: keep the box in view.
@@ -3712,9 +3741,35 @@
       historyRun = null; // a new run takes the canvas back to the live view
       historySig = "";
       adoptRun(data.run, true);
+      // The server stored this message as a turn already: the conversation keeps
+      // every earlier message and the new one, and a reload shows them all.
+      if (Array.isArray(data.chat)) chatLog = data.chat;
       paint();
       syncPolling();
       S.toast?.("Workflow run started");
+    } catch (err) {
+      S.toast?.(String(err.message || err), "err");
+    }
+  }
+
+  /**
+   * Delete the selected start node's conversation. Confirmed first — it cannot
+   * be undone — and scoped to that entry point: another start's chat, and the
+   * run history the picker lists, are untouched.
+   */
+  async function clearChatHistory(nodeId) {
+    const n = nodeById(nodeId);
+    if (!n) return;
+    const count = chatTurnsFor(n).length;
+    if (!count) return;
+    const ok = window.confirm?.(`Clear ${count} message${count === 1 ? "" : "s"} from ${n.name}'s history?\n\nThe runs stay in the run history picker.`);
+    if (!ok) return;
+    try {
+      const data = await post("clearChat", { startId: nodeId });
+      chatLog = Array.isArray(data.chat) ? data.chat : chatLog.filter((t) => t.startId !== nodeId);
+      msgSig = "";
+      renderMessages();
+      S.toast?.("Chat history cleared");
     } catch (err) {
       S.toast?.(String(err.message || err), "err");
     }
@@ -3868,8 +3923,13 @@
   }
 
   async function refreshHistory() {
-    try { historyList = (await getJson("/subagent-workflow/history")).history || []; }
-    catch { /* keep what we have */ }
+    try {
+      const data = await getJson("/subagent-workflow/history");
+      historyList = data.history || [];
+      // The same read carries the chat log, so a run that just settled gets its
+      // answer into the conversation without waiting for a full reload.
+      if (Array.isArray(data.chat)) chatLog = data.chat;
+    } catch { /* keep what we have */ }
     renderHistory();
   }
 
@@ -3916,6 +3976,7 @@
       historyRun = null; // a new run takes the canvas back to the live view
       historySig = "";
       adoptRun(data.run, true);
+      if (Array.isArray(data.chat)) chatLog = data.chat;
       paint();
       syncPolling();
       S.toast?.("Workflow run started");

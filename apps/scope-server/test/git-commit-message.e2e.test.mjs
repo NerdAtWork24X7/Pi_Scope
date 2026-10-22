@@ -350,6 +350,16 @@ describe("git view", () => {
     assert.deepEqual(opts.slice(1, 1 + roster.length), roster, "roster models are offered");
     assert.equal(await page.inputValue(modelSel), "test/stub-model");
     assert.ok(opts.includes("test/stub-model"), "current model kept as an option");
+
+    // The roster is searchable: this picker is a model picker like the others.
+    await page.click(modelSel);
+    await page.waitForSelector(".scope-sel-pop:not([hidden])");
+    await page.keyboard.type("beta");
+    await page.waitForFunction(() => document.querySelectorAll(".scope-sel-opt").length === 1);
+    assert.match(await page.textContent(".scope-sel-opt"), /test\/beta/);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator(".scope-sel-pop").isHidden(), true);
+
     const outside = Object.keys((await api("/settings")).data.modelsMeta || {})
       .find((k) => !roster.includes(k));
     if (outside) assert.ok(!opts.includes(outside), `catalogue-only model ${outside} is not offered`);

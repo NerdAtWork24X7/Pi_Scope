@@ -1042,7 +1042,219 @@
     return t.slice(tail + SEED_TAIL.length).replace(/^\s+/, "");
   }
 
+  // ─── Model selects: type to filter ───────────────────────────────────────
+  /**
+   * A model <select> opens the browser's own list, which cannot be searched:
+   * with a few hundred provider ids the only way to reach one is to scroll.
+   * This turns every `select[data-model-select]` into a combobox — clicking (or
+   * typing on) the select opens an anchored panel with a search box; the typed
+   * words filter the options as substrings, ↑/↓ move, Enter picks, Esc closes.
+   *
+   * The <select> itself stays in the DOM and keeps its value and its `change`
+   * event, so every existing handler, poll and test keeps working: the panel is
+   * a view of the select's options, never a replacement for it. One delegated
+   * listener covers every such select, including the ones rendered after load
+   * (the settings page, the office floor, the workflow canvas).
+   *
+   * The styles live here rather than in styles.css/mobile.css because this one
+   * component is shared by the desktop page, the phone page and two plugin
+   * bundles; three copies of the same rules would drift.
+   */
+  const SEL = { pop: null, input: null, list: null, for: null, active: 0, rows: [], observer: null };
+
+  function selCss() {
+    if (document.getElementById("scope-sel-filter-css")) return;
+    const style = document.createElement("style");
+    style.id = "scope-sel-filter-css";
+    style.textContent =
+      `.scope-sel-pop{position:fixed;z-index:var(--z-modal,1200);display:flex;flex-direction:column;gap:4px;` +
+      `padding:6px;box-sizing:border-box;background:var(--glass-bg-strong,var(--surface,#fff));color:var(--text,#242423);` +
+      `border:1px solid var(--border,var(--border-subtle,#e3e3df));border-radius:var(--r-card,6px);` +
+      `box-shadow:var(--shadow-panel,0 18px 48px rgba(0,0,0,.2));font-family:var(--font-body,system-ui,sans-serif);` +
+      `font-size:13px;line-height:1.4;}` +
+      `.scope-sel-pop[hidden]{display:none;}` +
+      `.scope-sel-search{width:100%;box-sizing:border-box;margin:0;padding:6px 8px;` +
+      `background:var(--field-bg,var(--surface-2,#f5f5f3));color:inherit;` +
+      `border:1px solid var(--border,var(--border-subtle,#d3d3cc));border-radius:var(--r-control,4px);` +
+      `font-family:var(--mono,monospace);font-size:12.5px;outline:none;}` +
+      `.scope-sel-search:focus{border-color:var(--accent,#ffd43b);box-shadow:0 0 0 3px var(--accent-soft,rgba(255,212,59,.28));}` +
+      `.scope-sel-list{max-height:290px;overflow-y:auto;padding:2px;border-radius:var(--r-control,4px);` +
+      `background:var(--surface,#fbfbfa);}` +
+      `.scope-sel-opt{display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:4px;cursor:pointer;` +
+      `font-family:var(--mono,monospace);font-size:12.5px;color:var(--text,#242423);white-space:nowrap;overflow:hidden;}` +
+      `.scope-sel-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;}` +
+      `.scope-sel-group{flex:0 0 auto;color:var(--muted,var(--text-3,#71716c));font-size:11px;}` +
+      `.scope-sel-opt.scope-sel-active{background:var(--accent-soft,#fff1b6);color:var(--accent-ink,#554400);}` +
+      `.scope-sel-opt.scope-sel-current .scope-sel-name{font-weight:600;}` +
+      `.scope-sel-none{padding:9px 8px;color:var(--muted,var(--text-3,#71716c));font-size:12.5px;}`;
+    document.head.appendChild(style);
+  }
+
+  /** The option rows of `select` that match every word in `query`. */
+  function selRowsFor(select, query) {
+    const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+    const rows = [];
+    for (const opt of select.options) {
+      const group = opt.parentElement && opt.parentElement.tagName === "OPTGROUP" ? opt.parentElement : null;
+      if (opt.disabled || (group && group.disabled)) continue;
+      const label = String(opt.textContent || "").trim() || opt.value;
+      const groupLabel = group ? String(group.label || "") : "";
+      const hay = `${opt.value} ${label} ${groupLabel}`.toLowerCase();
+      if (words.length && !words.every((w) => hay.includes(w))) continue;
+      rows.push({ value: opt.value, label, group: groupLabel });
+    }
+    return rows;
+  }
+
+  function selEnsurePop() {
+    if (SEL.pop) return;
+    selCss();
+    const pop = document.createElement("div");
+    pop.className = "scope-sel-pop";
+    pop.hidden = true;
+    pop.innerHTML =
+      `<input class="scope-sel-search" type="text" role="combobox" aria-autocomplete="list" ` +
+      `aria-controls="scope-sel-listbox" aria-expanded="true" placeholder="Type to filter…" ` +
+      `autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">` +
+      `<div class="scope-sel-list" id="scope-sel-listbox" role="listbox"></div>`;
+    document.body.appendChild(pop);
+    SEL.pop = pop;
+    SEL.input = pop.querySelector(".scope-sel-search");
+    SEL.list = pop.querySelector(".scope-sel-list");
+
+    SEL.input.addEventListener("input", () => { SEL.active = 0; selPaint(); selPlace(); });
+    SEL.input.addEventListener("keydown", (e) => {
+      // The panel is a modal-ish popup: its keystrokes are the search's, never a
+      // shortcut of the view behind it (Esc would otherwise close the whole
+      // popup this picker was opened from).
+      e.stopPropagation();
+      const n = SEL.rows.length;
+      if (e.key === "ArrowDown") { e.preventDefault(); SEL.active = n ? (SEL.active + 1) % n : 0; selPaint(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); SEL.active = n ? (SEL.active - 1 + n) % n : 0; selPaint(); }
+      else if (e.key === "Home") { e.preventDefault(); SEL.active = 0; selPaint(); }
+      else if (e.key === "End") { e.preventDefault(); SEL.active = Math.max(0, n - 1); selPaint(); }
+      else if (e.key === "Enter") { e.preventDefault(); selPick(SEL.active); }
+      else if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); selClose(true); }
+    });
+    // The list must not steal focus from the search box, or the next keystroke
+    // would land nowhere.
+    SEL.list.addEventListener("mousedown", (e) => e.preventDefault());
+    SEL.list.addEventListener("click", (e) => {
+      const row = e.target && e.target.closest ? e.target.closest("[data-idx]") : null;
+      if (row) selPick(Number(row.dataset.idx));
+    });
+  }
+
+  function selPaint() {
+    const select = SEL.for;
+    if (!select || !SEL.list) return;
+    SEL.rows = selRowsFor(select, SEL.input.value);
+    const n = SEL.rows.length;
+    if (SEL.active >= n) SEL.active = n ? n - 1 : 0;
+    SEL.list.innerHTML = n
+      ? SEL.rows.map((row, i) =>
+          `<div class="scope-sel-opt${i === SEL.active ? " scope-sel-active" : ""}` +
+          `${row.value === select.value ? " scope-sel-current" : ""}" role="option" ` +
+          `id="scope-sel-opt-${i}" data-idx="${i}" aria-selected="${i === SEL.active}" ` +
+          `title="${escapeHtml(row.value)}"><span class="scope-sel-name">${escapeHtml(row.label)}</span>` +
+          `${row.group ? `<span class="scope-sel-group">${escapeHtml(row.group)}</span>` : ""}</div>`).join("")
+      : `<div class="scope-sel-none">No model matches “${escapeHtml(SEL.input.value.trim())}”.</div>`;
+    SEL.input.setAttribute("aria-activedescendant", n ? `scope-sel-opt-${SEL.active}` : "");
+    const active = SEL.list.querySelector(".scope-sel-active");
+    if (active && active.scrollIntoView) active.scrollIntoView({ block: "nearest" });
+  }
+
+  /** Place the panel under the select, or above it when there is more room. */
+  function selPlace() {
+    const select = SEL.for, pop = SEL.pop;
+    if (!select || !pop) return;
+    const r = select.getBoundingClientRect();
+    const width = Math.min(Math.max(Math.round(r.width), 240), Math.min(420, window.innerWidth - 16));
+    pop.style.width = `${width}px`;
+    pop.style.left = `${Math.max(6, Math.min(Math.round(r.left), window.innerWidth - width - 6))}px`;
+    const height = Math.min(360, Math.max(150, pop.offsetHeight || 240));
+    const below = window.innerHeight - r.bottom - 10;
+    pop.style.top = below >= Math.min(height, 200) || below >= r.top - 10
+      ? `${Math.round(r.bottom + 4)}px`
+      : `${Math.max(6, Math.round(r.top - 4 - height))}px`;
+  }
+
+  function selOpen(select, initial) {
+    if (!select || select.disabled) return;
+    selEnsurePop();
+    if (SEL.observer) SEL.observer.disconnect();
+    SEL.for = select;
+    SEL.input.value = initial ? String(initial) : "";
+    SEL.rows = selRowsFor(select, SEL.input.value);
+    const at = SEL.rows.findIndex((row) => row.value === select.value);
+    SEL.active = at >= 0 ? at : 0;
+    SEL.pop.hidden = false;
+    select.setAttribute("aria-expanded", "true");
+    selPaint();
+    selPlace();
+    SEL.input.focus({ preventScroll: true });
+    SEL.input.setSelectionRange(SEL.input.value.length, SEL.input.value.length);
+    // A repaint of the select (a new catalogue, a new roster) is reflected
+    // while the panel is open instead of leaving a stale list behind.
+    SEL.observer = new MutationObserver(() => { if (SEL.for) { selPaint(); selPlace(); } });
+    SEL.observer.observe(select, { childList: true });
+  }
+
+  function selClose(refocus) {
+    const select = SEL.for;
+    if (SEL.observer) { SEL.observer.disconnect(); SEL.observer = null; }
+    if (SEL.pop) SEL.pop.hidden = true;
+    if (select) select.removeAttribute("aria-expanded");
+    SEL.for = null;
+    SEL.rows = [];
+    if (refocus && select) select.focus({ preventScroll: true });
+  }
+
+  function selPick(index) {
+    const select = SEL.for;
+    const row = SEL.rows[index];
+    if (!select || !row) return;
+    selClose(false);
+    if (select.value !== row.value) {
+      select.value = row.value;
+      // The select keeps its own `change` contract: the poll handlers, the
+      // settings writers and the workflow's Custom… box all listen for it.
+      select.dispatchEvent(new Event("input", { bubbles: true }));
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    select.focus({ preventScroll: true });
+  }
+
+  /** Delegated open/close: one listener serves selects created at any time. */
+  function selInstall() {
+    const modelSelectOf = (target) => (target && target.closest ? target.closest("select[data-model-select]") : null);
+    document.addEventListener("mousedown", (e) => {
+      const select = modelSelectOf(e.target);
+      if (select) { e.preventDefault(); selOpen(select, ""); return; }
+      if (SEL.for && SEL.pop && !SEL.pop.contains(e.target)) selClose(false);
+    }, true);
+    document.addEventListener("keydown", (e) => {
+      if (SEL.for || e.metaKey || e.ctrlKey || e.altKey) return;
+      const select = modelSelectOf(e.target);
+      if (!select || select.disabled) return;
+      if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); selOpen(select, ""); return; }
+      // Typing on a focused pill starts the search, the way a combobox behaves.
+      if (e.key.length === 1) { e.preventDefault(); e.stopPropagation(); selOpen(select, e.key); }
+    }, true);
+    document.addEventListener("focusin", (e) => {
+      if (SEL.for && SEL.pop && !SEL.pop.contains(e.target) && e.target !== SEL.for) selClose(false);
+    }, true);
+    window.addEventListener("resize", () => { if (SEL.for) selPlace(); });
+    // Any scroller other than the panel's own list moves the anchor with it.
+    window.addEventListener("scroll", (e) => {
+      if (!SEL.for) return;
+      if (SEL.pop && SEL.pop.contains(e.target)) return;
+      selClose(false);
+    }, true);
+  }
+
   const HELPERS = {
+    filterableModelSelects: { install: selInstall, open: selOpen, close: selClose },
     fmtTs,
     fmtRel,
     markdownHtml,
@@ -1081,4 +1293,9 @@
   window.SCOPE = window.SCOPE || {};
   Object.assign(window.SCOPE, HELPERS);
   window.SCOPE.isToolResultError = isToolResultError;
+
+  // Every model picker is searchable from boot. The listeners are delegated, so
+  // a picker rebuilt by a poll (the chat composer, the office roster) or
+  // rendered later (Settings, the workflow panel) needs no extra wiring.
+  selInstall();
 })();

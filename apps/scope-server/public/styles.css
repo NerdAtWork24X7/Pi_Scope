@@ -51,6 +51,12 @@
       --surface: #fbfbfa;
       --surface-2: #f5f5f3;
       --surface-3: #ffffff;
+      /* Text-entry fields get their own fill, deeper than every card surface. A
+         field has to read as a box both on the page and on a toolbar, so it can
+         share neither --bg (which IS the page) nor --surface-3 (a card on it):
+         a white textarea in the Git commit bar was indistinguishable from the
+         bar, and the same held for the dark theme. */
+      --field-bg: #efefec;
       --border: #e3e3df;
       --border-strong: #d3d3cc;
       --hairline: rgba(36, 36, 35, 0.055);
@@ -126,6 +132,7 @@
       --surface: #222220;
       --surface-2: #232321;
       --surface-3: #272725;
+      --field-bg: #2e2e2a;
       --border: #3b3b36;
       --border-strong: #4a4a42;
       --hairline: rgba(255, 255, 255, 0.055);
@@ -474,7 +481,7 @@
     .sidebar-filters select {
       width: 100%;
       padding: 4px 6px;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-sharp);
       color: var(--text);
@@ -757,7 +764,7 @@
 
     #search-box {
       padding: 3px 6px;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-sharp);
       color: var(--text);
@@ -2469,7 +2476,7 @@
 
     .diagram-toolbar input[type="text"] {
       font-family: var(--mono), var(--emoji);
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-sharp);
       color: var(--text);
@@ -3160,7 +3167,7 @@
     .cp-modal-select {
       width: 100%;
       padding: 6px 8px;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-control);
       color: var(--text);
@@ -3344,7 +3351,7 @@
 
     #trajectory-search {
       padding: 3px 6px;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-sharp);
       color: var(--text);
@@ -4542,7 +4549,7 @@ body.layout-form #trajectory-inspector {
       align-self: stretch;
       resize: none;
       padding: 7px 9px;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-control);
       color: var(--text);
@@ -4875,7 +4882,7 @@ body.layout-form #trajectory-inspector {
       height: calc(100% - 90px);
       min-height: 400px;
       padding: 10px 14px;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-control);
       color: var(--text);
@@ -5160,7 +5167,7 @@ body.layout-form #trajectory-inspector {
       width: 100%;
       box-sizing: border-box;
       padding: 7px 10px;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-control);
       color: var(--text);
@@ -5261,7 +5268,7 @@ body.layout-form #trajectory-inspector {
     .git-new-branch input {
       flex: 1;
       padding: 4px 8px;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-control);
       color: var(--text);
@@ -5302,7 +5309,7 @@ body.layout-form #trajectory-inspector {
 
     .git-remote-form input {
       padding: 4px 8px;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-control);
       color: var(--text);
@@ -5771,7 +5778,7 @@ body.layout-form #trajectory-inspector {
     .chat-ws-add-input {
       flex: 1 1 0;
       min-width: 0;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       border-radius: var(--r-btn);
       color: var(--text);
@@ -6875,7 +6882,7 @@ body.layout-form #trajectory-inspector {
       text-align: left;
       border: 1px solid var(--border);
       border-radius: var(--r-btn);
-      background: var(--bg);
+      background: var(--field-bg);
       color: var(--text);
       padding: 7px 10px;
       cursor: pointer;
@@ -6935,7 +6942,7 @@ body.layout-form #trajectory-inspector {
     .chat-ask-input {
       flex: 1;
       min-width: 0;
-      background: var(--bg);
+      background: var(--field-bg);
       border: 1px solid var(--border);
       color: var(--text);
       border-radius: var(--r-btn);
@@ -6987,7 +6994,7 @@ body.layout-form #trajectory-inspector {
     }
     .chat-ask-auto {
       border-color: var(--border);
-      background: var(--bg);
+      background: var(--field-bg);
     }
     .chat-ask-auto .chat-ask-note {
       color: var(--green);
@@ -9217,7 +9224,7 @@ body.layout-settings #sidebar-resizer {
   width: 100%;
   box-sizing: border-box;
   padding: 8px 11px;
-  background: var(--surface-2);
+  background: var(--field-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-btn);
   color: var(--text);
@@ -9233,7 +9240,7 @@ body.layout-settings #sidebar-resizer {
 .set-input:focus, .set-select:focus {
   outline: none;
   border-color: var(--accent);
-  background: var(--surface-3);
+  background: var(--field-bg);
 }
 .set-input-wrap { display: flex; gap: 8px; width: 100%; }
 .set-input-wrap .set-input { flex: 1; }
@@ -10068,7 +10075,7 @@ select, textarea, .cp-modal-select {
   font-family: var(--mono), var(--emoji);
   border-radius: var(--r-control);
   border: 1px solid var(--border);
-  background: var(--surface-2);
+  background: var(--field-bg);
   color: var(--text);
   transition: border-color var(--dur-fast) var(--ease-std), box-shadow var(--dur-fast) var(--ease-std);
 }
@@ -11106,7 +11113,7 @@ body.layout-form input[type="text"]:not(.chat-input) {
   font-family: var(--font-body), var(--emoji);
   font-size: 12px;
   color: var(--text);
-  background: var(--bg);
+  background: var(--field-bg);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 4px 8px;
@@ -12264,7 +12271,7 @@ body.has-wallpaper .settings-content {
   padding: 0 8px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--bg);
+  background: var(--field-bg);
   color: var(--text);
   font-family: var(--font-body), var(--emoji);
   font-size: 12px;

@@ -1626,6 +1626,14 @@ describe("office view", () => {
     const pick = pod("builder").locator(".office-model-select");
     assert.equal(await pick.getAttribute("data-model-for"), "member");
     assert.equal(await pick.inputValue(), "", "no model yet means the team default");
+    // The picker is searchable: each desk's list is the whole catalogue.
+    await pick.click();
+    await page.waitForSelector(".scope-sel-pop:not([hidden])");
+    await page.keyboard.type("v4-flash");
+    const filtered = await page.locator(".scope-sel-opt .scope-sel-name").allInnerTexts();
+    assert.ok(filtered.length >= 1 && filtered.every((t) => /v4-flash/i.test(t)),
+      `typing filters the desk's models (${filtered})`);
+    await page.keyboard.press("Escape");
     await pick.selectOption("deepseek/deepseek-v4-flash");
     await until(() => (mock.state.team.teams.dev.find((m) => m.name === "builder") || {}).model === "deepseek/deepseek-v4-flash", "the member's model is written");
     const posts = mock.requestsFor("/agent-team", "POST").filter((r) => r.body.action === "setMemberModel");

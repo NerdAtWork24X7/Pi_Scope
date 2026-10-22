@@ -1345,6 +1345,15 @@ describe("starting a session from the phone", () => {
     assert.ok(values.includes("stub/one") && values.includes("stub/two"), `the enabled models are the choices (${values})`);
     assert.equal(await page.locator("#m-model-select").inputValue(), "stub/one", "the configured default is preselected");
 
+    // The picker is searchable on the phone too: typing narrows the list.
+    await page.click("#m-model-select");
+    await page.waitForSelector(".scope-sel-pop:not([hidden])");
+    await page.keyboard.type("two");
+    await page.waitForFunction(() => document.querySelectorAll(".scope-sel-opt").length === 1);
+    assert.match(await page.textContent(".scope-sel-opt"), /stub\/two/);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator(".scope-sel-pop").isHidden(), true);
+
     // Picking a workspace marks it, and Escape closes the sheet.
     await page.click(`#m-ws-list .m-opt[data-ws="${wsB}"]`);
     assert.equal(await page.locator(`#m-ws-list .m-opt[data-ws="${wsB}"]`).getAttribute("aria-pressed"), "true");

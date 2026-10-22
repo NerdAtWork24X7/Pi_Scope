@@ -143,7 +143,7 @@
         <span id="terminal-title" style="font-weight:500">Terminal</span>
         <input id="terminal-cwd" type="text" placeholder="/path/to/repo"
           title="Shared working directory — auto-synced from the terminal's current directory; used by Files &amp; Checkpoints. You can still override it manually."
-          style="font-family:var(--mono);background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-control);color:var(--text);font-size:13.5px;padding:3px 6px;min-width:280px;flex:1">
+          style="font-family:var(--mono);background:var(--field-bg);border:1px solid var(--border);border-radius:var(--r-control);color:var(--text);font-size:13.5px;padding:3px 6px;min-width:280px;flex:1">
         </input>
         <div id="terminal-shell-picker" style="display:flex;gap:6px;align-items:center;">
           <button class="btn-sm" id="btn-bash" type="button" title="Open a Bash terminal">Bash</button>
@@ -231,7 +231,7 @@
         <span id="checkpoints-cwd-label" title="Working directory snapshotted by Checkpoints (set in the Terminal pane)"
           style="font-family:monospace;color:var(--muted);font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
         <input id="checkpoints-label" type="text" placeholder="label (optional)"
-          style="font-family:var(--mono);background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-control);color:var(--text);font-size:13.5px;padding:3px 6px;width:160px">
+          style="font-family:var(--mono);background:var(--field-bg);border:1px solid var(--border);border-radius:var(--r-control);color:var(--text);font-size:13.5px;padding:3px 6px;width:160px">
         <button class="btn-sm" id="btn-checkpoints-create" type="button"
           title="Create a git-backed checkpoint of the current working tree">＋ Checkpoint now</button>
         <button class="btn-sm" id="btn-checkpoints-refresh" type="button" title="Re-list checkpoints">↻ refresh</button>
@@ -400,7 +400,7 @@
                 <span class="chat-model-wrap" title="Model used for this chat">
                   <span class="dot">◆</span>
                   <span class="chat-model-label">Model</span>
-                  <select id="chat-model"></select>
+                  <select id="chat-model" data-model-select></select>
                 </span>
                 <span class="chat-mode-wrap" id="chat-mode-wrap" title="Agent mode advertised by this harness (ACP sessions)" hidden>
                   <span class="dot">◐</span>
