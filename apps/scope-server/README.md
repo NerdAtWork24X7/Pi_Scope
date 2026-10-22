@@ -93,6 +93,15 @@ transcript labels every reply with the harness that produced it — changing the
 picker later does not relabel earlier answers, and the attribution is included in
 the conversation snapshot a reload restores.
 
+Every external-harness turn is also recorded as a normal session in SQLite
+(`harness-record.ts`): Chat reports the user prompt when the run starts and the
+reply, thinking, tools and outcome when it settles, and the server stores them as
+`user_message` / `assistant_message` / `turn_*` events with `payload.harness`.
+That is what makes these conversations appear in the Chat **Workspaces** rail
+next to Pi sessions, open as a replayable transcript, and keep their harness
+attribution after a restart. A run stopped midway records the partial reply, and
+a run that could not start records the error instead of leaving a dangling turn.
+
 A harness's model list comes from its own CLI: a listing command where it has
 one — `opencode models`, `kilo models`, `cursor-agent --list-models` — or the
 metadata protocol it already speaks (`claude` initialize, Codex app-server
@@ -138,8 +147,12 @@ are refused: the harness runs its own tools. Claude Code and Codex CLI have no
 ACP server and keep their native protocols.
 
 The session id is kept in the agent dir (`chat-acp-sessions.json`, keyed by the
-chat session), so a **server restart** continues the same agent session with
-`session/load` — a CLI that refuses the id falls back to a fresh session. A
+chat session), so a **server restart** continues the same agent session. The
+handshake asks for ACP 2 and reads the agent's capabilities (the same negotiation
+t3code uses): a v2 agent that advertises `loadSession` is resumed with
+`session/load`, one that advertises `sessionCapabilities.resume` uses
+`session/resume`, and a v1-only agent keeps the original `session/load` path. A
+CLI that refuses the id falls back to a fresh `session/new`. A
 model or mode picked in the composer is pushed into the live session
 (`session/set_model` / `session/set_mode`) instead of waiting for a new one, and
 the modes the agent advertises get their own composer pill (Gemini's Plan/YOLO,

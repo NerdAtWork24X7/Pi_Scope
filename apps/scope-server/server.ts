@@ -31,7 +31,8 @@ import {
   shutdown as shutdownPlugins,
   storeFor,
 } from "./plugins.ts";
-import { startChat, startChatSession, killChatSession, stopChat, chatSessionPid, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatPendingDialog, chatLiveRuns, attachChatRun } from "./chat.ts";
+import { startChat, startChatSession, killChatSession, stopChat, chatSessionPid, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatPendingDialog, chatLiveRuns, attachChatRun, setHarnessRecorder } from "./chat.ts";
+import { harnessStartEvents, harnessEndEvents, type HarnessRecord, type NextSeq } from "./harness-record.ts";
 import { chatHarnessList, discoverHarnessModels, refreshHarnessModels } from "./harnesses.ts";
 import { discoverHarnessCommands } from "./harness-commands.ts";
 import { AcpSession } from "./acp-client.ts";
@@ -1527,6 +1528,12 @@ secureDbFile(DB_PATH);
 const q = prepare(db);
 const startTime = Date.now();
 
+// External harnesses (Claude Code, Codex, Gemini, …) have no pi extension to
+// post their events, so Chat hands us each turn's start/end. Store those as the
+// same observation events a pi session records; that is what puts the
+// conversation in the workspace rail and makes its transcript replayable.
+setHarnessRecorder((record) => recordHarnessTurn(record));
+
 // External IPv4 addresses a phone on the same Wi-Fi could actually reach.
 // Filters out loopback/internal and non-IPv4 interfaces, and prefers a
 // routable-looking address over docker/bridge ranges when several exist.
@@ -1862,6 +1869,35 @@ function ingestBatch(fn: (emit: (e: ObsEvent) => void) => void): void {
     throw err;
   }
   for (const e of pending) broadcastEvent(e);
+}
+
+/**
+ * Persist one external-harness chat turn (see harness-record.ts).
+ *
+ * Chat calls this at the start and end of a run. The events go through the
+ * normal ingest path, so SSE subscribers see the harness turn live and
+ * GET /sessions lists it exactly like a pi session — which is what the Chat
+ * workspace rail reads. Seq allocation starts at the session's highest stored
+ * value, so continuing a conversation or restarting the server never collides.
+ */
+function recordHarnessTurn(record: HarnessRecord): void {
+  try {
+    const sessionId = record.kind === "start" ? record.start.sessionId : record.end.sessionId;
+    const row: any = q.getMaxSeq.get({ $session_id: sessionId });
+    let seq = Number(row?.max_seq ?? -1);
+    const nextSeq: NextSeq = () => {
+      seq += 1;
+      return seq;
+    };
+    const events = record.kind === "start"
+      ? harnessStartEvents(record.start, nextSeq)
+      : harnessEndEvents(record.end, nextSeq);
+    for (const event of events) ingestEvent(event);
+  } catch (error) {
+    // A failed write must not take down the chat stream. Chat's recorder hook
+    // also guards, but log the cause here so a broken DB is visible.
+    console.error("failed to record harness turn:", error);
+  }
 }
 
 // ─── Stopping a pi that runs in the user's OWN terminal ────────────────────

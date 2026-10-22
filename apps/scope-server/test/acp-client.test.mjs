@@ -133,3 +133,71 @@ test("dismissing a permission dialog cancels the request", async () => {
   assert.equal(session.answerPermission(permission.id, "Allow once", false), false, "a dialog answers once");
   session.close();
 });
+
+// ─── ACP v2 negotiation (t3code's protocol shape) ──────────────────────────
+
+const V2_AGENT = `
+import * as fs from "node:fs";
+import * as readline from "node:readline";
+const log = process.argv[2];
+const mode = process.argv[3] || "none";
+const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") {
+    fs.appendFileSync(log, "initialize=" + JSON.stringify(frame.params) + "\\n");
+    const capabilities =
+      mode === "load" ? { loadSession: true }
+      : mode === "resume" ? { sessionCapabilities: { resume: {} } }
+      : {};
+    return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 2, agentCapabilities: capabilities } });
+  }
+  if (frame.method === "session/load" || frame.method === "session/resume" || frame.method === "session/new") {
+    fs.appendFileSync(log, frame.method + "=" + (frame.params.sessionId || "") + "\\n");
+    return send({ jsonrpc: "2.0", id: frame.id, result: frame.method === "session/new" ? { sessionId: "new-session" } : {} });
+  }
+  if (frame.method === "session/set_model") return send({ jsonrpc: "2.0", id: frame.id, result: {} });
+});
+`;
+
+function fakeV2Agent(mode) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-acp-v2-"));
+  const log = path.join(dir, "methods.log");
+  fs.writeFileSync(path.join(dir, "agent.mjs"), V2_AGENT);
+  const file = path.join(dir, "agent");
+  fs.writeFileSync(
+    file,
+    `#!/bin/sh\nexec node "$(dirname "$0")/agent.mjs" '${log}' '${mode}' "$@"\n`,
+    { mode: 0o755 },
+  );
+  return { file, log };
+}
+
+for (const [mode, method, expectedId] of [
+  ["load", "session/load", "saved-1"],
+  ["resume", "session/resume", "saved-1"],
+  ["none", "session/new", "new-session"],
+]) {
+  test(`ACP v2 with ${mode} capability resumes via ${method}`, async () => {
+    const { file, log } = fakeV2Agent(mode);
+    const session = new AcpSession({
+      file,
+      args: [],
+      cwd: os.tmpdir(),
+      resumeSessionId: "saved-1",
+      startTimeoutMs: 10_000,
+      handlers: { onText: () => {} },
+    });
+    assert.equal(await session.start(), expectedId);
+    const calls = fs.readFileSync(log, "utf8").trim().split("\n");
+    const init = JSON.parse(calls.find((l) => l.startsWith("initialize=")).slice("initialize=".length));
+    assert.equal(init.protocolVersion, 2, "the client asks for the current ACP version");
+    assert.equal(init.clientInfo.name, "Pi Scope");
+    assert.ok(calls.includes(`${method}=` + (method === "session/new" ? "" : "saved-1")),
+      `expected ${method}, got ${calls.join(", ")}`);
+    assert.equal(session.resumedSession, mode !== "none");
+    session.close();
+  });
+}

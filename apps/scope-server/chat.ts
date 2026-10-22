@@ -30,6 +30,7 @@ import { readStoredKeys } from "./api-keys.ts";
 import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spawnCli, killTree } from "../../shared/shell.ts";
 import { DEFAULT_CHAT_HARNESS, buildHarnessLaunch, chatHarness, normalizeHarnessId, resolveHarnessBin } from "./harnesses.ts";
 import { AcpSession } from "./acp-client.ts";
+import type { HarnessRecord, HarnessRecordTool } from "./harness-record.ts";
 import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 // Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
 // PATH (force-loading the Pi Scope extension). Must be imported before PI_BIN is
@@ -873,9 +874,36 @@ interface HarnessChatSession {
   lastRun: { outcome: "done" | "error" | "aborted"; at: number } | null;
   history: Array<{ role: "user" | "assistant"; text: string }>;
   librarySent: boolean;
+  /** The in-flight turn's output, kept so Stop can record what the agent had
+   *  already said instead of closing the turn as empty. */
+  runOutput: string;
+  runThinking: string;
+  runTools: HarnessRecordTool[];
 }
 
 const harnessSessions = new Map<string, HarnessChatSession>();
+
+// ─── Recording harness turns ───────────────────────────────────────────────
+// pi records itself through its extension; an external harness does not. Chat
+// is the only place that sees the turn, so it hands a start/end record to the
+// server (which turns it into observation events). Kept as a hook so chat.ts
+// stays independent of SQLite and the tests can observe it without a server.
+let harnessRecorder: ((record: HarnessRecord) => void) | null = null;
+
+/** Install the sink that persists external-harness turns (null in unit tests). */
+export function setHarnessRecorder(fn: ((record: HarnessRecord) => void) | null): void {
+  harnessRecorder = fn;
+}
+
+function recordHarness(record: HarnessRecord): void {
+  try {
+    harnessRecorder?.(record);
+  } catch (error) {
+    // A failed record must never take down the chat stream (or leave the CLI
+    // running without a reader). The conversation still works without its row.
+    console.error("failed to record harness turn:", error);
+  }
+}
 
 // ─── ACP session ids that survive a server restart ─────────────────────────
 // An ACP session is the conversation: its id is what `session/load` needs to
@@ -1042,6 +1070,9 @@ function startHarnessChat(
       lastRun: null,
       history: [],
       librarySent: false,
+      runOutput: "",
+      runThinking: "",
+      runTools: [],
     };
     harnessSessions.set(sid, sess);
   }
@@ -1069,7 +1100,38 @@ function startHarnessChat(
       owned.run = run;
       owned.runState = "running";
       owned.lastRun = null;
+      owned.runOutput = "";
+      owned.runThinking = "";
+      owned.runTools = [];
       runEmit(run, { type: "session", sessionId: sid, model, harness: harnessId });
+      recordHarness({
+        kind: "start",
+        start: {
+          sessionId: sid,
+          cwd: owned.cwd,
+          harness: harnessId,
+          model,
+          prompt,
+          at: run.startedAt,
+        },
+      });
+      // Close the turn when it failed before a runner started (no binary, a
+      // refused launch): otherwise the row would stay open forever.
+      const recordTurnError = (error: string) => recordHarness({
+        kind: "end",
+        end: {
+          sessionId: sid,
+          cwd: owned.cwd,
+          harness: harnessId,
+          model,
+          text: "",
+          thinking: owned.runThinking,
+          tools: owned.runTools.slice(),
+          outcome: "error",
+          error,
+          at: Date.now(),
+        },
+      });
 
       // Compose the message: an optional reference library on a new conversation,
       // the bounded transcript of the earlier turns, then this prompt.
@@ -1097,6 +1159,7 @@ function startHarnessChat(
           owned.runState = null;
           owned.lastRun = { outcome: "error", at: Date.now() };
           const error = `${spec.label} was not found on PATH — install it, or point the app at its binary`;
+          recordTurnError(error);
           finishRun(run, { type: "error", message: error }, { type: "done", sessionId: sid, model, harness: harnessId, error });
           return;
         }
@@ -1107,10 +1170,26 @@ function startHarnessChat(
           if (finalText) runEmit(run, { type: "final", text: finalText });
           if (finalText) rememberHarnessTurn(owned, prompt, finalText);
           const aborted = owned.stopRequested;
+          const outcome = aborted ? "aborted" : error ? "error" : "done";
+          recordHarness({
+            kind: "end",
+            end: {
+              sessionId: sid,
+              cwd: owned.cwd,
+              harness: harnessId,
+              model,
+              text: finalText,
+              thinking: owned.runThinking,
+              tools: owned.runTools.slice(),
+              outcome,
+              error,
+              at: Date.now(),
+            },
+          });
           owned.run = null;
           owned.runState = null;
           owned.stopRequested = false;
-          owned.lastRun = { outcome: aborted ? "aborted" : error ? "error" : "done", at: Date.now() };
+          owned.lastRun = { outcome, at: Date.now() };
           const done = { type: "done", sessionId: sid, model, harness: harnessId, aborted };
           if (error && !aborted) finishRun(run, { type: "error", message: error }, { ...done, error });
           else finishRun(run, done);
@@ -1121,11 +1200,18 @@ function startHarnessChat(
           onText: (delta: string) => {
             owned.lastUsed = Date.now();
             text = (text + delta).slice(-HARNESS_OUTPUT_MAX_CHARS);
+            owned.runOutput = (owned.runOutput + delta).slice(-HARNESS_OUTPUT_MAX_CHARS);
             run.sawText = true;
             runEmit(run, { type: "text", delta });
           },
-          onThought: (delta: string) => runEmit(run, { type: "thinking", delta }),
-          onToolStart: (name: string, args: string) => runEmit(run, { type: "tool_start", name, args }),
+          onThought: (delta: string) => {
+            owned.runThinking = (owned.runThinking + delta).slice(-HARNESS_OUTPUT_MAX_CHARS);
+            runEmit(run, { type: "thinking", delta });
+          },
+          onToolStart: (name: string, args: string) => {
+            owned.runTools.push({ name, args });
+            runEmit(run, { type: "tool_start", name, args });
+          },
           onToolEnd: (name: string) => runEmit(run, { type: "tool_end", name }),
           onPermission: (request: { id: string; title: string; options: Array<{ label: string }> }) => {
             // The chat's existing select-dialog card answers this: its reply
@@ -1205,6 +1291,7 @@ function startHarnessChat(
         owned.run = null;
         owned.runState = null;
         owned.lastRun = { outcome: "error", at: Date.now() };
+        recordTurnError(launch.error);
         finishRun(
           run,
           { type: "error", message: launch.error },
@@ -1230,6 +1317,7 @@ function startHarnessChat(
         owned.runState = null;
         owned.lastRun = { outcome: "error", at: Date.now() };
         const message = `failed to start ${launch.file}: ${err?.message ?? err}`;
+        recordTurnError(message);
         finishRun(
           run,
           { type: "error", message },
@@ -1254,6 +1342,7 @@ function startHarnessChat(
         output = (output + text).slice(-HARNESS_OUTPUT_MAX_CHARS);
         const clean = stripHarnessAnsi(text);
         if (clean) {
+          owned.runOutput = (owned.runOutput + clean).slice(-HARNESS_OUTPUT_MAX_CHARS);
           run.sawText = true;
           runEmit(run, { type: "text", delta: clean });
         }
@@ -1276,10 +1365,26 @@ function startHarnessChat(
         if (text) runEmit(run, { type: "final", text });
         if (text) rememberHarnessTurn(owned, prompt, text);
         const aborted = owned.stopRequested;
+        const outcome = aborted ? "aborted" : error ? "error" : "done";
+        recordHarness({
+          kind: "end",
+          end: {
+            sessionId: sid,
+            cwd: owned.cwd,
+            harness: harnessId,
+            model,
+            text,
+            thinking: owned.runThinking,
+            tools: owned.runTools.slice(),
+            outcome,
+            error,
+            at: Date.now(),
+          },
+        });
         owned.run = null;
         owned.runState = null;
         owned.stopRequested = false;
-        owned.lastRun = { outcome: aborted ? "aborted" : error ? "error" : "done", at: Date.now() };
+        owned.lastRun = { outcome, at: Date.now() };
         const done = { type: "done", sessionId: sid, model, harness: harnessId, aborted };
         if (error && !aborted) {
           finishRun(run, { type: "error", message: error }, { ...done, error });
@@ -1751,6 +1856,20 @@ export function killChatSession(id: string): void {
 function finishHarnessRunAsStopped(sess: HarnessChatSession): void {
   const run = sess.run;
   if (!run) return;
+  recordHarness({
+    kind: "end",
+    end: {
+      sessionId: sess.id,
+      cwd: sess.cwd,
+      harness: sess.harness,
+      model: sess.model,
+      text: stripHarnessAnsi(sess.runOutput).trim(),
+      thinking: sess.runThinking,
+      tools: sess.runTools.slice(),
+      outcome: "aborted",
+      at: Date.now(),
+    },
+  });
   sess.run = null;
   sess.runState = null;
   sess.stopRequested = false;

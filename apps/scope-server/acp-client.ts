@@ -84,6 +84,15 @@ export class AcpSession {
    *  one of these ids). Empty when the harness has no modes. */
   private modes: Array<{ id: string; name: string; description?: string }> = [];
   private currentMode = "";
+  /** The version the agent settled on in `initialize`. A v1 agent has no
+   *  capability map to inspect, so resuming keeps the old `session/load` try. */
+  private protocolVersion = 1;
+  /** What the agent advertised in `initialize` (ACP v2 uses this to choose
+   *  between `session/load` and `session/resume`). */
+  private agentCapabilities: Record<string, any> = {};
+  /** Whether this process attached to the saved conversation rather than
+   *  creating a new one. */
+  private resumed = false;
 
   private child: ChildProcess | null = null;
   private buffer = "";
@@ -112,6 +121,10 @@ export class AcpSession {
   }
 
   get sessionId(): string { return this.sid; }
+  /** The ACP protocol version negotiated with the agent. */
+  get acpProtocolVersion(): number { return this.protocolVersion; }
+  /** True when `start()` loaded/resumed the saved conversation. */
+  get resumedSession(): boolean { return this.resumed; }
   get availableModes(): Array<{ id: string; name: string; description?: string }> {
     return this.modes.map((m) => ({ ...m }));
   }
@@ -148,28 +161,56 @@ export class AcpSession {
       (timer as any)?.unref?.();
     });
     const handshake = (async () => {
-      await this.request("initialize", {
-        protocolVersion: 1,
+      // ACP 2 is the current protocol (the same version t3code negotiates):
+      // a v1-only agent answers with `protocolVersion: 1`, and `session/load`
+      // stays the way to resume. A v2 agent tells us through its capabilities
+      // which resume method it actually implements.
+      const initialized = await this.request("initialize", {
+        protocolVersion: 2,
+        clientInfo: { name: "Pi Scope", version: "1.0.0" },
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
         },
       });
+      this.protocolVersion = Number(initialized?.protocolVersion) || 1;
+      this.agentCapabilities = initialized?.agentCapabilities && typeof initialized.agentCapabilities === "object"
+        ? initialized.agentCapabilities
+        : {};
       // Resume first: the session carries the conversation and its context, so a
       // server restart continues instead of starting over. An agent that cannot
       // load (older build, expired id) falls back to a fresh session.
       let created: any = null;
       if (this.resumeSessionId) {
-        try {
-          const loaded = await this.request("session/load", {
-            sessionId: this.resumeSessionId,
-            cwd: this.cwd,
-            mcpServers: [],
-          });
-          // A load answer may carry the session's modes (Gemini does); keep them.
-          created = { ...(loaded && typeof loaded === "object" ? loaded : {}), sessionId: this.resumeSessionId };
-        } catch {
-          created = null;
+        const caps = this.agentCapabilities;
+        const canLoad = this.protocolVersion < 2 || caps.loadSession === true;
+        const canResume = caps.sessionCapabilities?.resume != null;
+        if (canLoad) {
+          try {
+            const loaded = await this.request("session/load", {
+              sessionId: this.resumeSessionId,
+              cwd: this.cwd,
+              mcpServers: [],
+            });
+            // A load answer may carry the session's modes (Gemini does); keep them.
+            created = { ...(loaded && typeof loaded === "object" ? loaded : {}), sessionId: this.resumeSessionId };
+            this.resumed = true;
+          } catch {
+            created = null;
+          }
+        }
+        if (!created && canResume) {
+          try {
+            const resumed = await this.request("session/resume", {
+              sessionId: this.resumeSessionId,
+              cwd: this.cwd,
+              mcpServers: [],
+            });
+            created = { ...(resumed && typeof resumed === "object" ? resumed : {}), sessionId: this.resumeSessionId };
+            this.resumed = true;
+          } catch {
+            created = null;
+          }
         }
       }
       if (!created) created = await this.request("session/new", { cwd: this.cwd, mcpServers: [] });
