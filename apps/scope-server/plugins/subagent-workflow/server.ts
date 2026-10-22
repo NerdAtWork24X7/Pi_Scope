@@ -399,6 +399,9 @@ const HARNESSES: Record<string, any> = {
   claude: {
     label: "Claude Code", bin: "claude", args: (p: string) => ["-p", p], modelFlag: "--model",
     models: ["sonnet", "opus", "haiku", "claude-sonnet-4-5", "claude-opus-4-1"],
+    // No `models` command, but the control channel's initialize response lists
+    // the aliases this install accepts (host `harness-model-discovery.ts`).
+    modelsVia: "claude-control",
     capabilities: {
       tools: { flag: "--allowedTools", style: "csv" },
       // Claude Code discovers skills from `.claude/skills/` and its extensions
@@ -418,14 +421,16 @@ const HARNESSES: Record<string, any> = {
     // ACP-capable: a node runs as a live session when the host hands over the
     // client (see `runAcpNode`). `--acp` needs a signed-in CLI.
     acpArgs: ["--acp"],
-    // Cline has no command that prints a model catalogue; the Model field keeps
-    // its "Custom…" entry for the ids a signed-in CLI offers.
+    // Cline has no command that prints a model catalogue; the host asks its ACP
+    // `session/new` response for the models a signed-in CLI offers.
     models: [],
+    modelsVia: "acp",
     capabilities: { tools: null, skills: null, extensions: null },
   },
   codex: {
     label: "Codex CLI", bin: "codex", args: (p: string) => ["exec", "--skip-git-repo-check", p], modelFlag: "--model",
     models: ["gpt-5-codex", "gpt-5", "gpt-5-mini", "o3", "o4-mini"],
+    modelsVia: "codex-app-server",
     capabilities: { tools: null, skills: null, extensions: null },
   },
   gemini: {
@@ -434,6 +439,7 @@ const HARNESSES: Record<string, any> = {
     // (there is no TTY here to answer the prompt).
     label: "Gemini CLI", bin: "gemini", args: (p: string) => ["-p", p, "--skip-trust"], modelFlag: "--model",
     models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"],
+    modelsVia: "acp",
     acpArgs: ["--acp", "--skip-trust"],
     capabilities: {
       // Comma-separated tool names that bypass the confirmation prompt.
@@ -495,6 +501,9 @@ const HARNESSES: Record<string, any> = {
   cursor: {
     label: "Cursor Agent", bin: "cursor-agent", args: (p: string) => ["-p", p], modelFlag: "--model",
     models: ["sonnet-4", "sonnet-4-thinking", "gpt-5"],
+    // Cursor prints the ids this install is signed in for (the interactive
+    // `/model` list is a TUI view, not usable from a pipe).
+    modelsArgs: ["--list-models"],
     capabilities: { tools: null, skills: null, extensions: null },
   },
   // The app's own runner: skills/tools/extensions map onto pi's own flags, which
@@ -1318,6 +1327,12 @@ export function activate(api: any): void {
   // factory, and an ACP harness then falls back to its one-shot invocation.
   const createAcpSession: ((opts: any) => any) | null =
     typeof api.kit.createAcpSession === "function" ? api.kit.createAcpSession : null;
+  // The host's harness-model catalogue, including the protocols that have no
+  // `models` command (Claude initialize, Codex app-server, ACP session/new).
+  // Feature-detected so this plugin still runs on a host that predates it; the
+  // CLI-only path below is then the fallback.
+  const hostModelsFor: ((id: string, opts?: any) => Promise<any>) | null =
+    typeof api.kit.harnessModelsFor === "function" ? api.kit.harnessModelsFor : null;
   /** The default shell a `custom` node runs when the user typed no command. */
   // On Windows the message is read from its **file**: `%SW_PROMPT%` is expanded
   // by cmd before parsing, so a quote or `&` in it becomes shell syntax. POSIX
@@ -1568,6 +1583,10 @@ export function activate(api: any): void {
       // node's Model dropdown asks the binary for the rest of its list itself, so
       // this says *what* to ask and lets the form say so while it waits.
       modelsArgs: Array.isArray(h.modelsArgs) && h.modelsArgs.length ? h.modelsArgs : null,
+      // The metadata protocol to ask when there is no models command (see the
+      // host's `harness-model-discovery.ts`); the client uses it only to know the
+      // list is live rather than a fixed alias table.
+      modelsVia: h.modelsVia || null,
       // Can this harness take a per-node **web search** switch? Only opencode
       // publishes one a workflow can set (see `applyOpencodeWebSearch`).
       webSearch: !!h.webSearch,
@@ -1617,19 +1636,43 @@ export function activate(api: any): void {
   }
 
   /**
-   * What `harness`'s own CLI says its models are (`opencode models`), cached for
-   * a few minutes so opening two nodes — or the same node twice — asks it once,
-   * while a model the user has just added to their CLI shows up on the next open
-   * rather than the next restart.
+   * What `harness`'s own CLI says its models are (`opencode models`), or what it
+   * publishes over its metadata protocol (Claude initialize, Codex app-server,
+   * ACP session/new), cached for a few minutes so opening two nodes — or the
+   * same node twice — asks it once, while a model the user has just added to
+   * their CLI shows up on the next open rather than the next restart.
    *
-   * `source` is the command line that answered (for the form's hint), and `null`
-   * for a harness that has no models command at all (`custom`, or any harness that
+   * The host owns that discovery matrix; this plugin calls it through the kit
+   * because packaged plugins cannot import server modules. If an older host does
+   * not provide it, the plugin's own `modelsArgs` path below is the fallback.
+   *
+   * `source` is the command/interface that answered (for the form's hint), and
+   * `null` for a harness with no live list at all (`custom`, or a harness that
    * only documents a fixed list). A failure is not cached: a missing binary or a
    * broken install can be fixed without restarting the server.
    */
-  async function cliModelsFor(id: string): Promise<{ models: string[]; source: string | null; error?: string }> {
+  async function cliModelsFor(id: string, force = false): Promise<{ models: string[]; source: string | null; error?: string }> {
     const spec = allHarnesses()[id];
-    if (!spec || !spec.bin || !Array.isArray(spec.modelsArgs) || !spec.modelsArgs.length) {
+    if (!spec || !spec.bin) return { models: [], source: null };
+    // The host owns the full discovery matrix (listing commands plus Claude's
+    // initialize, Codex's app-server, ACP session/new). Use it when it is there;
+    // a host that predates it falls through to the CLI-only path below. Only a
+    // non-empty answer is adopted: an unauthenticated/unavailable harness then
+    // keeps the same "nothing to ask" shape this route always had.
+    const hasLiveInterface = !!spec.modelsVia || (Array.isArray(spec.modelsArgs) && spec.modelsArgs.length > 0);
+    if (hostModelsFor && id !== "pi" && hasLiveInterface) {
+      try {
+        const found = await hostModelsFor(id, { force });
+        const models = Array.isArray(found?.models) ? found.models : [];
+        if (models.length) {
+          return {
+            models,
+            source: typeof found.source === "string" ? found.source : null,
+          };
+        }
+      } catch { /* fall back to the plugin's own listing command */ }
+    }
+    if (!Array.isArray(spec.modelsArgs) || !spec.modelsArgs.length) {
       return { models: [], source: null };
     }
     const source = `${spec.bin} ${spec.modelsArgs.join(" ")}`;
@@ -1637,7 +1680,7 @@ export function activate(api: any): void {
     if (!cmd) return { models: [], source, error: `${spec.bin} was not found on PATH` };
     const key = `${id}\u0000${cmd}`;
     const hit = cliModelsCache.get(key);
-    if (hit && Date.now() - hit.at < CLI_MODELS_TTL_MS) return { models: hit.models, source };
+    if (!force && hit && Date.now() - hit.at < CLI_MODELS_TTL_MS) return { models: hit.models, source };
     // stdout only: a CLI that prints its list to stderr as well would otherwise
     // contribute its single-word notices as "models" (opencode's own update
     // chatter goes to stderr, which is why a run sees it as a red line).
@@ -3309,15 +3352,17 @@ export function activate(api: any): void {
   }));
 
   /**
-   * The models a provider's own CLI reports, for a node's Model dropdown (see
-   * `cliModelsFor`). A harness with no models command answers with an empty list
-   * and a null `source`: there is nothing to ask, and the dropdown keeps offering
-   * the list the harness declares.
+   * The models a provider's own CLI/protocol reports, for a node's Model
+   * dropdown (see `cliModelsFor`). A harness with no live list answers with an
+   * empty list and a null `source`: there is nothing to ask, and the dropdown
+   * keeps offering the list the harness declares.
    */
   api.route("GET", "/subagent-workflow/models", async (ctx: any) => {
     const id = String(ctx.url.searchParams.get("harness") ?? "").trim();
     if (!allHarnesses()[id]) return jsonResponse({ error: `unknown harness: ${id || "(none)"}` }, 400);
-    return cliModelsFor(id);
+    // Settings → Models refreshes every harness at once; `refresh=1` makes this
+    // route ask the CLI again instead of answering from the five-minute cache.
+    return cliModelsFor(id, ctx.url.searchParams.get("refresh") === "1");
   });
 
   /**

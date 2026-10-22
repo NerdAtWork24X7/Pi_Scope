@@ -88,14 +88,21 @@ lists **Pi** (the default, with the app's full model catalogue) and the external
 CLIs **Claude Code**, **Codex CLI**, **Gemini CLI**, **opencode**, **Cline**,
 **Kilo Code**, **Aider** and **Cursor Agent**. The picker marks a CLI that is not
 installed and remembers the choice per browser; a prompt from an external harness
-runs that CLI non-interactively and streams its output as the chat reply.
+runs that CLI non-interactively and streams its output as the chat reply. The
+transcript labels every reply with the harness that produced it — changing the
+picker later does not relabel earlier answers, and the attribution is included in
+the conversation snapshot a reload restores.
 
-A harness's model list comes from its own CLI when it has a listing command —
-`opencode models`, `kilo models`, `cursor-agent --list-models` — so the pill shows
-the providers/models that CLI is actually set up for, not a baked-in list. The
-other harnesses show their documented aliases. The list is cached for five
-minutes and is re-asked after a failure, so signing in or editing the CLI's
-configuration shows up without a restart.
+A harness's model list comes from its own CLI: a listing command where it has
+one — `opencode models`, `kilo models`, `cursor-agent --list-models` — or the
+metadata protocol it already speaks (`claude` initialize, Codex app-server
+`model/list`, ACP `session/new` for Gemini/Cline). The pill therefore shows the
+providers/models that CLI is actually set up for, not a baked-in list. Aider,
+which publishes neither, shows its documented aliases. The list is cached for
+five minutes and is re-asked after a failure, so signing in or editing the CLI's
+configuration shows up without a restart. **Settings → Models → Refresh all
+models** bypasses that cache and re-asks every installed harness at once, so
+Chat and Workflow pick up changed lists immediately.
 
 Gemini CLI is launched with `--skip-trust` and Codex CLI with
 `--skip-git-repo-check`: the workspace picked in this app is the trust boundary,
@@ -255,7 +262,7 @@ address the token is required anyway (see the LAN notes in the root README).
 | GET | `/git/submodules` | List submodules |
 | POST | `/git/submodule` | Add/remove/update/init/deinit/sync a submodule |
 | GET | `/pi-update` | Compare the bundled Pi coding agent against the npm latest, plus `modelCatalog` (pi's model store + release cache; `cacheModels`/`cacheProviders` describe models.dev's whole release catalogue, not the providers the cost table lists) |
-| POST | `/pi-update` | `{ action: "check"|"update"|"refresh-models" }` — check, install the newest bundled agent, or fetch the model catalogs (`refresh-models` is what Settings → Models → Model update calls) |
+| POST | `/pi-update` | `{ action: "check"|"update"|"refresh-models" }` — check, install the newest bundled agent, or fetch the model catalogs. `refresh-models` (Settings → Models → Refresh all models) also re-reads the runtime's provider catalogue and re-asks every installed harness for its model list (`harnessModels` in the response) |
 | GET | `/auth/providers` | Provider catalogue (methods + status) and stored credentials, read live from the bundled agent |
 | POST | `/auth/login` | `{ providerId, type }` to start, `{ id, promptId, value }` to answer a prompt, `{ id, cancel: true }` to abort |
 | GET | `/auth/login?id=` | Current login session state (pending prompt + event log) |

@@ -38,6 +38,7 @@ let base;
 let tmpDir;
 let agentDir;
 let modelsDev;
+let opencodeModels;
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -103,6 +104,13 @@ before(async () => {
   fs.mkdirSync(stubDir, { recursive: true });
   writeStubPi(stubDir);
 
+  // A stub opencode whose `models` answer the test rewrites. The refresh must
+  // ask it again, not answer from the five-minute cache.
+  opencodeModels = path.join(tmpDir, "opencode-models.txt");
+  fs.writeFileSync(opencodeModels, "acme/old-model\n");
+  const opencode = path.join(stubDir, "opencode");
+  fs.writeFileSync(opencode, `#!/bin/sh\ncat ${JSON.stringify(opencodeModels)}\n`, { mode: 0o755 });
+
   // The providers the app already knows about, before any refresh. More than
   // one model is what makes the default-model picker searchable.
   fs.writeFileSync(path.join(agentDir, "models-store.json"), JSON.stringify({
@@ -138,6 +146,18 @@ before(async () => {
       SCOPE_TOKEN_FILE: path.join(tmpDir, "scope_token"),
       SCOPE_PI_BIN: path.join(stubDir, "pi"),
       SCOPE_MODELS_DEV_URL: `http://127.0.0.1:${devPort}/api.json`,
+      // One harness that can list its own models. The others are pinned to a
+      // missing path so the refresh is deterministic on a developer machine
+      // that happens to have kilo or cursor installed.
+      SCOPE_HARNESS_BIN_OPENCODE: path.join(stubDir, "opencode"),
+      SCOPE_HARNESS_BIN_KILO: path.join(stubDir, "missing-kilo"),
+      SCOPE_HARNESS_BIN_CURSOR: path.join(stubDir, "missing-cursor"),
+      // Protocol-backed harnesses are pinned away too: a developer machine with
+      // Claude/Codex/Gemini installed must not make this test spawn them.
+      SCOPE_HARNESS_BIN_CLAUDE: path.join(stubDir, "missing-claude"),
+      SCOPE_HARNESS_BIN_CODEX: path.join(stubDir, "missing-codex"),
+      SCOPE_HARNESS_BIN_GEMINI: path.join(stubDir, "missing-gemini"),
+      SCOPE_HARNESS_BIN_CLINE: path.join(stubDir, "missing-cline"),
       // No background refresh, so the click is the only thing that can change the list.
       SCOPE_MODEL_CATALOG: "off",
       PI_OFFLINE: "1",
@@ -198,6 +218,11 @@ describe("settings → models → model update", () => {
     const all = await sel.locator("option").count();
     assert.ok(all > 2, `the catalogue offers more than one model (${all})`);
 
+    // Center it first, then let Playwright's scroll settle: the picker closes on
+    // a scroll it did not originate, so a click that races the scroll event
+    // opens and immediately closes the panel.
+    await sel.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    await page.waitForTimeout(150);
     await sel.click();
     await page.waitForSelector(".scope-sel-pop:not([hidden])");
     assert.equal(await page.locator(".scope-sel-opt").count(), all, "every option is listed to start with");
@@ -235,5 +260,27 @@ describe("settings → models → model update", () => {
 
     assert.deepEqual(errors, [], "no page errors");
     await page.close();
+  });
+
+  test("refreshing models also re-asks every harness CLI", async () => {
+    // Warm the server's five-minute harness cache with the old answer.
+    const before = await api("/chat/harness-models?harness=opencode");
+    assert.equal(before.res.status, 200);
+    assert.deepEqual(before.data.models, ["acme/old-model"]);
+
+    fs.writeFileSync(opencodeModels, "acme/new-model\n");
+    const { res, data } = await api("/pi-update", {
+      method: "POST",
+      body: JSON.stringify({ action: "refresh-models" }),
+    });
+    assert.equal(res.status, 200);
+    const opencode = (data.harnessModels || []).find((h) => h.id === "opencode");
+    assert.ok(opencode, "the response reports the harness that was asked");
+    assert.deepEqual(opencode.models, ["acme/new-model"], "the refresh bypassed the cached list");
+
+    // The server cache now holds the fresh answer, so Chat/Workflow asking
+    // normally (no refresh flag) still see it.
+    const after = await api("/chat/harness-models?harness=opencode");
+    assert.deepEqual(after.data.models, ["acme/new-model"]);
   });
 });

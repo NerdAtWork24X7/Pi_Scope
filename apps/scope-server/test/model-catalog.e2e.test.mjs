@@ -144,6 +144,12 @@ async function startServer(agentDir, catalog, opts = {}) {
       SCOPE_MODEL_CATALOG: catalog,
       // Keep pi's own startup checks out of the way.
       PI_OFFLINE: "1",
+      // `refresh-models` also re-asks harness CLIs. Pin every one away so this
+      // suite never spawns a real coding agent on the machine running it.
+      ...Object.fromEntries(
+        ["opencode", "kilo", "cursor", "claude", "codex", "gemini", "cline"]
+          .map((id) => [`SCOPE_HARNESS_BIN_${id.toUpperCase()}`, path.join(stubDir, `missing-${id}`)]),
+      ),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

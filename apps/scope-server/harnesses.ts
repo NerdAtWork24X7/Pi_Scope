@@ -52,6 +52,12 @@
  */
 import { spawn } from "node:child_process";
 import { expandShellPath, resolveExecutable, spawnCli, killTree } from "../../shared/shell.ts";
+import {
+  discoverAcpModels,
+  discoverClaudeModels,
+  discoverCodexModels,
+  type ProtocolModelsResult,
+} from "./harness-model-discovery.ts";
 
 /** A harness the Chat composer can offer. */
 export interface ChatHarness {
@@ -69,6 +75,9 @@ export interface ChatHarness {
   models: string[];
   /** The CLI's own model listing command, when it has one. */
   modelsArgs?: string[];
+  /** How to ask for models over the CLI's protocol when it has no listing
+   *  command (Claude's initialize, Codex's app-server, ACP session/new). */
+  modelsVia?: "claude-control" | "codex-app-server" | "acp";
   /** How the composer's `/` menu learns this CLI's own commands (see
    *  harness-commands.ts). Absent = the CLI publishes no command interface. */
   commandsVia?: "pi-rpc" | "claude-control" | "codex-skills" | "acp";
@@ -101,6 +110,9 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
     promptStdin: false,
     modelFlag: "--model",
     models: ["sonnet", "opus", "haiku", "claude-sonnet-4-5", "claude-opus-4-1"],
+    // Claude's control channel reports the models this install can run; the
+    // curated list above is only a fallback for an older/unavailable CLI.
+    modelsVia: "claude-control",
     commandsVia: "claude-control",
   },
   codex: {
@@ -113,6 +125,7 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
     promptStdin: false,
     modelFlag: "--model",
     models: ["gpt-5-codex", "gpt-5", "gpt-5-mini", "o3", "o4-mini"],
+    modelsVia: "codex-app-server",
     commandsVia: "codex-skills",
   },
   gemini: {
@@ -126,6 +139,7 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
     promptStdin: false,
     modelFlag: "--model",
     models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"],
+    modelsVia: "acp",
     commandsVia: "acp",
     acpArgs: ["--acp", "--skip-trust"],
   },
@@ -150,6 +164,7 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
     promptStdin: true,
     modelFlag: "--model",
     models: [],
+    modelsVia: "acp",
     commandsVia: "acp",
     acpArgs: ["--acp"],
   },
@@ -512,31 +527,61 @@ export function parseHarnessModelLines(raw: string): string[] {
 }
 
 /**
- * Ask a harness's own CLI for the models it is set up for (`opencode models`,
- * `kilo models`, `cursor-agent --list-models`), cached for a few minutes and
- * keyed by the resolved binary so repointing a harness re-asks.
+ * Ask a harness for the models it is set up for: a listing command where the
+ * CLI has one (`opencode models`, `kilo models`, `cursor-agent --list-models`),
+ * otherwise the metadata protocol it already speaks (Claude's initialize,
+ * Codex's app-server, ACP session/new — see harness-model-discovery.ts). Cached
+ * for a few minutes and keyed by the resolved binary so repointing a harness
+ * re-asks.
  *
- * A harness with no listing command answers with its curated aliases and
- * `source: null` — the caller cannot tell that apart from a CLI that has one,
- * and does not need to. A failure (missing binary, non-zero exit, empty list) is
+ * A harness with neither interface answers with its curated aliases and
+ * `source: null`. A failure (missing binary, non-zero exit, empty list) is
  * returned with `error` and is NOT cached, so fixing the install or signing in
  * shows up on the next open instead of after the TTL.
  */
 export async function discoverHarnessModels(
   id: string,
   settings: HarnessSettings = EMPTY_HARNESS_SETTINGS,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; force?: boolean } = {},
 ): Promise<HarnessModelsResult> {
   const spec = chatHarness(id, settings);
   if (!spec) return { models: [], source: null, error: `unknown harness: ${normalizeHarnessId(id)}` };
-  if (!spec.modelsArgs?.length) return { models: spec.models.slice(), source: null };
+  // A CLI with neither a listing command nor a metadata protocol keeps the
+  // curated aliases this module declares.
+  if (!spec.modelsArgs?.length && !spec.modelsVia) return { models: spec.models.slice(), source: null };
   const file = resolveHarnessBin(spec.id, settings);
-  const source = `${spec.bin} ${spec.modelsArgs.join(" ")}`;
+  const source = spec.modelsArgs?.length
+    ? `${spec.bin} ${spec.modelsArgs.join(" ")}`
+    : spec.modelsVia === "claude-control"
+      ? `${spec.bin} initialize`
+      : spec.modelsVia === "codex-app-server"
+        ? `${spec.bin} app-server model/list`
+        : `${spec.bin} ACP session/new`;
   if (!file) return { models: [], source, error: `${spec.bin} was not found on PATH` };
 
-  const key = `${spec.id}\u0000${file}`;
+  const key = `${spec.id}\u0000${file}\u0000${spec.modelsVia || "cli"}`;
   const hit = modelsCache.get(key);
-  if (hit && Date.now() - hit.at < MODELS_TTL_MS) return hit.result;
+  if (!opts.force && hit && Date.now() - hit.at < MODELS_TTL_MS) return hit.result;
+
+  // Protocol discovery (Claude/Codex/Gemini/Cline) is a short metadata exchange,
+  // not a catalogue print, so it has its own path and error shapes.
+  if (!spec.modelsArgs?.length) {
+    let protocol: ProtocolModelsResult;
+    try {
+      const cwd = process.cwd();
+      protocol = spec.modelsVia === "claude-control"
+        ? await discoverClaudeModels(file, cwd, opts.timeoutMs ?? MODELS_TIMEOUT_MS)
+        : spec.modelsVia === "codex-app-server"
+          ? await discoverCodexModels(file, cwd, opts.timeoutMs ?? MODELS_TIMEOUT_MS)
+          : await discoverAcpModels(file, spec.acpArgs || [], cwd, opts.timeoutMs ?? MODELS_TIMEOUT_MS);
+    } catch (err: any) {
+      return { models: [], source, error: String(err?.message ?? err) };
+    }
+    if (!protocol.models.length) return { models: [], source, error: `${source} returned no models` };
+    const result: HarnessModelsResult = { models: protocol.models, source };
+    modelsCache.set(key, { at: Date.now(), result });
+    return result;
+  }
 
   const parsed = await new Promise<{ models: string[]; error?: string; detail?: string }>((resolve) => {
     let child: ReturnType<typeof spawn>;
@@ -579,6 +624,56 @@ export async function discoverHarnessModels(
   }
   modelsCache.set(key, { at: Date.now(), result });
   return result;
+}
+
+export interface HarnessModelsRefresh {
+  id: string;
+  label: string;
+  models: string[];
+  /** The command that answered, or null for a harness with a curated list. */
+  source: string | null;
+  error?: string;
+}
+
+/**
+ * Ask every installed harness for its current list, bypassing the five-minute
+ * cache. Settings → Models calls this next to the pi catalog refresh, so one
+ * click updates the models offered by Pi and by every CLI it can ask — the
+ * listing commands (opencode, kilo, cursor) and the protocol-backed ones
+ * (Claude, Codex, Gemini, Cline), not just pi's provider store.
+ *
+ * Harnesses with neither interface still answer with their curated aliases
+ * (`source: null`): the refresh reports them rather than silently leaving them
+ * out of "all harnesses". A missing/unknown harness is skipped — only CLIs this
+ * install can actually run are asked.
+ */
+export async function refreshHarnessModels(
+  settings: HarnessSettings = EMPTY_HARNESS_SETTINGS,
+): Promise<HarnessModelsRefresh[]> {
+  clearHarnessModelCache();
+  const targets = chatHarnessList(settings).filter((h) => h.id !== "pi" && h.available);
+  return Promise.all(targets.map(async (h) => {
+    try {
+      const result = await discoverHarnessModels(h.id, settings, { force: true });
+      return {
+        id: h.id,
+        label: h.label,
+        models: result.models,
+        source: result.source,
+        ...(result.error ? { error: result.error } : {}),
+      };
+    } catch (err: any) {
+      // One broken harness must never fail the whole refresh (or leave the
+      // route's other work un-awaited); report it in the same shape.
+      return {
+        id: h.id,
+        label: h.label,
+        models: [],
+        source: null,
+        error: String(err?.message ?? err),
+      };
+    }
+  }));
 }
 
 /** Drop the cached model lists (tests, and a Settings action that re-points a

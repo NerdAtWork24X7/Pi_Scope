@@ -8,7 +8,7 @@ import { test, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { startMockBackend, defaultTeam, makeSession } from "./mock-backend.mjs";
-import { launchBrowser, openChat, send, reply, wsRow } from "./harness.mjs";
+import { launchBrowser, openChat, send, reply, wsRow, sleep } from "./harness.mjs";
 
 const WS = "/tmp/pi-scope-e2e/harness";
 const SESS = { session_id: "sess-h", cwd: WS, agent_name: "orchestrator", first_msg: "harness work" };
@@ -124,6 +124,41 @@ test("a prompt carries the selected harness and omits pi-only fields", async () 
   await page.waitForFunction(() =>
     document.getElementById("chat-messages").textContent.includes("looks good to me"));
   assert.equal(env.pageErrors.length, 0, `no page errors: ${env.pageErrors.join("; ")}`);
+});
+
+test("the answer names the harness that produced it, and the snapshot keeps it", async () => {
+  await boot();
+  await page.selectOption("#chat-harness", "claude");
+  await page.waitForFunction(() => document.body.classList.contains("chat-external-harness"));
+
+  const turn = await send(page, mock, "summarise this file");
+  await reply(turn, "Claude wrote this reply", { sessionId: "h-2" });
+  await page.waitForFunction(() =>
+    document.getElementById("chat-messages").textContent.includes("Claude wrote this reply"));
+
+  // The transcript is a record of executions, so it names the CLI that ran
+  // THIS turn instead of printing pi's avatar/name for every reply. Changing
+  // the composer afterwards must not relabel it either.
+  const ai = page.locator(".chat-ai").last();
+  assert.equal(await ai.locator(".chat-msg-name").textContent(), "Claude Code");
+  assert.equal(await ai.locator(".chat-msg-avatar").textContent(), "✳");
+  await page.selectOption("#chat-harness", "pi");
+  assert.equal(await ai.locator(".chat-msg-name").textContent(), "Claude Code", "an earlier reply keeps its harness");
+
+  // Reloading restores that attribution rather than falling back to pi.
+  await sleep(1100); // snapshot writes are debounced
+  const snap = await page.evaluate(() => JSON.parse(localStorage.getItem("scope-chat-snapshot") || "null"));
+  assert.equal(snap?.msgs?.at(-1)?.harness, "claude", "the stored conversation records the harness");
+
+  // …and a reload restores both the reply and its attribution.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForSelector(`.chat-ws[data-cwd="${WS}"]`);
+  await wsRow(page, WS).click();
+  await page.waitForFunction(() =>
+    document.getElementById("chat-messages")?.textContent.includes("Claude wrote this reply"));
+  const restored = page.locator(".chat-ai").last();
+  assert.equal(await restored.locator(".chat-msg-name").textContent(), "Claude Code");
+  assert.equal(await restored.locator(".chat-msg-avatar").textContent(), "✳");
 });
 
 test("a harness saved by an earlier visit is selected on boot with its model", async () => {

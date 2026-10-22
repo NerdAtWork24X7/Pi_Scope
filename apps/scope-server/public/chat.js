@@ -137,6 +137,7 @@
     harnessesAt: 0,    // when that snapshot was fetched
     harnessModels: new Map(), // harness id → { models, source, error, at } from its own CLI
     harnessModelFetches: new Map(), // in-flight GET /chat/harness-models, one per harness
+    harnessModelsEpoch: 0, // bumped when Settings refreshes them, so a stale in-flight answer is dropped
     slashCommands: new Map(), // `${harness}\0${cwd}` → { commands, source, error, at } from the harness itself
     slashFetches: new Map(), // in-flight GET /chat/harness-commands, one per harness+cwd
     modelSig: "",      // the harness/model list last painted into the model <select>
@@ -1456,6 +1457,10 @@
             tools: (m.tools || []).map((t) => ({ name: t.name, state: t.state })),
             asks: (m.asks || []).slice(-16),
             model: m.model || "",
+            // Which CLI produced the reply: without it a restored Claude Code
+            // answer came back labelled pi (the composer's current choice is
+            // not evidence of who answered an earlier turn).
+            harness: m.role === "assistant" ? messageHarness(m) : "",
             ts: m.ts,
           }));
         // Store the workspace, its messages, the thread they belong to, the pi
@@ -1761,7 +1766,8 @@
     }
     const aiMsg = {
       role: "assistant", text: "", thinking: "", tools: [], usage: null,
-      model: run.model || CH.chatModel, ts: Date.now(), streaming: true,
+      model: run.model || CH.chatModel, harness: run.harness || currentHarness(),
+      ts: Date.now(), streaming: true,
     };
     t.history.push(aiMsg);
     t.live = { body: null, m: aiMsg, isFirst: true, queue: [], after: null };
@@ -2433,12 +2439,15 @@
     const errNote = m.errorNote ? `<div class="chat-error-note">${esc(m.errorNote)}</div>` : "";
     const stoppedNote = m.stopped ? `<div class="chat-stopped-note">⏹ stopped by you</div>` : "";
     const copyAttr = esc((m.text || "") + (m.thinking ? "\n\n" + m.thinking : ""));
+    // The harness that produced THIS reply — not whichever one the composer is
+    // set to now (see messageHarness).
+    const harness = messageHarness(m);
     return (
       `<div class="chat-msg chat-ai" data-i="${i}">` +
-      `<div class="chat-msg-avatar">π</div>` +
+      `<div class="chat-msg-avatar" title="${esc(harnessName(harness))}">${esc(harnessMark(harness))}</div>` +
       `<div class="chat-msg-body">` +
       `<div class="chat-msg-top">` +
-      `<span class="chat-msg-name">pi</span>` +
+      `<span class="chat-msg-name" title="${esc(harness === "pi" ? "Pi (built-in)" : harnessLabel(harness))}">${esc(harnessName(harness))}</span>` +
       (m.model ? `<span class="chat-msg-model" title="${esc(m.model)}">${esc(m.model)}</span>` : "") +
       `<span class="chat-msg-time">${esc(fmtTs(m.ts))}</span>` +
       `<span class="chat-msg-actions"><button type="button" class="chat-act" data-copy="${copyAttr}" title="Copy message">${ico(ICON_COPY, 13)}</button></span>` +
@@ -2574,12 +2583,13 @@
       : "";
     const tools = renderToolsHtml(m);
     const text = m.text ? liveTextHtml(m) : "";
+    const harness = messageHarness(m);
     return (
       `<div class="chat-msg chat-ai chat-ai-live" data-i="${dataIdx}">` +
-      `<div class="chat-msg-avatar">π</div>` +
+      `<div class="chat-msg-avatar" title="${esc(harnessName(harness))}">${esc(harnessMark(harness))}</div>` +
       `<div class="chat-msg-body">` +
       `<div class="chat-msg-top">` +
-      `<span class="chat-msg-name">pi</span>` +
+      `<span class="chat-msg-name" title="${esc(harness === "pi" ? "Pi (built-in)" : harnessLabel(harness))}">${esc(harnessName(harness))}</span>` +
       (m.model ? `<span class="chat-msg-model" title="${esc(m.model)}">${esc(m.model)}</span>` : "") +
       `<span class="chat-msg-time">${esc(fmtTs(m.ts))}</span>` +
       `<span class="chat-msg-actions"><button type="button" class="chat-act" data-copy="${copyAttr}" title="Copy message">${ico(ICON_COPY, 13)}</button></span>` +
@@ -3092,7 +3102,8 @@
         removeLiveRun(body);
         const m2 = {
           role: "assistant", text: "", thinking: "", tools: [], usage: null,
-          model: m.model || CH.chatModel, ts: Date.now(), streaming: true,
+          model: m.model || CH.chatModel, harness: m.harness || currentHarness(),
+          ts: Date.now(), streaming: true,
         };
         // Place the new bubble relative to any queued steer/follow-up bubbles so
         // an earlier run's leftover tool-loop messages land before the queued
@@ -3156,8 +3167,12 @@
       case "session":
         // The server announces the real subprocess session id at stream start
         // (it generates one when the request didn't carry one), so answers to
-        // extension dialogs can target the right session.
+        // extension dialogs can target the right session. It also names the
+        // harness that is answering: adopt it onto this bubble, so a reply from
+        // Claude Code (or any other CLI) never keeps pi's avatar/name.
         if (ev.sessionId) t.key = ev.sessionId;
+        if (ev.harness) m.harness = String(ev.harness);
+        if (body) setLiveHarness(body, m);
         if (t === curThread()) syncCurThread();
         break;
       case "ui_open": {
@@ -3393,6 +3408,41 @@
     return key === "pi" ? "Pi" : key;
   }
 
+  // Every assistant message records which harness produced it, so the
+  // transcript stays honest after the composer moves to another CLI: a reply
+  // Claude Code wrote must not keep the pi avatar. `pi` keeps its familiar
+  // glyph/name; an external harness gets a compact mark and its own label.
+  const HARNESS_MARKS = {
+    pi: "π", claude: "✳", codex: "⌘", gemini: "✦", opencode: "◍",
+    cline: "▣", kilo: "K", aider: "A", cursor: "▮", custom: "⚙",
+  };
+  /** The harness a stored/live message came from ("pi" for legacy messages). */
+  function messageHarness(m) {
+    return String(m?.harness || "").trim() || "pi";
+  }
+  function harnessMark(id) {
+    const key = String(id || "pi").toLowerCase();
+    if (HARNESS_MARKS[key]) return HARNESS_MARKS[key];
+    const label = harnessLabel(key);
+    return (label.match(/[A-Za-z0-9]/) || ["◆"])[0].toUpperCase();
+  }
+  function harnessName(id) {
+    return id === "pi" ? "pi" : harnessLabel(id);
+  }
+  /** Update a live bubble's avatar/name when the server names its harness. */
+  function setLiveHarness(body, m) {
+    if (!body) return;
+    const id = messageHarness(m);
+    const msg = body.closest(".chat-msg");
+    const avatar = msg?.querySelector(".chat-msg-avatar");
+    const name = msg?.querySelector(".chat-msg-name");
+    const mark = harnessMark(id);
+    const label = harnessName(id);
+    if (avatar && avatar.textContent !== mark) avatar.textContent = mark;
+    if (name && name.textContent !== label) name.textContent = label;
+    if (name) name.title = id === "pi" ? "Pi (built-in)" : harnessLabel(id);
+  }
+
   // Fetch the harness catalogue once at boot (and on demand when a picker is
   // opened after the server was unreachable). Five minutes is plenty: a CLI is
   // installed/removed far less often than a page is reloaded.
@@ -3415,6 +3465,19 @@
     } catch { /* server unreachable — keep the single Pi fallback option */ }
   }
 
+  // Settings → Models can force every harness CLI to be asked again (it shares
+  // this page, and its server-side cache is already cleared by then). Drop this
+  // page's own five-minute answers so the model pill shows the fresh lists
+  // instead of waiting out its TTL.
+  window.addEventListener("scope:models-refreshed", () => {
+    CH.harnesses = null;
+    CH.harnessesAt = 0;
+    CH.harnessModelsEpoch += 1;
+    CH.harnessModels.clear();
+    CH.harnessModelFetches.clear();
+    void fetchHarnesses(true);
+  });
+
   // Ask a harness's own CLI for the models it is configured for. Cached in the
   // page (and on the server) for five minutes; a failure leaves the curated
   // aliases in place, so the picker is never empty. Repainting is skipped when
@@ -3425,6 +3488,7 @@
     const cached = CH.harnessModels.get(id);
     if (!force && cached && Date.now() - cached.at < HARNESS_MODELS_TTL) return;
     if (CH.harnessModelFetches.has(id)) return CH.harnessModelFetches.get(id);
+    const epoch = CH.harnessModelsEpoch;
     const pending = (async () => {
       try {
         const { res, data } = await window.SCOPE.api("/chat/harness-models", { harness: id });
@@ -3432,6 +3496,9 @@
         const models = Array.isArray(data.models)
           ? data.models.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
           : [];
+        // A Settings refresh started while this request was in flight: its
+        // bypass-the-cache answer is the one that must win.
+        if (epoch !== CH.harnessModelsEpoch) return;
         CH.harnessModels.set(id, {
           models,
           source: typeof data.source === "string" ? data.source : null,
@@ -3441,7 +3508,7 @@
       } catch { /* keep the curated list */ }
       finally {
         CH.harnessModelFetches.delete(id);
-        if (id === currentHarness()) {
+        if (epoch === CH.harnessModelsEpoch && id === currentHarness()) {
           renderComposerModel();
           fitComposerSelects();
         }
@@ -4638,7 +4705,7 @@
         const gen = ++t.gen;
         t.busy = true;
         t.suppressed = false;
-        const aiMsg = { role: "assistant", text: "", thinking: "", tools: [], usage: null, model, ts: Date.now(), streaming: true };
+        const aiMsg = { role: "assistant", text: "", thinking: "", tools: [], usage: null, model, harness: currentHarness(), ts: Date.now(), streaming: true };
         t.history.push(aiMsg);
         syncCurThread();
         el.msg.innerHTML = t.history.slice(0, -1).map((m, i) => renderChatMsg(m, i)).join("") +
@@ -4726,7 +4793,7 @@
     setHint(isPiHarness() ? "pi is thinking…" : `${harnessLabel()} is working…`, "busy");
 
     const userMsg = { role: "user", text, attachments: attPaths.slice(), ts: Date.now() };
-    const aiMsg = { role: "assistant", text: "", thinking: "", tools: [], usage: null, model, ts: Date.now(), streaming: true };
+    const aiMsg = { role: "assistant", text: "", thinking: "", tools: [], usage: null, model, harness: currentHarness(), ts: Date.now(), streaming: true };
     t.history.push(userMsg);
     t.history.push(aiMsg);
     if (t.kind === "free" && !t.firstPrompt) t.firstPrompt = text;
@@ -5014,7 +5081,7 @@
         const tools = pendingTools;
         pendingTools = [];
         const text = p.text || p.content || "";
-        msgs.push({ role: "assistant", text, thinking, tools, usage: p.usage, model: evModel(ev), ts: ev.ts, recorded: true, sid: evSid });
+        msgs.push({ role: "assistant", text, thinking, tools, usage: p.usage, model: evModel(ev), harness: String(p.harness || "pi"), ts: ev.ts, recorded: true, sid: evSid });
         // A provider failure is recorded ON the message it killed (e.g. "Error:
         // model overloaded"). The terminal shows it; the transcript used to drop
         // it, so a failed run looked like a silent no-op here.
@@ -5026,7 +5093,7 @@
         const note = String(p.message || p.detail || "error");
         const last = msgs[msgs.length - 1];
         if (last && last.role === "assistant" && !last.errorNote) last.errorNote = note;
-        else msgs.push({ role: "assistant", text: "", thinking: "", tools: [], ts: ev.ts, errorNote: note, recorded: true, sid: evSid });
+        else msgs.push({ role: "assistant", text: "", thinking: "", tools: [], harness: String(p.harness || "pi"), ts: ev.ts, errorNote: note, recorded: true, sid: evSid });
       } else if (ev.type === "thinking") {
         // Thinking arrives as a series of events. Some producers send chunked
         // deltas, others send a growing snapshot of the full thought — so
@@ -5070,7 +5137,7 @@
         if (pendingTools.length) last.tools = (last.tools || []).concat(pendingTools);
         if (pendingThinking && !last.thinking) last.thinking = pendingThinking;
       } else if (pendingThinking || pendingTools.length) {
-        msgs.push({ role: "assistant", text: "", thinking: pendingThinking || "", tools: pendingTools, model, ts: null, recorded: true, sid: sid || null });
+        msgs.push({ role: "assistant", text: "", thinking: pendingThinking || "", tools: pendingTools, model, harness: "pi", ts: null, recorded: true, sid: sid || null });
       }
     }
     return msgs;

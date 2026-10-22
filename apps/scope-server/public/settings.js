@@ -1183,9 +1183,10 @@
       `<div class="settings-group-div"></div>` +
       `<div class="settings-group-kicker">Model update</div>` +
       `<h2 class="settings-group-title">providers ${scopeBadge("global")}</h2>` +
-      `<div class="settings-intro">Fetch the current model list from every provider. ` +
+      `<div class="settings-intro">Fetch the current model list from every provider and every harness. ` +
       `pi re-checks the providers configured in this agent dir and rewrites <code>models-store.json</code> — a source the cost table below is built from — and its models.dev release cache is fetched again. ` +
-      `The two hold different things: the table lists the providers you can run here (the store, pi's built-in catalogues and the dynamic provider caches), while the models.dev cache lists releases from that site's whole catalogue, most of which pi has no credentials for. ` +
+      `The table also re-reads the providers pi's runtime reports, and each installed coding-agent harness is asked for its own models — a listing command where it has one (opencode, kilo, cursor) or the CLI's metadata protocol (Claude, Codex, Gemini, Cline) — so Chat and Workflow offer what those tools are set up for. ` +
+      `The two catalogs hold different things: the table lists the providers you can run here (the store, pi's built-in catalogues and the dynamic provider caches), while the models.dev cache lists releases from that site's whole catalogue, most of which pi has no credentials for. ` +
       `Pi Scope launches pi with <code>PI_OFFLINE=1</code>, so nothing else refreshes them while the app is open; ` +
       `the app also refreshes whichever file has gone past ${Math.round(m.ttlMs / 3_600_000)}h by itself.</div>` +
       `<div class="set-update-card">` +
@@ -1198,8 +1199,9 @@
         (m.lastError ? statusRow("Last error", `<span class="set-update-verdict err">${esc(m.lastError)}</span>`) : "") +
       `</div>` +
       `<div class="set-update-actions">` +
-        `<button type="button" class="btn-sm primary" id="set-models-refresh"${piModelsRefreshing ? " disabled" : ""}>` +
-          `${piModelsRefreshing ? "Fetching models…" : "Refresh models from all providers"}</button>` +
+        `<button type="button" class="btn-sm primary" id="set-models-refresh"${piModelsRefreshing ? " disabled" : ""}` +
+          ` title="Fetch current models from every pi provider and every installed coding-agent harness">` +
+          `${piModelsRefreshing ? "Fetching models…" : "Refresh all models"}</button>` +
         (m.lastCheckedAt ? `<span class="set-update-when">checked ${esc(fmtWhen(new Date(m.lastCheckedAt).toISOString()))}</span>` : "") +
       `</div>`
     );
@@ -1572,9 +1574,29 @@
       // the cost table now lists the providers that were just fetched.
       await load();
       if (SET) SET.piUpdate = piUpdate;
-      toast(data.modelCatalog.lastError
-        ? `Models: ${data.modelCatalog.lastError}`
-        : "Fetched models from all providers");
+      // The response also carries what each harness CLI reported. Tell the Chat
+      // and Workflow clients to drop their per-page model caches, or a list they
+      // fetched minutes ago would keep the old models until its TTL expires.
+      const harnesses = Array.isArray(data.harnessModels) ? data.harnessModels : [];
+      if (harnesses.length) {
+        window.dispatchEvent(new CustomEvent("scope:models-refreshed", {
+          detail: { harnesses },
+        }));
+      }
+      if (data.modelCatalog.lastError) {
+        toast(`Models: ${data.modelCatalog.lastError}`);
+      } else if (harnesses.length) {
+        const failed = harnesses.filter((h) => h && h.error);
+        if (failed.length) {
+          const names = failed.slice(0, 3).map((h) => h.label || h.id).join(", ");
+          const more = failed.length > 3 ? ` +${failed.length - 3}` : "";
+          toast(`Fetched models; ${failed.length} harness${failed.length === 1 ? "" : "es"} could not answer (${names}${more})`);
+        } else {
+          toast(`Fetched models from all providers and ${harnesses.length} harness${harnesses.length === 1 ? "" : "es"}`);
+        }
+      } else {
+        toast("Fetched models from all providers");
+      }
     } catch (e) {
       toast(String(e?.message || e), true);
     } finally {

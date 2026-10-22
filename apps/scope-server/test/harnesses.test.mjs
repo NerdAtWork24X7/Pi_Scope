@@ -18,7 +18,13 @@ import {
   isChatHarness,
   normaliseHarnessSettings,
   normalizeHarnessId,
+  refreshHarnessModels,
 } from "../harnesses.ts";
+import {
+  parseAcpModels,
+  parseClaudeModels,
+  parseCodexModels,
+} from "../harness-model-discovery.ts";
 
 /** A real executable file an override can point at. */
 function fakeBin(name, script = "#!/bin/sh\nexit 0\n") {
@@ -213,10 +219,111 @@ test("the CLI's model listing is parsed and cached", async () => {
   assert.deepEqual(refreshed.models, ["other/model"]);
 });
 
-test("a harness without a listing command falls back to its curated aliases", async () => {
-  const result = await discoverHarnessModels("claude");
-  assert.ok(result.models.includes("sonnet"));
+test("a forced refresh bypasses the cache and re-asks every installed harness", async () => {
+  clearHarnessModelCache();
+  const bin = fakeBin("opencode", "#!/bin/sh\nprintf 'acme/one\\n'\n");
+  const settings = normaliseHarnessSettings({ bins: { opencode: bin } });
+  const first = await discoverHarnessModels("opencode", settings);
+  assert.deepEqual(first.models, ["acme/one"]);
+
+  fs.writeFileSync(bin, "#!/bin/sh\nprintf 'acme/two\\n'\n", { mode: 0o755 });
+  // The ordinary read still answers from the cache…
+  assert.deepEqual((await discoverHarnessModels("opencode", settings)).models, ["acme/one"]);
+  // …while a forced read asks the CLI again (what Settings → Models does).
+  assert.deepEqual((await discoverHarnessModels("opencode", settings, { force: true })).models, ["acme/two"]);
+
+  // A whole-catalogue refresh clears every cached list, so the next read for any
+  // harness is fresh too — not just the one that was forced.
+  fs.writeFileSync(bin, "#!/bin/sh\nprintf 'acme/three\\n'\n", { mode: 0o755 });
+  // Make every other harness unavailable, so the refresh is deterministic and
+  // never spawns a real CLI on the machine running the tests.
+  const others = ["kilo", "cursor", "claude", "codex", "gemini", "cline"];
+  const saved = Object.fromEntries(others.map((id) => [id, process.env[`SCOPE_HARNESS_BIN_${id.toUpperCase()}`]]));
+  for (const id of others) process.env[`SCOPE_HARNESS_BIN_${id.toUpperCase()}`] = path.join(os.tmpdir(), `scope-missing-${id}`);
+  try {
+    const all = await refreshHarnessModels(settings);
+    const opencode = all.find((h) => h.id === "opencode");
+    assert.ok(opencode, "the installed CLI is part of the refresh");
+    assert.deepEqual(opencode.models, ["acme/three"], "the refreshed list is the CLI's current one");
+    assert.equal(opencode.source, "opencode models");
+    assert.equal(all.some((h) => h.id === "pi"), false, "pi's models come from the provider catalog, not a CLI");
+    assert.deepEqual((await discoverHarnessModels("opencode", settings)).models, ["acme/three"],
+      "the freshly asked list is what the normal read serves afterwards");
+  } finally {
+    for (const id of others) {
+      const key = `SCOPE_HARNESS_BIN_${id.toUpperCase()}`;
+      if (saved[id] === undefined) delete process.env[key];
+      else process.env[key] = saved[id];
+    }
+  }
+});
+
+test("the protocol-backed harnesses publish the models they actually offer", () => {
+  // Claude's initialize response uses `value` as the alias `--model` accepts.
+  assert.deepEqual(
+    parseClaudeModels({ models: [
+      { value: "default", resolvedModel: "claude-opus-5-5" },
+      { value: "opus", resolvedModel: "claude-opus-5-5" },
+      { value: "sonnet", resolvedModel: "claude-sonnet-5-5" },
+      { value: "sonnet", resolvedModel: "duplicate" },
+    ] }),
+    ["opus", "sonnet"],
+    "the default pseudo-model is dropped and duplicates are removed",
+  );
+  assert.equal(parseClaudeModels({}), null, "a response without models is not an empty catalogue");
+
+  // Codex's app-server model/list marks models hidden when they must not be offered.
+  assert.deepEqual(
+    parseCodexModels({ data: [
+      { id: "gpt-6.1-sol" },
+      { id: "gpt-6-astra", hidden: true },
+      { model: "o4-mini" },
+      { id: "gpt-6.1-sol" },
+    ] }),
+    ["gpt-6.1-sol", "o4-mini"],
+  );
+  assert.equal(parseCodexModels({}), null);
+
+  // ACP session/new carries `models.availableModels`.
+  assert.deepEqual(
+    parseAcpModels({ models: { availableModels: [
+      { modelId: "auto", name: "Auto" },
+      { modelId: "gemini-3.8-flash", name: "Gemini 3.8 Flash" },
+      { modelId: "auto", name: "Auto again" },
+    ] } }),
+    ["auto", "gemini-3.8-flash"],
+  );
+  assert.equal(parseAcpModels({ modes: {} }), null);
+});
+
+test("a harness with no listing command and no protocol keeps its aliases", async () => {
+  const aider = chatHarness("aider");
+  assert.ok(aider);
+  assert.equal(aider.modelsVia, undefined);
+  const result = await discoverHarnessModels("aider");
+  assert.deepEqual(result.models, aider.models, "Aider publishes no catalogue to ask for");
   assert.equal(result.source, null);
+});
+
+test("a missing protocol-backed harness reports why instead of faking a live list", async () => {
+  clearHarnessModelCache();
+  const settings = normaliseHarnessSettings({
+    bins: { claude: path.join(os.tmpdir(), "scope-missing-claude") },
+  });
+  const result = await discoverHarnessModels("claude", settings);
+  assert.deepEqual(result.models, []);
+  assert.equal(result.source, "claude initialize");
+  assert.match(result.error, /not found/);
+});
+
+test("a protocol-backed harness that exits early is an error, not a server crash", async () => {
+  clearHarnessModelCache();
+  const bin = fakeBin("claude", "#!/bin/sh\nexit 0\n");
+  const settings = normaliseHarnessSettings({ bins: { claude: bin } });
+  const result = await discoverHarnessModels("claude", settings, { force: true, timeoutMs: 3000 });
+  assert.deepEqual(result.models, []);
+  assert.equal(result.source, "claude initialize");
+  assert.match(result.error, /exited before answering/);
 });
 
 test("a failing listing command reports why and is retried next time", async () => {

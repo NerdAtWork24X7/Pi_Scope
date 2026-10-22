@@ -260,25 +260,41 @@
     runSince = next?.seq || 0;
   }
 
+  /**
+   * Reads are workspace-scoped. A slow answer must never land on a canvas that
+   * has since switched workspaces: doing so replaced the new workflow's nodes,
+   * run and chat log with the old one's (messages seemed to vanish). The
+   * sequence number makes the newest refresh the only one allowed to paint.
+   */
+  let refreshSeq = 0;
   async function refresh() {
+    const seq = ++refreshSeq;
+    const want = cwd;
+    let data = null;
     try {
-      const data = await getJson("/subagent-workflow");
+      data = await getJson("/subagent-workflow");
+    } catch (err) {
+      if (seq === refreshSeq && want === cwd) loadError = String(err.message || err);
+    }
+    if (seq !== refreshSeq || want !== cwd) return false; // a newer workspace owns the canvas
+    if (data) {
       wf = data;
       adoptRun(data.run, true);
       historyList = Array.isArray(data.history) ? data.history : [];
       if (Array.isArray(data.chat)) chatLog = data.chat;
       triggers = data.triggers || null;
       loadError = null;
-    } catch (err) {
-      loadError = String(err.message || err);
     }
     paint();
     syncPolling();
+    return true;
   }
 
   async function refreshRun() {
+    const want = cwd;
     try {
       const data = await getJson("/subagent-workflow/run", runSince ? { since: runSince } : undefined);
+      if (want !== cwd) return; // the workspace changed while this poll was in flight
       const next = data.run || null;
       // Nothing new since the last poll: do no work at all.
       if (next && run && next.id === run.id && next.seq === run.seq && next.status === run.status) { syncPolling(); return; }
@@ -296,7 +312,7 @@
         // carried none. Re-read once so the canvas shows what the workflow
         // produced without a reload — then send anything the chat queued.
         void refreshHistory();
-        void refresh().then(() => drainChatQueue());
+        void refresh().then((ok) => { if (ok) drainChatQueue(); });
       } else if (isNewRun) {
         void refreshHistory();
       }
@@ -1744,8 +1760,16 @@
    *  hint spells it — `opencode models` — or "" when it has none. */
   function modelsCommandOf(hid) {
     const meta = harnessMeta(hid);
-    if (!meta || !Array.isArray(meta.modelsArgs) || !meta.modelsArgs.length) return "";
-    return `${meta.bin || hid} ${meta.modelsArgs.join(" ")}`.trim();
+    if (!meta) return "";
+    if (Array.isArray(meta.modelsArgs) && meta.modelsArgs.length) {
+      return `${meta.bin || hid} ${meta.modelsArgs.join(" ")}`.trim();
+    }
+    // No listing command, but the CLI publishes its catalogue over a metadata
+    // protocol; this string is what the form's hint shows while it asks.
+    if (meta.modelsVia === "claude-control") return "claude initialize";
+    if (meta.modelsVia === "codex-app-server") return "codex app-server model/list";
+    if (meta.modelsVia === "acp") return `${meta.bin || hid} ACP session/new`;
+    return "";
   }
   /** A list whose every entry is `provider/id`: the provider half is part of the
    *  value, so its options group by it (the shape a Pi node's catalogue gets).
@@ -1892,7 +1916,7 @@
    * after node does not spawn a CLI each time — the round trip still happens, so a
    * model added to the CLI shows up the next time a node is opened.
    */
-  async function askCliModels(n) {
+  async function askCliModels(n, force) {
     const hid = dlgEl.querySelector("#sw-f-harness")?.value || n.config?.harness || "";
     const cmd = modelsCommandOf(hid);
     if (!cmd) return;
@@ -1902,7 +1926,10 @@
     if (!cliModels.has(hid)) { cliPending.add(hid); repaintModelField(); }
     let models = [];
     try {
-      const data = await getJson("/subagent-workflow/models", { harness: hid });
+      const data = await getJson("/subagent-workflow/models", {
+        harness: hid,
+        ...(force ? { refresh: "1" } : {}),
+      });
       models = Array.isArray(data.models) ? data.models : [];
     } catch { models = []; }
     cliPending.delete(hid);
@@ -3923,14 +3950,16 @@
   }
 
   async function refreshHistory() {
+    const want = cwd;
     try {
       const data = await getJson("/subagent-workflow/history");
+      if (want !== cwd) return; // a different workspace is on screen now
       historyList = data.history || [];
       // The same read carries the chat log, so a run that just settled gets its
       // answer into the conversation without waiting for a full reload.
       if (Array.isArray(data.chat)) chatLog = data.chat;
     } catch { /* keep what we have */ }
-    renderHistory();
+    if (want === cwd) renderHistory();
   }
 
   /**
@@ -4430,6 +4459,14 @@
   // A reload is the common way this view is left; flush the view before the
   // document goes away rather than losing the debounced write.
   window.addEventListener("beforeunload", saveViewNow);
+
+  // Settings → Models refreshed every harness CLI. Drop the lists this view
+  // cached and re-ask the provider whose node settings are open, so its Model
+  // dropdown shows the same fresh list Chat does.
+  window.addEventListener("scope:models-refreshed", () => {
+    cliModels.clear();
+    if (dlgEl && dlgEl.querySelector("#sw-f-harness")) void askCliModels({}, true);
+  });
 
   S.Plugins.register({
     id: "subagent-workflow",

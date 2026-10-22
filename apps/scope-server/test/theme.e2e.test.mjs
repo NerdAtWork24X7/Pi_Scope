@@ -341,6 +341,50 @@ describe("wallpaper", () => {
     await context.close();
   });
 
+  test("every text field lets the wallpaper through (the Git commit box too)", async () => {
+    const { context, page, errors } = await open("light", "git");
+    // Without a wallpaper a field is a solid inset — that is the theme's own
+    // contrast contract and must not change.
+    const solid = await page.evaluate(() =>
+      getComputedStyle(document.getElementById("git-commit-msg")).backgroundColor);
+    assert.match(solid, /rgb\(239, 239, 236\)/, `the field is solid without a picture (${solid})`);
+
+    await page.click("#btn-wallpaper");
+    await page.click('[data-preset="mist"]');
+    await page.waitForFunction(() => document.body.classList.contains("has-wallpaper"));
+
+    // One token paints every field in the shell (and the plugins' fields), so
+    // fixing it here cannot leave a single opaque box behind.
+    const fieldToken = await token(page, "--field-bg");
+    assert.match(fieldToken, /^color-mix\(in srgb, #[0-9a-f]{6} 16%, transparent\)$/i,
+      `fields share a translucent glass token (${fieldToken})`);
+
+    const alphaOf = (sel) => page.evaluate((s) => {
+      const c = getComputedStyle(document.querySelector(s)).backgroundColor;
+      const m = c.match(/rgba?\([^)]*,\s*([\d.]+)\s*\)$/) || c.match(/\/\s*([\d.]+)\s*\)$/);
+      return m ? Number(m[1]) : 1;
+    }, sel);
+
+    // The reported box, plus a representative field in every other workspace
+    // view: a new view must never reintroduce an opaque input.
+    const fields = [["git", "#git-commit-msg"], ["terminal", "#terminal-cwd"],
+      ["files", "#diagram-search"], ["checkpoints", "#checkpoints-label"],
+      ["trajectory", "#trajectory-search"]];
+    for (const [view, sel] of fields) {
+      if (view !== "git") {
+        await page.click(`#btn-${view}`);
+        await page.waitForFunction((s) => {
+          const e = document.querySelector(s);
+          return !!e && e.offsetParent !== null;
+        }, sel);
+      }
+      const alpha = await alphaOf(sel);
+      assert.ok(alpha > 0.05 && alpha < 0.9, `${view}'s ${sel} is glass over the picture (alpha ${alpha})`);
+    }
+    assert.deepEqual(errors, []);
+    await context.close();
+  });
+
   test("presets, dim/blur and URL entry all drive the same layer", async () => {
     const { context, page } = await open("light");
     await page.click("#btn-wallpaper");

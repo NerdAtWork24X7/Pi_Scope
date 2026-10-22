@@ -518,6 +518,8 @@ describe("subagent workflow plugin (server)", () => {
     // have only the list they declare.
     assert.deepEqual(data.harnesses.find((h) => h.id === "opencode").modelsArgs, ["models"]);
     assert.equal(data.harnesses.find((h) => h.id === "claude").modelsArgs, null);
+    assert.equal(data.harnesses.find((h) => h.id === "claude").modelsVia, "claude-control");
+    assert.equal(data.harnesses.find((h) => h.id === "cline").modelsVia, "acp");
   });
 
   test("asks a provider's own CLI for its model list", async () => {
@@ -3086,6 +3088,13 @@ describe("subagent workflow plugin (client)", () => {
     const visibleFields = () => page.$$eval(".sw-dlg-body .sw-field > span", (els) =>
       els.filter((e) => e.offsetParent !== null)
         .map((e) => (e.textContent || "").trim().toLowerCase().split(" ")[0]));
+    // Choosing Claude starts the asynchronous "ask the CLI" repaint; let it
+    // settle before counting the panel's fields, or the check can run between
+    // the two DOM states.
+    await page.waitForFunction(() => {
+      const wrap = document.querySelector("#sw-model-wrap");
+      return !!wrap && !/Asking/.test(wrap.textContent || "");
+    });
     const labels = await visibleFields();
     assert.deepEqual(labels, ["provider", "model", "user", "reference"],
       `the panel shows its three settings and the reference list (${labels})`);

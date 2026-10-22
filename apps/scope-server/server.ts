@@ -32,7 +32,7 @@ import {
   storeFor,
 } from "./plugins.ts";
 import { startChat, startChatSession, killChatSession, stopChat, chatSessionPid, answerChatUi, shutdownChatSessions, pushChatPrefs, generateCommitMessage, chatRunStatus, chatPendingDialog, chatLiveRuns, attachChatRun } from "./chat.ts";
-import { chatHarnessList, discoverHarnessModels } from "./harnesses.ts";
+import { chatHarnessList, discoverHarnessModels, refreshHarnessModels } from "./harnesses.ts";
 import { discoverHarnessCommands } from "./harness-commands.ts";
 import { AcpSession } from "./acp-client.ts";
 import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
@@ -3431,7 +3431,19 @@ async function handle(req: Request): Promise<Response> {
     try {
       if (action === "check") return jsonResponse(await checkPiUpdate());
       if (action === "refresh-models") {
-        return jsonResponse({ modelCatalog: await refreshModelCatalog({ force: true }) });
+        // Refresh every source the Models tab reads, not just pi's store:
+        //   • pi's store + the models.dev release cache (refreshModelCatalog),
+        //   • the runtime's available-provider catalogue (pi-ai's built-in
+        //     static catalogues, which never land in models-store.json), and
+        //   • each installed harness CLI's own model list (opencode models,
+        //     kilo models, cursor-agent --list-models, or the metadata protocol
+        //     Claude/Codex/Gemini/Cline speak).
+        // Harness lists are asked in parallel with the catalog; the runtime read
+        // waits for the store so it sees what `pi update --models` just wrote.
+        const harnessModels = refreshHarnessModels(workflowHarnessSettings());
+        const modelCatalog = await refreshModelCatalog({ force: true });
+        await loadRuntimeModels(true);
+        return jsonResponse({ modelCatalog, harnessModels: await harnessModels });
       }
       if (action === "update") {
         const result = await updatePi();
@@ -4619,6 +4631,11 @@ const pluginKit = {
   // `cursor-agent --list-models`), asked on demand so the Chat model pill shows
   // what the tool on THIS machine is set up for instead of a curated handful.
   chatHarnessModels: (id: string) => discoverHarnessModels(id, workflowHarnessSettings()),
+  // The same catalogue for the Workflow plugin's node pickers, which cannot
+  // import `harnesses.ts` (plugins are packaged outside the bundle). `force`
+  // lets its `?refresh=1` route bypass the host cache after Settings refreshed.
+  harnessModelsFor: (id: string, opts: { force?: boolean; timeoutMs?: number } = {}) =>
+    discoverHarnessModels(id, workflowHarnessSettings(), opts),
   // The commands a harness's OWN session advertises (ACP `available_commands`
   // for gemini/opencode/kilo/cline, the Claude initialize response, Codex's
   // skill list, pi's `get_commands`). Asked on demand by the composer's `/`

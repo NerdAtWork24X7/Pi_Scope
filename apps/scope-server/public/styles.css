@@ -12083,6 +12083,13 @@ body.has-wallpaper {
   --surface-2: color-mix(in srgb, var(--bg) 38%, transparent);
   --surface-3: color-mix(in srgb, var(--bg) 46%, transparent);
   --pill-bg: color-mix(in srgb, var(--bg) 42%, transparent);
+  /* Text-entry fields are glass insets, not opaque blocks. The theme's solid
+     --field-bg made the Git commit box (and every search box, settings input
+     and select) punch a hole in the wallpaper even though the panes and cards
+     around it were translucent. A light scrim + the field's border keeps it
+     readable while the picture shows through everywhere at once — the token is
+     used by every field in the shell and both plugins. */
+  --field-bg: color-mix(in srgb, var(--bg) 16%, transparent);
   /* Hover/track fills are neutrals, not cards: keep the wash, drop the wall. */
   --row-hover: color-mix(in srgb, var(--text) 7%, transparent);
 }
@@ -12136,6 +12143,10 @@ body.has-wallpaper .files-list,
 body.has-wallpaper #files-diagram,
 body.has-wallpaper .git-main,
 body.has-wallpaper .git-side,
+/* The commit bar is nested chrome on the Git pane's scrim: giving it its own
+   surface stacked a second opaque-ish layer under the message box and hid the
+   picture there. Transparent, the box's glass fill is the only wash left. */
+body.has-wallpaper .git-commitbar,
 body.has-wallpaper .settings-content {
   background-color: transparent;
 }
