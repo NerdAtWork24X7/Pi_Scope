@@ -6,7 +6,9 @@
  * module starts the CLI's ACP server, creates a session in the workspace, and
  * then streams each turn's updates (`agent_message_chunk`, `tool_call`, …). That
  * is what makes the harness's own slash commands, permission requests and
- * multi-turn context work — a print-mode run has none of those.
+ * multi-turn context work — a print-mode run has none of those. The agent also
+ * publishes the commands it accepts (`available_commands_update`), so the
+ * composer mirrors the live session instead of shipping a copied list.
  *
  * Only the parts the app renders are implemented, and everything the agent asks
  * the CLIENT to do on its own (read/write files, run a terminal command) is
@@ -31,12 +33,24 @@ export interface AcpPermissionRequest {
   options: AcpPermissionOption[];
 }
 
+/** One slash command an ACP agent advertises for its session. */
+export interface AcpCommand {
+  /** The agent's name, without a leading slash (`review`, `compact`). */
+  name: string;
+  description: string;
+  /** Placeholder for the command's argument (`input.hint` in ACP v2). */
+  argumentHint?: string;
+}
+
 export interface AcpHandlers {
   onText(delta: string): void;
   onThought?(delta: string): void;
   onToolStart?(name: string, args: string): void;
   onToolEnd?(name: string): void;
   onPermission?(request: AcpPermissionRequest): void;
+  /** The session's slash commands, from `session/new` or a live
+   *  `available_commands_update` (project commands can appear mid-turn). */
+  onCommands?(commands: AcpCommand[]): void;
   /** A session-scoped notice worth showing (auth, unsupported command, …). */
   onNotice?(message: string, kind: "info" | "warning" | "error"): void;
 }
@@ -84,6 +98,9 @@ export class AcpSession {
    *  one of these ids). Empty when the harness has no modes. */
   private modes: Array<{ id: string; name: string; description?: string }> = [];
   private currentMode = "";
+  /** Commands the session advertised, kept so a reopened composer can paint
+   *  immediately without re-asking the agent. */
+  private commands: AcpCommand[] = [];
   /** The version the agent settled on in `initialize`. A v1 agent has no
    *  capability map to inspect, so resuming keeps the old `session/load` try. */
   private protocolVersion = 1;
@@ -127,6 +144,9 @@ export class AcpSession {
   get resumedSession(): boolean { return this.resumed; }
   get availableModes(): Array<{ id: string; name: string; description?: string }> {
     return this.modes.map((m) => ({ ...m }));
+  }
+  get availableCommands(): AcpCommand[] {
+    return this.commands.map((c) => ({ ...c }));
   }
   get mode(): string { return this.currentMode; }
   get pid(): number | null {
@@ -217,6 +237,8 @@ export class AcpSession {
       this.sid = String(created?.sessionId || "");
       if (!this.sid) throw new Error("the harness created no session");
       this.readModes(created);
+      // Some agents return the list on session/new; most publish it just after.
+      if (Array.isArray(created?.availableCommands)) this.adoptCommands(created.availableCommands);
       if (this.model) {
         // Best effort: agents that do not implement the unstable method answer
         // with an error, which must not fail the session.
@@ -433,6 +455,12 @@ export class AcpSession {
         this.handlers.onToolStart?.(name, args);
         return;
       }
+      case "available_commands_update": {
+        // The agent's own slash commands. ACP publishes them for the live
+        // session, so the composer never has to guess (or start a second CLI).
+        this.adoptCommands(update.availableCommands);
+        return;
+      }
       case "current_mode_update": {
         if (update.currentModeId) this.currentMode = String(update.currentModeId);
         return;
@@ -447,6 +475,12 @@ export class AcpSession {
       default:
         return;
     }
+  }
+
+  /** Keep the session's command list and hand it to the current run. */
+  private adoptCommands(raw: unknown): void {
+    this.commands = parseAcpAvailableCommands(raw);
+    this.handlers.onCommands?.(this.availableCommands);
   }
 
   /** Record the modes a session advertises (session/new or session/load). */
@@ -478,6 +512,35 @@ export class AcpSession {
       .join(" ");
     return `${this.file} ${what}${detail ? ` — ${detail}` : ""}`;
   }
+}
+
+/**
+ * Coerce an ACP `availableCommands` array into the shape the composer paints.
+ *
+ * ACP v2 describes an argument placeholder as `input: { type: "text", hint }`.
+ * Names starting with `$` are skills, which take a `$` token rather than a
+ * slash command, so they are not offered in the `/` menu.
+ */
+export function parseAcpAvailableCommands(value: unknown): AcpCommand[] {
+  const entries = Array.isArray(value) ? value : [];
+  const out: AcpCommand[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries.slice(0, 512)) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, any>;
+    const name = String(record.name ?? "").trim().replace(/^\/+/, "");
+    if (!name || name.startsWith("$") || name.length > 64 || /[\s/]/.test(name)) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const description = String(record.description ?? "").replace(/\s+/g, " ").trim().slice(0, 400);
+    const input = record.input && typeof record.input === "object" ? record.input : null;
+    const hint = String(input?.hint ?? record.argumentHint ?? record.inputHint ?? "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 400);
+    out.push({ name, description, ...(hint ? { argumentHint: hint } : {}) });
+  }
+  return out;
 }
 
 /** The dialog title for a permission request: what the agent wants to do. */

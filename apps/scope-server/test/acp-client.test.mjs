@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { AcpSession, permissionDialogId } from "../acp-client.ts";
+import { AcpSession, parseAcpAvailableCommands, permissionDialogId } from "../acp-client.ts";
 
 const AGENT = `
 import * as readline from "node:readline";
@@ -92,6 +92,63 @@ test("a prompt streams text/tools and blocks on the permission dialog", async ()
   assert.equal(events.filter((e) => e[0] === "permission").length, 1);
   session.close();
   assert.equal(session.alive, false);
+});
+
+test("the live session's available_commands_update reaches the current run", async () => {
+  const AGENT = `
+import * as readline from "node:readline";
+const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");
+const rl = readline.createInterface({ input: process.stdin });
+const commands = (list) => send({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "available_commands_update", availableCommands: list } } });
+rl.on("line", (line) => {
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 2 } });
+  if (frame.method === "session/new") {
+    commands([{ name: "review", description: "Review changes", input: { type: "text", hint: "[focus]" } }, { name: "$skill" }]);
+    return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "sess-commands" } });
+  }
+  if (frame.method === "session/prompt") {
+    commands([{ name: "compact", description: "Reduce context" }, { name: "review" }]);
+    return send({ jsonrpc: "2.0", id: frame.id, result: { stopReason: "end_turn" } });
+  }
+});
+`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-acp-commands-"));
+  fs.writeFileSync(path.join(dir, "agent.mjs"), AGENT);
+  const file = path.join(dir, "agent");
+  fs.writeFileSync(file, `#!/bin/sh\nexec node "$(dirname "$0")/agent.mjs" "$@"\n`, { mode: 0o755 });
+
+  const seen = [];
+  const session = new AcpSession({
+    file,
+    args: [],
+    cwd: os.tmpdir(),
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {}, onCommands: (commands) => seen.push(commands) },
+  });
+  await session.start();
+  assert.deepEqual(session.availableCommands, [
+    { name: "review", description: "Review changes", argumentHint: "[focus]" },
+  ], "session/new commands are kept, and `$` skills stay out of the / menu");
+  assert.deepEqual(seen.at(-1), session.availableCommands);
+
+  await session.prompt("go");
+  assert.deepEqual(session.availableCommands.map((c) => c.name), ["compact", "review"],
+    "a mid-session update replaces the list");
+  assert.equal(seen.length, 2, "the latest run handler saw the update");
+  session.close();
+});
+
+test("parseAcpAvailableCommands accepts ACP v2's input.hint", () => {
+  assert.deepEqual(parseAcpAvailableCommands([
+    { name: "/status", description: "Show status", input: { type: "text", hint: "[verbose]" } },
+    { name: "$skill" },
+    { name: "two words" },
+    { name: "status" },
+  ]), [
+    { name: "status", description: "Show status", argumentHint: "[verbose]" },
+  ]);
 });
 
 test("a saved session is resumed with session/load, and model/mode switch live", async () => {

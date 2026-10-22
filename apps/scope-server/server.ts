@@ -42,6 +42,7 @@ import { buildSessionSeed } from "./session-seed.ts";
 import { noteExternalProcess, externalProcessFor, killExternalProcess, findProcessBySessionFile } from "./external-process.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
 import { checkPiUpdate, updatePi, updateState } from "./pi-update.ts";
+import { checkHarnessUpdates, updateHarness, updateAllHarnesses, harnessUpdateState, harnessStatusSnapshot } from "./harness-update.ts";
 import {
   MODELS_STORE_PATH, modelCatalogStatus, refreshModelCatalog, startModelCatalogScheduler, modelCatalogAutoEnabled,
 } from "./model-catalog.ts";
@@ -3498,6 +3499,57 @@ async function handle(req: Request): Promise<Response> {
       // Surface the underlying failure (e.g. npm's stderr) so a client that
       // started the install learns why it failed, not just "internal error".
       return jsonResponse({ error: String(err?.message ?? err) }, 500);
+    }
+  }
+
+  // ── GET /harness-update (versions of the external coding harnesses) ─────
+  // The Update tab's second card: one row per installed CLI with the version
+  // it reports and the release its registry publishes. `update` carries the
+  // install state so a page that reloaded mid-update restores the busy row and
+  // adopts the outcome (see harness-update.ts). Checks are cached briefly, so
+  // this is cheap to call each time the tab opens.
+  if (pathname === "/harness-update" && method === "GET") {
+    const update = harnessUpdateState();
+    // While an updater runs, serve the rows from the last check instead of
+    // probing every `--version` again on each poll (a harness being replaced is
+    // also a bad moment to execute it). The next check after it finishes reads
+    // the fresh versions.
+    const cached = update.running ? harnessStatusSnapshot() : null;
+    return jsonResponse({ harnesses: cached || await checkHarnessUpdates(), update });
+  }
+
+  // ── POST /harness-update ({ action: "check"|"update"|"update-all" }) ────
+  // `update` waits for the updater (it can take minutes) and returns the
+  // refreshed rows, exactly like /pi-update does for the bundled agent.
+  if (pathname === "/harness-update" && method === "POST") {
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const action = String(body?.action ?? "check");
+    try {
+      if (action === "check") {
+        return jsonResponse({
+          harnesses: await checkHarnessUpdates({ force: true }),
+          update: harnessUpdateState(),
+        });
+      }
+      if (action === "update") {
+        const id = String(body?.id ?? "").trim();
+        if (!id) return jsonResponse({ error: "missing harness id" }, 400);
+        const updated = await updateHarness(id);
+        return jsonResponse({
+          harnesses: await checkHarnessUpdates(),
+          update: harnessUpdateState(),
+          updated,
+        });
+      }
+      if (action === "update-all") {
+        const result = await updateAllHarnesses();
+        return jsonResponse({ ...result, update: harnessUpdateState() });
+      }
+      return jsonResponse({ error: `unknown action: ${action}` }, 400);
+    } catch (err: any) {
+      console.error("POST /harness-update failed:", err);
+      return jsonResponse({ error: String(err?.message ?? err), update: harnessUpdateState() }, 500);
     }
   }
 

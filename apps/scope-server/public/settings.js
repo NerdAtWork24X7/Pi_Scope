@@ -57,6 +57,19 @@
   let piAdoptTimer = null; // poll handle while adopting an install we did not start
   let piAdoptFails = 0;   // consecutive unreadable install states
 
+  // External coding-harness updates (the second card on the Update tab). These
+  // are the CLIs Chat can drive — Claude Code, Codex, opencode, … — and each one
+  // is updated with its own updater (see the server's harness-update.ts).
+  let harnessRows = null;       // HarnessUpdateStatus[] once fetched
+  let harnessState = null;      // { running, id, startedAt, last }
+  let harnessChecking = false;
+  let harnessUpdating = null;   // harness id, or "all"
+  let harnessAppliedAt = "";    // outcome already surfaced by this page
+  let harnessAdoptTimer = null; // poll handle while adopting an update we did not start
+  let harnessAdoptFails = 0;
+  let harnessError = null;      // last whole-check error
+  let harnessLastLog = "";      // tail of the most recent updater's output
+
   // Authentication tab state (GUI mirror of pi's /login). `authData` is the
   // provider catalogue; `authSession` is the running login (polled); `authSig`
   // suppresses re-renders that would steal focus from a prompt input.
@@ -432,9 +445,12 @@
     if (!fn) { renderError("Unknown section"); return; }
     el.content.innerHTML = `<div class="settings-panel">${fn()}</div>`;
     wireSection(sec);
-    // The Update tab needs a registry round trip, so kick one off the first
-    // time (and only then) the section is shown; refreshPiUpdate re-renders.
-    if (sec === "update" && !SET.piUpdate && !piUpdateChecking) void refreshPiUpdate();
+    // The Update tab needs registry round trips, so kick them off the first
+    // time (and only then) the section is shown; the refresh fns re-render.
+    if (sec === "update") {
+      if (!SET.piUpdate && !piUpdateChecking) void refreshPiUpdate();
+      if (harnessRows === null && !harnessChecking) void refreshHarnessUpdates(false);
+    }
     // Resume polling a login that was left running (setSection loads the
     // provider catalogue when the tab is entered).
     if (sec === "auth" && authSession && authSession.status === "running") ensureAuthPoll();
@@ -1554,6 +1570,94 @@
         (u && u.checkedAt ? `<span class="set-update-when">checked ${esc(fmtWhen(u.checkedAt))}</span>` : "") +
       `</div>` +
       (u && u.error && u.output ? `<pre class="set-update-log">${esc(u.output)}</pre>` : "") +
+      `</div>` +
+      renderHarnessUpdates()
+    );
+  }
+
+  // ─── External coding harnesses (same tab, below pi) ───────────────────────
+  // Pi Scope also drives the CLIs installed on this machine (Claude Code,
+  // Codex, Gemini, opencode, …). Each row reports the version that CLI prints
+  // and the release its registry publishes; Update runs the CLI's own updater,
+  // which keeps working whatever way that CLI was installed (see the server's
+  // harness-update.ts).
+  const HARNESS_OUTCOME_FRESH_MS = 10 * 60_000;
+
+  /** One row: name/binary, versions + verdict, and the Update action. */
+  function harnessRow(h, busyId) {
+    const isBusy = busyId === h.id || (busyId === "all" && h.updatable && (h.updateAvailable || !h.latest));
+    const canRun = h.updatable && !busyId && !harnessChecking;
+    const installed = h.installed
+      ? `<code>${esc(h.installed)}</code>`
+      : `<span class="set-update-muted">unknown</span>`;
+    // Only show the published version when it is the thing being offered. A
+    // channel that reports something older than the install (opencode's native
+    // build can outrun its npm tag) would otherwise read "2.1.3 → 1.19.4".
+    const latest = h.updateAvailable
+      ? `<span class="set-update-muted">→</span> <code>${esc(h.latest)}</code>`
+      : (!h.installed && h.latest ? `<span class="set-update-muted">latest</span> <code>${esc(h.latest)}</code>` : "");
+    let verdict;
+    if (isBusy) verdict = `<span class="set-update-verdict busy">Updating…</span>`;
+    else if (h.updateAvailable) verdict = `<span class="set-update-verdict avail">Update available</span>`;
+    else if (h.latest && h.installed) verdict = `<span class="set-update-verdict ok">Up to date</span>`;
+    else if (!h.updatable) verdict = `<span class="set-update-verdict">Manual update</span>`;
+    else verdict = `<span class="set-update-verdict">Updater ready</span>`;
+    const hint = h.command ? `Runs: ${h.command}` : h.reason || "";
+    const action = h.updatable
+      ? `<button type="button" class="btn-sm${h.updateAvailable ? " primary" : ""}" ` +
+        `data-harness-update="${esc(h.id)}"${canRun ? "" : " disabled"}` +
+        `${hint ? ` title="${esc(hint)}"` : ""}>${isBusy ? "Updating…" : "Update"}</button>`
+      : `<span class="set-harness-note"${hint ? ` title="${esc(hint)}"` : ""}>update manually</span>`;
+    return (
+      `<div class="set-update-row set-harness-row">` +
+        `<span class="set-harness-name"><b>${esc(h.label)}</b><code>${esc(h.bin)}</code></span>` +
+        `<span class="set-harness-vers">${installed}${latest}${verdict}` +
+          (h.error ? `<span class="set-harness-err" title="${esc(h.error)}">check failed</span>` : "") +
+        `</span>` +
+        action +
+      `</div>`
+    );
+  }
+
+  function renderHarnessUpdates() {
+    const rows = harnessRows;
+    const busyId = harnessUpdating || (harnessState && harnessState.running ? harnessState.id : null);
+    const pending = (rows || []).filter((h) => h.updatable && (h.updateAvailable || !h.latest));
+    let body;
+    if (rows === null) {
+      body = `<div class="settings-empty-sub">${
+        harnessChecking ? "Checking installed coding harnesses…" : "Not checked yet."
+      }</div>`;
+    } else if (!rows.length) {
+      body = `<div class="settings-empty-sub">No external coding harnesses were found on PATH. ` +
+        `Install one (Claude Code, Codex, Gemini CLI, opencode, …) and it appears here.</div>`;
+    } else {
+      body = `<div class="set-update-card${pending.length ? " avail" : ""}">` +
+        rows.map((h) => harnessRow(h, busyId)).join("") +
+        `</div>`;
+    }
+    if (harnessError) {
+      body += `<div class="set-field-hint"><span class="set-update-verdict err">${esc(harnessError)}</span></div>`;
+    }
+    const checkedAt = rows && rows.length
+      ? rows.map((h) => h.checkedAt).filter(Boolean).sort().pop()
+      : null;
+    return (
+      `<div class="settings-group">` +
+      `<div class="settings-group-kicker">Coding harnesses</div>` +
+      `<h2 class="settings-group-title">harnesses ${scopeBadge("global")}</h2>` +
+      `<div class="settings-intro">Chat can drive the coding-agent CLIs installed on this machine. ` +
+      `Each is updated through its own updater, so the way it was installed (npm, native, Homebrew) stays intact. ` +
+      `Only harnesses Pi Scope can find are listed.</div>` +
+      body +
+      `<div class="set-update-actions">` +
+        `<button type="button" class="btn-sm" id="set-harness-check"${busyId || harnessChecking ? " disabled" : ""}>` +
+          `${harnessChecking ? "Checking…" : "Check harnesses"}</button>` +
+        `<button type="button" class="btn-sm primary" id="set-harness-all"${pending.length && !busyId && !harnessChecking ? "" : " disabled"}>` +
+          `${busyId === "all" ? "Updating…" : `Update all${pending.length ? ` (${pending.length})` : ""}`}</button>` +
+        (checkedAt ? `<span class="set-update-when">checked ${esc(fmtWhen(checkedAt))}</span>` : "") +
+      `</div>` +
+      (harnessLastLog ? `<pre class="set-update-log">${esc(harnessLastLog)}</pre>` : "") +
       `</div>`
     );
   }
@@ -1739,9 +1843,147 @@
     }
   }
 
+  // ── External harness updates: check / install / reload recovery ───────────
+  // The server runs the updater, which can outlive the request (and a page
+  // reload), so GET /harness-update carries the install state. Entering the tab
+  // restores the busy row and adopts the outcome, exactly like the pi card.
+
+  function stopHarnessAdopt() {
+    if (harnessAdoptTimer) { clearInterval(harnessAdoptTimer); harnessAdoptTimer = null; }
+  }
+
+  /** Fold the server's harness update state into the card. Idempotent per outcome. */
+  function adoptHarnessUpdateState(up) {
+    if (!up) return;
+    if (up.running) {
+      if (harnessUpdating !== up.id) {
+        harnessUpdating = up.id;
+        if (activeSec === "update") setSection("update", true);
+      }
+      if (!harnessAdoptTimer) {
+        harnessAdoptFails = 0;
+        harnessAdoptTimer = setInterval(() => { void pollHarnessUpdateState(); }, 2000);
+        void pollHarnessUpdateState();
+      }
+      return;
+    }
+    stopHarnessAdopt();
+    const watched = harnessUpdating;
+    if (harnessUpdating) {
+      harnessUpdating = null;
+      if (activeSec === "update") setSection("update", true);
+    }
+    const last = up.last;
+    if (!last || !last.at || last.at === harnessAppliedAt) return;
+    harnessAppliedAt = last.at;
+    if (Date.now() - Date.parse(last.at) > HARNESS_OUTCOME_FRESH_MS) return;
+    if (last.output) harnessLastLog = last.output;
+    if (last.ok) {
+      if (watched) toast(last.id === "all" ? "Coding harnesses updated" : "Coding harness updated");
+    } else {
+      if (last.error) harnessError = last.error;
+      if (watched) toast(last.error || "Harness update failed", true);
+    }
+  }
+
+  /** Read the harness state without disturbing the card's own check state. */
+  async function pollHarnessUpdateState() {
+    let data;
+    try {
+      const { res, data: body } = await S.api("/harness-update");
+      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+      if (!body) throw new Error("empty response");
+      data = body;
+    } catch (e) {
+      if (++harnessAdoptFails < 5) return;
+      stopHarnessAdopt();
+      harnessUpdating = null;
+      harnessAdoptFails = 0;
+      harnessError = `Could not read the harness update state — ${String(e?.message || e)}`;
+      if (activeSec === "update") setSection("update", true);
+      return;
+    }
+    harnessAdoptFails = 0;
+    if (Array.isArray(data.harnesses)) harnessRows = data.harnesses;
+    harnessState = data.update || null;
+    adoptHarnessUpdateState(data.update);
+    if (activeSec === "update") setSection("update", true);
+  }
+
+  /** Check the installed harnesses. `force` bypasses the server's caches. */
+  async function refreshHarnessUpdates(force) {
+    if (harnessChecking || harnessUpdating) return;
+    harnessChecking = true;
+    harnessError = null;
+    if (activeSec === "update") setSection("update", true);
+    try {
+      const { res, data } = force
+        ? await S.api("/harness-update", {}, { action: "check" })
+        : await S.api("/harness-update");
+      if (res.ok && data) {
+        harnessRows = Array.isArray(data.harnesses) ? data.harnesses : [];
+        harnessState = data.update || null;
+        adoptHarnessUpdateState(data.update);
+      } else {
+        harnessError = data?.error || `HTTP ${res.status}`;
+      }
+    } catch (e) {
+      harnessError = String(e?.message || e);
+    } finally {
+      harnessChecking = false;
+      if (activeSec === "update") setSection("update", true);
+    }
+  }
+
+  /** Update one harness (or all of them) and refresh from the result. */
+  async function runHarnessUpdate(id) {
+    if (harnessUpdating || harnessChecking) return;
+    harnessUpdating = id;
+    stopHarnessAdopt(); // this page owns the outcome now
+    harnessError = null;
+    harnessLastLog = "";
+    if (activeSec === "update") setSection("update", true);
+    try {
+      const body = id === "all" ? { action: "update-all" } : { action: "update", id };
+      const { res, data } = await S.api("/harness-update", {}, body);
+      if (Array.isArray(data?.harnesses)) harnessRows = data.harnesses;
+      harnessState = data?.update || null;
+      // This page started the update, so mark the outcome as applied or the
+      // adopter (polling the same state) would announce it a second time.
+      harnessAppliedAt = data?.update?.last?.at || "";
+      if (res.ok && data) {
+        harnessLastLog = data?.updated?.output || data?.update?.last?.output || "";
+        if (id === "all") {
+          const results = Array.isArray(data.results) ? data.results : [];
+          const failed = results.filter((r) => !r.ok);
+          if (!results.length) toast("All coding harnesses are up to date");
+          else if (failed.length) toast(`${results.length - failed.length} updated, ${failed.length} failed`, true);
+          else toast(`${results.length} coding harness${results.length === 1 ? "" : "es"} updated`);
+        } else {
+          const label = data?.updated?.label || id;
+          toast(`${label} updated`);
+        }
+      } else {
+        const msg = data?.error || "Harness update failed";
+        harnessError = msg;
+        toast(msg, true);
+      }
+    } catch (e) {
+      harnessError = String(e?.message || e);
+      toast(harnessError, true);
+    } finally {
+      harnessUpdating = null;
+      if (activeSec === "update") setSection("update", true);
+    }
+  }
+
   function wireUpdate(panel) {
     panel.querySelector("#set-update-check")?.addEventListener("click", () => void refreshPiUpdate());
     panel.querySelector("#set-update-run")?.addEventListener("click", () => void runPiUpdate());
+    panel.querySelector("#set-harness-check")?.addEventListener("click", () => void refreshHarnessUpdates(true));
+    panel.querySelector("#set-harness-all")?.addEventListener("click", () => void runHarnessUpdate("all"));
+    panel.querySelectorAll("[data-harness-update]").forEach((btn) =>
+      btn.addEventListener("click", () => void runHarnessUpdate(btn.dataset.harnessUpdate)));
   }
 
   // ─── Authentication section (GUI mirror of pi's /login) ───────────────────

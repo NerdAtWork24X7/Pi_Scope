@@ -19,7 +19,15 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = fs.readFileSync(path.join(HERE, "..", "public", "helpers.js"), "utf8");
 
 function loadScope() {
-  const sandbox = { console, document: { body: { hasAttribute: () => false } } };
+  // helpers.js installs delegated model-picker listeners at load time, so the
+  // stub is a minimal event target: the pure helpers below never fire them.
+  const listen = () => {};
+  const sandbox = {
+    console,
+    document: { body: { hasAttribute: () => false }, addEventListener: listen, removeEventListener: listen },
+    addEventListener: listen,
+    removeEventListener: listen,
+  };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   new vm.Script(SRC, { filename: "helpers.js" }).runInContext(sandbox);

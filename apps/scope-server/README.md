@@ -134,6 +134,17 @@ are directory scoped:
 | Kilo Code | ACP (`kilo acp`) → `available_commands_update` |
 | Cline | ACP (`cline --acp`) → `available_commands_update` |
 
+For an ACP harness the composer prefers the command list the **live** session
+published over the wire, including a mid-conversation
+`available_commands_update` (project commands and skills can appear after the
+session starts), and shows the argument hint ACP carries in `input.hint`. A
+command sent from the menu is passed to `session/prompt` **verbatim** — no
+reference-library or transcript preamble is prepended, because the agent only
+expands a native command when it opens the prompt. Names ACP marks as skills
+(`$skill`) stay out of the `/` menu, since they are not slash commands. When no
+session is open yet, the same list is discovered over a short-lived ACP session
+(as the table describes) and cached for five minutes.
+
 The ACP harnesses (Gemini CLI, opencode, Kilo Code, Cline) are driven as **live
 sessions**, not one-shot print runs: `acp-client.ts` starts the CLI's ACP server,
 creates a session in the chat's workspace, streams `agent_message_chunk` /
@@ -276,6 +287,8 @@ address the token is required anyway (see the LAN notes in the root README).
 | POST | `/git/submodule` | Add/remove/update/init/deinit/sync a submodule |
 | GET | `/pi-update` | Compare the bundled Pi coding agent against the npm latest, plus `modelCatalog` (pi's model store + release cache; `cacheModels`/`cacheProviders` describe models.dev's whole release catalogue, not the providers the cost table lists) |
 | POST | `/pi-update` | `{ action: "check"|"update"|"refresh-models" }` — check, install the newest bundled agent, or fetch the model catalogs. `refresh-models` (Settings → Models → Refresh all models) also re-reads the runtime's provider catalogue and re-asks every installed harness for its model list (`harnessModels` in the response) |
+| GET | `/harness-update` | Installed external coding harnesses (Claude Code, Codex, Gemini, opencode, …) with the version each reports, its registry's latest release and the install state (`update`) |
+| POST | `/harness-update` | `{ action: "check"|"update"|"update-all", id? }` — re-check every harness, update one through its own updater, or update every harness with a pending release |
 | GET | `/auth/providers` | Provider catalogue (methods + status) and stored credentials, read live from the bundled agent |
 | POST | `/auth/login` | `{ providerId, type }` to start, `{ id, promptId, value }` to answer a prompt, `{ id, cancel: true }` to abort |
 | GET | `/auth/login?id=` | Current login session state (pending prompt + event log) |

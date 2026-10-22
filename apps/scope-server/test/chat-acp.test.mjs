@@ -29,7 +29,10 @@ rl.on("line", (line) => {
   let frame;
   try { frame = JSON.parse(line); } catch { return; }
   if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 1 } });
-  if (frame.method === "session/new") return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "acp-session-1", modes: { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] } } });
+  if (frame.method === "session/new") {
+    send({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "compact", description: "Reduce context", input: { type: "text", hint: "[instructions]" } }] } } });
+    return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "acp-session-1", modes: { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] } } });
+  }
   if (frame.method === "session/load") {
     fs.appendFileSync(countFile + ".ctl", "session/load=" + frame.params.sessionId + "\\n");
     return send({ jsonrpc: "2.0", id: frame.id, result: { modes: { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] } } });
@@ -145,6 +148,44 @@ test("Chat drives an ACP harness as a live session with a permission card", asyn
   assert.match(second.filter((e) => e.type === "text").map((e) => e.delta).join(""), /hello 2/);
   const prompts = JSON.parse(fs.readFileSync(countFile, "utf8"));
   assert.deepEqual(prompts, ["first", "second"], "the harness kept the conversation instead of being restarted");
+});
+
+test("a slash command is sent verbatim and the session's own command list reaches the page", async () => {
+  const { file, countFile, dir } = fakeGemini();
+  const before = process.env.SCOPE_HARNESS_BIN_GEMINI;
+  process.env.SCOPE_HARNESS_BIN_GEMINI = file;
+  cleanups.push(() => {
+    if (before === undefined) delete process.env.SCOPE_HARNESS_BIN_GEMINI;
+    else process.env.SCOPE_HARNESS_BIN_GEMINI = before;
+  });
+
+  const sid = `acp-command-${Date.now()}`;
+  cleanups.push(() => killChatSession(sid));
+  let advertised = null;
+  const events = await readRun(
+    startChat({
+      cwd: dir,
+      harness: "gemini",
+      prompt: "/compact focus on the API",
+      sessionId: sid,
+      // A fresh ACP session normally gets the reference library/transcript
+      // preamble. A native command must not: it has to be the whole prompt.
+      libraryBlock: "REFERENCE LIBRARY BLOCK",
+    }),
+    (event) => {
+      if (event.type === "session_commands") advertised = event;
+      if (event.type === "ui_select") answerChatUi(sid, event.id, { value: "Allow once" });
+    },
+  );
+
+  const prompts = JSON.parse(fs.readFileSync(countFile, "utf8"));
+  assert.deepEqual(prompts, ["/compact focus on the API"]);
+  assert.ok(advertised, "the live session advertised its commands");
+  assert.equal(advertised.harness, "gemini");
+  assert.deepEqual(advertised.commands, [
+    { command: "/compact", description: "Reduce context", argumentHint: "[instructions]", source: "acp" },
+  ]);
+  assert.ok(events.some((e) => e.type === "done" && !e.error));
 });
 
 test("a saved ACP session is resumed with session/load after a restart", async () => {

@@ -21,7 +21,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawnCli } from "../../shared/shell.ts";
+import { compareVersions } from "./semver.ts";
+import { npmCommand, runCommand } from "./cli-run.ts";
 import { PI_BUNDLE } from "./pi-bundle.ts";
 
 /** The npm package Pi Scope bundles. */
@@ -34,8 +35,6 @@ const DEFAULT_REGISTRY = "https://registry.npmjs.org";
 const CHECK_TIMEOUT_MS = 10_000;
 /** How long `npm install` may run before it is killed. */
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
-/** Keep only the tail of npm's output — it is for diagnostics, not display. */
-const MAX_OUTPUT = 8_000;
 
 interface PiUpdateStatus {
   /** npm package under management. */
@@ -108,26 +107,6 @@ async function fetchLatest(): Promise<string> {
   }
 }
 
-/** Split a semver into numeric components + a prerelease string. */
-function parseVersion(v: string): { nums: number[]; pre: string } {
-  const [core, ...pre] = String(v).trim().split("-");
-  return { nums: core.split(".").map((n) => parseInt(n, 10) || 0), pre: pre.join("-") };
-}
-
-/** -1 / 0 / 1 for `a` before / equal to / after `b`. Release beats prerelease. */
-function compareVersions(a: string, b: string): number {
-  const A = parseVersion(a);
-  const B = parseVersion(b);
-  for (let i = 0; i < 3; i++) {
-    const diff = (A.nums[i] ?? 0) - (B.nums[i] ?? 0);
-    if (diff) return diff > 0 ? 1 : -1;
-  }
-  if (A.pre === B.pre) return 0;
-  if (!A.pre) return 1;
-  if (!B.pre) return -1;
-  return A.pre > B.pre ? 1 : -1;
-}
-
 /** Starting shape every response shares: where the agent is, what's installed,
  *  and whether Pi Scope may update it. */
 function baseStatus(): PiUpdateStatus {
@@ -175,76 +154,6 @@ export async function checkPiUpdate(): Promise<PiUpdateStatus> {
   }
   status.checkedAt = new Date().toISOString();
   return status;
-}
-
-/**
- * npm's own CLI as shipped with the Node running this server, or null.
- *
- * Running it through `node` is the one form that works on every platform: no
- * PATH lookup and no `.cmd` for CreateProcess to refuse. A packaged app has no
- * npm on PATH, but its portable Node bundles one — this is how Settings → Update
- * stays usable there (the seeded agent in `~/.pi-scope/pi` is writable, unlike
- * the copy inside the package). Positions checked: a POSIX install
- * (`<prefix>/bin/node` → `<prefix>/lib/node_modules/npm`) and a Windows one
- * (`<dir>\node.exe` → `<dir>\node_modules\npm`).
- */
-function npmCliBesideNode(): string | null {
-  const dir = path.dirname(process.execPath);
-  const candidates = [
-    path.join(dir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-    path.join(dir, "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-    path.join(dir, "node_modules", "npm", "bin", "npm-cli.js"),
-  ];
-  for (const candidate of candidates) {
-    try { if (fs.statSync(candidate).isFile()) return candidate; } catch { /* try next */ }
-  }
-  return null;
-}
-
-/** How npm is invoked: `{ file, args }` to spawn, plus a label for messages.
- *  `SCOPE_NPM_BIN` (an operator's npm, or the e2e suite's stub) always wins. */
-function npmCommand(): { file: string; args: string[]; label: string } {
-  const configured = (process.env.SCOPE_NPM_BIN || "").trim();
-  if (configured) return { file: configured, args: [], label: configured };
-  const cli = npmCliBesideNode();
-  if (cli) return { file: process.execPath, args: [cli], label: "npm (bundled with Node)" };
-  return { file: "npm", args: [], label: "npm" };
-}
-
-/** Run a command to completion, resolving with its combined output. */
-function run(command: { file: string; args: string[]; label: string }, args: string[], cwd: string): Promise<string> {
-  const bin = command.file;
-  return new Promise((resolve, reject) => {
-    let out = "";
-    let settled = false;
-    // `spawnCli`, not `spawn`: on Windows `npm` is `npm.cmd`, which Node refuses
-    // to spawn directly (and `SCOPE_NPM_BIN` usually points straight at one).
-    const proc = spawnCli(bin, [...command.args, ...args], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try { proc.kill("SIGKILL"); } catch { /* already gone */ }
-      reject(new Error(`npm install timed out after ${UPDATE_TIMEOUT_MS / 60_000} minutes`));
-    }, UPDATE_TIMEOUT_MS);
-    const collect = (chunk: Buffer) => { out = (out + chunk.toString()).slice(-MAX_OUTPUT); };
-    proc.stdout?.on("data", collect);
-    proc.stderr?.on("data", collect);
-    proc.on("error", (err: any) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(err?.code === "ENOENT"
-        ? new Error(`${command.label} not found — install npm or set SCOPE_NPM_BIN`)
-        : err);
-    });
-    proc.on("exit", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (code === 0) resolve(out.trim());
-      else reject(new Error(`npm install exited with code ${code}${out.trim() ? `\n${out.trim()}` : ""}`));
-    });
-  });
 }
 
 /** Deduplicate concurrent update requests — `npm install` must not run twice. */
@@ -303,7 +212,13 @@ async function runUpdate(): Promise<PiUpdateStatus> {
   if (!status.updatable) throw new Error(status.reason || "the bundled pi cannot be updated");
   const npm = npmCommand();
   const args = ["install", "--no-audit", "--no-fund", "--save-exact", `${PI_PACKAGE}@latest`];
-  const output = await run(npm, args, status.bundleDir);
+  const output = await runCommand(npm, args, {
+    cwd: status.bundleDir,
+    timeoutMs: UPDATE_TIMEOUT_MS,
+    timeoutMessage: `npm install timed out after ${UPDATE_TIMEOUT_MS / 60_000} minutes`,
+    exitLabel: "npm install",
+    missingHint: "install npm or set SCOPE_NPM_BIN",
+  });
   // Re-read the on-disk version and the registry (npm may report success while
   // a mirror still serves the old version).
   const after = await checkPiUpdate();

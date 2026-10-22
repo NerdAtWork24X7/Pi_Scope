@@ -17,6 +17,7 @@ import {
   parseClaudeCommands,
   parseCodexSkills,
   parsePiCommands,
+  rememberHarnessCommands,
 } from "../harness-commands.ts";
 
 function fakeBin(name, script) {
@@ -113,7 +114,15 @@ test("each protocol's answer is parsed into the composer's shape", () => {
     },
   });
   assert.deepEqual(acp.map((c) => c.command), ["/review"]);
+  assert.equal(acp[0].argumentHint, "[focus]", "ACP v2's input.hint reaches the composer");
   assert.equal(parseAcpCommands({ params: { update: { sessionUpdate: "agent_message_chunk" } } }), null);
+
+  // ACP names skills `$skill`; they take a `$` token, not a `/` command, so the
+  // slash menu must not offer something the agent cannot dispatch.
+  const acpSkills = parseAcpCommands({
+    params: { update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "$review" }] } },
+  });
+  assert.deepEqual(acpSkills, []);
 });
 
 test("pi is asked over its RPC get_commands, in the workspace", async () => {
@@ -200,4 +209,22 @@ test("an unknown harness is reported instead of guessed", async () => {
   const result = await discoverHarnessCommands("not-a-harness", undefined, { cwd: os.tmpdir(), timeoutMs: 1000 });
   assert.deepEqual(result.commands, []);
   assert.match(result.error, /unknown harness/);
+});
+
+test("commands from a live ACP session are reused instead of starting a probe", async () => {
+  clearHarnessCommandCache();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "scope-live-commands-"));
+  const marker = path.join(cwd, "started");
+  const bin = fakeBin("gemini", `#!/bin/sh\ntouch '${marker}'\n`);
+  rememberHarnessCommands("gemini", cwd, [
+    { command: "/review", description: "Review changes", argumentHint: "[focus]" },
+  ]);
+  const result = await withEnv("SCOPE_HARNESS_BIN_GEMINI", bin, () =>
+    discoverHarnessCommands("gemini", undefined, { cwd, timeoutMs: 5000 }),
+  );
+  assert.equal(result.source, "ACP session");
+  assert.deepEqual(result.commands, [
+    { command: "/review", description: "Review changes", argumentHint: "[focus]" },
+  ]);
+  assert.equal(fs.existsSync(marker), false, "the live session already answered; no second CLI was started");
 });

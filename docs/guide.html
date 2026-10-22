@@ -372,6 +372,18 @@ node docs/seed-demo.mjs</code></pre>
         global <code>pi</code> at all. Point elsewhere with <code>SCOPE_PI_BIN</code>.
       </p>
       <p>
+        The same Settings → Update tab lists the <strong>external coding harnesses</strong> Chat can
+        drive (<code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>opencode</code>,
+        <code>cline</code>, <code>kilo</code>, <code>aider</code>, <code>cursor-agent</code>) once
+        they are installed on this machine. Each row shows the version the CLI reports and its
+        published release; <strong>Update</strong> runs that CLI's own updater
+        (<code>claude update</code>, <code>opencode upgrade</code>, …) so an npm, native or
+        Homebrew install stays the install it was. Gemini CLI, which ships no updater
+        command, is updated through npm. Only harnesses
+        Pi Scope can find are listed, and a custom harness defined in Settings → Plugins → Workflow
+        is never touched.
+      </p>
+      <p>
         The bundled agent also keeps its <strong>own agent dir</strong>
         (<code>~/.pi-scope/agent</code>, see <code>SCOPE_AGENT_DIR</code>). Its settings, API keys,
         model store, sessions and extensions live there, so it never reads or writes your global pi
@@ -633,7 +645,23 @@ node docs/seed-demo.mjs</code></pre>
             <tr>
               <th scope="row"><code>SCOPE_NPM_BIN</code></th>
               <td style="text-align:left"><code>npm</code></td>
-              <td style="text-align:left"><code>npm</code> executable Settings → Update runs</td>
+              <td style="text-align:left"><code>npm</code> executable Settings → Update runs (bundled pi and
+                npm-managed harnesses)</td>
+            </tr>
+            <tr>
+              <th scope="row"><code>SCOPE_HARNESS_REGISTRY</code></th>
+              <td style="text-align:left"><code>https://registry.npmjs.org</code></td>
+              <td style="text-align:left">npm registry the harness cards use to find each CLI's newest release</td>
+            </tr>
+            <tr>
+              <th scope="row"><code>SCOPE_HARNESS_PYPI</code></th>
+              <td style="text-align:left"><code>https://pypi.org</code></td>
+              <td style="text-align:left">PyPI base URL used for Aider's release check</td>
+            </tr>
+            <tr>
+              <th scope="row"><code>SCOPE_PYTHON_BIN</code></th>
+              <td style="text-align:left"><code>python3</code></td>
+              <td style="text-align:left">Python used for a PyPI-managed harness update</td>
             </tr>
             <tr>
               <th scope="row"><code>SCOPE_MODEL_CATALOG</code></th>

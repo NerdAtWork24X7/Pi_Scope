@@ -30,6 +30,7 @@ import { readStoredKeys } from "./api-keys.ts";
 import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spawnCli, killTree } from "../../shared/shell.ts";
 import { DEFAULT_CHAT_HARNESS, buildHarnessLaunch, chatHarness, normalizeHarnessId, resolveHarnessBin } from "./harnesses.ts";
 import { AcpSession } from "./acp-client.ts";
+import { normalizeHarnessCommands, rememberHarnessCommands } from "./harness-commands.ts";
 import type { HarnessRecord, HarnessRecordTool } from "./harness-record.ts";
 import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 // Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
@@ -1133,25 +1134,30 @@ function startHarnessChat(
         },
       });
 
-      // Compose the message: an optional reference library on a new conversation,
-      // the bounded transcript of the earlier turns, then this prompt.
-      const parts: string[] = [];
-      const library = String(opts.libraryBlock || "").trim();
-      if (library && !owned.librarySent && !owned.history.length) {
-        owned.librarySent = true;
-        parts.push(library);
-      }
-      const transcript = harnessTranscriptBlock(owned.history);
-      if (transcript) parts.push(transcript);
-      parts.push(prompt);
-      const message = parts.join("\n\n");
-
       // An ACP harness runs as a LIVE SESSION, not a print-mode child: the CLI
       // keeps the conversation between prompts, its own slash commands are
       // dispatched in `session/prompt`, and a permission request is rendered as
       // an answerable card instead of being silently refused. Claude Code and
       // Codex have no ACP server, so they keep the one-shot adapters below.
       const spec = chatHarness(harnessId, workflowHarnessSettings());
+      // A native command must open the prompt. Prepending a library/transcript
+      // block would turn `/compact` into ordinary prose the agent never
+      // dispatches, so a command skips the preamble even on a fresh session.
+      const isSlashCommand = spec?.commandsVia === "acp" && /^\s*\//.test(prompt);
+
+      // Compose the message: an optional reference library on a new conversation,
+      // the bounded transcript of the earlier turns, then this prompt.
+      const parts: string[] = [];
+      const library = String(opts.libraryBlock || "").trim();
+      if (library && !owned.librarySent && !owned.history.length && !isSlashCommand) {
+        owned.librarySent = true;
+        parts.push(library);
+      }
+      const transcript = isSlashCommand ? "" : harnessTranscriptBlock(owned.history);
+      if (transcript) parts.push(transcript);
+      parts.push(prompt);
+      const message = parts.join("\n\n");
+
       if (spec?.commandsVia === "acp") {
         const file = resolveHarnessBin(spec.id, workflowHarnessSettings());
         if (!file) {
@@ -1227,6 +1233,24 @@ function startHarnessChat(
             run.openUi.set(request.id, dialog);
             runEmit(run, dialog);
           },
+          onCommands: (commands) => {
+            // The agent publishes its slash commands on the live session. Feed
+            // both the server cache (so the next `/` request is instant) and the
+            // page (so an already-open menu repaints).
+            const normalized = normalizeHarnessCommands(
+              commands.map((c) => ({ ...c, source: "acp" })) as Array<Record<string, unknown>>,
+              { source: () => "acp" },
+            );
+            rememberHarnessCommands(harnessId, owned.cwd, normalized);
+            runEmit(run, {
+              type: "session_commands",
+              sessionId: sid,
+              harness: harnessId,
+              cwd: owned.cwd,
+              source: "ACP session",
+              commands: normalized,
+            });
+          },
           onNotice: (message: string, kind: "info" | "warning" | "error") =>
             runEmit(run, { type: "ui_notify", message, kind }),
         };
@@ -1267,7 +1291,8 @@ function startHarnessChat(
             // The session itself is the conversation, so a follow-up carries only
             // the new message. The transcript preamble is for a FRESH session (a
             // one-shot CLI, or an ACP session that died and had to be restarted).
-            await session.prompt(reused ? prompt : message);
+            // A slash command is always sent verbatim (see `isSlashCommand`).
+            await session.prompt(reused || isSlashCommand ? prompt : message);
             finishAcp();
           } catch (error: any) {
             const detail = stripHarnessAnsi(String(error?.message ?? error)).trim();

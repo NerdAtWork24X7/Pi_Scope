@@ -7445,6 +7445,7 @@ body.layout-form #trajectory-inspector {
       flex-shrink: 0;
     }
     #chat-model,
+    #chat-mode,
     #chat-thinking,
     #chat-harness {
       border: 1px solid var(--border);
@@ -7460,17 +7461,20 @@ body.layout-form #trajectory-inspector {
       outline: none;
     }
     #chat-model:hover,
+    #chat-mode:hover,
     #chat-thinking:hover,
     #chat-harness:hover {
       border-color: var(--accent);
     }
     #chat-model:focus-visible,
+    #chat-mode:focus-visible,
     #chat-thinking:focus-visible,
     #chat-harness:focus-visible {
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.16);
     }
     #chat-model:disabled,
+    #chat-mode:disabled,
     #chat-thinking:disabled,
     #chat-harness:disabled {
       opacity: 0.55;
@@ -9125,6 +9129,33 @@ body.layout-settings #sidebar-resizer {
   border-radius: var(--r-control);
 }
 .set-update-path { max-width: 100%; display: inline-block; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+/* Coding harnesses: one compact row per installed CLI. The existing
+   .set-update-row is label/value; this variant adds the per-row action and a
+   wider, two-line name column so `Claude Code` and its `claude` binary fit. */
+.set-harness-row { align-items: center; gap: 10px; padding: 7px 0; }
+.set-harness-row + .set-harness-row { border-top: 1px solid var(--border); }
+.set-harness-name { display: flex; flex-direction: column; gap: 1px; width: 140px; flex-shrink: 0; min-width: 0; }
+.set-harness-name b { font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-harness-name code, .set-harness-vers code {
+  font-family: var(--mono), var(--emoji);
+  font-size: 11.5px;
+  background: var(--pill-bg);
+  padding: 1px 6px;
+  border-radius: var(--r-control);
+}
+.set-harness-name code { align-self: flex-start; color: var(--muted); background: none; padding: 0; }
+.set-harness-vers {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.set-harness-row .btn-sm { margin-left: auto; flex-shrink: 0; }
+.set-harness-note { margin-left: auto; font-size: 11.5px; color: var(--muted); flex-shrink: 0; }
+.set-harness-err { font-size: 11.5px; color: var(--red); cursor: help; }
 .set-update-muted { color: var(--muted); }
 .set-update-verdict { font-weight: 600; }
 .set-update-verdict.ok { color: var(--green); }
@@ -11688,6 +11719,14 @@ body.layout-form .chat-slash-cmd {
   font-weight: 600;
 }
 
+body.layout-form .chat-slash-hint {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-family: var(--mono), var(--emoji);
+  font-size: 11px;
+  opacity: 0.75;
+}
+
 body.layout-form .chat-slash-desc {
   min-width: 0;
   overflow: hidden;
@@ -11698,7 +11737,9 @@ body.layout-form .chat-slash-desc {
 }
 
 body.layout-form .chat-slash-item:hover .chat-slash-desc,
-body.layout-form .chat-slash-item.active .chat-slash-desc {
+body.layout-form .chat-slash-item.active .chat-slash-desc,
+body.layout-form .chat-slash-item:hover .chat-slash-hint,
+body.layout-form .chat-slash-item.active .chat-slash-hint {
   color: inherit;
   opacity: 0.8;
 }
@@ -11729,6 +11770,7 @@ body.layout-form .chat-composer-bar {
 }
 
 body.layout-form #chat-model,
+body.layout-form #chat-mode,
 body.layout-form #chat-thinking,
 body.layout-form #chat-harness {
   font-family: var(--font-body), var(--emoji);
@@ -11741,12 +11783,14 @@ body.layout-form #chat-harness {
 }
 
 body.layout-form #chat-model:hover,
+body.layout-form #chat-mode:hover,
 body.layout-form #chat-thinking:hover,
 body.layout-form #chat-harness:hover {
   border-color: var(--border);
 }
 
 body.layout-form .chat-model-label,
+body.layout-form .chat-mode-label,
 body.layout-form .chat-think-label,
 body.layout-form .chat-harness-label {
   font-size: 9.5px;

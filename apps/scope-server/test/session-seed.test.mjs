@@ -26,7 +26,15 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
  *  helpers.test.mjs). */
 function loadScope() {
   const SRC = fs.readFileSync(path.join(HERE, "..", "public", "helpers.js"), "utf8");
-  const sandbox = { console, document: { body: { hasAttribute: () => false } } };
+  // helpers.js installs delegated model-picker listeners at load time; the
+  // sandbox only needs to accept them, not dispatch them.
+  const listen = () => {};
+  const sandbox = {
+    console,
+    document: { body: { hasAttribute: () => false }, addEventListener: listen, removeEventListener: listen },
+    addEventListener: listen,
+    removeEventListener: listen,
+  };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   new vm.Script(SRC, { filename: "helpers.js" }).runInContext(sandbox);

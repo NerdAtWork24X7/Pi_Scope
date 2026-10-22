@@ -65,6 +65,13 @@ const MAX_DESCRIPTION = 400;
 
 const cache = new Map<string, { at: number; result: HarnessCommandsResult }>();
 const inFlight = new Map<string, Promise<HarnessCommandsResult>>();
+/** Commands a LIVE ACP session advertised (`available_commands_update`). The
+ *  ephemeral probe below is a fallback: when the chat already has a session
+ *  open, that session is the authoritative source and asking again would start
+ *  a second CLI just to repeat what it said. Keyed by harness + cwd, because a
+ *  live session has no resolved binary path to add to the key. */
+const liveCache = new Map<string, { at: number; result: HarnessCommandsResult }>();
+const liveKey = (id: string, cwd: string) => `${id}\u0000${cwd}`;
 
 const collapse = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
 
@@ -73,7 +80,10 @@ const collapse = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
  *  token, so only single-word commands can be offered. */
 function commandName(raw: unknown): string {
   const name = collapse(raw).replace(/^\/+/, "");
-  if (!name || name.length > MAX_NAME || !/^[^\s/]+$/.test(name)) return "";
+  // ACP names skills `$skill`: those are invoked with a `$` token, not a slash
+  // command, so putting them in the `/` menu would insert something the agent
+  // cannot dispatch.
+  if (!name || name.startsWith("$") || name.length > MAX_NAME || !/^[^\s/]+$/.test(name)) return "";
   return `/${name}`;
 }
 
@@ -92,7 +102,11 @@ export function normalizeHarnessCommands(
     if (seen.has(command)) continue;
     seen.add(command);
     const description = collapse(entry.description).slice(0, MAX_DESCRIPTION);
-    const hint = collapse(entry.argumentHint ?? entry.inputHint).slice(0, MAX_DESCRIPTION);
+    // ACP advertises an argument placeholder as `input: { type: "text", hint }`;
+    // Claude/pi/codex use flat fields. Accept all three so the composer can show
+    // the same hint whichever protocol answered.
+    const input = entry.input && typeof entry.input === "object" ? (entry.input as Record<string, unknown>) : null;
+    const hint = collapse(entry.argumentHint ?? entry.inputHint ?? input?.hint).slice(0, MAX_DESCRIPTION);
     const source = opts.source ? opts.source(entry) : collapse(entry.source);
     out.push({
       command,
@@ -400,7 +414,10 @@ async function discoverAcp(
       id: 1,
       method: "initialize",
       params: {
-        protocolVersion: 1,
+        // Ask for the current protocol, exactly like the chat's live session
+        // does. A v1-only agent answers with protocolVersion 1 and keeps working.
+        protocolVersion: 2,
+        clientInfo: { name: "Pi Scope", version: "1.0.0" },
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
@@ -441,6 +458,35 @@ async function discoverAcp(
 // ─── Public entry point ─────────────────────────────────────────────────────
 
 /**
+ * Remember the commands a live ACP session just advertised.
+ *
+ * An ACP agent publishes commands on its session (`available_commands_update`),
+ * and the set can grow mid-conversation as project skills load. Recording that
+ * here means the composer's `/` menu reflects the session the user is actually
+ * talking to — and does not spawn a second CLI process to re-ask.
+ */
+export function rememberHarnessCommands(
+  id: string,
+  cwd: string,
+  commands: HarnessCommand[],
+  source = "ACP session",
+): void {
+  const harness = String(id || "").trim();
+  if (!harness) return;
+  const result: HarnessCommandsResult = {
+    commands: commands
+      .filter((c) => c && typeof c.command === "string" && /^\/\S+$/.test(c.command))
+      .map((c) => ({ ...c })),
+    source,
+  };
+  liveCache.set(liveKey(harness, String(cwd || "").trim()), { at: Date.now(), result });
+  if (liveCache.size > 32) {
+    const oldest = [...liveCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) liveCache.delete(oldest[0]);
+  }
+}
+
+/**
  * The commands one harness advertises for `cwd`, cached for five minutes and
  * deduplicated across concurrent callers.
  *
@@ -459,6 +505,11 @@ export async function discoverHarnessCommands(
   if (!spec.commandsVia) return { commands: [], source: null };
   if (spec.user) return { commands: [], source: null, error: "a custom harness has no command interface" };
 
+  const cwd = String(opts.cwd || "").trim() || process.cwd();
+  // A live ACP session already told us what it offers; trust it over a probe.
+  const live = liveCache.get(liveKey(spec.id, cwd));
+  if (live && Date.now() - live.at < CACHE_TTL_MS) return live.result;
+
   // Pi's runner is the app's own bundled agent; every other harness resolves
   // through the same override chain a prompt uses.
   const file =
@@ -473,7 +524,6 @@ export async function discoverHarnessCommands(
     };
   }
 
-  const cwd = String(opts.cwd || "").trim() || process.cwd();
   const key = `${spec.id}\u0000${file}\u0000${cwd}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.result;
@@ -517,4 +567,5 @@ export async function discoverHarnessCommands(
 /** Drop cached answers (tests, and a Settings action that re-points a binary). */
 export function clearHarnessCommandCache(): void {
   cache.clear();
+  liveCache.clear();
 }

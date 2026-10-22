@@ -3164,6 +3164,22 @@
         CH.acpModeHarness = currentHarness();
         renderChatMode();
         break;
+      case "session_commands": {
+        // The live ACP session advertised its slash commands. Remember them for
+        // this harness+workspace so a `/` menu opened later paints from the
+        // session itself instead of starting a second CLI to re-ask.
+        const id = String(ev.harness || m.harness || currentHarness());
+        const key = `${id}\u0000${typeof ev.cwd === "string" ? ev.cwd : slashCwd()}`;
+        const entry = {
+          commands: Array.isArray(ev.commands) ? ev.commands.filter((c) => c && typeof c.command === "string") : [],
+          source: typeof ev.source === "string" ? ev.source : "ACP session",
+          error: "",
+          at: Date.now(),
+        };
+        CH.slashCommands.set(key, entry);
+        if (slash.open && slashKey() === key) updateSlash();
+        break;
+      }
       case "session":
         // The server announces the real subprocess session id at stream start
         // (it generates one when the request didn't carry one), so answers to
@@ -3783,7 +3799,12 @@
           entry = {
             commands: Array.isArray(data.commands)
               ? data.commands.filter((c) => c && typeof c.command === "string" && /^\/\S+$/.test(c.command))
-                .map((c) => ({ command: c.command, description: typeof c.description === "string" ? c.description : "" }))
+                .map((c) => ({
+                  command: c.command,
+                  description: typeof c.description === "string" ? c.description : "",
+                  // ACP calls it `input.hint`; the server normalizes it to this.
+                  argumentHint: typeof c.argumentHint === "string" ? c.argumentHint : "",
+                }))
               : [],
             source: typeof data.source === "string" ? data.source : null,
             error: typeof data.error === "string" ? data.error : "",
@@ -3843,6 +3864,7 @@
       `<button type="button" class="chat-slash-item${i === slash.active ? " active" : ""}"` +
       ` data-slash="${esc(c.command)}" role="option" aria-selected="${i === slash.active ? "true" : "false"}">` +
       `<span class="chat-slash-cmd">${esc(c.command)}</span>` +
+      (c.argumentHint ? `<span class="chat-slash-hint">${esc(c.argumentHint)}</span>` : "") +
       `<span class="chat-slash-desc">${esc(c.description || "")}</span></button>`).join("");
     el.slash.innerHTML =
       `<div class="chat-slash-head"><span>Slash commands</span>` +
