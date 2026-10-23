@@ -356,7 +356,8 @@ describe("git view", () => {
     await page.waitForSelector(".scope-sel-pop:not([hidden])");
     await page.keyboard.type("beta");
     await page.waitForFunction(() => document.querySelectorAll(".scope-sel-opt").length === 1);
-    assert.match(await page.textContent(".scope-sel-opt"), /test\/beta/);
+    assert.match(await page.textContent(".scope-sel-group"), /test/, "the provider heads the group");
+    assert.match(await page.textContent(".scope-sel-opt"), /beta/, "the model name is the row");
     await page.keyboard.press("Escape");
     assert.equal(await page.locator(".scope-sel-pop").isHidden(), true);
 

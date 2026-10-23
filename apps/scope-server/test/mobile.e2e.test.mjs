@@ -1350,7 +1350,8 @@ describe("starting a session from the phone", () => {
     await page.waitForSelector(".scope-sel-pop:not([hidden])");
     await page.keyboard.type("two");
     await page.waitForFunction(() => document.querySelectorAll(".scope-sel-opt").length === 1);
-    assert.match(await page.textContent(".scope-sel-opt"), /stub\/two/);
+    assert.match(await page.textContent(".scope-sel-group"), /stub/, "the provider heads the group");
+    assert.match(await page.textContent(".scope-sel-opt"), /two/, "the model name is the row");
     await page.keyboard.press("Escape");
     assert.equal(await page.locator(".scope-sel-pop").isHidden(), true);
 

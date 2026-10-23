@@ -94,6 +94,8 @@ test("the model pill is searchable, and the picked model rides on the next promp
   await pill.click();
   await page.waitForSelector(".scope-sel-pop:not([hidden])");
   assert.equal(await page.locator(".scope-sel-opt").count(), all, "the whole catalogue is offered");
+  assert.ok((await page.locator(".scope-sel-group .scope-sel-provider-ico").count()) >= 2,
+    "each provider heading carries its icon");
   await page.keyboard.type("gemini");
   const rows = await page.locator(".scope-sel-opt .scope-sel-name").allInnerTexts();
   assert.ok(rows.length > 0 && rows.length < all, `typing narrows the list (${rows})`);
@@ -284,5 +286,7 @@ test("a model picked for one harness never leaks into another's list", async () 
 
   await page.selectOption("#chat-harness", "pi");
   models = await page.$$eval("#chat-model option", (els) => els.map((el) => el.value));
-  assert.deepEqual(models, ["google/gemini-2.5-flash-lite", "deepseek/deepseek-v4-flash"], "the Pi catalogue is back");
+  assert.deepEqual(models, ["deepseek/deepseek-v4-flash", "google/gemini-2.5-flash-lite"], "the Pi catalogue is back, grouped by provider");
+  const groups = await page.$$eval("#chat-model optgroup", (els) => els.map((el) => el.label));
+  assert.deepEqual(groups, ["deepseek", "google"], "the picker is grouped one block per provider");
 });

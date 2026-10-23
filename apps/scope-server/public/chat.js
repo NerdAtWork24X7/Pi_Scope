@@ -3600,6 +3600,66 @@
     CH.chatModel = "";
   }
 
+  // A provider-qualified model id is "<provider>/<model>". Only the FIRST slash
+  // separates the two: "kilo/inclusionai/ling-3.0" is provider "kilo" with the
+  // model name "inclusionai/ling-3.0". A bare alias (Claude's "sonnet", a CLI's
+  // "default") has no provider, so it stays a single name.
+  function modelParts(id) {
+    const s = String(id || "");
+    const i = s.indexOf("/");
+    if (i <= 0 || i === s.length - 1) return { provider: "", name: s };
+    return { provider: s.slice(0, i), name: s.slice(i + 1) };
+  }
+
+  // Provider first, then model name — the order the model picker lists options
+  // in, so every provider's models stay together and providers read A→Z. Bare
+  // aliases (a CLI's "sonnet", "opus") have no provider key to sort by, so they
+  // keep the order the harness itself reported.
+  function compareModelIds(a, b) {
+    const A = modelParts(a), B = modelParts(b);
+    if (!A.provider && !B.provider) return 0;
+    if (!A.provider !== !B.provider) return A.provider ? -1 : 1;
+    return A.provider.localeCompare(B.provider) ||
+      A.name.localeCompare(B.name) ||
+      String(a).localeCompare(String(b));
+  }
+
+  // Group model ids into one block per provider: providers read A→Z and the
+  // models inside each block read A→Z. A bare alias (no provider, e.g. a
+  // harness's "sonnet") has no group of its own and keeps the harness's order.
+  function groupModelIds(ids) {
+    const groups = new Map(); // provider -> model ids
+    for (const id of ids) {
+      const { provider } = modelParts(id);
+      if (!groups.has(provider)) groups.set(provider, []);
+      groups.get(provider).push(id);
+    }
+    return [...groups.entries()]
+      .sort(([a], [b]) => (!a ? 1 : !b ? -1 : a.localeCompare(b)))
+      .map(([provider, list]) => ({
+        provider,
+        ids: provider ? list.slice().sort(compareModelIds) : list,
+      }));
+  }
+
+  // The option text is the model name alone — the provider is the <optgroup>
+  // header, so it is not repeated on every row of the list.
+  function modelOptionHtml(id, selected, suffix) {
+    const { name } = modelParts(id);
+    return `<option value="${esc(id)}"${selected ? " selected" : ""} title="${esc(id)}">${esc(name + (suffix || ""))}</option>`;
+  }
+
+  // One <optgroup> per provider, with the model ids under it. Ungrouped bare
+  // aliases stay in the order their harness reported.
+  function modelOptionsHtml(ids, selected, suffixFor) {
+    return groupModelIds(ids).map(({ provider, ids: keys }) => {
+      const options = keys
+        .map((id) => modelOptionHtml(id, id === selected, suffixFor ? suffixFor(id) : ""))
+        .join("");
+      return provider ? `<optgroup label="${esc(provider)}">${options}</optgroup>` : options;
+    }).join("");
+  }
+
   function renderComposerModel() {
     if (!el.model) return;
     if (!isPiHarness()) {
@@ -3616,23 +3676,22 @@
       // default instead of appending it to the list — the pill must only ever
       // offer the selected harness's models.
       if (CH.chatModel && CH.modelHarness !== id) CH.chatModel = "";
-      const opts = [""];
-      for (const m of list) if (m && !opts.includes(m)) opts.push(m);
+      // "default" (empty value) stays pinned first; the rest are grouped by
+      // provider so the picker list reads provider → models.
+      const models = new Set();
+      for (const m of list) if (m) models.add(m);
       // Never silently drop a selection of THIS harness (e.g. one just
       // discovered, or an id the current CLI no longer lists): keep it
       // selectable.
-      if (CH.chatModel && !opts.includes(CH.chatModel)) opts.push(CH.chatModel);
+      if (CH.chatModel) models.add(CH.chatModel);
       // Rebuilding thousands of <option>s on every poll is the expensive part,
       // so only touch the DOM when the list or the selection actually changed.
       const sig = `${id}\u0000${found?.at || 0}\u0000${list.length}\u0000${list[0] || ""}\u0000${CH.chatModel || ""}`;
       if (CH.modelSig !== sig) {
         CH.modelSig = sig;
-        let html = "";
-        for (const m of opts) {
-          const label = m || "default";
-          const title = m || `the ${harnessLabel(id)} default`;
-          html += `<option value="${esc(m)}"${m === (CH.chatModel || "") ? " selected" : ""} title="${esc(title)}">${esc(label)}</option>`;
-        }
+        const title = `the ${harnessLabel(id)} default`;
+        let html = `<option value=""${CH.chatModel ? "" : " selected"} title="${esc(title)}">default</option>`;
+        html += modelOptionsHtml([...models], CH.chatModel || "");
         el.model.innerHTML = html;
       }
       fitComposerSelects();
@@ -3647,19 +3706,13 @@
     const used = new Set();
     for (const s of wsSessions(CH.workspace)) { const q = qualifiedModel(s); if (q) used.add(q); }
     if (CH.chatModel) used.add(CH.chatModel);
-    const ordered = enabled.slice();
-    for (const m of Array.from(used).sort()) if (!ordered.includes(m)) ordered.push(m);
+    // Enabled models + models this workspace has actually run with, grouped by
+    // provider (then name) so the picker is not a mixed-order list.
+    const ordered = Array.from(new Set([...enabled, ...used]));
 
     if (!ordered.length) ordered.push(CH.chatModel || "google/gemini-2.5-flash-lite");
-    let html = "";
-    for (const m of ordered) {
-      const fromSettings = enabled.includes(m);
-      // Full model ids are shown verbatim; the closed select is sized
-      // dynamically to its selected option (fitComposerSelects), so the pill
-      // grows to fit the text instead of clipping it.
-      const label = fromSettings ? m : `${m} · (session)`;
-      html += `<option value="${esc(m)}"${m === CH.chatModel ? " selected" : ""} title="${esc(m)}">${esc(label)}</option>`;
-    }
+    const html = modelOptionsHtml(ordered, CH.chatModel,
+      (m) => (enabled.includes(m) ? "" : " · (session)"));
     // Avoid rewriting the <select> every poll — an innerHTML swap resets the
     // element and would drop an open dropdown. Only patch when the options
     // actually changed.

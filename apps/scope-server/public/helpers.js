@@ -1080,17 +1080,43 @@
       `.scope-sel-search:focus{border-color:var(--accent,#ffd43b);box-shadow:0 0 0 3px var(--accent-soft,rgba(255,212,59,.28));}` +
       `.scope-sel-list{max-height:290px;overflow-y:auto;padding:2px;border-radius:var(--r-control,4px);` +
       `background:var(--surface,#fbfbfa);}` +
-      `.scope-sel-opt{display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:4px;cursor:pointer;` +
+      `.scope-sel-opt{display:flex;align-items:baseline;gap:6px;padding:5px 7px;border-radius:4px;cursor:pointer;` +
       `font-family:var(--mono,monospace);font-size:12.5px;color:var(--text,#242423);white-space:nowrap;overflow:hidden;}` +
-      `.scope-sel-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;}` +
-      `.scope-sel-group{flex:0 0 auto;color:var(--muted,var(--text-3,#71716c));font-size:11px;}` +
+      `.scope-sel-opt.scope-sel-sub{padding-left:29px;}` +
+      `.scope-sel-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;font-weight:400;}` +
+      `.scope-sel-group{display:flex;align-items:center;gap:6px;padding:8px 7px 4px;` +
+      `font-family:var(--mono,monospace);font-size:11.5px;font-weight:700;line-height:1.2;color:var(--text,#242423);}` +
+      `.scope-sel-group:not(:first-child){margin-top:3px;border-top:1px solid var(--hairline,var(--border,#e3e3df));}` +
+      `.scope-sel-provider-ico{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;` +
+      `width:15px;height:15px;border-radius:3px;font-family:var(--mono,monospace);font-size:9px;font-weight:700;line-height:1;` +
+      `background:var(--accent-soft,#fff1b6);color:var(--accent-ink,#554400);}` +
+      `.scope-sel-provider-ico.t1{background:var(--tint-green,rgba(131,207,156,.14));color:var(--green,#2f7d4a);}` +
+      `.scope-sel-provider-ico.t2{background:var(--tint-orange,rgba(227,178,79,.14));color:var(--orange,#9a6b12);}` +
+      `.scope-sel-provider-ico.t3{background:var(--tint-purple,rgba(173,140,242,.14));color:var(--purple,#6d4ec4);}` +
+      `.scope-sel-provider-ico.t4{background:var(--tint-cyan,rgba(106,162,240,.12));color:var(--cyan,#2e6bb8);}` +
+      `.scope-sel-provider-ico.t5{background:var(--tint-red,rgba(255,158,150,.14));color:var(--red,#b7382f);}` +
       `.scope-sel-opt.scope-sel-active{background:var(--accent-soft,#fff1b6);color:var(--accent-ink,#554400);}` +
-      `.scope-sel-opt.scope-sel-current .scope-sel-name{font-weight:600;}` +
+      `.scope-sel-opt.scope-sel-current{box-shadow:inset 2px 0 0 var(--accent,#ffd43b);}` +
       `.scope-sel-none{padding:9px 8px;color:var(--muted,var(--text-3,#71716c));font-size:12.5px;}`;
     document.head.appendChild(style);
   }
 
-  /** The option rows of `select` that match every word in `query`. */
+  /** A small provider avatar: its initial on a tinted chip, with the tint fixed
+   *  per provider so the same provider reads the same wherever it is listed. */
+  function providerIconHtml(provider) {
+    const name = String(provider || "").trim();
+    const initial = (name.match(/[A-Za-z0-9]/) || ["?"])[0].toUpperCase();
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+    return `<span class="scope-sel-provider-ico t${hash % 6}" aria-hidden="true">${escapeHtml(initial)}</span>`;
+  }
+
+  /** The option rows of `select` that match every word in `query`, ordered by
+   *  provider then model. A model select may carry its provider as an
+   *  <optgroup> (Settings, Chat) or inline in the option text as
+   *  "provider/model" (the mobile sheet, Git's plugin setting), so both shapes
+   *  are split the same way: the provider becomes a heading and the model name
+   *  alone is the selectable label. */
   function selRowsFor(select, query) {
     const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
     const rows = [];
@@ -1101,8 +1127,39 @@
       const groupLabel = group ? String(group.label || "") : "";
       const hay = `${opt.value} ${label} ${groupLabel}`.toLowerCase();
       if (words.length && !words.every((w) => hay.includes(w))) continue;
-      rows.push({ value: opt.value, label, group: groupLabel });
+      // The first slash is the provider separator; any further slashes belong
+      // to the model's own id (e.g. "kilo/inclusionai/ling-3.0"). Only a real
+      // id parses: "(agent default — google/gemini-…)" keeps its whole label.
+      let provider = groupLabel;
+      let name = label;
+      if (provider) {
+        if (name.startsWith(provider + "/")) name = name.slice(provider.length + 1);
+      } else if (opt.value) {
+        const cut = name.indexOf("/");
+        const head = cut > 0 ? name.slice(0, cut) : "";
+        if (cut > 0 && cut < name.length - 1 && /^[A-Za-z0-9._-]+$/.test(head)) {
+          provider = head;
+          name = name.slice(cut + 1);
+        }
+      }
+      rows.push({ value: opt.value, name, provider, index: rows.length });
     }
+    // Empty-value rows ("default", "(none)", "(choose a model)") stay pinned
+    // first; everything else is grouped by provider and then by model name.
+    // Bare aliases (no provider) keep the order the harness reported, so a CLI
+    // whose list is deliberately ordered is not alphabetised behind its back.
+    rows.sort((a, b) => {
+      if (!a.value || !b.value) {
+        if (!a.value && !b.value) return a.index - b.index;
+        return a.value ? 1 : -1;
+      }
+      if (!a.provider && !b.provider) return a.index - b.index;
+      if (!a.provider !== !b.provider) return a.provider ? -1 : 1;
+      return a.provider.localeCompare(b.provider) ||
+        a.name.localeCompare(b.name) ||
+        a.value.localeCompare(b.value) ||
+        a.index - b.index;
+    });
     return rows;
   }
 
@@ -1151,14 +1208,28 @@
     SEL.rows = selRowsFor(select, SEL.input.value);
     const n = SEL.rows.length;
     if (SEL.active >= n) SEL.active = n ? n - 1 : 0;
-    SEL.list.innerHTML = n
-      ? SEL.rows.map((row, i) =>
-          `<div class="scope-sel-opt${i === SEL.active ? " scope-sel-active" : ""}` +
+    if (!n) {
+      SEL.list.innerHTML = `<div class="scope-sel-none">No model matches “${escapeHtml(SEL.input.value.trim())}”.</div>`;
+    } else {
+      let html = "";
+      let lastProvider = null;
+      SEL.rows.forEach((row, i) => {
+        // One heading per provider, directly above that provider's models. It
+        // is not a selectable row, so arrow keys still move model to model.
+        if (row.provider && row.provider !== lastProvider) {
+          html += `<div class="scope-sel-group" role="presentation">` +
+            `${providerIconHtml(row.provider)}<span class="scope-sel-group-name">${escapeHtml(row.provider)}</span></div>`;
+        }
+        lastProvider = row.provider || null;
+        html += `<div class="scope-sel-opt${row.provider ? " scope-sel-sub" : ""}` +
+          `${i === SEL.active ? " scope-sel-active" : ""}` +
           `${row.value === select.value ? " scope-sel-current" : ""}" role="option" ` +
           `id="scope-sel-opt-${i}" data-idx="${i}" aria-selected="${i === SEL.active}" ` +
-          `title="${escapeHtml(row.value)}"><span class="scope-sel-name">${escapeHtml(row.label)}</span>` +
-          `${row.group ? `<span class="scope-sel-group">${escapeHtml(row.group)}</span>` : ""}</div>`).join("")
-      : `<div class="scope-sel-none">No model matches “${escapeHtml(SEL.input.value.trim())}”.</div>`;
+          `title="${escapeHtml(row.value)}">` +
+          `<span class="scope-sel-name">${escapeHtml(row.name)}</span></div>`;
+      });
+      SEL.list.innerHTML = html;
+    }
     SEL.input.setAttribute("aria-activedescendant", n ? `scope-sel-opt-${SEL.active}` : "");
     const active = SEL.list.querySelector(".scope-sel-active");
     if (active && active.scrollIntoView) active.scrollIntoView({ block: "nearest" });
