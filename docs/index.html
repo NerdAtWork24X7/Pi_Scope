@@ -6,11 +6,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Pi Scope — watch your AI coding agent think, type, and act</title>
   <meta name="description"
-    content="Pi Scope is a local-first control room for AI coding agents. Stream every message, tool call, shell command and file edit into a live dashboard — or replay it later. Private by default, no account, nothing leaves your machine." />
+    content="Pi Scope is a local-first control room for AI coding agents. Chat drives Pi, Claude Code, Codex, Gemini CLI and more; every message, tool call, shell command and file edit streams into a live dashboard — or replay it later. Private by default, no account, nothing leaves your machine." />
   <meta name="color-scheme" content="dark light" />
   <meta property="og:title" content="Pi Scope — watch your AI coding agent think, type, and act" />
   <meta property="og:description"
-    content="Local-first observability and control for AI coding agents: live event stream, replay, real shell, diffs, git checkpoints. Nothing leaves your machine." />
+    content="Local-first observability and control for AI coding agents: one Chat for Pi and external coding CLIs, live event stream, replay, real shell, diffs, git checkpoints. Nothing leaves your machine." />
   <meta property="og:type" content="website" />
   <link rel="icon"
     href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23F5C400'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%230A0A0A' stroke-width='2.5'/%3E%3C/svg%3E" />
@@ -50,10 +50,11 @@
       </h1>
 
       <p class="hero-lede">
-        Pi Scope is a control room for autonomous coding agents. Every message, tool call,
-        shell command and file edit streams into a live dashboard you can watch over SSE —
-        or replay later like a movie of your agent's brain. It runs locally, needs no
-        account, and uploads nothing.
+        Pi Scope is a control room for autonomous coding agents. Chat drives Pi and the
+        coding-agent CLIs already on your PATH — Claude Code, Codex, Gemini CLI, opencode
+        and more — while every message, tool call, shell command and file edit streams
+        into a live dashboard you can watch over SSE, or replay later like a movie of your
+        agent's brain. It runs locally, needs no account, and uploads nothing.
       </p>
 
       <!-- The install snippet, up top like pi.dev — switchable per OS, copy and go. -->
@@ -302,7 +303,7 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
         <article class="tile">
           <span class="glyph">›_</span>
           <h4>Chat</h4>
-          <p>Talk to your agent, steer a live run mid-flight, and never lose a turn to a reload.</p>
+          <p>Drive Pi — or Claude Code, Codex, Gemini CLI, opencode and more — and steer a live run mid-flight.</p>
         </article>
         <article class="tile">
           <span class="glyph">≡</span>
@@ -312,7 +313,7 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
         <article class="tile">
           <span class="glyph">▦</span>
           <h4>Office</h4>
-          <p>Your agent team as a pixel-art floor; a dispatch literally walks the task over.</p>
+          <p>Your agent team as a pixel-art floor; live runs land on the board as cards.</p>
         </article>
         <article class="tile">
           <span class="glyph">∿</span>
@@ -322,7 +323,7 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
         <article class="tile">
           <span class="glyph">⑃</span>
           <h4>Workflow</h4>
-          <p>Wire coding-agent harnesses into a graph on a canvas, gate it, and run it server-side.</p>
+          <p>Wire coding-agent harnesses into a graph, gate it, and run it server-side — Pi nodes run through Chat.</p>
         </article>
         <article class="tile">
           <span class="glyph">&gt;_</span>
@@ -332,7 +333,7 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
         <article class="tile">
           <span class="glyph">±</span>
           <h4>Review</h4>
-          <p>Side-by-side diffs against HEAD — and the new side is editable and savable.</p>
+          <p>Side-by-side diffs with an editable right pane, plus a dependency diagram and blast-radius overlay.</p>
         </article>
         <article class="tile">
           <span class="glyph">◆</span>
@@ -342,12 +343,12 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
         <article class="tile">
           <span class="glyph">⑂</span>
           <h4>Git</h4>
-          <p>Stage, commit, push, branches, stashes, submodules and a commit-lane graph.</p>
+          <p>Stage, commit, merge, push, branches, stashes, submodules and a commit-lane graph.</p>
         </article>
         <article class="tile">
           <span class="glyph">⚙</span>
           <h4>Settings</h4>
-          <p>Agents, teams, models, keys and extensions — mirrored and editable from the browser.</p>
+          <p>Agents, teams, models, keys, extensions and plugins — plus Updates for pi and the coding harnesses it finds.</p>
         </article>
         <article class="tile">
           <span class="glyph">⊞</span>
@@ -394,13 +395,13 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
           <figure class="frame console reveal">
             <div class="console-bar">
               <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span class="console-path">chat · dark</span>
+              <span class="console-path">chat · pick a harness</span>
               <span class="console-status"><i class="dot"></i> working</span>
             </div>
             <img src="shots/chat-dark.png" width="3200" height="1800" loading="lazy"
-              alt="The Chat view in dark theme: a session transcript, an agent-team rail and a composer with model and thinking controls." />
-            <figcaption><span class="fc-title">Chat</span><span class="fc-note">steer a live run · agent team
-                rail</span></figcaption>
+              alt="The Chat view in dark theme: a session transcript with per-message harness glyphs, an agent-team rail and a composer with a harness picker, provider-grouped model menu and thinking controls." />
+            <figcaption><span class="fc-title">Chat</span><span class="fc-note">harness picker · provider-grouped models ·
+                slash commands · agent team rail</span></figcaption>
           </figure>
 
           <figure class="frame console reveal">
@@ -468,12 +469,26 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
           </figure>
         </div>
 
+        <figure class="frame console reveal">
+          <div class="console-bar">
+            <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="console-path">review · dependency diagram</span>
+            <span class="console-status"><i class="dot amber"></i> blast radius</span>
+          </div>
+          <img src="shots/review-diagram-dark.png" width="3200" height="1800" loading="lazy"
+            alt="The Review dependency diagram: file nodes with changed files highlighted, the selected file's transitive dependents marked red, and a side panel listing its imports and dependents." />
+          <figcaption>
+            <span class="fc-title">Review · diagram</span>
+            <span class="fc-note">changed files glow · click a file for what depends on it · double-click straight to the diff</span>
+          </figcaption>
+        </figure>
+
         <div class="shots shots-2">
           <figure class="frame console reveal">
             <div class="console-bar">
               <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
               <span class="console-path">checkpoints · a save button for your agent</span>
-              <span class="console-status"><i class="dot amber"></i> 6 labels</span>
+              <span class="console-status"><i class="dot amber"></i> git-backed</span>
             </div>
             <img src="shots/checkpoints-dark.png" width="3200" height="1800" loading="lazy"
               alt="The Checkpoints pane: a list of labelled git-backed snapshots with restore and merge actions." />
@@ -489,8 +504,8 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
             </div>
             <img src="shots/git-dark.png" width="3200" height="1800" loading="lazy"
               alt="The Git view: a commit history with a commit-lane graph and a diff for the selected commit." />
-            <figcaption><span class="fc-title">Git</span><span class="fc-note">history graph · ✨ generate a message from
-                staged changes</span></figcaption>
+            <figcaption><span class="fc-title">Git</span><span class="fc-note">history graph · merge from the context
+                menu · ✨ generate a commit message</span></figcaption>
           </figure>
         </div>
 
@@ -499,12 +514,12 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
             <div class="console-bar">
               <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
               <span class="console-path">settings · the whole agent</span>
-              <span class="console-status"><i class="dot grey"></i> 6 tabs</span>
+              <span class="console-status"><i class="dot grey"></i> 8 tabs</span>
             </div>
             <img src="shots/settings-dark.png" width="3200" height="1800" loading="lazy"
-              alt="The Settings view: tabs for Agent, Teams, Models, Extensions, API keys, Plugins, SubAgent, Auth and Update." />
-            <figcaption><span class="fc-title">Settings</span><span class="fc-note">models &amp; cost catalog · auth ·
-                pi update</span></figcaption>
+              alt="The Settings view: tabs for SubAgent, Models, Extensions, API Keys, Auth, pi, Update and Plugins." />
+            <figcaption><span class="fc-title">Settings</span><span class="fc-note">agents &amp; teams · provider-grouped
+                models · extensions · keys · pi &amp; harness updates</span></figcaption>
           </figure>
 
           <figure class="frame console reveal">
@@ -527,10 +542,10 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
             <span class="console-status"><i class="dot grey"></i> 6 nodes · 6 edges</span>
           </div>
           <img src="shots/workflow-dark.png" width="3200" height="1800" loading="lazy"
-            alt="The Workflow view: a canvas graph of start, planner, builder and tester agents, a human approval gate and an end node, with the messages sidebar beside it." />
+            alt="The Workflow view: a canvas graph of start, planner, builder and tester agents, a human approval gate and an end node, with each node's harness and model shown and the messages sidebar beside it." />
           <figcaption>
             <span class="fc-title">Workflow</span>
-            <span class="fc-note">parallel branches · human approval gate · every past run kept in the workspace</span>
+            <span class="fc-note">any harness per node · Pi runs through Chat · approval gate · every past run kept in the workspace</span>
           </figcaption>
         </figure>
 
@@ -636,6 +651,12 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
               <td class="no mark">✗</td>
             </tr>
             <tr>
+              <th scope="row">One Chat for Pi and external coding CLIs</th>
+              <td class="yes mark">✓</td>
+              <td class="no mark">✗</td>
+              <td class="maybe mark">one at a time</td>
+            </tr>
+            <tr>
               <th scope="row">Exact LLM request args captured</th>
               <td class="yes mark">✓</td>
               <td class="maybe mark">varies</td>
@@ -694,8 +715,8 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
           <h4>Agent-aware, not LLM-aware</h4>
           <p>
             Tool calls with exit codes, the shell's live working directory, context-window
-            usage, compactions, model switches and branch navigation — the parts a generic
-            tracer throws away.
+            usage, compactions, model switches, external-harness sessions and branch
+            navigation — the parts a generic tracer throws away.
           </p>
         </div>
       </div>
@@ -715,8 +736,9 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
           <summary>Do I need an account or a cloud service?<span class="glyph">+</span></summary>
           <div class="answer">
             No. Pi Scope is a single Node server on your machine that serves the dashboard and
-            stores everything in a local SQLite file. There is no sign-up, no telemetry and no
-            outbound network call except the ones your agent already makes.
+            stores everything in a local SQLite file. There is no sign-up and no telemetry; the
+            only outbound calls are the ones your agent makes, plus update and model-catalog
+            checks, which send no prompts or code.
           </div>
         </details>
         <details>
@@ -724,17 +746,25 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
           <div class="answer">
             Session start and end, every user and assistant message, thinking blocks, tool calls
             and their results including exit codes, the LLM request arguments and system prompt,
-            model changes, compactions and branch navigation.
+            model changes, compactions and branch navigation — plus, for an external harness,
+            which CLI produced each turn.
           </div>
         </details>
         <details>
-          <summary>Does it only work with the <code>pi</code> agent?<span class="glyph">+</span></summary>
+          <summary>Which coding agents can it drive?<span class="glyph">+</span></summary>
           <div class="answer">
             <p>
-              The bundled agent is <code>pi</code> and Pi Scope ships its own copy of it, so Chat,
-              the commit-message generator and the in-browser terminal work with nothing to
-              install. But the server is agent-agnostic: anything that can POST JSON to
-              <code>/events</code> can feed it, which is about ten lines of script.
+              Pi Scope ships its own copy of <code>pi</code>, so Chat, the commit-message
+              generator and the in-browser terminal work with nothing installed. Chat can also
+              drive the coding agents already on your <code>PATH</code> — Claude Code, Codex CLI,
+              Gemini CLI, opencode, Cline, Kilo Code, Aider and Cursor Agent — in the same
+              dashboard. Each keeps its own models, and the ACP (Agent Client Protocol) harnesses
+              publish their own slash commands and modes to the composer. Settings → Update uses
+              each CLI's own updater, or the package manager its docs specify.
+            </p>
+            <p>
+              Anything else can still feed the dashboard by POSTing JSON to
+              <code>/events</code>.
             </p>
           </div>
         </details>
@@ -756,8 +786,9 @@ cd Pi_Scope; .\pi-scope.cmd</code></pre>
             <code>pi</code> agent with its runtime packages (roughly 1&nbsp;GB). It also builds the
             shared Python environment (<code>~/.pi-scope/.venv</code>) and, in the background, the
             Playwright Chromium (<code>~/.pi-scope/playwright-browsers</code>) that the
-            <code>web-fetch</code> and <code>video-creator</code> tools share. Your checkout stays
-            free of <code>node_modules</code>.
+            <code>web-fetch</code> and <code>video-creator</code> tools share. External coding
+            CLIs are yours: Pi Scope detects them on <code>PATH</code> and never installs them.
+            Your checkout stays free of <code>node_modules</code>.
           </div>
         </details>
         <details>

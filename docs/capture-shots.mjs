@@ -44,7 +44,11 @@ const PROJECT = path.join(DEMO_ROOT, "model-selector");
 /** seed-demo's second project, so the rail shows two workspaces. */
 const SIBLING = path.join(DEMO_ROOT, "model_selector");
 const DB = path.join(ROOT, "tmp", "shots.db");
-const BASE = "http://127.0.0.1:43190";
+/** The server's token file, kept apart from a running app's tmp/scope_token. */
+const TOKEN_FILE = path.join(ROOT, "tmp", "shots_token");
+/** Override the port so a capture can run beside a live desktop app. */
+const PORT = process.env.SCOPE_CAPTURE_PORT ?? "43190";
+const BASE = `http://127.0.0.1:${PORT}`;
 const VW = 1600, VH = 900, DSF = 2;
 /** The hero demo session: the coder adding dark mode (see docs/seed-demo.mjs). */
 const HERO = "sess-darkmode-9f3a2b";
@@ -163,10 +167,10 @@ async function seedWorkflow(token) {
 
 // ─── Real server + seeded demo ──────────────────────────────────────────────
 async function startServer() {
-  for (const f of [DB, `${DB}-shm`, `${DB}-wal`]) rmSync(f, { force: true });
+  for (const f of [DB, `${DB}-shm`, `${DB}-wal`, TOKEN_FILE]) rmSync(f, { force: true });
   const server = spawn("node", ["apps/scope-server/server.ts"], {
     cwd: ROOT,
-    env: { ...process.env, SCOPE_DB_PATH: DB },
+    env: { ...process.env, SCOPE_DB_PATH: DB, SCOPE_PORT: PORT, SCOPE_TOKEN_FILE: TOKEN_FILE },
     stdio: "ignore",
   });
   let up = false;
@@ -186,9 +190,8 @@ async function startServer() {
       stdio: "ignore",
     }).on("exit", (c) => (c === 0 ? resolve() : reject(new Error("seed-demo exited " + c))))
   );
-  const tokenFile = path.join(ROOT, "tmp", "scope_token");
-  const token = existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "";
-  if (!token) throw new Error("no auth token at tmp/scope_token");
+  const token = existsSync(TOKEN_FILE) ? readFileSync(TOKEN_FILE, "utf8").trim() : "";
+  if (!token) throw new Error("no auth token at " + TOKEN_FILE);
   log("server up, seeded demo, token", token.slice(0, 8) + "…");
   return { server, token };
 }
@@ -378,6 +381,23 @@ async function captureRealViews(token) {
     if (!(await waitFor("#diff-old-lines .dline, #diff-new-lines .dline", 15000, "review"))) fail("review", "no diff lines");
     await hold(1200);
     await shotBoth("review", "#files-list .file-item");
+
+    /*
+     * Review's other half: the dependency diagram. Its default selection is the
+     * riskiest changed file, so the impact overlay (dimmed floor, red
+     * dependents) is already on and the shot shows what the change could break.
+     * Dark only — the diagram lives on the same dark canvas in both themes.
+     */
+    if (await clickIf("#btn-files-diagram", 6000)) {
+      if (!(await waitFor("#diagram-svg [data-node].changed", 15000, "review diagram"))) {
+        fail("review", "diagram shows no changed files");
+      }
+      await hold(1400);
+      const diagram = path.join(OUT, "review-diagram-dark.png");
+      await page.screenshot({ path: diagram });
+      written.add(diagram);
+      log("wrote", "review-diagram-dark.png");
+    } else fail("review", "diagram toggle missing");
   }
 
   // ── Git: history, changes, branches ─────────────────────────────────────

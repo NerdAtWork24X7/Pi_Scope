@@ -24,17 +24,30 @@ folder is served exactly as it sits in git.
 Every image in `shots/` is produced by one script, so they can never drift from the app:
 
 ```bash
-node docs/capture-shots.mjs            # every view, both themes
+node docs/capture-shots.mjs            # every view, plus dark-only detail shots
 node docs/capture-shots.mjs chat git   # just those views
+```
+
+Set `SCOPE_CAPTURE_PORT=43191` to run a capture beside a live app: the script boots its
+own server on that port and keeps its token in `tmp/shots_token`, so it never touches a
+running instance's port or `tmp/scope_token`.
+
+The checkout keeps no `node_modules`, so resolve Playwright from the shared install and
+point it at the browsers that install downloaded:
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=~/.pi-scope/playwright-browsers \
+  node --import ./apps/scope-server/test/register-bundle.mjs docs/capture-shots.mjs
 ```
 
 It boots the real server on a throwaway DB, seeds the demo from inside a scratch project
 (`tmp/demo/model-selector` — a small git repo with a branch, a staged file and unstaged
 edits), and drives the actual UI with Playwright at 1600×900 @2x. A workspace *is* the
 shared working directory, so Review, Checkpoints, Git and Terminal all open on that demo
-project instead of on this checkout. The Office floor needs a seeded team, so it is captured
-against the test mock backend (`apps/scope-server/test/mock-backend.mjs`) — the same harness
-the office e2e tests use.
+project instead of on this checkout. Review's dependency diagram is captured dark-only
+as a second figure (`review-diagram-dark.png`). The Office floor needs a seeded team, so
+it is captured against the test mock backend
+(`apps/scope-server/test/mock-backend.mjs`) — the same harness the office e2e tests use.
 
 The script then decodes every PNG it wrote and checks its dimensions and colour variety, and
 each view asserts it actually rendered something (ledger rows, checkpoint rows, the
