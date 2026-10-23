@@ -1323,6 +1323,11 @@ export function activate(api: any): void {
     typeof api.kit.killTree === "function"
       ? api.kit.killTree
       : (child, signal = "SIGTERM") => { try { child?.kill(signal); } catch { /* gone */ } };
+  // The host's pid ledger, so a Workflow harness is stopped by app shutdown
+  // even when this plugin's own dispose has not run yet. Feature-detected: an
+  // older host keeps its previous, run-scoped cleanup only.
+  const trackProcess: ((child: any, opts: any) => any) | null =
+    typeof api.kit.trackProcess === "function" ? api.kit.trackProcess : null;
   // A live ACP session (see `runAcpNode`). Feature-detected: an older host has no
   // factory, and an ACP harness then falls back to its one-shot invocation.
   const createAcpSession: ((opts: any) => any) | null =
@@ -3080,13 +3085,25 @@ export function activate(api: any): void {
           // through cmd.exe with every argument escaped, a real image is spawned
           // directly, and POSIX is unchanged. A stdin harness needs that pipe to
           // exist (`ignore` leaves it closed, and it would read nothing).
-          child = spawnCli(cmd, args, { cwd, env, stdio: [promptOnStdin ? "pipe" : "ignore", "pipe", "pipe"] });
+          child = spawnCli(cmd, args, {
+            cwd,
+            env,
+            stdio: [promptOnStdin ? "pipe" : "ignore", "pipe", "pipe"],
+            // Its own group on POSIX so the harness's tools go down with it (and
+            // so app shutdown can signal the group, not just this pid).
+            detached: !isWindows(),
+          });
         } catch (err: any) {
           dropPromptFile();
           resolve({ text: "", code: null, error: `failed to spawn ${cmd}: ${err?.message ?? err}` });
           return;
         }
         run.children.add(child);
+        trackProcess?.(child, {
+          kind: "workflow",
+          label: `${node.config.harness} ${node.id}`,
+          group: !isWindows(),
+        });
         // Hand a stdin harness its prompt and close the pipe, so it starts on it
         // at once instead of waiting for input that will never come. A command
         // that exits before reading the prompt closes the pipe under us; with the

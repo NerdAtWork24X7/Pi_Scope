@@ -30,6 +30,7 @@ import { readStoredKeys } from "./api-keys.ts";
 import { expandShellPath, readShellEnvValues, shellQuote, resolveExecutable, spawnCli, killTree } from "../../shared/shell.ts";
 import { DEFAULT_CHAT_HARNESS, buildHarnessLaunch, chatHarness, normalizeHarnessId, resolveHarnessBin } from "./harnesses.ts";
 import { AcpSession } from "./acp-client.ts";
+import { trackProcess } from "./process-registry.ts";
 import { normalizeHarnessCommands, rememberHarnessCommands } from "./harness-commands.ts";
 import type { HarnessRecord, HarnessRecordTool } from "./harness-record.ts";
 import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
@@ -139,7 +140,7 @@ setInterval(() => {
     // fresh while output streams; this guard covers the silent stretches.
     if (sess.run) continue;
     if (now - sess.lastUsed > IDLE_TIMEOUT) {
-      try { sess.proc.kill(); } catch { /* already dead */ }
+      killTree(sess.proc, "SIGTERM");
       sessions.delete(id);
     }
   }
@@ -766,6 +767,9 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
       cwd,
       env,
       stdio: ["pipe", "ignore", "pipe", "pipe"],
+      // Its own process group: `exec` keeps this pid, so a SIGTERM to the group
+      // reaches pi *and* every tool/agent pi started. Registered below.
+      detached: process.platform !== "win32",
     });
     // fd 3 is pi's stdout; fd 1 (shell/rc noise) was discarded, fd 2 is stderr.
     out = proc.stdio[3] as NodeJS.ReadableStream;
@@ -777,9 +781,19 @@ function spawnChat(id: string, cwd: string, model: string, fresh = false, extras
     // override/global sources that are somebody else's binary.
     proc = spawnCli(PI_LAUNCH.file, [...PI_LAUNCH.args, ...args], {
       cwd, env, stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
     out = proc.stdout as NodeJS.ReadableStream;
   }
+
+  // Track the agent (and, through its process group, everything it starts) so
+  // closing the app closes it too — even if no browser is attached to this
+  // conversation and no run is in flight.
+  trackProcess(proc, {
+    kind: "pi",
+    label: `pi chat ${id}`,
+    group: process.platform !== "win32",
+  });
 
   const sess: ChatSession = { id, cwd, model, proc, buffer: "", stderrBuf: "", run: null, lastUsed: Date.now(), dead: false, prompted: false, thinkingLevel: null, resumedFile: null, resumeCallback: null, resumeWarned: null, stopRequested: false, fresh, librarySent: false, runState: null, lastRun: null };
 
@@ -1336,6 +1350,9 @@ function startHarnessChat(
           // A stdin harness needs a pipe; an argv harness gets `ignore` so it can
           // never block waiting on input that will not arrive.
           stdio: [launch.promptOnStdin ? "pipe" : "ignore", "pipe", "pipe"],
+          // Own process group on POSIX: a harness that starts a shell tool or an
+          // MCP server takes those children with it when the app closes.
+          detached: process.platform !== "win32",
         });
       } catch (err: any) {
         owned.run = null;
@@ -1351,6 +1368,13 @@ function startHarnessChat(
         return;
       }
       owned.child = child;
+      // Remember the pid while the CLI is alive: the registry is what closes it
+      // (and its own tools) when the app shuts down mid-run.
+      trackProcess(child, {
+        kind: "harness",
+        label: `${harnessId} ${sid}`,
+        group: process.platform !== "win32",
+      });
       // Hand a stdin harness its message and close the pipe so it starts at once.
       if (launch.promptOnStdin) {
         child.stdin?.on("error", () => { /* the CLI exited before reading it */ });
@@ -1486,7 +1510,7 @@ export function startChat(opts: { cwd: string; model?: string; mode?: string; th
   const sessionFile = (opts.sessionFile || "").trim() || "";
   let sess = sessions.get(sid);
   if (!sess || sess.dead || sess.proc.exitCode !== null) {
-    try { if (sess) sess.proc.kill(); } catch { /* ignore */ }
+    if (sess) killTree(sess.proc, "SIGTERM");
     // Every distinct session id gets its own pi subprocess, so different
     // conversations in a workspace run truly in parallel. A subprocess that
     // serves a recorded session is keyed by that session's id; the
@@ -1712,7 +1736,7 @@ export function startChatSession(opts: { cwd: string; model?: string }): { sessi
     if (!sess.fresh) continue; // never touch recorded-session subprocesses
     if (sess.run || sess.prompted) continue; // in-flight or already conversed
     if (sess.cwd !== opts.cwd || sess.model !== model) {
-      try { sess.proc.kill(); } catch { /* already dead */ }
+      killTree(sess.proc, "SIGTERM");
       sessions.delete(id);
     }
   }
@@ -1863,7 +1887,7 @@ export function attachChatRun(id: string): Response | null {
 export function killChatSession(id: string): void {
   const sess = sessions.get(id);
   if (sess) {
-    try { sess.proc.kill(); } catch { /* already dead */ }
+    killTree(sess.proc, "SIGTERM");
     sessions.delete(id);
   }
   const hsess = harnessSessions.get(id);
@@ -2156,7 +2180,7 @@ export async function generateCommitMessage(opts: {
 /** Kill every chat subprocess (called on server shutdown). */
 export function shutdownChatSessions(): void {
   for (const [, sess] of sessions) {
-    try { sess.proc.kill(); } catch { /* ignore */ }
+    killTree(sess.proc, "SIGTERM");
   }
   sessions.clear();
   for (const [, sess] of harnessSessions) killHarnessChild(sess);

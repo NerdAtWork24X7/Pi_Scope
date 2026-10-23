@@ -27,6 +27,7 @@
  */
 import type { ChildProcess } from "node:child_process";
 import { killTree, resolveExecutable, spawnCli } from "../../shared/shell.ts";
+import { trackProcess } from "./process-registry.ts";
 import {
   chatHarness,
   resolveHarnessBin,
@@ -140,6 +141,12 @@ function openWire(file: string, args: string[], cwd: string): Wire {
     cwd,
     env: { ...process.env },
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+  });
+  trackProcess(child, {
+    kind: "discovery",
+    label: `${file} commands`,
+    group: process.platform !== "win32",
   });
   child.stdin?.on("error", () => { /* the harness exited before reading */ });
 

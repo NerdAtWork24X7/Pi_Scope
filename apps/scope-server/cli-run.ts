@@ -9,7 +9,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveExecutable, spawnCli } from "../../shared/shell.ts";
+import { killTree, resolveExecutable, spawnCli } from "../../shared/shell.ts";
+import { trackProcess } from "./process-registry.ts";
 
 /** How a command is invoked: `{ file, args }` to spawn, plus a label for messages. */
 export interface CommandSpec {
@@ -20,6 +21,54 @@ export interface CommandSpec {
 
 /** Keep only the tail of a command's output — it is for diagnostics, not display. */
 const MAX_OUTPUT = 8_000;
+
+// ANSI escapes a CLI paints its progress with: CSI (colours, cursor moves,
+// erase-line), OSC (window titles, hyperlinks) and the two-byte forms.
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
+// Control characters that have no meaning in the Settings log. Tab and newline
+// survive; carriage returns are handled below.
+// eslint-disable-next-line no-control-regex
+const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+/**
+ * Command output the way a terminal would have left it, as plain text.
+ *
+ * Settings → Update prints the updater's output in a <pre>. Updaters (and npm)
+ * paint that output with ANSI escapes and redraw progress lines with a bare
+ * carriage return or backspace. Escaped into HTML those sequences show up as
+ * literal `[32m` / `←[2K` garbage, and every progress redraw adds a line, so
+ * the log reads as noise instead of the text the updater meant to show. This
+ * strips the escapes and collapses each line to what was last left visible —
+ * the log is diagnostics, not a terminal emulator.
+ */
+export function sanitizeCommandOutput(raw: string): string {
+  const text = String(raw ?? "").replace(ANSI_ESCAPE_RE, "").replace(/\r\n/g, "\n");
+  return text
+    .split("\n")
+    .map((line) => {
+      // `\r` returns to column 0; only the final redraw was visible. A line
+      // that merely ends in `\r` keeps its text (the cursor just moved back).
+      const redraw = line.split("\r");
+      let visible = redraw[redraw.length - 1];
+      if (!visible) {
+        for (let i = redraw.length - 2; i >= 0 && !visible; i--) visible = redraw[i];
+      }
+      // Spinners erase with backspace rather than overwriting: apply the
+      // backspaces so `⠋\b⠙\b⠹` reads as `⠹` instead of all three glyphs.
+      if (visible.includes("\b")) {
+        let out = "";
+        for (const ch of visible) {
+          if (ch === "\b") out = out.slice(0, -1);
+          else out += ch;
+        }
+        visible = out;
+      }
+      return visible;
+    })
+    .join("\n")
+    .replace(CONTROL_RE, "");
+}
 
 /**
  * npm's own CLI as shipped with the Node running this server, or null.
@@ -101,11 +150,19 @@ export function runCommand(command: CommandSpec, args: string[], opts: RunOption
       cwd,
       env: env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    // Tracked so closing the app stops an updater it started (npm, a harness's
+    // own `update` command) instead of leaving it writing to disk unwatched.
+    trackProcess(proc, {
+      kind: "command",
+      label: command.label,
+      group: process.platform !== "win32",
     });
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+      killTree(proc, "SIGKILL");
       reject(new Error(timeoutMessage));
     }, timeoutMs);
     const collect = (chunk: Buffer) => { out = (out + chunk.toString()).slice(-MAX_OUTPUT); };
@@ -123,8 +180,9 @@ export function runCommand(command: CommandSpec, args: string[], opts: RunOption
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (code === 0) resolve(out.trim());
-      else reject(new Error(`${exitLabel} exited with code ${code}${out.trim() ? `\n${out.trim()}` : ""}`));
+      const clean = sanitizeCommandOutput(out).trim();
+      if (code === 0) resolve(clean);
+      else reject(new Error(`${exitLabel} exited with code ${code}${clean ? `\n${clean}` : ""}`));
     });
   });
 }

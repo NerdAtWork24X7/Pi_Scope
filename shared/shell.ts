@@ -289,6 +289,9 @@ export function planSpawn(file: string, args: string[] = [], platform: NodeJS.Pl
   };
 }
 
+/** Children `spawnCli` started detached: the leaders of their own POSIX group. */
+const groupLeaders = new WeakSet<object>();
+
 /**
  * Spawn `file args…`, handling the Windows shim case (see `planSpawn`). Every
  * server spawn of a PATH program — pi, npm, a Workflow node's harness — goes
@@ -301,11 +304,15 @@ export function spawnCli(
   platform: NodeJS.Platform = process.platform,
 ): ChildProcess {
   const plan = planSpawn(file, args, platform);
-  return spawn(plan.file, plan.args, {
+  const child = spawn(plan.file, plan.args, {
     ...options,
     shell: plan.shell,
     windowsVerbatimArguments: plan.windowsVerbatimArguments,
   });
+  // Remember which children lead their own process group, so `killTree` only
+  // ever signals `-pid` for one of them (see below).
+  if (options.detached && !isWindows(platform)) groupLeaders.add(child);
+  return child;
 }
 
 /**
@@ -347,10 +354,17 @@ export function supportsPosixCommandSyntax(shellPath: string): boolean {
 /**
  * Stop a process **and everything it started**.
  *
- * POSIX: a signal to the process group leader we spawned. Windows has no
- * signals and `child.kill()` only ends the direct child — a harness started
- * through cmd.exe would leave its real work running — so the tree is taken down
- * with `taskkill /T /F`, and `kill()` is still called as a backstop.
+ * POSIX: an agent the server spawned detached (see `spawnCli`) leads its own
+ * process group, so signalling `-pid` reaches the CLI and every child it
+ * started (a shell tool, an MCP server, Gemini's node wrapper). Only such a
+ * child is signalled that way: for anything else `-pid` names a group this
+ * child does not lead — or, once it has exited and its pid is reused, an
+ * unrelated one — so the direct `kill()` is used instead.
+ *
+ * Windows has no signals and `child.kill()` only ends the direct child — a
+ * harness started through cmd.exe would leave its real work running — so the
+ * tree is taken down with `taskkill /T /F`, and `kill()` is also called as a
+ * backstop.
  */
 export function killTree(
   child: { pid?: number; kill: (signal?: NodeJS.Signals | number) => boolean } | null | undefined,
@@ -358,11 +372,18 @@ export function killTree(
   platform: NodeJS.Platform = process.platform,
 ): void {
   if (!child) return;
+  const pid = Number(child.pid);
   if (isWindows(platform)) {
-    const pid = Number(child.pid);
     if (Number.isFinite(pid) && pid > 0) {
       try { spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* already gone */ }
     }
+    try { child.kill(signal); } catch { /* already gone */ }
+    return;
+  }
+  // The group signal is best effort: `detached` makes the child call setsid, and
+  // that may not have happened yet when we are asked to stop it immediately.
+  if (groupLeaders.has(child) && Number.isFinite(pid) && pid > 0) {
+    try { process.kill(-pid, signal); } catch { /* not a leader yet, or already gone */ }
   }
   try { child.kill(signal); } catch { /* already gone */ }
 }

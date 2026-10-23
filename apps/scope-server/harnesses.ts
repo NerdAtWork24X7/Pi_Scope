@@ -58,6 +58,7 @@ import {
   discoverCodexModels,
   type ProtocolModelsResult,
 } from "./harness-model-discovery.ts";
+import { trackProcess } from "./process-registry.ts";
 
 /** A harness the Chat composer can offer. */
 export interface ChatHarness {
@@ -588,7 +589,15 @@ export async function discoverHarnessModels(
     try {
       // spawnCli owns the Windows `.cmd` rules: a CLI that is a shim there
       // cannot be handed to spawn() directly (EINVAL).
-      child = spawnCli(file, spec.modelsArgs!.slice(), { stdio: ["ignore", "pipe", "pipe"] });
+      child = spawnCli(file, spec.modelsArgs!.slice(), {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      });
+      trackProcess(child, {
+        kind: "discovery",
+        label: `${spec.bin} models`,
+        group: process.platform !== "win32",
+      });
     } catch (err: any) {
       resolve({ models: [], error: `could not run ${spec.bin}: ${err?.message ?? err}` });
       return;

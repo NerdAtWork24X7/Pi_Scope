@@ -83,7 +83,7 @@ before(async () => {
   // covered too.
   writeStub("claude", `
 if [ "$1" = "--version" ]; then echo "$(cat "${claudeVersion}") (Claude Code)"; exit 0; fi
-if [ "$1" = "update" ]; then echo "Claude Code updated"; echo "${LATEST}" > "${claudeVersion}"; exit 0; fi
+if [ "$1" = "update" ]; then printf '\\033[32mClaude Code updated\\033[0m\\n'; printf 'progress 1%%\\rprogress 100%%\\n'; echo "${LATEST}" > "${claudeVersion}"; exit 0; fi
 exit 0`);
   writeStub("gemini", `if [ "$1" = "--version" ]; then cat "${geminiVersion}"; fi`);
   writeStub("codex", `
@@ -188,7 +188,10 @@ describe("harness update API", () => {
     });
     assert.ok(res.ok, data?.error);
     assert.equal(data.updated.installed, LATEST);
-    assert.match(data.updated.output, /Claude Code updated/);
+    // The updater paints its output with ANSI and redraws a progress line
+    // with `\r`; Settings shows the text a terminal would be left with.
+    assert.equal(data.updated.output, "Claude Code updated\nprogress 100%");
+    assert.ok(!String(data.updated.output).includes("\u001b"), "no escape bytes in the log");
     assert.equal(row(data, "claude").installed, LATEST);
     assert.equal(row(data, "claude").updateAvailable, false);
     assert.equal(data.update.last.ok, true);
@@ -264,6 +267,13 @@ describe("harness update API", () => {
   });
 
   test("Settings → Update shows the harness rows", async () => {
+    // Leave a finished update with output for the tab to adopt, so the log is
+    // rendered the same way a user sees it after an updater ran.
+    const rerun = await api("/harness-update", {
+      method: "POST",
+      body: JSON.stringify({ action: "update", id: "claude" }),
+    });
+    assert.ok(rerun.res.ok, rerun.data?.error);
     const page = await browser.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
@@ -277,6 +287,12 @@ describe("harness update API", () => {
     // an update and keeps its per-row button enabled.
     assert.match(await page.textContent(".settings-panel"), /Coding harnesses/);
     assert.match(await page.textContent(".settings-panel"), /Check harnesses|Update all/);
+    // The updater's ANSI colours and `\r` progress redraws must read as the
+    // final text, not as escape-sequence junk.
+    await page.waitForSelector(".set-update-log", { timeout: 15_000 });
+    const log = await page.textContent(".set-update-log");
+    assert.equal(log, "Claude Code updated\nprogress 100%");
+    assert.ok(!log.includes("\u001b"), "no escape bytes in the rendered log");
     assert.equal(errors.length, 0, `no page errors: ${errors.join("; ")}`);
     await page.close();
   });

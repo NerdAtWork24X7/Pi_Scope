@@ -31,6 +31,7 @@
  */
 import * as os from "node:os";
 import { killTree, spawnCli } from "../../shared/shell.ts";
+import { trackProcess } from "./process-registry.ts";
 import { chatHarnessList, type ChatHarnessInfo } from "./harnesses.ts";
 import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 import { compareVersions, findVersion } from "./semver.ts";
@@ -219,7 +220,15 @@ function probeVersion(path: string, bin: string): Promise<{ version: string | nu
     let settled = false;
     let child: ReturnType<typeof spawnCli>;
     try {
-      child = spawnCli(path, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+      child = spawnCli(path, ["--version"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      });
+      trackProcess(child, {
+        kind: "discovery",
+        label: `${bin} --version`,
+        group: process.platform !== "win32",
+      });
     } catch (err: any) {
       resolve({ version: null, error: `could not run ${bin}: ${err?.message || err}` });
       return;

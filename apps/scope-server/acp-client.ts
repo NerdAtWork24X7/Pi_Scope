@@ -17,6 +17,7 @@
  */
 import type { ChildProcess } from "node:child_process";
 import { killTree, spawnCli } from "../../shared/shell.ts";
+import { trackProcess } from "./process-registry.ts";
 
 /** One choice an agent offers for a permission request. */
 export interface AcpPermissionOption {
@@ -162,8 +163,16 @@ export class AcpSession {
       cwd: this.cwd,
       env: this.env,
       stdio: ["pipe", "pipe", "pipe"],
+      // The ACP server is the conversation: keep it in its own process group so
+      // shutdown reaches the agent's own node/tool children too.
+      detached: process.platform !== "win32",
     });
     this.child = child;
+    trackProcess(child, {
+      kind: "acp",
+      label: `${this.file} ACP session`,
+      group: process.platform !== "win32",
+    });
     child.stdin?.on("error", () => { /* the CLI exited mid-turn */ });
     child.stdout?.on("data", (chunk: Buffer) => this.read(chunk.toString()));
     child.stderr?.on("data", (chunk: Buffer) => {

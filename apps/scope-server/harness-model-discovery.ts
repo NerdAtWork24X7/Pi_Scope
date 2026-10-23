@@ -19,6 +19,7 @@
  */
 import type { ChildProcess } from "node:child_process";
 import { killTree, spawnCli } from "../../shared/shell.ts";
+import { trackProcess } from "./process-registry.ts";
 
 export interface ProtocolModelsResult {
   models: string[];
@@ -52,6 +53,13 @@ function openWire(file: string, args: string[], cwd: string): Wire {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
+  });
+  // A discovery child is short-lived, but an app closed while one is waiting
+  // for a slow CLI must not leave it running (the registry removes it on exit).
+  trackProcess(child, {
+    kind: "discovery",
+    label: `${file} models`,
+    group: process.platform !== "win32",
   });
   let buffered = "";
   let err = "";

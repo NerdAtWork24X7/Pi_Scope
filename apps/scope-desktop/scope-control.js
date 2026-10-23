@@ -520,6 +520,10 @@ async function spawnServer(cfg, timeoutMs) {
     SCOPE_PORT: String(cfg.port),
     SCOPE_HOST: cfg.host,
     SCOPE_AUTH_TOKEN: cfg.token,
+    // The server watches this pid and shuts itself (and every harness it
+    // started) down if the window is killed instead of closed. A normal quit
+    // still asks it to stop first (see stopServer).
+    SCOPE_PARENT_PID: String(process.pid),
     // Make sure the packaged server sees the user's real environment even when
     // launched from a desktop session that may not inherit shell env vars.
     HOME: process.env.HOME || os.homedir(),

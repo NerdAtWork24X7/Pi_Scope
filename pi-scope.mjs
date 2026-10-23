@@ -396,6 +396,10 @@ async function runServer() {
     SCOPE_PORT: String(cfg.port),
     SCOPE_HOST: cfg.host,
     SCOPE_AUTH_TOKEN: cfg.token,
+    // This launcher owns the server's lifetime (unless --keep-server asked for
+    // the opposite): if it dies without its SIGINT/SIGTERM cleanup running, the
+    // server notices and shuts itself — and every agent it started — down.
+    ...(opts.keepServer ? {} : { SCOPE_PARENT_PID: String(process.pid) }),
   };
   if (cfg.db) env.SCOPE_DB_PATH = cfg.db;              // otherwise the server's own default
 

@@ -40,6 +40,7 @@ import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
 import { buildSessionSeed } from "./session-seed.ts";
 import { noteExternalProcess, externalProcessFor, killExternalProcess, findProcessBySessionFile } from "./external-process.ts";
+import { trackProcess, stopTrackedProcesses, stopTrackedProcessesSync, isProcessAlive } from "./process-registry.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
 import { checkPiUpdate, updatePi, updateState } from "./pi-update.ts";
 import { checkHarnessUpdates, updateHarness, updateAllHarnesses, harnessUpdateState, harnessStatusSnapshot } from "./harness-update.ts";
@@ -2876,10 +2877,10 @@ function matchSession(pathname: string): string | null {
 
 let shuttingDown = false;
 
-function gracefulShutdown(): void {
+async function gracefulShutdown(reason = "requested"): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log("\n  Shutting down gracefully…");
+  console.log(`\n  Shutting down gracefully (${reason})…`);
 
   // Tear down every activated plugin before the process exits. The terminal
   // plugin's dispose closes its WebSocket server and terminates live PTYs.
@@ -2887,6 +2888,19 @@ function gracefulShutdown(): void {
 
   // Kill any lingering pi chat subprocesses.
   shutdownChatSessions();
+
+  // The authoritative pass over every agent process this server opened: the
+  // bundled pi, external harness CLIs, ACP sessions, Workflow nodes and any
+  // discovery/update child still running. Each gets SIGTERM (or a plain
+  // taskkill /T on Windows), a short grace period, then SIGKILL. Awaiting it is
+  // what guarantees "closing the app closes its harnesses" instead of leaving
+  // an agent to outlive the window.
+  try {
+    const stopped = await stopTrackedProcesses({ graceMs: 3_000 });
+    if (stopped.length) console.log(`  Stopped ${stopped.length} agent process(es).`);
+  } catch (err) {
+    console.error("Failed to stop tracked agent processes:", err);
+  }
 
   // Stop a live microphone capture before the process exits.
   abortStt();
@@ -2904,13 +2918,39 @@ function gracefulShutdown(): void {
     process.exit(0);
   });
 
-  // Force exit after 5s if graceful close hangs.
-  setTimeout(() => { console.error("  Forcing exit after timeout."); process.exit(1); }, 5_000).unref();
+  // Force exit after 10s if graceful close (or a stubborn child) hangs.
+  setTimeout(() => { console.error("  Forcing exit after timeout."); process.exit(1); }, 10_000).unref();
 }
 
 // Handle OS-level termination signals for graceful shutdown.
-process.on("SIGTERM", () => gracefulShutdown());
-process.on("SIGINT", () => gracefulShutdown());
+process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
+process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });
+// Last-resort cleanup for an unexpected exit: signals the pids synchronously,
+// because `exit` handlers cannot await.
+process.on("exit", () => stopTrackedProcessesSync());
+
+/**
+ * The launcher that started this server, when it asked us to watch it.
+ *
+ * The desktop shell spawns the server detached so it can shut it down as a
+ * process group. That also means an app crash (or a SIGKILL from the window
+ * manager) would leave the server — and every agent it started — running with
+ * nothing to stop them. `SCOPE_PARENT_PID` is the launcher's pid: when it is
+ * gone, shut down the same way a window close does. An adopted/reused server
+ * gets no such variable, so it is never stopped by another instance's exit.
+ */
+function watchLauncher(): void {
+  const parentPid = Number(process.env.SCOPE_PARENT_PID || 0);
+  if (!Number.isInteger(parentPid) || parentPid <= 1 || parentPid === process.pid) return;
+  const timer = setInterval(() => {
+    if (isProcessAlive(parentPid)) return;
+    clearInterval(timer);
+    console.log(`  Launcher process ${parentPid} exited.`);
+    void gracefulShutdown("launcher exited");
+  }, 1_500);
+  // Never hold the event loop open just for this check.
+  timer.unref?.();
+}
 
 // ─── Main handler ───────────────────────────────────────────────────────────
 
@@ -2968,7 +3008,7 @@ async function handle(req: Request): Promise<Response> {
     }
     const response = jsonResponse({ ok: true, message: "shutting down" });
     // Defer shutdown so the caller receives the response before we close.
-    setImmediate(() => gracefulShutdown());
+    setImmediate(() => { void gracefulShutdown("shutdown request"); });
     return response;
   }
 
@@ -4739,6 +4779,10 @@ const pluginKit = {
   // anyway. All five are feature-detected by plugins: an older host is
   // POSIX-only and provides none of them.
   spawnCli, planSpawn, shellCommandPlan, killTree, isWindows,
+  // …and the pid ledger: a plugin that spawns a long-running harness (the
+  // Workflow's nodes) registers it here so closing the app stops it too, even
+  // if the plugin's own dispose never runs.
+  trackProcess,
   // Chat run state, for plugins that own a background run (the Office queue):
   // a task's dispatch outlives the page that started it, so the plugin needs to
   // tell a still-running session from an orphan, and to stop it on Pause.
@@ -4843,4 +4887,5 @@ void loadRuntimeModels();
 server.listen(PORT, HOST, () => {
   console.log(`  Listening on http://${HOST}:${PORT}`);
   if (process.env.SCOPE_VERBOSE) console.log(`  Open the UI →  ${OPEN_URL}\n`);
+  watchLauncher();
 });

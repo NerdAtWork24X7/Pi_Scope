@@ -13,6 +13,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 import {
   isWindows, windowsCommandLine, planSpawn, spawnCli, shellCommandPlan,
@@ -162,6 +165,43 @@ describe("platform: stopping processes", () => {
     const calls = [];
     killTree({ pid: 42, kill: (s) => { calls.push(s); return true; } }, "SIGTERM", "linux");
     assert.deepEqual(calls, ["SIGTERM"]);
+  });
+
+  test("a detached spawnCli child is stopped with its process group", { skip: isWindows() ? "POSIX process groups only" : false }, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-killtree-"));
+    const pidFile = path.join(dir, "grandchild.pid");
+    const code = `
+      const { spawn } = require("node:child_process");
+      const fs = require("node:fs");
+      const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+      fs.writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+      setInterval(() => {}, 1000);
+    `;
+    const parent = spawnCli(process.execPath, ["-e", code], { stdio: "ignore", detached: true });
+    let grandchild = 0;
+    try {
+      const deadline = Date.now() + 5_000;
+      while (!grandchild && Date.now() < deadline) {
+        try { grandchild = Number(fs.readFileSync(pidFile, "utf8")); } catch { /* not written yet */ }
+        if (!grandchild) await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.ok(grandchild > 0, "the child wrote its pid");
+
+      killTree(parent, "SIGTERM");
+      const gone = (pid) => {
+        try { process.kill(pid, 0); return false; } catch { return true; }
+      };
+      const exitDeadline = Date.now() + 5_000;
+      while (!gone(grandchild) && Date.now() < exitDeadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(gone(grandchild), true, "the grandchild went down with the group");
+    } finally {
+      for (const pid of [parent.pid, grandchild]) {
+        try { if (pid) process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("Windows takes the whole tree down (the child is a cmd.exe wrapper)", () => {
