@@ -3,9 +3,9 @@
  *
  * Everything related to "which extensions does a spawned pi subprocess get"
  * lives here: scanning for extension entry points, honouring settings.json
- * disable-lists, detecting the Pi Scope observability extension, and
- * building the actual --extension/-o-name CLI flags that memory.ts and
- * orchestration.ts pass to spawned subprocesses.
+ * disable-lists, and building the actual --extension CLI flags that memory.ts
+ * and orchestration.ts pass to spawned subprocesses. Role naming travels as
+ * the OBS_NAME env var, not a Pi Scope CLI flag — see orchestration.ts#spawnProc.
  *
  * This was previously split across core.ts (hasPiScopeExtension), config.ts
  * (scanExtensionPaths/loadDisabledExtensions/isDisabled), and duplicated
@@ -130,38 +130,6 @@ export function scanExtensionPaths(cwd: string): string[] {
   }
 
   return paths.filter(p => !p.includes("agent-team"));
-}
-
-// ── Pi Scope detection (memoized) ───────────────────────────────────────
-
-/** `extPaths` is a stable, session-lifetime array (assigned once in
- *  index.ts#loadAgents and shared by reference via a closure into
- *  MemoryManager/ProcessManager). A WeakMap lets us cache the boolean per
- *  array *instance* without holding a strong reference to it — if a future
- *  session reload ever produces a new array, the old cache entry is
- *  collected instead of accumulating forever. */
-const piScopeCache = new WeakMap<string[], boolean>();
-
-function computeHasPiScopeExtension(extPaths: string[]): boolean {
-  return extPaths.some((p) => {
-    const normalized = p.replace(/\\/g, "/");
-    const base = normalized.split("/").pop()?.replace(/\.((ts|js))$/i, "") ?? "";
-    return base === "pi-scope" || /(^|\/)pi-scope\//.test(normalized);
-  });
-}
-
-/** Returns true if the Pi Scope observability extension is present in the
- *  list of extension entry-point paths. Used to decide whether it is safe
- *  to pass Pi-Scope-specific CLI flags (e.g. --o-name) to spawned pi
- *  subprocesses. Memoized per extPaths array reference so repeated
- *  per-dispatch calls (one per subagent spawn) don't re-scan the same
- *  session-lifetime array every time. */
-export function hasPiScopeExtension(extPaths: string[]): boolean {
-  const cached = piScopeCache.get(extPaths);
-  if (cached !== undefined) return cached;
-  const result = computeHasPiScopeExtension(extPaths);
-  piScopeCache.set(extPaths, result);
-  return result;
 }
 
 // ── Extension settings (one file per extensions directory) ──────────────
@@ -384,9 +352,4 @@ function toolsProvidedBy(extPath: string): string[] {
 export function buildExtensionCliArgs(extPaths: string[], filter?: SubagentExtensionFilter): string[] {
   const selected = filter ? selectSubagentExtensions(extPaths, filter) : extPaths;
   return ["--no-extensions", ...selected.flatMap(p => ["--extension", p])];
-}
-
-/** `--o-name <name>` iff the Pi Scope extension is loaded, else []. */
-export function buildScopeNameArgs(extPaths: string[], name: string): string[] {
-  return hasPiScopeExtension(extPaths) ? ["--o-name", name] : [];
 }

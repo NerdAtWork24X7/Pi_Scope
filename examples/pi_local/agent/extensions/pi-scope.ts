@@ -81,6 +81,11 @@ interface ObsEventEnvelope<T = unknown> {
   model?: string;
   payload: T;
   seq: number;
+  /** Process id of this pi, plus its approximate start time. The server uses
+   *  them to stop a pi running in the user's OWN terminal (see the server's
+   *  external-process map); a chat subprocess never needs this. */
+  pid: number;
+  pid_started_at: number;
 }
 
 interface SessionStartPayload {
@@ -491,6 +496,11 @@ function createEventEnvelope<T>(
     model: sessionInfo.model,
     payload,
     seq,
+    pid: process.pid,
+    // `Date.now() - uptime` is the process's own start instant (to the second);
+    // the server compares it against the live process before honouring a kill,
+    // so a recycled pid can never take someone else's signal.
+    pid_started_at: Math.round(Date.now() - process.uptime() * 1000),
   };
 }
 

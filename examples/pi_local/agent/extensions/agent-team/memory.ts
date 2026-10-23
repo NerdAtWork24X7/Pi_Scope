@@ -6,7 +6,7 @@ import type { SessionLogger } from "./core";
 import type { AgentDef, AgentProc, AgentTeamContext, MemoryState } from "./core";
 import { blankProcState, parseModelId, safeUnlink } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
-import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
+import { buildExtensionCliArgs } from "./extensions";
 import { updateTeamsYaml, loadTeamsYaml, teamsYamlPath } from "./config";
 import { makeHandleEvent } from "./orchestration";
 import { piBin, trunc } from "./helpers";
@@ -418,7 +418,6 @@ export class MemoryManager {
       "--system-prompt", memoryAp.systemPromptFile,
       "--session", memoryAp.sessionFile,
       "--name", memoryAp.def.name,
-      ...buildScopeNameArgs(extPaths, memoryAp.def.name),
     ];
 
     const bin = piBin();
@@ -458,8 +457,11 @@ export class MemoryManager {
         bin,
         args: cliArgs,
         // Same spawned-worker marker (and extension routing) the dispatch
-        // clones use: the summarizer only needs read/write/edit.
-        env: { ...process.env, PI_SUBAGENT: "1" },
+        // clones use: the summarizer only needs read/write/edit. OBS_NAME
+        // carries the role name — never the `--o-name` flag, which only
+        // exists when the authoritative Pi Scope extension is force-loaded
+        // (see orchestration.ts#spawnProc).
+        env: { ...process.env, PI_SUBAGENT: "1", OBS_NAME: memoryAp.def.name },
         logger: this.logger,
         onLine: (line) => {
           lastLineAt = Date.now();

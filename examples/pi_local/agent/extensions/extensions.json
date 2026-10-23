@@ -53,5 +53,8 @@
   "obscura": {
     "orchestrator": false,
     "subagent": false
+  },
+  "agent-team": {
+    "orchestrator": true
   }
 }

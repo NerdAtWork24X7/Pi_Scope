@@ -541,7 +541,7 @@ export default function (pi: ExtensionAPI) {
   // When the agent team is active, label the orchestrator "orchestrator" in
   // observability so the session list (the table below "clear all agents")
   // shows the main agent distinctly from spawned subagents. Subagents carry
-  // their real role via --o-name (see orchestration.ts / memory.ts). Respect
+  // their real role via OBS_NAME (see orchestration.ts / memory.ts). Respect
   // any explicit SCOPE_NAME the operator already set.
   if (team.enabled && !process.env.SCOPE_NAME) process.env.SCOPE_NAME = "orchestrator";
 
