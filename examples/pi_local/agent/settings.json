@@ -1,9 +1,9 @@
 {
-  "lastChangelogVersion": "1.1.0",
+  "lastChangelogVersion": "1.4.0",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
-  "defaultProvider": "opencode-go",
-  "defaultModel": "opencode-go/longcat-2.5-preview-free",
+  "defaultProvider": "tokenharbor",
+  "defaultModel": "deepseek-v4.1-flash-1017",
   "defaultThinkingLevel": "high",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
@@ -26,8 +26,17 @@
     "-skills/video-creator/SKILL.md"
   ],
   "enabledModels": [
-    "opencode-go/step-5-preview-free",
-    "opencode-go/longcat-2.5-preview-free"
+    "opencode-go/beam-free",
+    "opencode-go/deepseek-v4.1-flash",
+    "xiaomi-token-plan-ams/mimo-v2.6-flash",
+    "xiaomi-token-plan-ams/mimo-v2.6-pro",
+    "opencode/space-bunny-free",
+    "opencode/mimo-v2.6-flash-free",
+    "tokenharbor/mimo-v2.6-flash:free",
+    "kilo/inclusionai/ling-3.1-flash",
+    "opencode-go/longcat-2.5-preview-free",
+    "opencode-go/cat-jam-free",
+    "opencode-go/glm-5.3-flash"
   ],
   "extensions": [
     "+extensions/agent-team/index.ts",

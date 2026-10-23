@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Persistent batch web-fetch runner for the pi `web-fetch` tool.
 
-ONE headless Chromium (via Playwright) is started once and reused across
-batches, so the multi-second Python + Playwright + Chromium startup is paid
-once per session instead of once per tool call. The TS side keeps this
-process alive between tool calls (idle-timeout / session end closes stdin,
-which shuts us down gracefully).
+ONE Chromium (via Playwright) is started once and reused across batches, so
+the multi-second Python + Playwright + Chromium startup is paid once per
+session instead of once per tool call. The TS side keeps this process alive
+between tool calls (idle-timeout / session end closes stdin, which shuts us
+down gracefully).
+
+The browser is HEADFUL by default — a real window, minimized right after
+launch (see minimize_window) — because a headful build has none of the
+headless fingerprints anti-bot edges look for. It degrades to headless when
+no display exists (server/CI: no DISPLAY/WAYLAND_DISPLAY on Linux) or when
+the headful launch itself fails; WEB_FETCH_HEADLESS=1 forces headless.
 
 The browser runs on a PERSISTENT profile directory (user-data-dir, from
 WEB_FETCH_PROFILE_DIR, default ~/.pi/web-fetch-profile), so cookies, logins
@@ -513,26 +519,68 @@ def extract_text(html, raw, page_url=None, expected_chars=0):
     return plain if len(plain) > len(text) else text
 
 
+# Hard ceiling for the lazy-loading pass on ONE page: 20 s after the page
+# loaded, no matter what. The in-page loop budgets itself just below this, but
+# a page that hijacks setTimeout (or a renderer wedged on a busy main thread)
+# can leave evaluate() pending forever — Playwright sets no timeout on
+# evaluate() — which stalls the crawl until the TS runner's whole-batch kill.
+SCROLL_TIMEOUT_S = 20
+
+
 async def scroll_full_page(page):
-    """Scroll to the bottom so lazy-loaded content renders, then back to top."""
+    """Scroll to the bottom so lazy-loaded content renders, then back to top.
+
+    Every exit is bounded. Endless feeds (Twitter/Reddit-style infinite scroll)
+    grow scrollHeight on each step, so the old `while (y < scrollHeight)` loop
+    only stopped at its hard-coded 100000 px — tens of seconds of scrolling that
+    looked like a hang. The loop now also stops on a wall-clock budget, on a cap
+    of height GROWTHS (content keeps loading = endless feed), and when the
+    viewport stops moving (non-scrollable or scroll-locked document).
+    """
     try:
-        await page.evaluate("""async () => {
+        await asyncio.wait_for(page.evaluate("""async () => {
             // Human-ish scroll: irregular wheel-sized steps, jittered cadence,
             // an occasional "reading" pause, then back to the top.
             const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             const el = document.scrollingElement || document.documentElement;
+            const started = Date.now();
+            const DEADLINE_MS = 18000;   // lazy-load budget (outer cap: 20 s)
+            const MAX_DISTANCE = 60000;  // never travel further than this (px)
+            const MAX_GROWTHS = 6;       // page grew this often => endless feed
+            const MAX_STEPS = 200;       // hard cap (throttled/hijacked timers)
             let y = 0;
-            while (y < el.scrollHeight) {
-                y += 300 + Math.floor(Math.random() * 500);   // one wheel flick
+            let height = el.scrollHeight || 0;
+            let growths = 0;
+            let stalled = 0;
+            for (let i = 0; i < MAX_STEPS; i++) {
+                if (Date.now() - started >= DEADLINE_MS) break;
+                const before = window.scrollY || el.scrollTop || 0;
+                y = Math.min(y + 300 + Math.floor(Math.random() * 500), MAX_DISTANCE);
                 window.scrollTo(0, y);
                 await sleep(80 + Math.random() * 180);
                 if (Math.random() < 0.08) await sleep(250 + Math.random() * 500);
-                if (y > 100000) break;
+                const after = window.scrollY || el.scrollTop || 0;
+                if (after - before < 5) {
+                    // Nothing moved: not scrollable, scroll-locked, or already
+                    // at the bottom. Two in a row => stop instead of grinding
+                    // through the remaining distance.
+                    if (++stalled >= 2) break;
+                } else {
+                    stalled = 0;
+                }
+                const h = el.scrollHeight || 0;
+                if (h > height) {
+                    height = h;
+                    if (++growths >= MAX_GROWTHS) break;   // infinite scroll feed
+                }
+                if (y >= height || y >= MAX_DISTANCE) break;  // bottom reached
             }
             await sleep(80 + Math.random() * 160);
             window.scrollTo(0, 0);
-        }""")
+        }"""), timeout=SCROLL_TIMEOUT_S)
     except Exception:
+        # Timeouts and page-level JS errors are not fatal: the DOM is already as
+        # hydrated as it will get, so extraction proceeds either way.
         pass
 
 
@@ -602,10 +650,11 @@ async def fetch_page(page, url, timeout_ms, page_delay_s, scan_full, light, want
         await page.wait_for_load_state("networkidle", timeout=5000 if light else min(timeout_ms, 10000))
     except Exception:
         pass  # networkidle timeout is not fatal
-    try:
-        await page.bring_to_front()  # headless tabs report unfocused otherwise
-    except Exception:
-        pass
+    if HEADLESS:
+        try:
+            await page.bring_to_front()  # headless tabs report unfocused otherwise
+        except Exception:
+            pass
     try:
         await page.evaluate(PREPARE_JS)
     except Exception:
@@ -679,6 +728,14 @@ async def run_group(context, jobs, concurrency, batch_id, timeout_ms, page_delay
                 emit({"batch": batch_id, "key": job["key"], "url": job["url"],
                       "ok": False, "text": "", "error": "browser error: %s" % e})
                 return
+            if not HEADLESS:
+                # New tabs activate — and so restore — a minimized window.
+                # Re-assert in the background: the crawl must not wait on the
+                # window manager, and a briefly restored window would steal the
+                # user's focus.
+                task = asyncio.create_task(minimize_window(page))
+                _BACKGROUND.add(task)
+                task.add_done_callback(_BACKGROUND.discard)
             try:
                 if job.get("extract") == "serp":
                     await one_serp(page, job)
@@ -798,34 +855,140 @@ LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--blink-settings=imagesEnabled=false",
     "--ozone-platform=x11",
+    # The headful window is minimized (see minimize_window), and Chromium
+    # treats a minimized/occluded window as backgrounded: it throttles timers
+    # and rAF and reports the page hidden, which stalls lazy content on
+    # JS-heavy sites. These keep the renderer at full speed while the window
+    # sits in the taskbar (Harmless in headless mode).
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
 ]
+
+# Set by launch_browser(): True when the browser came up headless. Read by
+# fetch_page, where headless needs extra focus/visibility nudges that would
+# restore a minimized window.
+HEADLESS = True
+
+# One warning is enough for a window manager that refuses to minimize.
+_MINIMIZE_WARNED = False
+
+# Fire-and-forget minimize tasks. asyncio keeps only weak refs to tasks, so a
+# running one could be collected mid-flight without this.
+_BACKGROUND = set()
+
+
+def headful_supported():
+    """Headful is the default; WEB_FETCH_HEADLESS=1 forces headless, and a
+    Linux box with no display (CI, bare server, SSH without X forwarding) has
+    nothing to open a window on. DISPLAY is an X11 concept — Windows and macOS
+    have no such variable and always have a desktop."""
+    if os.environ.get("WEB_FETCH_HEADLESS", "").strip().lower() in ("1", "true", "yes", "on"):
+        return False
+    if sys.platform.startswith("linux"):
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return True
+
+
+def launch_args(headless):
+    """Shared args; a Wayland-only session drops the forced X11 backend, which
+    would abort the launch — Chromium then picks its own ozone platform."""
+    args = list(LAUNCH_ARGS)
+    if not headless and not os.environ.get("DISPLAY"):
+        args = [a for a in args if not a.startswith("--ozone-platform")]
+    return args
+
+
+async def _window_state(page):
+    """(windowId, state) of the window owning `page`, via CDP."""
+    cdp = await page.context.new_cdp_session(page)
+    try:
+        info = await cdp.send("Browser.getWindowForTarget")
+        return info["windowId"], (info.get("bounds") or {}).get("windowState")
+    finally:
+        await cdp.detach()
+
+
+async def minimize_window(page):
+    """Minimize the window owning `page` so crawls never cover the user's
+    screen. Playwright has no window API, so this goes through CDP — the only
+    cross-platform route. Best-effort: without a window manager the window
+    simply stays visible; crawling is unaffected either way.
+
+    Verified, because window state is handled asynchronously by the window
+    manager: a tab activation queued just before this call (new_page restores
+    the window) can land after the request. Read the state back and retry once
+    instead of trusting the fire-and-forget CDP call."""
+    global _MINIMIZE_WARNED
+    try:
+        for _ in range(2):
+            window_id, _state = await _window_state(page)
+            cdp = await page.context.new_cdp_session(page)
+            try:
+                # `windowState` only: width/height are rejected when combined
+                # with minimized/maximized/fullscreen.
+                await cdp.send("Browser.setWindowBounds", {
+                    "windowId": window_id,
+                    "bounds": {"windowState": "minimized"},
+                })
+            finally:
+                await cdp.detach()
+            await asyncio.sleep(0.15)
+            if (await _window_state(page))[1] == "minimized":
+                return
+    except Exception as e:
+        if not _MINIMIZE_WARNED:
+            _MINIMIZE_WARNED = True
+            sys.stderr.write("browser window could not be minimized: %s\n" % e)
 
 
 async def launch_browser(p):
-    """Launch headless Chromium on a PERSISTENT profile directory (see
-    PROFILE_DIR), preferring the FULL browser build over Playwright's default
-    stripped 'headless shell'. The shell's fingerprint is trivially detected by
-    anti-bot edges — X/Twitter's Cloudflare 403s it before any JS stealth can
-    matter — while the full build in new-headless mode (channel="chromium")
-    renders real content. Fall back to the shell only when it isn't installed,
-    so partial setups keep working.
+    """Launch Chromium on a PERSISTENT profile directory (see PROFILE_DIR),
+    headful (minimized) when a display exists, headless otherwise.
+
+    Headful matters for stealth: the headless shell's fingerprint is trivially
+    detected by anti-bot edges — X/Twitter's Cloudflare 403s it before any JS
+    stealth can matter — while a real minimized window is indistinguishable
+    from a user's browser at the engine level. Both paths prefer the FULL
+    browser build (channel="chromium") over the stripped shell, falling back
+    only when it isn't installed, so partial setups keep working.
 
     launch_persistent_context returns the single shared context directly: every
     page opened in it (context.new_page() per job) shares cookies/localStorage/
     site state, both across the jobs of one batch and across batches and even
     across process restarts (the profile persists on disk)."""
-    opts = dict(
-        headless=True,
-        viewport=random.choice(VIEWPORTS),  # same size every session is a fingerprint
-        user_agent=USER_AGENT,
-        locale="en-US",
-        ignore_https_errors=True,
-        args=LAUNCH_ARGS,
-    )
-    try:
-        return await p.chromium.launch_persistent_context(PROFILE_DIR, channel="chromium", **opts)
-    except Exception:
-        return await p.chromium.launch_persistent_context(PROFILE_DIR, **opts)
+    global HEADLESS
+
+    async def start(headless):
+        opts = dict(
+            headless=headless,
+            viewport=random.choice(VIEWPORTS),  # same size every session is a fingerprint
+            user_agent=USER_AGENT,
+            locale="en-US",
+            ignore_https_errors=True,
+            args=launch_args(headless),
+        )
+        try:
+            return await p.chromium.launch_persistent_context(PROFILE_DIR, channel="chromium", **opts)
+        except Exception:
+            return await p.chromium.launch_persistent_context(PROFILE_DIR, **opts)
+
+    if headful_supported():
+        try:
+            context = await start(headless=False)
+        except Exception as e:
+            # Rare: a display exists but cannot host a window (broken X auth,
+            # remote session). A headless crawl beats no crawl at all.
+            sys.stderr.write("headful launch failed (%s); retrying headless\n" % e)
+        else:
+            HEADLESS = False
+            if context.pages:
+                await minimize_window(context.pages[0])
+            return context
+
+    HEADLESS = True
+    return await start(headless=True)
 
 
 async def serve():

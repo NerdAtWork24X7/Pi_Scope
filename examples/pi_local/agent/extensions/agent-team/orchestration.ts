@@ -7,7 +7,7 @@ import { spawnRpcSubprocess } from "./core";
 import { SessionLogger, agentKey, agentNameKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, safeUnlink, shortModel, MAX_COLLECTED_TEXT, DEFAULT_DISPATCH_TIMEOUT_MS, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext, AgentMode } from "./core";
 import { resolveSkillPath } from "./config";
-import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
+import { buildExtensionCliArgs } from "./extensions";
 import { availableAgentNames, piBin } from "./helpers";
 
 const KILLALL_TIMEOUT_MS = 5_000;
@@ -1038,7 +1038,6 @@ export class ProcessManager {
       "--system-prompt", ap.systemPromptFile,
       "--session", ap.sessionFile,
       "--name", ap.def.name,
-      ...buildScopeNameArgs(extPaths, ap.def.name),
     ];
 
     const sub = spawnRpcSubprocess({
@@ -1048,7 +1047,16 @@ export class ProcessManager {
       // host-only work (e.g. pi-scope's boot probes and completion flush) skip
       // it. Cheap for children, and it keeps the orchestrator's own behaviour
       // untouched.
-      env: { ...process.env, PI_SUBAGENT: "1" },
+      //
+      // OBS_NAME is the role name. It must be an env var, not the Pi Scope
+      // `--o-name` flag: that flag is only registered when the authoritative
+      // Pi Scope extension copy is force-loaded (the app's bundled shim). A
+      // terminal `pi` that inherits PI_SCOPE_FORCE_EXTENSION but resolves to a
+      // different binary makes the agent-dir copy no-op before registerFlag,
+      // so `--o-name` becomes an unknown option and the child exits before the
+      // readiness probe ("<agent> failed to start."). OBS_NAME is read by
+      // pi-scope.ts regardless of which binary or agent dir the child uses.
+      env: { ...process.env, PI_SUBAGENT: "1", OBS_NAME: ap.def.name },
       logger: ctx.logger,
       owner: ap,
       onStderr: (line) => {
