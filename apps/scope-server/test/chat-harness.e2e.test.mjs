@@ -51,10 +51,11 @@ test("the harness picker lists installed and missing CLIs", async () => {
   const options = await page.$$eval("#chat-harness option", (els) =>
     els.map((el) => ({ value: el.value, text: el.textContent || "" })));
   assert.equal(options[0].value, "pi", "Pi is the default");
-  assert.ok(options.some((o) => o.value === "claude" && o.text === "Claude Code"));
+  assert.match(options[0].text, /^π Pi \(built-in\)$/, "each option is prefixed with its harness icon");
+  assert.ok(options.some((o) => o.value === "claude" && /^✳ Claude Code$/.test(o.text)));
   const codex = options.find((o) => o.value === "codex");
   assert.ok(codex, "an uninstalled harness is still offered");
-  assert.match(codex.text, /not installed/);
+  assert.match(codex.text, /^⌘ Codex CLI · not installed$/);
 });
 
 test("choosing a harness repaints the model pill and persists the choice", async () => {

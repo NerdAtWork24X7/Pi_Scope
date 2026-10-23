@@ -3548,12 +3548,15 @@
     let html = "";
     for (const h of list) {
       const label = h.available === false ? `${h.label} · not installed` : h.label;
+      // Native <option>s are text-only, so the harness glyph the transcript
+      // avatars use doubles as the picker's icon (π, ✳, ⌘, ✦, ◍, …).
+      const marked = `${harnessMark(h.id)} ${label}`;
       const title = h.available === false
         ? `${h.label} was not found on PATH — install it, or set ${h.bin ? `SCOPE_HARNESS_BIN_${String(h.id).toUpperCase().replace(/[^A-Z0-9]/g, "_")}` : "its binary"}`
         : h.user
           ? `${h.resolved || h.label} — custom harness (Settings → Plugins → Workflow)`
           : (h.resolved || h.label);
-      html += `<option value="${esc(h.id)}"${h.id === CH.harness ? " selected" : ""} title="${esc(title)}">${esc(label)}</option>`;
+      html += `<option value="${esc(h.id)}"${h.id === CH.harness ? " selected" : ""} title="${esc(title)}">${esc(marked)}</option>`;
     }
     // Same no-churn rule as the model select: rewriting an open dropdown
     // closes it and drops focus.

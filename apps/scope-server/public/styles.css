@@ -6788,9 +6788,20 @@ body.layout-form #trajectory-inspector {
       padding: 0 10px;
       display: flex;
       align-items: center;
+      gap: 10px;
       min-height: 17px;
     }
+    /* The harness picker heads the composer, directly above the input card, so
+       the control bar under the textarea keeps only the model/thinking pills. */
+    .chat-composer-top .chat-harness-wrap {
+      flex: 0 0 auto;
+      /* The row keeps its 10px inner padding for the status hint, but the
+         picker should line up with the input card's outer edge below it. */
+      margin-left: -10px;
+    }
     .chat-composer-hint {
+      min-width: 0;
+      flex: 0 1 auto;
       font-size: 11.5px;
       color: var(--muted);
       display: inline-flex;
@@ -6968,6 +6979,26 @@ body.layout-form #trajectory-inspector {
       padding: 3px 26px 3px 12px;
       cursor: pointer;
       outline: none;
+    }
+    /* The green ❯ marks the harness picker, so drop the native chevron. Keep
+       `base-select` (set globally for every select) so the open list still
+       wears the shared glass menu chrome instead of the browser's opaque
+       native popup. */
+    #chat-harness {
+      padding-right: 12px;
+    }
+    @supports (appearance: base-select) {
+      #chat-harness {
+        appearance: base-select;
+      }
+      #chat-harness::picker-icon {
+        display: none;
+      }
+      /* The selected harness reads from its accent-tinted row alone — no
+         checkmark or arrow beside the icon. */
+      #chat-harness option::checkmark {
+        display: none;
+      }
     }
     #chat-model:hover,
     #chat-mode:hover,
@@ -11152,6 +11183,10 @@ body.layout-form #chat-harness {
   border-color: transparent;
   background: var(--surface-2);
   color: var(--text);
+}
+
+body.layout-form #chat-harness {
+  padding-right: 10px;
 }
 
 body.layout-form #chat-model:hover,

@@ -383,6 +383,11 @@
 
           <div class="chat-composer" id="chat-composer">
             <div class="chat-composer-top">
+              <span class="chat-harness-wrap" title="Coding-agent harness used for this chat (Pi, Claude Code, Codex, opencode, …)">
+                <span class="dot">❯</span>
+                <span class="chat-harness-label">Harness</span>
+                <select id="chat-harness"></select>
+              </span>
               <span class="chat-composer-hint" id="chat-composer-hint"></span>
             </div>
             <div class="chat-composer-box">
@@ -392,11 +397,6 @@
               <div class="chat-attachments" id="chat-attachments" hidden></div>
               <textarea id="chat-input" rows="1" placeholder="Message the pi coding agent…" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off" enterkeyhint="send"></textarea>
               <div class="chat-composer-bar">
-                <span class="chat-harness-wrap" title="Coding-agent harness used for this chat (Pi, Claude Code, Codex, opencode, …)">
-                  <span class="dot">❯</span>
-                  <span class="chat-harness-label">Harness</span>
-                  <select id="chat-harness"></select>
-                </span>
                 <span class="chat-model-wrap" title="Model used for this chat">
                   <span class="dot">◆</span>
                   <span class="chat-model-label">Model</span>
