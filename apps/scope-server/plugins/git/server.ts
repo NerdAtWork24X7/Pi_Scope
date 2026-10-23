@@ -295,6 +295,15 @@ export function activate(api: any): void {
         if (!sha) return jsonResponse({ error: "missing sha" }, 400);
         r = gitTry(absCwd, ["rebase", sha]);
         break;
+      case "merge":
+        // `sha` may be a commit or a branch/tag name: the history menu offers
+        // the refs that point at the right-clicked commit. --no-edit keeps the
+        // auto-generated message so a non-interactive server never waits on an
+        // editor, and the identity fallback lets the merge commit succeed in a
+        // repo that has no user.name/user.email configured.
+        if (!sha) return jsonResponse({ error: "missing sha" }, 400);
+        r = gitTry(absCwd, ["merge", "--no-edit", sha], identityConfig(absCwd));
+        break;
       case "reset":
         if (!sha) return jsonResponse({ error: "missing sha" }, 400);
         r = gitTry(absCwd, ["reset", "--mixed", sha]);
@@ -319,6 +328,18 @@ export function activate(api: any): void {
     return jsonResponse({ ok: true, out: r.out.trim() });
   });
 
+  // Fall back to a Pi Scope identity when the repo has none configured, so the
+  // GUI can still commit — and a merge can still create its merge commit —
+  // without failing on "who are you".
+  function identityConfig(absCwd: string): Record<string, string> {
+    const cfg: Record<string, string> = {};
+    const uname = gitTry(absCwd, ["config", "user.name"]);
+    const uemail = gitTry(absCwd, ["config", "user.email"]);
+    if (!uname.ok || !uname.out.trim()) cfg["user.name"] = "Pi Scope";
+    if (!uemail.ok || !uemail.out.trim()) cfg["user.email"] = "scope@localhost";
+    return cfg;
+  }
+
   api.route("POST", "/git/commit", async (ctx) => {
     const req = ctx.req;
     const body = await gitPost(req);
@@ -327,14 +348,7 @@ export function activate(api: any): void {
     const message = typeof parsed.message === "string" ? parsed.message.trim() : "";
     if (!message) return jsonResponse({ error: "missing commit message" }, 400);
     const amend = parsed.amend === true;
-    // Fall back to a Pi Scope identity when the repo has none configured, so
-    // the GUI can still commit without failing on "who are you".
-    const cfg: Record<string, string> = {};
-    const uname = gitTry(absCwd, ["config", "user.name"]);
-    const uemail = gitTry(absCwd, ["config", "user.email"]);
-    if (!uname.ok || !uname.out.trim()) cfg["user.name"] = "Pi Scope";
-    if (!uemail.ok || !uemail.out.trim()) cfg["user.email"] = "scope@localhost";
-    const r = gitTry(absCwd, ["commit", ...(amend ? ["--amend"] : []), "-m", message], cfg);
+    const r = gitTry(absCwd, ["commit", ...(amend ? ["--amend"] : []), "-m", message], identityConfig(absCwd));
     if (!r.ok) return jsonResponse({ ok: false, error: r.out }, 409);
     // The commit consumed the repo's drafted message: drop the job so a page
     // that comes back later never adopts a draft the box has moved past.

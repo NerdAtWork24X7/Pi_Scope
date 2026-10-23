@@ -768,7 +768,7 @@
       root.classList.add("active");
       showCommitDetail(c.sha);
     };
-    root.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); showCommitMenu(c.sha, e.clientX, e.clientY); };
+    root.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); showCommitMenu(c, e.clientX, e.clientY); };
     return root;
   }
 
@@ -1187,7 +1187,15 @@
     });
   }
 
-  function showCommitMenu(sha, x, y) {
+  function showCommitMenu(c, x, y) {
+    const sha = c.sha;
+    const refs = (c.refs || "").split(",").map((s) => s.trim()).filter(Boolean);
+    // Branch/tag refs pointing at this commit are the meaningful merge sources;
+    // the checked-out branch and remote HEAD aliases can't be merged into
+    // themselves, so they are left out.
+    const mergeSources = refs
+      .map((r) => (r.startsWith("HEAD ->") ? r.slice("HEAD ->".length).trim() : r.replace(/^tag:\s*/, "")))
+      .filter((n) => n && n !== "HEAD" && n !== repo.branch && !n.endsWith("/HEAD"));
     showMenu(x, y, (add, sep) => {
     add("Checkout this commit", async () => {
       const ok = await showGitModal({ title: "Checkout Commit", message: "Checkout this commit as a detached HEAD?", confirmLabel: "Checkout" });
@@ -1227,6 +1235,32 @@
     add("Create tag here…", async () => {
       const n = await showGitModal({ title: "Create Tag", input: { placeholder: "New tag name…" }, confirmLabel: "Create" });
       if (n && n.trim()) gitAction("tag", sha, n.trim());
+    });
+    // Merge the branch/tag at this commit into the checked-out branch. When the
+    // row carries several refs the modal asks which one; a plain commit row
+    // merges that exact commit.
+    add(mergeSources.length === 1 ? `Merge ${mergeSources[0]} into current branch…` : "Merge into current branch…", async () => {
+      let ref = sha;
+      if (mergeSources.length === 1) {
+        ref = mergeSources[0];
+      } else if (mergeSources.length > 1) {
+        const options = [...mergeSources, sha].map((v) => ({ value: v, label: v === sha ? `commit ${c.short}` : v }));
+        const pick = await showGitModal({
+          title: "Merge into current branch",
+          select: { options, value: options[0].value },
+          confirmLabel: "Merge",
+        });
+        if (!pick) return;
+        ref = pick;
+      }
+      const source = ref === sha ? `commit ${c.short}` : `“${ref}”`;
+      const target = repo.branch ? `“${repo.branch}”` : "the current branch";
+      const ok = await showGitModal({
+        title: "Merge",
+        message: `Merge ${source} into ${target}?`,
+        confirmLabel: "Merge",
+      });
+      if (ok) gitAction("merge", ref);
     });
     add("Cherry-pick this commit", async () => {
       const ok = await showGitModal({ title: "Cherry-pick", message: "Cherry-pick this commit?", confirmLabel: "Cherry-pick" });
@@ -1281,8 +1315,15 @@
       }
       return;
     }
-    setStatus(action + " ok");
+    // A merge reports whether it fast-forwarded, created a commit or had
+    // nothing to do; surface git's first line so the result is visible without
+    // opening the terminal. loadStatus() clears the status bar once it succeeds,
+    // so the note is re-applied afterwards (a status error is left untouched).
+    const mergeNote = action === "merge" ? (data.out || "").split("\n").map((s) => s.trim()).find(Boolean) || "" : "";
+    const done = action + " ok" + (mergeNote ? " — " + mergeNote : "");
+    setStatus(done);
     await loadStatus();
+    if (!statusEl.textContent) setStatus(done);
   }
 
   async function loadBranches() {
