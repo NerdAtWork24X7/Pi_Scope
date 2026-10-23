@@ -1294,8 +1294,15 @@ function startHarnessChat(
             rememberAcpSession(sid, harnessId, owned.cwd, session.sessionId);
             const requestedMode = String(opts.mode || "").trim();
             // A model/mode change made in the composer applies to the live
-            // session instead of being ignored until a new one is started.
-            if (model && model !== owned.acpModel && await session.setModel(model)) owned.acpModel = model;
+            // session instead of being ignored until a new one is started. A
+            // model the agent refuses must fail this turn: prompting on the
+            // agent's old/default model would silently answer as the wrong one.
+            if (model && model !== owned.acpModel) {
+              if (!(await session.setModel(model))) {
+                throw new Error(`${spec.label} could not use model "${model}"${session.modelErrorDetail ? `: ${session.modelErrorDetail}` : ""}`);
+              }
+              owned.acpModel = model;
+            }
             if (requestedMode && requestedMode !== owned.acpMode && await session.setMode(requestedMode)) owned.acpMode = requestedMode;
             if (owned.run !== run) return;
             const modes = session.availableModes;

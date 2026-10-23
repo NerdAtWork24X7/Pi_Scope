@@ -165,7 +165,13 @@ t3code uses): a v2 agent that advertises `loadSession` is resumed with
 `session/resume`, and a v1-only agent keeps the original `session/load` path. A
 CLI that refuses the id falls back to a fresh `session/new`. A
 model or mode picked in the composer is pushed into the live session
-(`session/set_model` / `session/set_mode`) instead of waiting for a new one, and
+(`session/set_model` / `session/set_mode`, or `session/set_config_option` for a
+model an agent publishes only as a config option, as opencode does) instead of
+waiting for a new one. The handshake waits briefly for that model option (some
+agents publish it just after `session/new`) and retries a transient rejection.
+If the agent still refuses the requested model — an unauthenticated provider, an
+id it no longer serves — the turn fails with the agent's own reason instead of
+prompting on its default model, and
 the modes the agent advertises get their own composer pill (Gemini's Plan/YOLO,
 opencode's build/plan). A workflow node also runs an ACP harness as a live
 session (`createAcpSession` through the plugin kit); because a run is unattended,

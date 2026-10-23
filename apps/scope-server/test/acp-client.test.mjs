@@ -191,8 +191,198 @@ test("dismissing a permission dialog cancels the request", async () => {
   session.close();
 });
 
-// ─── ACP v2 negotiation (t3code's protocol shape) ──────────────────────────
+// opencode publishes the model as a `configOptions` select and answers
+// `session/set_model` with Method not found. The selected model must still be
+// applied — through `session/set_config_option` — before the first prompt.
+const CONFIG_OPTION_AGENT = `
+import * as fs from "node:fs";
+import * as readline from "node:readline";
+const log = process.argv[2];
+const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");
+const configOptions = (current) => [{
+  id: "provider",
+  name: "Provider",
+  category: "model",
+  type: "select",
+  currentValue: "default",
+  options: [{ value: "default", name: "Default" }],
+}, {
+  id: "model",
+  name: "Model",
+  category: "model",
+  type: "select",
+  currentValue: current,
+  options: [
+    { value: "default-model", name: "Default" },
+    { value: "chosen-model", name: "Chosen" },
+  ],
+}];
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 2 } });
+  if (frame.method === "session/new") {
+    return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "sess-config", configOptions: configOptions("default-model") } });
+  }
+  if (frame.method === "session/set_model") {
+    fs.appendFileSync(log, "set_model=" + frame.params.modelId + "\\n");
+    return send({ jsonrpc: "2.0", id: frame.id, error: { code: -32601, message: "Method not found" } });
+  }
+  if (frame.method === "session/set_config_option") {
+    fs.appendFileSync(log, "set_config_option=" + frame.params.configId + ":" + frame.params.value + "\\n");
+    send({ jsonrpc: "2.0", method: "session/update", params: {
+      sessionId: "sess-config",
+      update: { sessionUpdate: "config_option_update", configOptions: configOptions(frame.params.value) },
+    } });
+    return send({ jsonrpc: "2.0", id: frame.id, result: { configOptions: configOptions(frame.params.value) } });
+  }
+});
+`;
 
+function fakeConfigOptionAgent() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-acp-config-"));
+  const log = path.join(dir, "methods.log");
+  fs.writeFileSync(path.join(dir, "agent.mjs"), CONFIG_OPTION_AGENT);
+  const file = path.join(dir, "agent");
+  fs.writeFileSync(
+    file,
+    `#!/bin/sh\nexec node "$(dirname "$0")/agent.mjs" '${log}' "$@"\n`,
+    { mode: 0o755 },
+  );
+  return { file, log };
+}
+
+test("an agent without session/set_model is switched through its model config option", async () => {
+  const { file, log } = fakeConfigOptionAgent();
+  const session = new AcpSession({
+    file,
+    args: [],
+    cwd: os.tmpdir(),
+    model: "chosen-model",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  assert.equal(await session.start(), "sess-config");
+  assert.equal(session.modelId, "chosen-model", "start() awaits the switch before the first prompt");
+
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n");
+  assert.ok(calls.includes("set_model=chosen-model"), "the unstable method is tried first");
+  assert.ok(calls.includes("set_config_option=model:chosen-model"), `expected a config-option fallback, got ${calls.join(", ")}`);
+
+  assert.equal(await session.setModel("default-model"), true);
+  assert.equal(session.modelId, "default-model", "a live config_option_update is adopted");
+  session.close();
+});
+
+// A model option that arrives a beat after session/new (opencode loads its
+// provider catalogue asynchronously). The handshake must wait for it instead of
+// concluding the agent has no model setting.
+const LATE_MODEL_AGENT = `
+import * as readline from "node:readline";
+const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");
+const configOptions = (current) => [{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options: [{ value: "default-model", name: "Default" }, { value: "chosen-model", name: "Chosen" }] }];
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 2 } });
+  if (frame.method === "session/new") {
+    setTimeout(() => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-late", update: { sessionUpdate: "config_option_update", configOptions: configOptions("default-model") } } }), 120);
+    return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "sess-late" } });
+  }
+  if (frame.method === "session/set_model") return send({ jsonrpc: "2.0", id: frame.id, error: { code: -32601, message: "Method not found" } });
+  if (frame.method === "session/set_config_option") {
+    return send({ jsonrpc: "2.0", id: frame.id, result: { configOptions: configOptions(frame.params.value) } });
+  }
+});
+`;
+
+const REFUSED_MODEL_AGENT = `
+import * as readline from "node:readline";
+const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");
+const configOptions = (current) => [{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options: [{ value: "default-model", name: "Default" }, { value: "chosen-model", name: "Chosen" }] }];
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 2 } });
+  if (frame.method === "session/new") return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "sess-refused", configOptions: configOptions("default-model") } });
+  if (frame.method === "session/set_model") return send({ jsonrpc: "2.0", id: frame.id, error: { code: -32601, message: "Method not found" } });
+  if (frame.method === "session/set_config_option") {
+    return send({ jsonrpc: "2.0", id: frame.id, error: { code: -32000, message: "Authentication required: provider authentication required" } });
+  }
+});
+`;
+
+// Accepts the option but keeps advertising its old model: claiming the switch
+// worked here would make the first prompt answer as the wrong model.
+const IGNORED_MODEL_AGENT = `
+import * as readline from "node:readline";
+const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");
+const configOptions = (current) => [{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options: [{ value: "default-model", name: "Default" }, { value: "chosen-model", name: "Chosen" }] }];
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 2 } });
+  if (frame.method === "session/new") return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "sess-ignored", configOptions: configOptions("default-model") } });
+  if (frame.method === "session/set_model") return send({ jsonrpc: "2.0", id: frame.id, error: { code: -32601, message: "Method not found" } });
+  if (frame.method === "session/set_config_option") {
+    return send({ jsonrpc: "2.0", id: frame.id, result: { configOptions: configOptions("default-model") } });
+  }
+});
+`;
+
+function fakeAgentSource(source, prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  fs.writeFileSync(path.join(dir, "agent.mjs"), source);
+  const file = path.join(dir, "agent");
+  fs.writeFileSync(file, `#!/bin/sh\nexec node "$(dirname "$0")/agent.mjs" "$@"\n`, { mode: 0o755 });
+  return file;
+}
+
+test("a model option published after session/new is awaited, not skipped", async () => {
+  const session = new AcpSession({
+    file: fakeAgentSource(LATE_MODEL_AGENT, "scope-acp-late-"),
+    args: [],
+    cwd: os.tmpdir(),
+    model: "chosen-model",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  assert.equal(await session.start(), "sess-late");
+  assert.equal(session.modelId, "chosen-model", "the late model option was applied before the first prompt");
+  session.close();
+});
+
+test("a refused model switch fails the session instead of using the default", async () => {
+  const session = new AcpSession({
+    file: fakeAgentSource(REFUSED_MODEL_AGENT, "scope-acp-refused-"),
+    args: [],
+    cwd: os.tmpdir(),
+    model: "chosen-model",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  await assert.rejects(session.start(), /could not use model "chosen-model".*Authentication required/);
+  assert.equal(session.alive, false, "the refused session is closed");
+});
+
+test("a model option that silently keeps the old value is treated as a failure", async () => {
+  const session = new AcpSession({
+    file: fakeAgentSource(IGNORED_MODEL_AGENT, "scope-acp-ignored-"),
+    args: [],
+    cwd: os.tmpdir(),
+    model: "chosen-model",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  await assert.rejects(session.start(), /kept "default-model" instead of "chosen-model"/);
+  assert.equal(session.alive, false);
+});
+
+// ─── ACP v2 negotiation (t3code's protocol shape) ──────────────────────────
 const V2_AGENT = `
 import * as fs from "node:fs";
 import * as readline from "node:readline";

@@ -71,6 +71,43 @@ function fakeGemini() {
   return { file, countFile, dir };
 }
 
+// An agent that exposes a model config option but refuses to change it. The
+// point is that Chat must NOT fall through to `session/prompt` on the agent's
+// default model: the user would see an answer from a model they did not pick.
+const REFUSING_MODEL_AGENT = `
+import * as fs from "node:fs";
+import * as readline from "node:readline";
+const countFile = process.argv[2];
+const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");
+const modelOption = (current) => [{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options: [{ value: "default-model", name: "Default" }, { value: "chosen-model", name: "Chosen" }] }];
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 2 } });
+  if (frame.method === "session/new") return send({ jsonrpc: "2.0", id: frame.id, result: { sessionId: "acp-refused-model", configOptions: modelOption("default-model") } });
+  if (frame.method === "session/set_model") return send({ jsonrpc: "2.0", id: frame.id, error: { code: -32601, message: "Method not found" } });
+  if (frame.method === "session/set_config_option") return send({ jsonrpc: "2.0", id: frame.id, error: { code: -32000, message: "Authentication required: provider authentication required" } });
+  if (frame.method === "session/prompt") {
+    fs.appendFileSync(countFile, "prompted\\n");
+    return send({ jsonrpc: "2.0", id: frame.id, result: { stopReason: "end_turn" } });
+  }
+});
+`;
+
+function fakeRefusingModelAgent() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-chat-acp-refuse-"));
+  const countFile = path.join(dir, "prompts.log");
+  fs.writeFileSync(path.join(dir, "agent.mjs"), REFUSING_MODEL_AGENT);
+  const file = path.join(dir, "gemini");
+  fs.writeFileSync(
+    file,
+    `#!/bin/sh\nexec node "$(dirname "$0")/agent.mjs" '${countFile}' "$@"\n`,
+    { mode: 0o755 },
+  );
+  return { file, countFile, dir };
+}
+
 /** Read one NDJSON stream into events, stopping at `done`. */
 async function readRun(res, onEvent) {
   const reader = res.body.getReader();
@@ -216,4 +253,29 @@ test("a saved ACP session is resumed with session/load after a restart", async (
   assert.ok(events.some((e) => e.type === "done" && !e.error), JSON.stringify(events.filter((e) => e.error)));
   const ctl = fs.readFileSync(`${countFile}.ctl`, "utf8");
   assert.match(ctl, /session\/load=saved-1/, "the stored session was loaded, not replaced");
+});
+
+test("a model the harness refuses fails the turn instead of prompting on its default", async () => {
+  const { file, countFile, dir } = fakeRefusingModelAgent();
+  const before = process.env.SCOPE_HARNESS_BIN_GEMINI;
+  process.env.SCOPE_HARNESS_BIN_GEMINI = file;
+  cleanups.push(() => {
+    if (before === undefined) delete process.env.SCOPE_HARNESS_BIN_GEMINI;
+    else process.env.SCOPE_HARNESS_BIN_GEMINI = before;
+  });
+
+  const sid = `acp-refused-model-${Date.now()}`;
+  cleanups.push(() => killChatSession(sid));
+
+  const events = await readRun(
+    startChat({ cwd: dir, harness: "gemini", prompt: "hello", sessionId: sid, model: "chosen-model" }),
+  );
+
+  const error = events.find((e) => e.type === "error");
+  assert.ok(error, `expected an error event, got ${JSON.stringify(events)}`);
+  assert.match(error.message, /could not use model "chosen-model"/);
+  assert.match(error.message, /Authentication required/);
+  const done = events.find((e) => e.type === "done");
+  assert.ok(done?.error, "the run settles with an error");
+  assert.equal(fs.existsSync(countFile), false, "session/prompt was never sent, so the default model never answered");
 });

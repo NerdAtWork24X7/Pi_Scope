@@ -62,7 +62,8 @@ export interface AcpSessionOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   handlers: AcpHandlers;
-  /** `opus`… the harness's own model id; applied with `session/set_model`. */
+  /** `opus`… the harness's own model id. Applied with `session/set_model`,
+   *  falling back to the session's `model` config option (e.g. opencode). */
   model?: string;
   /** Overall budget for the handshake (initialize + session/new). */
   startTimeoutMs?: number;
@@ -76,8 +77,27 @@ interface PendingPermission {
   options: AcpPermissionOption[];
 }
 
+/** One `configOptions` entry a session advertises (`select` or `boolean`). */
+interface AcpConfigOption {
+  id: string;
+  name: string;
+  category?: string;
+  type?: string;
+  currentValue?: string | boolean;
+  options: Array<{ value: string; name: string }>;
+}
+
 const START_TIMEOUT_MS = 30_000;
 const MAX_LINE = 4_000_000;
+/** How long to wait for an agent to advertise its model config option. Some
+ *  agents (opencode) publish `configOptions` just after `session/new`; applying
+ *  a model before that list arrives used to fall back to the agent's default
+ *  without telling anyone. */
+const MODEL_OPTION_WAIT_MS = 1_500;
+/** A failed `set_config_option` can be a transient "catalogue is still
+ *  loading" rejection. Retry once before surfacing it as the reason a run
+ *  cannot use the selected model. */
+const MODEL_SWITCH_RETRY_MS = 250;
 
 /** The JSON-RPC id a permission dialog carries; matching id → request. */
 export function permissionDialogId(requestId: string | number): string {
@@ -99,6 +119,17 @@ export class AcpSession {
    *  one of these ids). Empty when the harness has no modes. */
   private modes: Array<{ id: string; name: string; description?: string }> = [];
   private currentMode = "";
+  /** Select/boolean options the session advertised (`configOptions` in ACP v2).
+   *  Some agents (opencode) publish the model only as one of these and reject
+   *  `session/set_model`; `session/set_config_option` switches it instead. */
+  private configOptions: AcpConfigOption[] = [];
+  /** The model the session reports as current (either mechanism). */
+  private currentModel = "";
+  /** Why the last `setModel` could not apply the requested id. Empty after a
+   *  successful switch (or when no switch was attempted). */
+  private modelError = "";
+  /** Handshakes waiting for the agent to advertise its model config option. */
+  private modelOptionWaiters = new Set<() => void>();
   /** Commands the session advertised, kept so a reopened composer can paint
    *  immediately without re-asking the agent. */
   private commands: AcpCommand[] = [];
@@ -150,6 +181,11 @@ export class AcpSession {
     return this.commands.map((c) => ({ ...c }));
   }
   get mode(): string { return this.currentMode; }
+  /** The model the session is using, as reported by the agent. */
+  get modelId(): string { return this.currentModel; }
+  /** Human-readable reason the last `setModel` failed, for the Chat/Workflow
+   *  error. Empty when the requested model was applied. */
+  get modelErrorDetail(): string { return this.modelError; }
   get pid(): number | null {
     const pid = Number(this.child?.pid);
     return Number.isInteger(pid) && pid > 0 ? pid : null;
@@ -246,12 +282,18 @@ export class AcpSession {
       this.sid = String(created?.sessionId || "");
       if (!this.sid) throw new Error("the harness created no session");
       this.readModes(created);
+      this.readConfigOptions(created?.configOptions);
+      if (created?.models?.currentModelId) this.currentModel = String(created.models.currentModelId);
       // Some agents return the list on session/new; most publish it just after.
       if (Array.isArray(created?.availableCommands)) this.adoptCommands(created.availableCommands);
       if (this.model) {
-        // Best effort: agents that do not implement the unstable method answer
-        // with an error, which must not fail the session.
-        this.request("session/set_model", { sessionId: this.sid, modelId: this.model }).catch(() => {});
+        // Await the switch: the first prompt must already run on the selected
+        // model. If the agent refuses it, fail loudly instead of quietly
+        // prompting on its default model (the exact failure that made opencode
+        // answer with `recursive/flint-v1.0:free` whatever the composer said).
+        if (!(await this.setModel(this.model))) {
+          throw new Error(this.modelFailure(this.model));
+        }
       }
       return this.sid;
     })();
@@ -278,16 +320,101 @@ export class AcpSession {
     return String(result?.stopReason || "end_turn");
   }
 
-  /** Switch the model mid-session (no-op when the agent does not support it). */
+  /** Switch the model mid-session (no-op when the agent does not support it).
+   *  On success `modelId` is the requested id. On failure this returns false and
+   *  `modelErrorDetail` explains why, so a caller never has to guess whether a
+   *  prompt will run on the model the user picked. */
   async setModel(modelId: string): Promise<boolean> {
     const id = String(modelId || "").trim();
-    if (!id || !this.sid || !this.alive) return false;
-    try {
-      await this.request("session/set_model", { sessionId: this.sid, modelId: id });
-      return true;
-    } catch {
+    this.modelError = "";
+    if (!id) return false;
+    if (!this.sid || !this.alive) {
+      this.modelError = "the agent session is not running";
       return false;
     }
+    const previousModel = this.currentModel;
+    if (id === previousModel) return true;
+    // The unstable ACP method: Gemini, Cline and Kilo accept it.
+    let unstableError = "";
+    try {
+      await this.request("session/set_model", { sessionId: this.sid, modelId: id });
+      this.currentModel = id;
+      return true;
+    } catch (error: any) {
+      // opencode and other ACP v2 servers publish the model as a config
+      // option and answer `session/set_model` with `Method not found`.
+      unstableError = String(error?.message ?? error ?? "set_model failed").trim();
+    }
+    // The option can arrive a beat after `session/new` (and after an agent has
+    // loaded its provider catalogue). Wait for it rather than falling through
+    // to the agent's default model.
+    let option = this.modelConfigOption() || await this.waitForModelOption(MODEL_OPTION_WAIT_MS);
+    if (!option) {
+      this.modelError = `the agent exposes no model setting via ACP${unstableError ? ` (${unstableError})` : ""}`;
+      return false;
+    }
+    // The option's own currentValue is authoritative even when `currentModel`
+    // was never seeded (some agents publish the option only after session/new).
+    const optionPrevious = typeof option.currentValue === "string" && option.currentValue
+      ? option.currentValue
+      : previousModel;
+    if (optionPrevious === id) {
+      this.currentModel = id;
+      return true;
+    }
+    let lastError = "";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const result = await this.request("session/set_config_option", {
+          sessionId: this.sid,
+          configId: option.id,
+          value: id,
+        });
+        if (Array.isArray(result?.configOptions)) this.readConfigOptions(result.configOptions);
+        else option.currentValue = id;
+        // Some agents accept the option but silently keep their old model. Do
+        // not claim success when the session still advertises the previous
+        // value. A different, non-previous value is the agent's canonical id
+        // for the switch (e.g. it rewrote the provider prefix): keep that.
+        const advertised = this.currentModel;
+        if (advertised && advertised === optionPrevious && advertised !== id) {
+          this.modelError = `the agent kept "${advertised}" instead of "${id}"`;
+          return false;
+        }
+        this.currentModel = advertised || id;
+        return true;
+      } catch (error: any) {
+        lastError = String(error?.message ?? error ?? "set_config_option failed").trim();
+        // Re-discover the option: the retry may follow a fresh
+        // `config_option_update`, and an agent can rebuild the option object.
+        option = this.modelConfigOption() || option;
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, MODEL_SWITCH_RETRY_MS));
+      }
+    }
+    this.modelError = lastError || `the agent refused "${id}"`;
+    return false;
+  }
+
+  private modelFailure(id: string): string {
+    return `${this.file} could not use model "${id}"${this.modelError ? `: ${this.modelError}` : ""}`;
+  }
+
+  /** Resolve once the agent advertises a model config option, or after the
+   *  timeout. Used by `setModel` so a late `config_option_update` still applies. */
+  private waitForModelOption(timeoutMs: number): Promise<AcpConfigOption | undefined> {
+    const existing = this.modelConfigOption();
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = () => {
+        if (timer) clearTimeout(timer);
+        this.modelOptionWaiters.delete(done);
+        resolve(this.modelConfigOption());
+      };
+      timer = setTimeout(done, Math.max(0, timeoutMs));
+      (timer as any)?.unref?.();
+      this.modelOptionWaiters.add(done);
+    });
   }
 
   /** Switch the agent's mode (`session/set_mode`), e.g. Gemini's plan/yolo. */
@@ -474,6 +601,12 @@ export class AcpSession {
         if (update.currentModeId) this.currentMode = String(update.currentModeId);
         return;
       }
+      case "config_option_update": {
+        // ACP v2 publishes the whole option list after a config change (the
+        // model is one of them when the agent manages it that way).
+        this.readConfigOptions(update.configOptions ?? update.configOption);
+        return;
+      }
       case "tool_call_update": {
         const status = String(update.status || "");
         if (status === "completed" || status === "failed") {
@@ -505,6 +638,41 @@ export class AcpSession {
         .filter((m: any) => m.id);
     }
     if (created?.modes?.currentModeId) this.currentMode = String(created.modes.currentModeId);
+  }
+
+  /** Record the config options a session advertises (`session/new`,
+   *  `session/load` or a live `config_option_update`). */
+  private readConfigOptions(raw: unknown): void {
+    const entries = Array.isArray(raw) ? raw : [];
+    this.configOptions = entries
+      .slice(0, 128)
+      .map((o: any) => ({
+        id: String(o?.id || ""),
+        name: String(o?.name || o?.id || ""),
+        ...(o?.category ? { category: String(o.category) } : {}),
+        ...(o?.type ? { type: String(o.type) } : {}),
+        ...(typeof o?.currentValue === "string" || typeof o?.currentValue === "boolean"
+          ? { currentValue: o.currentValue }
+          : {}),
+        options: (Array.isArray(o?.options) ? o.options : [])
+          .map((x: any) => ({ value: String(x?.value ?? ""), name: String(x?.name ?? x?.value ?? "") }))
+          .filter((x: { value: string }) => x.value),
+      }))
+      .filter((o: AcpConfigOption) => o.id);
+    const model = this.modelConfigOption();
+    if (typeof model?.currentValue === "string" && model.currentValue) this.currentModel = model.currentValue;
+    if (model) {
+      for (const resolve of this.modelOptionWaiters) resolve();
+      this.modelOptionWaiters.clear();
+    }
+  }
+
+  /** The option that carries the model. opencode/Kilo use `id: "model"`;
+   *  Cline also has a separate `id: "provider"` option in the same category. */
+  private modelConfigOption(): AcpConfigOption | undefined {
+    return this.configOptions.find((o) => o.id === "model")
+      || this.configOptions.find((o) => o.category === "model" && o.id !== "provider")
+      || this.configOptions.find((o) => o.category === "model");
   }
 
   private failAll(error: Error): void {

@@ -1898,8 +1898,20 @@
     return dlgWebSearch;
   }
 
-  /** The model the form is showing: the select's value, or the free-text
-   *  box when the provider has no list / "Custom…" is chosen. */
+  /** Model ids mean different things to different CLIs, so a provider switch
+   *  must not carry the previous one over unless the new provider lists it too
+   *  (a custom node takes a free-form value, so it keeps whatever was typed). */
+  function modelKnownTo(hid, model) {
+    const value = String(model || "").trim();
+    if (!value) return false;
+    if (hid === "custom") return true;
+    const list = harnessModels(hid);
+    return hid === "pi" ? !!resolveModelKey(list, value) : list.includes(value);
+  }
+
+  /**
+   * The model the form is showing: the select's value, or the free-text
+   * box when the provider has no list / "Custom…" is chosen. */
   function readModelField() {
     const el = dlgEl.querySelector("#sw-f-model");
     if (!el) return "";
@@ -2356,7 +2368,11 @@
       // that block — carrying over what the user has typed but not saved —
       // instead of the whole form, which would throw away an unsaved message.
       harnessSel.addEventListener("change", () => {
-        const model = readModelField();
+        const typed = readModelField();
+        // A model id carries a different meaning to each CLI: keep the typed
+        // value only when the new provider also knows it, otherwise reset to
+        // that provider's default instead of silently sending a foreign id.
+        const model = modelKnownTo(harnessSel.value, typed) ? typed : "";
         const webOn = readWebSearchField();
         dlgEl.querySelector("#sw-model-wrap").innerHTML = modelFieldHtml(harnessSel.value, model, webOn);
         bindModelField();
