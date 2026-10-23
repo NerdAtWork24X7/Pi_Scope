@@ -62,7 +62,6 @@
   let compareBase = null; // SHA of first commit selected for diff comparison
   let fullscreen = false; // whether the detail pane is in fullscreen mode
   let changesFs = false; // whether the changes diff view is fullscreen
-  let editFile = { path: "", content: "", original: "", sha: "" };
   let pendingSelect = ""; // cross-view "open this file's changes" request
 
   const selectedCwd = window.SCOPE.currentCwd;
@@ -874,7 +873,6 @@
     const btn = $("#git-fs-toggle");
     if (btn) btn.textContent = "⛶";
     document.body.style.overflow = "";
-    editFile = { path: "", content: "", original: "", sha: "" };
     if (detailMode === "compare" || (currentDetail && currentDetail._compare)) {
       detailPane.hidden = true;
       detailMode = "commit";
@@ -927,62 +925,6 @@
       if (tabs) tabs.appendChild(btn);
     }
     btn.style.display = (currentDetail && !currentDetail._compare) ? "" : "none";
-  }
-
-  // ─── File editing from history (fullscreen mode) ───────────────────────────
-  async function openFileFromHistory(sha, filePath) {
-    if (!fullscreen) enterFullscreen();
-    detailBody.innerHTML = '<div class="empty-state">loading file…</div>';
-    const cwd = selectedCwd();
-    const { res, data } = await api("/git/cat", { cwd, sha, path: filePath });
-    if (!res.ok) { detailBody.innerHTML = `<div class="git-diff-empty">error: ${esc(data.error || res.status)}</div>`; return; }
-    editFile = { path: filePath, content: data.content, original: data.content, sha };
-    renderFileEditor();
-  }
-
-  function renderFileEditor() {
-    detailBody.innerHTML = "";
-    const hdr = document.createElement("div");
-    hdr.className = "git-edit-header";
-    hdr.innerHTML = `<span class="git-edit-path">📄 ${esc(editFile.path)}</span><span class="git-detail-sub">at ${esc(editFile.sha.slice(0,8))}</span>`;
-    detailBody.appendChild(hdr);
-
-    const toolbar = document.createElement("div");
-    toolbar.className = "git-edit-toolbar";
-    const saveBtn = document.createElement("button");
-    saveBtn.className = "btn-sm";
-    saveBtn.style.cssText = "background:var(--accent);color:var(--on-accent);border-color:var(--accent)";
-    saveBtn.textContent = "Save to working tree";
-    saveBtn.onclick = saveFileFromHistory;
-    const discardBtn = document.createElement("button");
-    discardBtn.className = "btn-sm";
-    discardBtn.textContent = "Discard";
-    discardBtn.onclick = () => { editFile.content = editFile.original; renderFileEditor(); };
-    const backBtn = document.createElement("button");
-    backBtn.className = "btn-sm";
-    backBtn.textContent = "← back";
-    backBtn.onclick = () => { renderDetail(detailMode, currentDetail); };
-    toolbar.appendChild(backBtn);
-    toolbar.appendChild(discardBtn);
-    toolbar.appendChild(saveBtn);
-    detailBody.appendChild(toolbar);
-
-    const ta = document.createElement("textarea");
-    ta.className = "git-edit-textarea";
-    ta.spellcheck = false;
-    ta.value = editFile.content;
-    ta.addEventListener("input", () => { editFile.content = ta.value; });
-    detailBody.appendChild(ta);
-  }
-
-  async function saveFileFromHistory() {
-    const cwd = selectedCwd();
-    if (!confirm(`Overwrite working-tree file "${editFile.path}"?\n\nUncommitted changes to this file will be lost.`)) return;
-    setStatus("saving…");
-    const { res, data } = await api("/files/save", {}, { cwd, file: editFile.path, content: editFile.content });
-    if (!res.ok) { setStatus("save failed: " + (data.error || res.status), true); return; }
-    editFile.original = editFile.content;
-    setStatus(`saved ${editFile.path} (${data.bytes ?? 0} bytes)`);
   }
 
   async function showCommitDetail(sha) {

@@ -211,24 +211,11 @@
       gap: 10px
     }
 
-    .brand {
-      display: flex;
-      flex-direction: column;
-      gap: 1px;
-      white-space: nowrap
-    }
-
     header h1 {
       font-size: 18px;
       font-weight: 600;
       white-space: nowrap;
       line-height: 1
-    }
-
-    .subtitle {
-      font-size: 13.5px;
-      color: var(--muted);
-      line-height: 1.1
     }
 
     /* The centre block is flex:1 but must be allowed to shrink below its content
@@ -460,54 +447,6 @@
       display: none
     }
 
-    .sidebar-filters {
-      padding: 8px 12px;
-      border-bottom: 1px solid var(--border)
-    }
-
-    .sidebar-filters label {
-      display: block;
-      font-size: 15px;
-      color: var(--muted);
-      margin-bottom: 1px;
-      margin-top: 5px
-    }
-
-    .sidebar-filters label:first-child {
-      margin-top: 0
-    }
-
-    .sidebar-filters input[type=text],
-    .sidebar-filters select {
-      width: 100%;
-      padding: 4px 6px;
-      background: var(--field-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--r-sharp);
-      color: var(--text);
-      font-size: 15px;
-      font-family: var(--mono), var(--emoji)
-    }
-
-    .sidebar-filters input:focus,
-    .sidebar-filters select:focus {
-      outline: none;
-      border-color: var(--accent)
-    }
-
-    .sidebar-filters .toggle-row {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      margin-top: 5px;
-      font-size: 15px;
-      color: var(--muted)
-    }
-
-    .toggle-row input[type=checkbox] {
-      accent-color: var(--accent)
-    }
-
     #session-list {
       flex: 1;
       overflow-y: auto;
@@ -522,208 +461,6 @@
     #session-list::-webkit-scrollbar-thumb {
       background: var(--border);
       border-radius: var(--r-sharp)
-    }
-
-    .session-item {
-      padding: 3px 10px;
-      cursor: pointer;
-      border-bottom: 1px solid var(--hairline);
-      font-size: 12.5px;
-      transition: background 0.1s;
-      display: flex;
-      align-items: flex-start;
-      gap: 5px;
-      position: relative
-    }
-
-    .session-item:hover {
-      background: var(--row-hover)
-    }
-
-    .session-item.selected {
-      background: var(--accent-soft);
-      border-left: 2px solid var(--accent)
-    }
-
-    .session-item input[type=checkbox] {
-      margin-top: 2px;
-      flex-shrink: 0;
-      accent-color: var(--accent)
-    }
-
-    .session-item .info {
-      flex: 1;
-      min-width: 0
-    }
-
-    .session-item .name {
-      font-weight: 600;
-      color: var(--text);
-      font-size: 13px
-    }
-
-    .session-item .name .status-dot {
-      display: inline-block;
-      width: 9px;
-      height: 9px;
-      border-radius: 50%;
-      margin-right: 4px;
-      flex-shrink: 0;
-      vertical-align: middle;
-      position: relative;
-      top: -1px;
-      transition: background 0.5s ease, box-shadow 0.5s ease
-    }
-
-    .session-item .name .status-dot.green {
-      background: var(--green);
-      box-shadow: 0 0 4px var(--green)
-    }
-
-    .session-item .name .status-dot.orange {
-      background: var(--orange);
-      box-shadow: 0 0 4px var(--orange)
-    }
-
-    .session-item .name .status-dot.red {
-      background: var(--red);
-      box-shadow: 0 0 4px var(--red)
-    }
-
-    .session-item .uuid {
-      font-family: var(--mono), var(--emoji);
-      color: var(--muted);
-      font-size: 11.5px
-    }
-
-    .session-item .meta {
-      color: var(--muted);
-      font-size: 11.5px;
-      margin-top: 0;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis
-    }
-
-    .session-item .cost {
-      color: var(--green);
-      font-size: 12px
-    }
-
-    .session-item .err-dot {
-      color: var(--red);
-      font-weight: bold;
-      font-size: 13px;
-      margin-left: 2px
-    }
-
-    .session-item .err-dot.ackd {
-      opacity: 0.25;
-      transition: opacity 0.3s ease
-    }
-
-    .session-item .err-dot.noerr {
-      display: none
-    }
-
-    .session-item .name-model {
-      color: var(--muted);
-      font-weight: 400;
-      font-family: var(--mono), var(--emoji);
-      font-size: 11.5px
-    }
-
-    .session-item .sess-delete {
-      position: absolute;
-      top: 3px;
-      right: 8px;
-      width: 18px;
-      height: 18px;
-      line-height: 17px;
-      text-align: center;
-      font-size: 16px;
-      color: var(--muted);
-      border-radius: var(--r-control);
-      cursor: pointer;
-      display: none;
-      z-index: 2
-    }
-
-    .session-item:hover .sess-delete {
-      display: block
-    }
-
-    .session-item .sess-delete:hover {
-      color: var(--red);
-      background: var(--tint-red)
-    }
-
-    .session-mini .sess-delete {
-      display: none
-    }
-
-    body.sidebar-collapsed .session-item .sess-delete {
-      display: none
-    }
-
-    /* ─── Session → subagent tree ───────────────────────────────────── */
-    .session-group {
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 6px
-    }
-
-    .session-group-head {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 10px;
-      cursor: pointer;
-      user-select: none;
-      font-size: 14px;
-      background: var(--surface-2)
-    }
-
-    .session-group-head:hover {
-      background: var(--row-hover)
-    }
-
-    .session-group-caret {
-      color: var(--muted);
-      font-size: 12px;
-      width: 14px;
-      flex-shrink: 0;
-      text-align: center
-    }
-
-    .session-group-title {
-      font-weight: 700;
-      color: var(--text);
-      font-size: 15px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      min-width: 0
-    }
-
-    .session-group-count {
-      color: var(--muted);
-      font-size: 11px;
-      margin-left: auto;
-      flex-shrink: 0
-    }
-
-    .session-group-children .session-item {
-      padding-left: 30px
-    }
-
-    body.layout-form .session-group-head {
-      padding: 9px 14px;
-      gap: 6px;
-      font-size: 15px
-    }
-
-    body.layout-form .session-group-children .session-item {
-      padding-left: 34px
     }
 
     section {
@@ -1543,27 +1280,6 @@
       color: var(--text)
     }
 
-    /* ─── Sidebar collapse toggle + mini (icon) mode ────────────────── */
-    /* When collapsed, the filters/sort/hide controls disappear and the   */
-    /* session list reduces to single-letter agent chips with a tiny      */
-    /* activity dot (green ≤10s, orange ≤20s, gray after). Frees up real  */
-    /* estate for the main view without losing per-agent at-a-glance.     */
-    /* Same split as the chat rails: collapse button lives in the sidebar
-       header (next to the clear-all action); when collapsed, a "show" button
-       appears at the top of the slim strip. */
-    .sidebar-top {
-      display: none; /* only visible when the sidebar is collapsed */
-    }
-
-    .sidebar-toggle-wrap {
-      padding: 8px 10px;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-shrink: 0
-    }
-
     /* Ghost panel-icon toggle matching the chat rails (Claude-style) — same
        28px size as the chat page's show button. */
     #sidebar-toggle,
@@ -1611,23 +1327,8 @@
       width: 52px
     }
 
-    body.sidebar-collapsed .sidebar-filters {
-      display: none
-    }
-
     body.sidebar-collapsed #btn-clear-all {
       display: none
-    }
-
-    body.sidebar-collapsed .sidebar-toggle-wrap {
-      display: none
-    }
-
-    body.sidebar-collapsed .sidebar-top {
-      display: flex;
-      justify-content: center;
-      padding: 10px 0 6px;
-      flex-shrink: 0;
     }
 
     body.sidebar-collapsed #session-list {
@@ -1637,65 +1338,6 @@
       align-items: center;
       gap: 6px;
       overflow-x: hidden
-    }
-
-    body.sidebar-collapsed .session-item {
-      display: none
-    }
-
-    .session-mini {
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 34px;
-      height: 34px;
-      border-radius: var(--r-btn);
-      background: var(--pill-bg);
-      border: 1px solid var(--border);
-      color: var(--text);
-      font-family: var(--mono), var(--emoji);
-      font-weight: 700;
-      font-size: 14px;
-      cursor: pointer;
-      flex-shrink: 0;
-      transition: border-color 0.1s, background 0.1s
-    }
-
-    .session-mini:hover {
-      border-color: var(--accent);
-      background: var(--row-hover)
-    }
-
-    .session-mini.selected {
-      background: var(--accent-soft);
-      border-color: var(--accent);
-      box-shadow: inset 0 0 0 1px var(--accent)
-    }
-
-    .session-mini .mini-dot {
-      position: absolute;
-      top: -3px;
-      right: -3px;
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      border: 2px solid var(--bg);
-      transition: background 0.5s ease, box-shadow 0.5s ease
-    }
-
-    .session-mini .mini-dot.green {
-      background: var(--green);
-      box-shadow: 0 0 5px var(--green)
-    }
-
-    .session-mini .mini-dot.orange {
-      background: var(--orange);
-      box-shadow: 0 0 5px var(--orange)
-    }
-
-    .session-mini .mini-dot.gray {
-      background: var(--muted)
     }
 
     /* ─── Form mode (default) ────────────────────────────────────────── */
@@ -1734,34 +1376,6 @@
 
     body.layout-form.sidebar-collapsed #workspace-sidebar {
       width: 56px
-    }
-
-    body.layout-form .sidebar-filters {
-      padding: 12px 14px
-    }
-
-    body.layout-form .sidebar-filters label {
-      margin-bottom: 3px;
-      margin-top: 8px
-    }
-
-    body.layout-form .sidebar-filters input[type=text],
-    body.layout-form .sidebar-filters select {
-      padding: 6px 8px
-    }
-
-    body.layout-form .session-item {
-      padding: 4px 14px;
-      gap: 6px;
-      border-bottom-color: var(--hairline-strong)
-    }
-
-    body.layout-form .session-item .name {
-      font-weight: 600
-    }
-
-    body.layout-form .session-item .meta {
-      margin-top: 0
     }
 
     body.layout-form .pane-header {
@@ -2433,8 +2047,7 @@
       color: var(--amber);
     }
 
-    .diff-binary,
-    .diff-toobig {
+    .diff-binary{
       color: var(--muted);
       padding: 20px;
       font-family: var(--mono), var(--emoji);
@@ -3571,8 +3184,6 @@
     .traj-row:hover {
       background: var(--row-hover);
     }
-
-    .traj-row.colhead,
     .traj-row.traj-colhead {
       position: sticky;
       top: 0;
@@ -4853,63 +4464,6 @@ body.layout-form #trajectory-inspector {
       flex-wrap: wrap;
     }
 
-    /* ─── File editor from history ──────────────────────────────────── */
-    .git-edit-header {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 6px 0;
-      font-family: var(--mono), var(--emoji);
-      flex-wrap: wrap;
-    }
-
-    .git-edit-path {
-      font-weight: 600;
-      color: var(--text);
-      font-size: 13px;
-    }
-
-    .git-edit-toolbar {
-      display: flex;
-      gap: 8px;
-      padding: 8px 0;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 10px;
-    }
-
-    .git-edit-textarea {
-      width: 100%;
-      height: calc(100% - 90px);
-      min-height: 400px;
-      padding: 10px 14px;
-      background: var(--field-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--r-control);
-      color: var(--text);
-      font-family: var(--mono), var(--emoji);
-      font-size: 13px;
-      line-height: 1.5;
-      resize: none;
-      tab-size: 4;
-      box-sizing: border-box;
-    }
-
-    .git-edit-textarea:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-
-    .git-detail-file-link {
-      cursor: pointer;
-      border-radius: var(--r-control);
-      padding: 4px 6px;
-      margin: 0 -6px;
-    }
-
-    .git-detail-file-link:hover {
-      background: var(--row-hover);
-    }
-
     .llm-error-banner {
       margin: 6px 0 4px;
       padding: 6px 10px;
@@ -5367,14 +4921,6 @@ body.layout-form #trajectory-inspector {
       color: var(--muted);
     }
 
-    .git-log-msg {
-      padding: 10px 12px;
-      font-family: var(--mono), var(--emoji);
-      font-size: 12px;
-      color: var(--muted);
-      white-space: pre-wrap;
-    }
-
     /* ─── Translucent glass: body gradient shows through every page ──────── */
     body {
       background: var(--bg-gradient);
@@ -5597,15 +5143,6 @@ body.layout-form #trajectory-inspector {
     .chat-ws.active .chat-ws-meta {
       color: var(--accent-ink);
       opacity: 0.85;
-    }
-    .chat-ws-count {
-      font-size: 10px;
-      font-weight: 600;
-      color: var(--muted);
-      background: var(--pill-bg);
-      border-radius: var(--r-btn);
-      padding: 0 6px;
-      flex-shrink: 0;
     }
     .chat-ws-children {
       margin: 0 2px 4px 26px;
@@ -6447,14 +5984,6 @@ body.layout-form #trajectory-inspector {
     .chat-thinking[open] > summary::before {
       transform: rotate(90deg);
     }
-    .chat-thinking .chat-th-dot {
-      width: 5px;
-      height: 5px;
-      border-radius: 50%;
-      background: var(--orange);
-      animation: chat-blink-soft 1s ease-in-out infinite;
-      margin-left: auto;
-    }
     /* Auto-scroll toggle in a Thought block's header. Pushed to the right edge,
      * dim until hovered; "on" reads in the accent colour so the state is obvious
      * without a label. Its own click handler stops the toggle from folding the
@@ -7121,12 +6650,6 @@ body.layout-form #trajectory-inspector {
       0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
       30% { transform: translateY(-4px); opacity: 1; }
     }
-    .chat-caret {
-      display: inline-block;
-      margin-left: 1px;
-      color: var(--accent-ink);
-      animation: chat-blink-soft 1s steps(2, start) infinite;
-    }
 
     /* Usage badges */
     .chat-usage {
@@ -7145,11 +6668,6 @@ body.layout-form #trajectory-inspector {
       border-radius: var(--r-pill);
       padding: 1px 9px;
       font-family: var(--mono), var(--emoji);
-    }
-    .chat-badge-model {
-      color: var(--accent-ink);
-      background: var(--accent-soft);
-      border-color: transparent;
     }
     .chat-badge.cost {
       color: var(--green);
@@ -7253,15 +6771,6 @@ body.layout-form #trajectory-inspector {
     .chat-chip:hover .chat-chip-icon {
       background: var(--accent);
       box-shadow: 0 0 14px rgba(var(--accent-rgb), 0.5);
-    }
-    .chat-hero-note {
-      margin-top: 18px;
-      font-size: 11.5px;
-      color: var(--muted);
-      opacity: 0.8;
-      display: flex;
-      align-items: center;
-      gap: 6px;
     }
 
     /* ── Composer ───────────────────────────────────────────────────────── */
@@ -8382,32 +7891,6 @@ body.layout-form #trajectory-inspector {
       color: var(--muted);
       opacity: 0.8;
     }
-
-    .at-item {
-      border-radius: var(--r-btn);
-      margin: 1px 0;
-      padding: 4px 7px;
-    }
-    .at-item .status-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--muted);
-      flex-shrink: 0;
-    }
-    .at-item .status-dot.green {
-      background: var(--green);
-      box-shadow: 0 0 5px var(--green);
-    }
-    .at-item .status-dot.red {
-      background: var(--red);
-    }
-    .at-item .status-dot.orange {
-      background: var(--orange);
-    }
-    .at-item-name {
-      font-weight: 500;
-    }
     .at-orch {
       display: flex;
       align-items: center;
@@ -8454,9 +7937,6 @@ body.layout-form #trajectory-inspector {
     .at-orch-status.green { background: var(--green); box-shadow: 0 0 5px var(--green); }
     .at-orch-status.red { background: var(--red); }
     .at-orch-status.orange { background: var(--orange); }
-    .at-row {
-      padding: 3px 4px;
-    }
     /* Mode & Memory as compact toggle cards, side by side like chips. */
     .at-mm {
       display: flex;
@@ -8574,9 +8054,6 @@ body.layout-form #trajectory-inspector {
     .chat-user .chat-bubble-user .chat-bubble-text {
       white-space: pre-wrap;
       word-break: break-word;
-    }
-    .chat-badges {
-      display: none;
     }
 
     /* Right rail head keeps its count next to the title */
@@ -8733,72 +8210,6 @@ body.layout-form #trajectory-inspector {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .at-rows {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .at-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      font-size: 12px;
-    }
-    .at-row.clickable {
-      cursor: pointer;
-      border-radius: var(--r-control);
-      padding: 2px 6px;
-      margin: -2px -6px;
-    }
-    .at-row.clickable:hover {
-      background: var(--row-hover);
-    }
-    .at-k {
-      color: var(--muted);
-      flex-shrink: 0;
-    }
-    .at-v {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .at-item {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      cursor: pointer;
-      font-size: 12.5px;
-    }
-    .at-item:hover {
-      background: var(--row-hover);
-    }
-    .at-item.active,
-    .at-item.on {
-      background: var(--accent-soft);
-    }
-    .at-item.disabled .at-item-name {
-      color: var(--muted);
-    }
-    .at-item-mark {
-      color: var(--success, var(--green));
-      flex-shrink: 0;
-      font-size: 11px;
-      width: 12px;
-      text-align: center;
-    }
-    .at-item.on .at-item-mark {
-      color: var(--accent-ink);
-    }
-    .at-item-body {
-      flex: 1;
-      min-width: 0;
-    }
-    .at-item-count {
-      flex-shrink: 0;
-      font-size: 11px;
-      color: var(--muted);
-    }
     .at-dim {
       font-size: 12px;
       color: var(--muted);
@@ -8810,19 +8221,6 @@ body.layout-form #trajectory-inspector {
     .at-on {
       font-size: 10px;
       color: var(--accent-ink);
-    }
-    .at-sub {
-      flex-shrink: 0;
-      font-size: 9px;
-      color: var(--muted);
-      background: var(--pill-bg);
-      border-radius: var(--r-control);
-      padding: 0 4px;
-    }
-    .at-sep {
-      height: 1px;
-      background: var(--hairline);
-      margin: 4px 2px;
     }
 
     /* ── Rail hide / show (sidebars fold to slim strips by default) ─────── */
@@ -9413,10 +8811,6 @@ body.layout-settings #sidebar-resizer {
 .set-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
 .set-chip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); }
 .set-chip.on .set-chip-dot { background: var(--accent); }
-/* A tool no agents/*.md pins, but that pi's default tool list — used by every
-   definition without a tools: key — still grants: off, yet not absent. */
-.set-chip.via-default { border-style: dashed; }
-.set-chip.via-default .set-chip-dot { background: var(--border-strong); }
 .set-chip-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Tool-policy list pickers (SubAgent → Tool policy): a dropdown of known tools
    plus a Custom… entry, with the picked names shown as removable chips. */
@@ -9429,13 +8823,6 @@ body.layout-settings #sidebar-resizer {
   cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px;
 }
 .set-chip-x:hover { color: var(--red); }
-.set-skill-group { margin-bottom: 18px; }
-.set-skill-head {
-  display: flex; align-items: center; justify-content: space-between;
-  font-size: 13px; font-weight: 700; color: var(--text);
-  margin-bottom: 9px;
-}
-.set-skill-count { font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--pill-bg); padding: 1px 8px; border-radius: var(--r-card); white-space: nowrap; }
 
 /* Models */
 .set-model-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 14px; }
@@ -10027,13 +9414,6 @@ header {
 }
 header h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.035em; }
 header h1::first-letter { color: var(--accent-ink); }
-.brand .subtitle {
-  font-family: var(--mono), var(--emoji);
-  font-size: 9.5px;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  color: var(--text-subtle);
-}
 #header-breadcrumb {
   font-family: var(--mono), var(--emoji);
   font-size: 12px;
@@ -10270,9 +9650,9 @@ select, textarea { border-radius: var(--r-control); }
 /* Named field classes own a higher specificity than the element rule above, so
    list them explicitly to keep every field on the control radius. */
 .set-input, .set-select, .cp-modal-select, .git-modal-input, .git-new-branch input,
-.git-remote-form input, .git-commitbar textarea, .git-edit-textarea,
+.git-remote-form input, .git-commitbar textarea,
 .chat-ws-add-input, .chat-ask-input, .diagram-toolbar input[type="text"],
-#trajectory-search, #search-box, .sidebar-filters input[type=text], .sidebar-filters select {
+#trajectory-search, #search-box{
   border-radius: var(--r-control);
 }
 
@@ -10300,8 +9680,7 @@ select, textarea { border-radius: var(--r-control); }
 
 /* ── Chips / pills / badges / tags / status ──────────────────────────────── */
 .pill, .tool-name-pill, .snav-tag, .snav-model-pill, .snav-stat, .exit-chip,
-.gsm-status, .fchip, .set-chip, .set-model-chip, .set-cost-chip, .set-team-pill,
-.set-skill-count, .chat-rail-count, .chat-ws-count, .git-branch-chip, .git-count,
+.gsm-status, .fchip, .set-chip, .set-model-chip, .set-cost-chip, .set-team-pill, .chat-rail-count, .git-branch-chip, .git-count,
 .git-ref-badge, .traj-agent-tag, .at-chip, .at-card-pill, .at-toggle, .chat-badge,
 .chat-header-model, .chat-msg-model, .cf-chip, .chat-live-run, .phone-chip,
 .chat-ws-add-btn, .chat-stopped-note, .chat-msg-cancelled, .set-toggle-track,
@@ -11494,17 +10873,10 @@ body.layout-form .chat-bubble-user {
   box-shadow: none;
 }
 
-body.layout-form .chat-bubble-user .chat-bubble-text,
-body.layout-form .chat-bubble-user .md-body {
+body.layout-form .chat-bubble-user .chat-bubble-text{
   font-size: 13.5px;
   line-height: 1.7;
   color: var(--text);
-}
-
-body.layout-form .chat-ai-text,
-body.layout-form .chat-msg .md-body {
-  font-size: 13.5px;
-  line-height: 1.72;
 }
 
 body.layout-form .chat-msg .chat-msg-body > .chat-bubble-text {
@@ -11874,11 +11246,7 @@ body.layout-form .at-sec-head {
 
 body.layout-form .at-sec-head:hover { background: transparent; }
 
-body.layout-form .ws-team-card,
-body.layout-form .at-agent-card,
-body.layout-form .at-skill-chip,
-body.layout-form .at-ext-chip,
-body.layout-form .at-team-chip {
+body.layout-form .ws-team-card{
   border-radius: 4px;
   box-shadow: none;
   background: var(--surface-2);

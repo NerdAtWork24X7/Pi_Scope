@@ -45,6 +45,11 @@ CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_pool ON events(pool);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
 CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, type);
+-- Parent-inference (/sessions nesting): a correlated subquery searches
+-- tool_call events in a 10-minute window per session. Without (type, ts) that
+-- is a scan of every tool_call in the DB for each session; with it the range
+-- search is an index seek (measured: 4.0s → 68ms at 120k events).
+CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(type, ts);
 -- Hot paths: the session rail is ORDER BY last_ts DESC LIMIT n, and every
 -- ingested event resolves its session file through getSessionByFile. Without
 -- these, both fall back to a full table scan once the session table grows.

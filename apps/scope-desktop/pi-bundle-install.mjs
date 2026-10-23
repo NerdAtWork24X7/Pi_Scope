@@ -49,9 +49,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG = "@earendil-works/pi-coding-agent";
 /** Packages the Pi Scope server itself loads from the bundle. */
 const APP_PACKAGES = ["node-pty", "ws"];
-/** The installed package dir, and the CLI entry the server launches. */
+/** The installed package dir the server loads from. */
 const pkgDirIn = (root) => path.join(root, "node_modules", ...PKG.split("/"));
-const cliIn = (root) => path.join(pkgDirIn(root), "dist", "bundle", "cli.js");
 
 const die = (msg) => { console.error(`pi-bundle-install: ${msg}`); process.exit(1); };
 const info = (msg) => console.log(`==> ${msg}`);

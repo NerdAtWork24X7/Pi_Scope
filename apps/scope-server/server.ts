@@ -55,6 +55,7 @@ import {
 } from "../../shared/shell.ts";
 import { execFileSync, spawn } from "node:child_process";
 import * as crypto from "node:crypto";
+import * as zlib from "node:zlib";
 import type { WebSocket as WsSocket } from "ws";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -2009,8 +2010,32 @@ const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
  * response carries an ETag + `no-cache`, so a reload costs one revalidation
  * instead of a full body transfer.
  */
-type StaticEntry = { body: Uint8Array; mime: string; mtimeMs: number; size: number };
+type StaticEntry = { body: Uint8Array; gz: Uint8Array | null; mime: string; mtimeMs: number; size: number };
 const staticCache = new Map<string, StaticEntry>();
+// Only text-ish assets shrink under gzip. Compressing a PNG or font costs CPU
+// on the first request and makes the body slightly larger, so it is skipped.
+const GZIP_MIN_BYTES = 1024;
+function isCompressible(mime: string): boolean {
+  return /^(?:text\/|application\/(?:javascript|json)|image\/svg\+xml)/.test(mime);
+}
+/** True when the client's Accept-Encoding admits gzip (and does not forbid it
+ *  with `q=0`). Identity is always available as the fallback. */
+function acceptsGzip(req?: Request): boolean {
+  const header = req?.headers.get("accept-encoding");
+  if (!header) return false;
+  let gzipQ: number | null = null;
+  let wildcardQ: number | null = null;
+  for (const part of header.split(",")) {
+    const [enc, ...params] = part.trim().toLowerCase().split(";");
+    if (enc !== "gzip" && enc !== "*") continue;
+    const q = params.map((p) => p.trim()).find((p) => p.startsWith("q="));
+    const value = q ? parseFloat(q.slice(2)) : 1;
+    if (enc === "gzip") gzipQ = value;
+    else wildcardQ = value;
+  }
+  // An explicit `gzip;q=` wins over the wildcard, so `gzip;q=0, *` means no.
+  return (gzipQ ?? wildcardQ ?? 0) > 0;
+}
 // Resolved once, not per asset request. `path.resolve` below is what rejects a
 // `..` segment; the old string scrub also mangled legitimate names like
 // `foo..bar.js`.
@@ -2032,16 +2057,39 @@ function serveStatic(relPath: string, req?: Request): Response | null {
   }
   if (!st.isFile()) return null;
 
+  let entry = staticCache.get(filePath);
+  if (!entry || entry.mtimeMs !== st.mtimeMs || entry.size !== st.size) {
+    const body = fs.readFileSync(filePath);
+    // extname, not lastIndexOf("."): a dot in a directory name (e.g.
+    // "vendor/x.term/app.js") used to select the wrong MIME type.
+    const mime = MIME[path.extname(safe) || ".html"] ?? "application/octet-stream";
+    const compress = body.length >= GZIP_MIN_BYTES && isCompressible(mime);
+    entry = {
+      body,
+      // Pre-compressed once per file version and shared by every request, like
+      // the body itself. The UI bundle is ~1.1 MB of JS/CSS; gzip cuts it to
+      // roughly a quarter of that, which is the bulk of a cold page load.
+      gz: compress ? zlib.gzipSync(body) : null,
+      mime,
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+    };
+    staticCache.set(filePath, entry);
+  }
+
+  const gz = entry.gz !== null && acceptsGzip(req);
   // (size, mtime) is enough to identify the representation: byte-exact for any
   // given pair, and it changes the moment a file is rewritten (including by a
-  // `node --watch` restart-editing editor).
-  const etag = `"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
+  // `node --watch` restart-editing editor). The suffix keeps the gzip and
+  // identity variants from sharing a validator.
+  const etag = `"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}${gz ? "-gz" : ""}"`;
   const baseHeaders: Record<string, string> = {
     etag,
     "cache-control": "no-cache",
     "last-modified": st.mtime.toUTCString(),
     "access-control-allow-origin": "*",
   };
+  if (entry.gz !== null) baseHeaders.vary = "accept-encoding";
 
   if (req) {
     const inm = req.headers.get("if-none-match");
@@ -2050,20 +2098,12 @@ function serveStatic(relPath: string, req?: Request): Response | null {
     }
   }
 
-  let entry = staticCache.get(filePath);
-  if (!entry || entry.mtimeMs !== st.mtimeMs || entry.size !== st.size) {
-    entry = {
-      body: fs.readFileSync(filePath),
-      // extname, not lastIndexOf("."): a dot in a directory name (e.g.
-      // "vendor/x.term/app.js") used to select the wrong MIME type.
-      mime: MIME[path.extname(safe) || ".html"] ?? "application/octet-stream",
-      mtimeMs: st.mtimeMs,
-      size: st.size,
-    };
-    staticCache.set(filePath, entry);
-  }
-  return new Response(entry.body, {
-    headers: { ...baseHeaders, "content-type": entry.mime },
+  return new Response(gz && entry.gz ? entry.gz : entry.body, {
+    headers: {
+      ...baseHeaders,
+      "content-type": entry.mime,
+      ...(gz ? { "content-encoding": "gzip" } : {}),
+    },
   });
 }
 
@@ -2092,8 +2132,14 @@ async function serveDocument(file: string, req: Request, url: URL): Promise<Resp
         ? m
         : `${attr}="${val}?_=${encodeURIComponent(bust)}"`,
   );
-  return new Response(html, {
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  const gz = acceptsGzip(req);
+  return new Response(gz ? zlib.gzipSync(html) : html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      ...(gz ? { "content-encoding": "gzip" } : {}),
+      vary: "accept-encoding",
+    },
   });
 }
 
