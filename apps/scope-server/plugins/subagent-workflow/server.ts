@@ -3010,6 +3010,8 @@ export function activate(api: any): void {
             args: acpArgs || [],
             cwd,
             env,
+            // Each ACP harness has its own model contract (see acp-harness.ts).
+            harness: node.config.harness,
             model: node.config.model || "",
             handlers: {
               onText: (delta: string) => {

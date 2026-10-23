@@ -10,6 +10,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { AcpSession, parseAcpAvailableCommands, permissionDialogId } from "../acp-client.ts";
+import {
+  acpHarnessProfile,
+  CLINE_ACP_PROFILE,
+  GEMINI_ACP_PROFILE,
+  KILO_ACP_PROFILE,
+  OPENCODE_ACP_PROFILE,
+} from "../acp-harness.ts";
 
 const AGENT = `
 import * as readline from "node:readline";
@@ -260,6 +267,7 @@ test("an agent without session/set_model is switched through its model config op
     args: [],
     cwd: os.tmpdir(),
     model: "chosen-model",
+    harness: "cline",
     startTimeoutMs: 10_000,
     handlers: { onText: () => {} },
   });
@@ -342,12 +350,216 @@ function fakeAgentSource(source, prefix) {
   return file;
 }
 
+// One agent that can play every ACP model shape. It advertises BOTH a
+// `provider` and a `model` config option (like Cline), logs which mechanism was
+// used, and can accept or refuse `session/set_model`. The per-harness tests
+// below assert the profile that is actually selected, not a shared fallback.
+const STRATEGY_AGENT = `
+import * as fs from "node:fs";
+import * as readline from "node:readline";
+const log = process.argv[2];
+const setModelMode = process.argv[3] || "error";
+const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");
+const configOptions = (model) => [{
+  id: "provider", name: "Provider", category: "model", type: "select",
+  currentValue: "anthropic", options: [{ value: "anthropic", name: "Anthropic" }],
+}, {
+  id: "model", name: "Model", category: "model", type: "select",
+  currentValue: model,
+  options: [{ value: "default-model", name: "Default" }, { value: "chosen-model", name: "Chosen" }],
+}];
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  let frame;
+  try { frame = JSON.parse(line); } catch { return; }
+  if (frame.method === "initialize") return send({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 2 } });
+  if (frame.method === "session/new") {
+    return send({ jsonrpc: "2.0", id: frame.id, result: {
+      sessionId: "sess-strategy",
+      models: { currentModelId: "default-model", availableModels: [{ modelId: "default-model" }, { modelId: "chosen-model" }] },
+      configOptions: configOptions("default-model"),
+    } });
+  }
+  if (frame.method === "session/set_model") {
+    fs.appendFileSync(log, "set_model=" + frame.params.modelId + "\\n");
+    if (setModelMode === "ok") {
+      return send({ jsonrpc: "2.0", id: frame.id, result: { models: { currentModelId: frame.params.modelId } } });
+    }
+    return send({ jsonrpc: "2.0", id: frame.id, error: { code: -32601, message: "set_model unavailable" } });
+  }
+  if (frame.method === "session/set_config_option") {
+    fs.appendFileSync(log, "set_config_option=" + frame.params.configId + ":" + frame.params.value + "\\n");
+    // Only the model option changes; choosing provider would leave the model
+    // at its previous value and be caught by the client's verification.
+    const nextModel = frame.params.configId === "model" ? frame.params.value : "default-model";
+    return send({ jsonrpc: "2.0", id: frame.id, result: { configOptions: configOptions(nextModel) } });
+  }
+});
+`;
+
+function fakeStrategyAgent(setModelMode = "error") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scope-acp-strategy-"));
+  const log = path.join(dir, "methods.log");
+  fs.writeFileSync(path.join(dir, "agent.mjs"), STRATEGY_AGENT);
+  const file = path.join(dir, "agent");
+  fs.writeFileSync(
+    file,
+    `#!/bin/sh\nexec node "$(dirname "$0")/agent.mjs" '${log}' '${setModelMode}' "$@"\n`,
+    { mode: 0o755 },
+  );
+  return { file, log };
+}
+
+function callsIn(log) {
+  return fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
+}
+
+test("Gemini's profile uses set_model only and never falls back to a config option", async () => {
+  const { file, log } = fakeStrategyAgent("error");
+  const session = new AcpSession({
+    file,
+    args: [],
+    cwd: os.tmpdir(),
+    model: "chosen-model",
+    harness: "gemini",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  await assert.rejects(session.start(), /could not use model "chosen-model".*set_model unavailable/);
+  const calls = callsIn(log);
+  assert.ok(calls.includes("set_model=chosen-model"), "Gemini uses the standard method");
+  assert.equal(calls.some((c) => c.startsWith("set_config_option=")), false, "Gemini must not fall through to a config option");
+  assert.equal(session.alive, false, "the refused session is closed");
+});
+
+test("Kilo's profile uses set_model only and never falls back to a config option", async () => {
+  const { file, log } = fakeStrategyAgent("error");
+  const session = new AcpSession({
+    file,
+    args: [],
+    cwd: os.tmpdir(),
+    model: "chosen-model",
+    harness: "kilo",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  await assert.rejects(session.start(), /could not use model "chosen-model".*set_model unavailable/);
+  const calls = callsIn(log);
+  assert.ok(calls.includes("set_model=chosen-model"), "Kilo uses the standard method");
+  assert.equal(calls.some((c) => c.startsWith("set_config_option=")), false, "Kilo's profile must not mask a refused set_model");
+  assert.equal(session.alive, false);
+});
+
+test("Cline's profile falls back to its `model` option, never `provider`", async () => {
+  const { file, log } = fakeStrategyAgent("error");
+  const session = new AcpSession({
+    file,
+    args: [],
+    cwd: os.tmpdir(),
+    model: "chosen-model",
+    harness: "cline",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  assert.equal(await session.start(), "sess-strategy");
+  assert.equal(session.modelId, "chosen-model");
+  const calls = callsIn(log);
+  assert.ok(calls.includes("set_model=chosen-model"), "set_model is tried first");
+  assert.ok(calls.includes("set_config_option=model:chosen-model"), `expected the model option, got ${calls.join(", ")}`);
+  assert.equal(calls.some((c) => c.startsWith("set_config_option=provider:")), false, "the provider option must never be mistaken for the model");
+  session.close();
+});
+
+test("Cline's profile rejects an unlisted model before the CLI can answer empty", async () => {
+  const { file, log } = fakeStrategyAgent("ok");
+  const session = new AcpSession({
+    file,
+    args: [],
+    cwd: os.tmpdir(),
+    model: "not-listed",
+    harness: "cline",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  await assert.rejects(session.start(), /could not use model "not-listed": the agent does not list "not-listed"/);
+  assert.equal(fs.existsSync(log), false, "no switch should be sent for a model Cline cannot run");
+  assert.equal(session.alive, false);
+});
+
+test("Gemini's profile lets the CLI itself reject an unadvertised id", async () => {
+  const { file, log } = fakeStrategyAgent("ok");
+  const session = new AcpSession({
+    file,
+    args: [],
+    cwd: os.tmpdir(),
+    model: "not-listed",
+    harness: "gemini",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  // Gemini returns a clear error at prompt time for an unknown id; the client
+  // must not replace that with its own list check, which would reject aliases
+  // the CLI accepts but ACP does not advertise.
+  assert.equal(await session.start(), "sess-strategy");
+  assert.ok(callsIn(log).includes("set_model=not-listed"));
+  session.close();
+});
+
+test("Cline's profile stops at set_model when the CLI accepts it", async () => {
+  const { file, log } = fakeStrategyAgent("ok");
+  const session = new AcpSession({
+    file,
+    args: [],
+    cwd: os.tmpdir(),
+    model: "chosen-model",
+    harness: "cline",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  assert.equal(await session.start(), "sess-strategy");
+  assert.equal(session.modelId, "chosen-model");
+  const calls = callsIn(log);
+  assert.ok(calls.includes("set_model=chosen-model"));
+  assert.equal(calls.some((c) => c.startsWith("set_config_option=")), false, "a successful set_model needs no config fallback");
+  session.close();
+});
+
+test("opencode's profile uses its config option even when set_model would work", async () => {
+  const { file, log } = fakeStrategyAgent("ok");
+  const session = new AcpSession({
+    file,
+    args: [],
+    cwd: os.tmpdir(),
+    model: "chosen-model",
+    harness: "opencode",
+    startTimeoutMs: 10_000,
+    handlers: { onText: () => {} },
+  });
+  assert.equal(await session.start(), "sess-strategy");
+  assert.equal(session.modelId, "chosen-model");
+  const calls = callsIn(log);
+  assert.equal(calls.some((c) => c.startsWith("set_model=")), false, "opencode's profile must not call set_model");
+  assert.ok(calls.includes("set_config_option=model:chosen-model"));
+  session.close();
+});
+
+test("a harness id or an executable path selects the same profile", () => {
+  assert.equal(acpHarnessProfile("gemini"), GEMINI_ACP_PROFILE);
+  assert.equal(acpHarnessProfile("/home/me/.nvm/bin/gemini"), GEMINI_ACP_PROFILE);
+  assert.equal(acpHarnessProfile("C:\\tools\\cline.cmd"), CLINE_ACP_PROFILE);
+  assert.equal(acpHarnessProfile("kilo"), KILO_ACP_PROFILE);
+  assert.equal(acpHarnessProfile("/home/me/.opencode/bin/opencode"), OPENCODE_ACP_PROFILE);
+  assert.equal(acpHarnessProfile("some-new-harness").id, "generic");
+});
+
+
 test("a model option published after session/new is awaited, not skipped", async () => {
   const session = new AcpSession({
     file: fakeAgentSource(LATE_MODEL_AGENT, "scope-acp-late-"),
     args: [],
     cwd: os.tmpdir(),
     model: "chosen-model",
+    harness: "opencode",
     startTimeoutMs: 10_000,
     handlers: { onText: () => {} },
   });
@@ -362,6 +574,7 @@ test("a refused model switch fails the session instead of using the default", as
     args: [],
     cwd: os.tmpdir(),
     model: "chosen-model",
+    harness: "opencode",
     startTimeoutMs: 10_000,
     handlers: { onText: () => {} },
   });
@@ -375,6 +588,7 @@ test("a model option that silently keeps the old value is treated as a failure",
     args: [],
     cwd: os.tmpdir(),
     model: "chosen-model",
+    harness: "opencode",
     startTimeoutMs: 10_000,
     handlers: { onText: () => {} },
   });

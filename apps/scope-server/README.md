@@ -167,16 +167,21 @@ CLI that refuses the id falls back to a fresh `session/new`. A
 model or mode picked in the composer is pushed into the live session
 (`session/set_model` / `session/set_mode`, or `session/set_config_option` for a
 model an agent publishes only as a config option, as opencode does) instead of
-waiting for a new one. The handshake waits briefly for that model option (some
-agents publish it just after `session/new`) and retries a transient rejection.
-If the agent still refuses the requested model — an unauthenticated provider, an
-id it no longer serves — the turn fails with the agent's own reason instead of
-prompting on its default model, and
-the modes the agent advertises get their own composer pill (Gemini's Plan/YOLO,
-opencode's build/plan). A workflow node also runs an ACP harness as a live
-session (`createAcpSession` through the plugin kit); because a run is unattended,
-it answers the agent's permission request with the offered allow option and
-writes the decision to the run log.
+waiting for a new one, and before the first prompt. If the agent still refuses
+the requested model — an unauthenticated provider, an id it no longer serves —
+the turn fails with the agent's own reason instead of prompting on its default
+model. The mechanisms are declared per harness in `acp-harness.ts`: Gemini and
+Kilo use `session/set_model` only, Cline tries it then falls back to its `model`
+config option (never `provider`) after rejecting an id its session does not
+advertise, and opencode uses its `model` config option only, waiting for a late
+option and retrying a transient rejection. A profile
+lists only what its own CLI implements, so a workaround for one harness cannot
+alter another; print-mode harnesses keep their per-harness `modelFlag`. The modes
+the agent advertises get their own composer pill (Gemini's Plan/YOLO, opencode's
+build/plan). A workflow node also runs an ACP harness as a live session
+(`createAcpSession` through the plugin kit); because a run is unattended, it
+answers the agent's permission request with the offered allow option and writes
+the decision to the run log.
 
 Discovery runs on demand (`GET /chat/harness-commands?harness=&cwd=`), never
 submits a prompt, asks for metadata only, and kills the child as soon as it

@@ -1268,12 +1268,16 @@ function startHarnessChat(
           onNotice: (message: string, kind: "info" | "warning" | "error") =>
             runEmit(run, { type: "ui_notify", message, kind }),
         };
-        const openAcp = () => {            const session = new AcpSession({
+        const openAcp = () => {
+          const session = new AcpSession({
             file,
             args: spec.acpArgs || [],
             cwd: owned.cwd,
             env: chatChildEnv(owned.cwd),
             model,
+            // The model contract is per harness: opencode's config-option
+            // switch must not change how Gemini/Cline/Kilo apply a model.
+            harness: harnessId,
             // Continue a session this chat had before the server restarted.
             resumeSessionId: acpResumeId(sid, harnessId, owned.cwd),
             handlers: acpHandlers,

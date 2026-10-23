@@ -102,16 +102,24 @@ function writeStubHarness(dir, name, log, marker) {
  * then asks for permission before finishing. A workflow has no dialog surface,
  * so the plugin's own policy has to answer it — and say so in the run log.
  */
-function writeAcpStub(dir) {
+function writeAcpStub(dir, controlLog, mode = "set_model") {
+  const control = JSON.stringify(controlLog);
+  const configMode = mode === "config_option";
   const agent = [
+    'import * as fs from "node:fs";',
     'import * as readline from "node:readline";',
     'const send = (v) => process.stdout.write(JSON.stringify(v) + "\\n");',
+    'const modelOptions = (current) => [{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options: [{ value: "default", name: "Default" }, { value: current, name: current }] }];',
     'let promptId = 0;',
     'const rl = readline.createInterface({ input: process.stdin });',
     'rl.on("line", (line) => {',
     '  let f; try { f = JSON.parse(line); } catch { return; }',
     '  if (f.method === "initialize") return send({ jsonrpc: "2.0", id: f.id, result: { protocolVersion: 1 } });',
-    '  if (f.method === "session/new") return send({ jsonrpc: "2.0", id: f.id, result: { sessionId: "wf-acp" } });',
+    `  if (f.method === "session/new") return send({ jsonrpc: "2.0", id: f.id, result: { sessionId: "wf-acp"${configMode ? ', configOptions: modelOptions("default")' : ""} } });`,
+    `  if (f.method === "session/set_model") { fs.appendFileSync(${control}, "set_model=" + f.params.modelId + "\\n"); ${configMode
+      ? 'return send({ jsonrpc: "2.0", id: f.id, error: { code: -32601, message: "Method not found" } });'
+      : 'return send({ jsonrpc: "2.0", id: f.id, result: {} });'} }`,
+    `  if (f.method === "session/set_config_option") { fs.appendFileSync(${control}, "set_config_option=" + f.params.configId + ":" + f.params.value + "\\n"); return send({ jsonrpc: "2.0", id: f.id, result: { configOptions: modelOptions(f.params.value) } }); }`,
     '  if (f.id === 90) {',
     '    send({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: " ACP_SESSION_OK" } } } });',
     '    return send({ jsonrpc: "2.0", id: promptId, result: { stopReason: "end_turn" } });',
@@ -860,7 +868,8 @@ describe("subagent workflow plugin (server)", () => {
   test("runs an ACP harness as a live session and logs its permission decision", async () => {
     const solo = path.join(tmpDir, "ws-acp-run");
     fs.mkdirSync(solo, { recursive: true });
-    const bin = writeAcpStub(tmpDir);
+    const controlLog = path.join(tmpDir, "acp-control.log");
+    const bin = writeAcpStub(tmpDir, controlLog);
     const pinned = await api(`/${PLUGIN}/harness-paths`, {
       method: "POST", body: JSON.stringify({ harness: "cline", path: bin }),
     });
@@ -869,7 +878,7 @@ describe("subagent workflow plugin (server)", () => {
       const s = await snapshot(solo);
       const agent = s.nodes.find((n) => n.type === "agent");
       const upd = await act("updateNode", { id: agent.id, name: "acp-node", config: {
-        harness: "cline", prompt: "do {task}",
+        harness: "cline", prompt: "do {task}", model: "cline/wf-model",
       } }, solo);
       assert.ok(upd.res.ok, upd.data?.error);
 
@@ -877,6 +886,8 @@ describe("subagent workflow plugin (server)", () => {
       assert.ok(started.res.ok, started.data?.error);
       const run = await waitRun(solo);
       assert.equal(run.nodes[agent.id].status, "done", JSON.stringify(run.log));
+      assert.match(fs.readFileSync(controlLog, "utf8"), /set_model=cline\/wf-model/,
+        "the node's selected model reached the ACP session");
       // The agent's streamed text is the node's output, exactly like stdout of a
       // print-mode harness…
       assert.match(run.nodes[agent.id].outputTail, /ACP_SESSION_OK/);
@@ -890,6 +901,39 @@ describe("subagent workflow plugin (server)", () => {
       // Back to auto-detection for the rest of the suite.
       await api(`/${PLUGIN}/harness-paths`, {
         method: "POST", body: JSON.stringify({ harness: "cline", path: "" }),
+      });
+    }
+  });
+
+  test("runs an opencode node through its config-option model switch", async () => {
+    const solo = path.join(tmpDir, "ws-acp-opencode");
+    fs.mkdirSync(solo, { recursive: true });
+    const controlLog = path.join(tmpDir, "acp-opencode-control.log");
+    const bin = writeAcpStub(tmpDir, controlLog, "config_option");
+    const pinned = await api(`/${PLUGIN}/harness-paths`, {
+      method: "POST", body: JSON.stringify({ harness: "opencode", path: bin }),
+    });
+    assert.ok(pinned.res.ok, pinned.data?.error);
+    try {
+      const s = await snapshot(solo);
+      const agent = s.nodes.find((n) => n.type === "agent");
+      const upd = await act("updateNode", { id: agent.id, name: "opencode-acp", config: {
+        harness: "opencode", prompt: "do {task}", model: "test/model",
+      } }, solo);
+      assert.ok(upd.res.ok, upd.data?.error);
+
+      const started = await runApi("start", { task: "the thing" }, solo);
+      assert.ok(started.res.ok, started.data?.error);
+      const run = await waitRun(solo);
+      assert.equal(run.nodes[agent.id].status, "done", JSON.stringify(run.log));
+      assert.match(run.nodes[agent.id].outputTail, /ACP_SESSION_OK/);
+      const calls = fs.readFileSync(controlLog, "utf8");
+      assert.match(calls, /set_config_option=model:test\/model/,
+        "the node's selected model was applied through opencode's config option");
+      assert.doesNotMatch(calls, /set_model=/, "opencode's profile must not call set_model");
+    } finally {
+      await api(`/${PLUGIN}/harness-paths`, {
+        method: "POST", body: JSON.stringify({ harness: "opencode", path: "" }),
       });
     }
   });

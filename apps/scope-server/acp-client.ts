@@ -14,10 +14,19 @@
  * the CLIENT to do on its own (read/write files, run a terminal command) is
  * refused: the harness runs its tools itself, so a client-side fs/terminal call
  * would be a second, unreported execution path.
+ *
+ * This file is the shared transport. Harness-specific model behavior (which
+ * ACP method to use, which config option, waits/retries) lives in
+ * `acp-harness.ts`, one profile per CLI, so changing opencode cannot change
+ * Gemini, Cline or Kilo.
  */
 import type { ChildProcess } from "node:child_process";
 import { killTree, spawnCli } from "../../shared/shell.ts";
 import { trackProcess } from "./process-registry.ts";
+import {
+  acpHarnessProfile,
+  type AcpHarnessProfile,
+} from "./acp-harness.ts";
 
 /** One choice an agent offers for a permission request. */
 export interface AcpPermissionOption {
@@ -62,9 +71,15 @@ export interface AcpSessionOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   handlers: AcpHandlers;
-  /** `opus`… the harness's own model id. Applied with `session/set_model`,
-   *  falling back to the session's `model` config option (e.g. opencode). */
+  /** `opus`… the harness's own model id. Applied during `start()` with this
+   *  harness's profile; a refusal fails the session instead of using the
+   *  agent's default. */
   model?: string;
+  /** The harness id (`opencode`, `gemini`, …). Selects the per-harness model
+   *  profile. When omitted, the executable's basename is used. */
+  harness?: string;
+  /** Explicit profile, for tests or a caller that already resolved one. */
+  profile?: AcpHarnessProfile;
   /** Overall budget for the handshake (initialize + session/new). */
   startTimeoutMs?: number;
   /** Resume an existing session (`session/load`) instead of creating one. The
@@ -89,15 +104,6 @@ interface AcpConfigOption {
 
 const START_TIMEOUT_MS = 30_000;
 const MAX_LINE = 4_000_000;
-/** How long to wait for an agent to advertise its model config option. Some
- *  agents (opencode) publish `configOptions` just after `session/new`; applying
- *  a model before that list arrives used to fall back to the agent's default
- *  without telling anyone. */
-const MODEL_OPTION_WAIT_MS = 1_500;
-/** A failed `set_config_option` can be a transient "catalogue is still
- *  loading" rejection. Retry once before surfacing it as the reason a run
- *  cannot use the selected model. */
-const MODEL_SWITCH_RETRY_MS = 250;
 
 /** The JSON-RPC id a permission dialog carries; matching id → request. */
 export function permissionDialogId(requestId: string | number): string {
@@ -113,6 +119,8 @@ export class AcpSession {
    *  receives its updates is a different object each time. */
   private handlers: AcpHandlers;
   private readonly model: string;
+  /** Per-harness model contract (mechanism order, option ids, waits). */
+  private readonly profile: AcpHarnessProfile;
   private readonly startTimeoutMs: number;
   private readonly resumeSessionId: string;
   /** Modes the agent advertised at session creation (`session/set_mode` takes
@@ -125,6 +133,9 @@ export class AcpSession {
   private configOptions: AcpConfigOption[] = [];
   /** The model the session reports as current (either mechanism). */
   private currentModel = "";
+  /** Model ids the agent advertised (session/new models or its model config
+   *  option). Used by profiles that must reject an unlisted id themselves. */
+  private modelCatalogue: string[] = [];
   /** Why the last `setModel` could not apply the requested id. Empty after a
    *  successful switch (or when no switch was attempted). */
   private modelError = "";
@@ -160,6 +171,8 @@ export class AcpSession {
     this.env = opts.env || { ...process.env };
     this.handlers = opts.handlers;
     this.model = String(opts.model || "").trim();
+    this.profile = opts.profile
+      || acpHarnessProfile(opts.harness || opts.file);
     this.startTimeoutMs = opts.startTimeoutMs ?? START_TIMEOUT_MS;
     this.resumeSessionId = String(opts.resumeSessionId || "").trim();
   }
@@ -283,6 +296,7 @@ export class AcpSession {
       if (!this.sid) throw new Error("the harness created no session");
       this.readModes(created);
       this.readConfigOptions(created?.configOptions);
+      this.readModelCatalogue(created);
       if (created?.models?.currentModelId) this.currentModel = String(created.models.currentModelId);
       // Some agents return the list on session/new; most publish it just after.
       if (Array.isArray(created?.availableCommands)) this.adoptCommands(created.availableCommands);
@@ -320,10 +334,11 @@ export class AcpSession {
     return String(result?.stopReason || "end_turn");
   }
 
-  /** Switch the model mid-session (no-op when the agent does not support it).
-   *  On success `modelId` is the requested id. On failure this returns false and
-   *  `modelErrorDetail` explains why, so a caller never has to guess whether a
-   *  prompt will run on the model the user picked. */
+  /** Switch the model mid-session using this harness's own ACP contract.
+   *  On success `modelId` is the requested id (or the agent's canonical id for
+   *  it). On failure this returns false and `modelErrorDetail` explains why, so
+   *  a caller never has to guess whether a prompt will run on the model the user
+   *  picked. */
   async setModel(modelId: string): Promise<boolean> {
     const id = String(modelId || "").trim();
     this.modelError = "";
@@ -334,24 +349,53 @@ export class AcpSession {
     }
     const previousModel = this.currentModel;
     if (id === previousModel) return true;
-    // The unstable ACP method: Gemini, Cline and Kilo accept it.
-    let unstableError = "";
-    try {
-      await this.request("session/set_model", { sessionId: this.sid, modelId: id });
-      this.currentModel = id;
-      return true;
-    } catch (error: any) {
-      // opencode and other ACP v2 servers publish the model as a config
-      // option and answer `session/set_model` with `Method not found`.
-      unstableError = String(error?.message ?? error ?? "set_model failed").trim();
-    }
-    // The option can arrive a beat after `session/new` (and after an agent has
-    // loaded its provider catalogue). Wait for it rather than falling through
-    // to the agent's default model.
-    let option = this.modelConfigOption() || await this.waitForModelOption(MODEL_OPTION_WAIT_MS);
-    if (!option) {
-      this.modelError = `the agent exposes no model setting via ACP${unstableError ? ` (${unstableError})` : ""}`;
+    // Cline accepts any string for both mechanisms; a typo would otherwise end
+    // the turn with an empty answer instead of an error. Its session lists the
+    // models it can actually run, so reject anything outside that list.
+    if (this.profile.validateAdvertisedModel && this.modelCatalogue.length && !this.modelCatalogue.includes(id)) {
+      this.modelError = `the agent does not list "${id}" among its ${this.modelCatalogue.length} models`;
       return false;
+    }
+
+    let lastError = "";
+    for (const via of this.profile.modelVia) {
+      const outcome = via === "set_model"
+        ? await this.trySetModel(id, previousModel)
+        : await this.trySetConfigOption(id, previousModel);
+      if (outcome.ok) return true;
+      lastError = outcome.error || lastError;
+    }
+    this.modelError = lastError || `the ${this.profile.id} agent refused "${id}"`;
+    return false;
+  }
+
+  /** The standard ACP method (Gemini, Cline, Kilo). A successful response may
+   *  carry the agent's canonical model id; an empty response is trusted. */
+  private async trySetModel(id: string, previousModel: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const result = await this.request("session/set_model", { sessionId: this.sid, modelId: id });
+      const reported = this.reportedModel(result);
+      if (reported && reported === previousModel && reported !== id) {
+        return { ok: false, error: `the agent kept "${reported}" instead of "${id}"` };
+      }
+      this.currentModel = reported || id;
+      return { ok: true };
+    } catch (error: any) {
+      return { ok: false, error: String(error?.message ?? error ?? "set_model failed").trim() };
+    }
+  }
+
+  /** The config-option path (opencode, and Cline's older fallback). The wait
+   *  and retry values come from the harness profile, never from a shared
+   *  default, so tuning opencode cannot slow down Gemini/Kilo. */
+  private async trySetConfigOption(id: string, previousModel: string): Promise<{ ok: boolean; error?: string }> {
+    const preferred = this.profile.modelConfigIds;
+    let option = this.modelConfigOption(preferred);
+    if (!option && this.profile.modelOptionWaitMs > 0) {
+      option = await this.waitForModelOption(this.profile.modelOptionWaitMs, preferred);
+    }
+    if (!option) {
+      return { ok: false, error: "the agent exposes no model config option via ACP" };
     }
     // The option's own currentValue is authoritative even when `currentModel`
     // was never seeded (some agents publish the option only after session/new).
@@ -360,10 +404,11 @@ export class AcpSession {
       : previousModel;
     if (optionPrevious === id) {
       this.currentModel = id;
-      return true;
+      return { ok: true };
     }
+    const attempts = this.profile.modelRetryMs > 0 ? 2 : 1;
     let lastError = "";
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         const result = await this.request("session/set_config_option", {
           sessionId: this.sid,
@@ -378,21 +423,32 @@ export class AcpSession {
         // for the switch (e.g. it rewrote the provider prefix): keep that.
         const advertised = this.currentModel;
         if (advertised && advertised === optionPrevious && advertised !== id) {
-          this.modelError = `the agent kept "${advertised}" instead of "${id}"`;
-          return false;
+          return { ok: false, error: `the agent kept "${advertised}" instead of "${id}"` };
         }
         this.currentModel = advertised || id;
-        return true;
+        return { ok: true };
       } catch (error: any) {
         lastError = String(error?.message ?? error ?? "set_config_option failed").trim();
         // Re-discover the option: the retry may follow a fresh
         // `config_option_update`, and an agent can rebuild the option object.
-        option = this.modelConfigOption() || option;
-        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, MODEL_SWITCH_RETRY_MS));
+        option = this.modelConfigOption(preferred) || option;
+        if (attempt + 1 < attempts) {
+          await new Promise((resolve) => setTimeout(resolve, this.profile.modelRetryMs));
+        }
       }
     }
-    this.modelError = lastError || `the agent refused "${id}"`;
-    return false;
+    return { ok: false, error: lastError || `the agent refused "${id}"` };
+  }
+
+  /** Read a model id out of a successful ACP response. Agents differ: ACP v2
+   *  reports `models.currentModelId`, some report `configOptions`, and several
+   *  (Gemini, Cline, Kilo) return `{}` for set_model. */
+  private reportedModel(payload: any): string {
+    if (Array.isArray(payload?.configOptions)) this.readConfigOptions(payload.configOptions);
+    const direct = payload?.models?.currentModelId ?? payload?.currentModelId;
+    if (direct) return String(direct);
+    if (Array.isArray(payload?.configOptions)) return this.currentModel;
+    return "";
   }
 
   private modelFailure(id: string): string {
@@ -401,15 +457,15 @@ export class AcpSession {
 
   /** Resolve once the agent advertises a model config option, or after the
    *  timeout. Used by `setModel` so a late `config_option_update` still applies. */
-  private waitForModelOption(timeoutMs: number): Promise<AcpConfigOption | undefined> {
-    const existing = this.modelConfigOption();
+  private waitForModelOption(timeoutMs: number, preferredIds: readonly string[] = []): Promise<AcpConfigOption | undefined> {
+    const existing = this.modelConfigOption(preferredIds);
     if (existing) return Promise.resolve(existing);
     return new Promise((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const done = () => {
         if (timer) clearTimeout(timer);
         this.modelOptionWaiters.delete(done);
-        resolve(this.modelConfigOption());
+        resolve(this.modelConfigOption(preferredIds));
       };
       timer = setTimeout(done, Math.max(0, timeoutMs));
       (timer as any)?.unref?.();
@@ -659,17 +715,42 @@ export class AcpSession {
           .filter((x: { value: string }) => x.value),
       }))
       .filter((o: AcpConfigOption) => o.id);
-    const model = this.modelConfigOption();
+    const model = this.modelConfigOption(this.profile.modelConfigIds);
     if (typeof model?.currentValue === "string" && model.currentValue) this.currentModel = model.currentValue;
     if (model) {
+      this.mergeModelCatalogue(model.options.map((o) => o.value));
       for (const resolve of this.modelOptionWaiters) resolve();
       this.modelOptionWaiters.clear();
     }
   }
 
-  /** The option that carries the model. opencode/Kilo use `id: "model"`;
-   *  Cline also has a separate `id: "provider"` option in the same category. */
-  private modelConfigOption(): AcpConfigOption | undefined {
+  /** Record the model ids a session advertises. ACP v2 puts them in
+   *  `models.availableModels` (Gemini, Cline); Kilo/opencode put the same ids
+   *  in their model config option. Kept as a union so either shape works. */
+  private readModelCatalogue(created: any): void {
+    const available = created?.models?.availableModels;
+    if (Array.isArray(available)) {
+      this.mergeModelCatalogue(available.map((m: any) => m?.modelId ?? m?.id ?? m?.value));
+    }
+  }
+
+  private mergeModelCatalogue(ids: readonly unknown[]): void {
+    const merged = new Set(this.modelCatalogue);
+    for (const raw of ids) {
+      const id = String(raw ?? "").trim();
+      if (id && id !== "default") merged.add(id);
+    }
+    this.modelCatalogue = [...merged];
+  }
+
+  /** The option that carries the model. A profile can name its preferred ids
+   *  first; otherwise opencode/Kilo use `id: "model"`, and Cline also has a
+   *  separate `id: "provider"` option in the same category. */
+  private modelConfigOption(preferredIds: readonly string[] = []): AcpConfigOption | undefined {
+    for (const id of preferredIds) {
+      const found = this.configOptions.find((o) => o.id === id);
+      if (found) return found;
+    }
     return this.configOptions.find((o) => o.id === "model")
       || this.configOptions.find((o) => o.category === "model" && o.id !== "provider")
       || this.configOptions.find((o) => o.category === "model");

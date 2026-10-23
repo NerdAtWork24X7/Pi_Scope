@@ -257,18 +257,18 @@ test("a saved ACP session is resumed with session/load after a restart", async (
 
 test("a model the harness refuses fails the turn instead of prompting on its default", async () => {
   const { file, countFile, dir } = fakeRefusingModelAgent();
-  const before = process.env.SCOPE_HARNESS_BIN_GEMINI;
-  process.env.SCOPE_HARNESS_BIN_GEMINI = file;
+  const before = process.env.SCOPE_HARNESS_BIN_OPENCODE;
+  process.env.SCOPE_HARNESS_BIN_OPENCODE = file;
   cleanups.push(() => {
-    if (before === undefined) delete process.env.SCOPE_HARNESS_BIN_GEMINI;
-    else process.env.SCOPE_HARNESS_BIN_GEMINI = before;
+    if (before === undefined) delete process.env.SCOPE_HARNESS_BIN_OPENCODE;
+    else process.env.SCOPE_HARNESS_BIN_OPENCODE = before;
   });
 
   const sid = `acp-refused-model-${Date.now()}`;
   cleanups.push(() => killChatSession(sid));
 
   const events = await readRun(
-    startChat({ cwd: dir, harness: "gemini", prompt: "hello", sessionId: sid, model: "chosen-model" }),
+    startChat({ cwd: dir, harness: "opencode", prompt: "hello", sessionId: sid, model: "chosen-model" }),
   );
 
   const error = events.find((e) => e.type === "error");

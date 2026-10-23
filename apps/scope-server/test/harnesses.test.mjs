@@ -99,6 +99,29 @@ test("Claude Code's plan is `-p <prompt>` with the model flag appended", () => {
   });
 });
 
+test("each print-mode harness appends its own model flag", () => {
+  const cases = [
+    { id: "claude", model: "sonnet", args: ["-p", "x", "--model", "sonnet"] },
+    { id: "codex", model: "gpt-5", args: ["exec", "--skip-git-repo-check", "x", "--model", "gpt-5"] },
+    { id: "aider", model: "gpt-5", args: ["--yes", "--message", "x", "--model", "gpt-5"] },
+    { id: "cursor", model: "sonnet-4", args: ["-p", "x", "--model", "sonnet-4"] },
+  ];
+  for (const c of cases) {
+    const key = `SCOPE_HARNESS_BIN_${c.id.toUpperCase()}`;
+    const before = process.env[key];
+    const bin = fakeBin(c.id === "cursor" ? "cursor-agent" : c.id);
+    process.env[key] = bin;
+    try {
+      const launch = buildHarnessLaunch(c.id, { prompt: "x", model: c.model });
+      assert.equal(launch.ok, true, `${c.id} launch: ${launch.error || ""}`);
+      assert.deepEqual(launch.args, c.args, `${c.id} must carry the selected model`);
+    } finally {
+      if (before === undefined) delete process.env[key];
+      else process.env[key] = before;
+    }
+  }
+});
+
 test("a stdin harness gets no prompt in argv and an empty model is omitted", () => {
   const bin = fakeBin("opencode");
   const before = process.env.SCOPE_HARNESS_BIN_OPENCODE;
