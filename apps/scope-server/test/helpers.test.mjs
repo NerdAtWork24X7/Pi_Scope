@@ -69,6 +69,24 @@ describe("media in result text", () => {
     assert.deepEqual(plain(items.map((i) => i.kind)), ["image", "image", "image"]);
   });
 
+  test("finds image URLs that a reply wraps in markdown delimiters", () => {
+    // pi (and any markdown table) often quotes a link in an inline code span or
+    // bold. The closing ` / ** used to stay on the match, so `…/a.png` failed the
+    // file test and every picture but one vanished from the Media table.
+    const text =
+      "| 1 | `https://multimedia.beckhoff.com/media/cx7050__web_preview.png` |\n" +
+      "| 2 | `https://multimedia.beckhoff.com/media/cx7050__web.jpg.webp` |\n" +
+      "**https://example.com/chart.png** and https://example.com/plain.png.";
+    const items = S.mediaInText(text);
+    assert.deepEqual(plain(items.map((i) => i.src)), [
+      "https://multimedia.beckhoff.com/media/cx7050__web_preview.png",
+      "https://multimedia.beckhoff.com/media/cx7050__web.jpg.webp",
+      "https://example.com/chart.png",
+      "https://example.com/plain.png",
+    ]);
+    assert.doesNotMatch(S.resultMediaHtml(text), /\.(?:png|webp)`/);
+  });
+
   test("flags a video file and a YouTube link, deriving a poster for the latter", () => {
     const items = S.mediaInText(
       "clip https://cdn.example.com/demo.mp4 and https://www.youtube.com/watch?v=dQw4w9WgXcQ"

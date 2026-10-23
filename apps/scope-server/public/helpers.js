@@ -556,6 +556,13 @@
   const IMAGE_URL_RE = /https?:\/\/[^\s"'<>()]+/gi;
   // A URL that names a picture file (optionally with a ?query / #fragment tail).
   const IMAGE_FILE_RE = /\.(png|jpe?g|gif|webp|avif|bmp|svg)(?:[?#][^\s"'<>)]*)?$/i;
+  // Characters that hug a URL in running text but are never part of it: sentence
+  // punctuation and the markdown delimiters a reply wraps a link in — an inline
+  // code span (`https://…/a.png`) or bold (**https://…/a.png**). Left on the
+  // match they fail the file test (the picture is never drawn), and a URL that
+  // only survived because a ?query came after the extension would carry the
+  // delimiter straight into its src and 404.
+  const URL_TRAIL_RE = /[.,;:!?'"`*]+$/;
   // A direct video file, and YouTube, whose still frame we can derive from the
   // link alone (…/watch?v=ID, youtu.be/ID, /shorts/ID, /embed/ID, /live/ID).
   const VIDEO_FILE_RE = /\.(mp4|webm|ogv|ogg|mov|m4v)(?:[?#][^\s"'<>)]*)?$/i;
@@ -619,7 +626,7 @@
     for (const m of text.matchAll(IMAGE_MD_RE)) add(m[2], m[1], m.index);
     for (const m of text.matchAll(IMAGE_DATA_RE)) add(m[0], "", m.index);
     for (const m of text.matchAll(IMAGE_URL_RE)) {
-      const u = m[0].replace(/[.,;:!?]+$/, "");
+      const u = m[0].replace(URL_TRAIL_RE, "");
       if (IMAGE_FILE_RE.test(u) || VIDEO_FILE_RE.test(u) || VIDEO_HOST_RE.test(u)) add(u, "", m.index);
     }
     // A path pi wrote to instead of a link ("saved to tmp/chart.png"). Only
