@@ -51,7 +51,7 @@ export default function (pi: ExtensionAPI) {
 		name: "web-fetch",
 		label: "Web Fetch",
 		description:
-			"Fetch web pages as Markdown via a persistent headless browser (one shared session across calls), or search with 'query'/'queries'. " +
+			"Fetch web pages as Markdown via a persistent browser (headful and minimized when a display is available, headless otherwise; one shared session across calls), or search with 'query'/'queries'. " +
 			"Search extracts your keywords, queries DuckDuckGo, and fetches the top 'maxResults' results (ad slots and duplicate URLs dropped, titles/snippets/sources returned). " +
 			"Pass 'urls' (array) and/or 'queries' (array) to batch many fetches/searches in ONE tool call — everything is crawled in parallel in the same browser session. Singular 'url'/'query' still work. " +
 			"Pages are cached per project: a URL another agent already fetched is reused instead of crawled again, so parallel agents asking for the same page only pay for it once.",

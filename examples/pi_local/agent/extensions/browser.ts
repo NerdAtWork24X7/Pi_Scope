@@ -11,7 +11,7 @@
 import { Type } from "@mariozechner/pi-ai";
 import { getAgentDir, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "fs";
-import { join, dirname } from "path";
+import { join } from "path";
 import { homedir, tmpdir } from "os";
 import { createRequire } from "module";
 import { pathToFileURL } from "url";
@@ -301,23 +301,43 @@ function interop(mod: any, namedExport?: string): any {
 }
 
 /**
- * Locate the Chromium binary inside PLAYWRIGHT_BROWSERS_PATH (default
- * <agentDir>/../playwright-browsers — ~/.pi-scope/playwright-browsers under Pi
- * Scope, ~/.pi/playwright-browsers under a global pi). Prefers the revision
- * this playwright build wants
- * (read from its own browsers.json), else the newest installed one. Returns
- * null when nothing is installed, so the caller can fall back to playwright's
- * own registry lookup.
+ * User-global directories a Playwright browser install may live in, in
+ * preference order: the configured PLAYWRIGHT_BROWSERS_PATH (the shared global
+ * install, e.g. $HOME/playwright-browsers), Playwright's per-user default
+ * cache, then the conventional $HOME/playwright-browsers. Agent-local
+ * directories are deliberately never consulted — the browser tool always uses
+ * the globally installed Chromium.
+ */
+function globalBrowsersRoots(): string[] {
+  const defaultCache =
+    process.platform === "win32"
+      ? join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "ms-playwright")
+      : process.platform === "darwin"
+        ? join(homedir(), "Library", "Caches", "ms-playwright")
+        : join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "ms-playwright");
+  return [
+    ...new Set(
+      [process.env.PLAYWRIGHT_BROWSERS_PATH, defaultCache, join(homedir(), "playwright-browsers")].filter(
+        (r): r is string => !!r
+      )
+    ),
+  ];
+}
+
+/**
+ * Locate the globally installed Chromium binary (see globalBrowsersRoots).
+ * Prefers the revision this playwright build wants (read from its own
+ * browsers.json), else the newest installed one. Returns null when nothing is
+ * installed, so the caller can fall back to playwright's own registry lookup.
  *
  * The relative layout differs per platform (linux64 / linux / mac .app / win
  * .exe), so all of them are probed. A missing layout would return null and
  * silently fall back to the registry lookup instead of pinning the revision.
  */
-function resolveChromiumExecutable(): string | null {
-  const root = process.env.PLAYWRIGHT_BROWSERS_PATH || join(dirname(getAgentDir()), "playwright-browsers");
-  if (!existsSync(root)) return null;
+export function resolveChromiumExecutable(): string | null {
+  const roots = globalBrowsersRoots();
 
-  const exeOf = (dir: string) => {
+  const exeOf = (root: string, dir: string) => {
     for (const rel of [
       "chrome-linux64/chrome",
       "chrome-linux/chrome",
@@ -331,30 +351,47 @@ function resolveChromiumExecutable(): string | null {
     return null;
   };
 
-  // 1. exact revision this playwright-core expects
-  const browsersJson = resolveDepFrom("playwright-core/browsers.json", process.cwd());
+  // 1. exact revision this playwright-core expects. Search the same roots the
+  //    modules are loaded from (PI_BROWSER_MODULE_ROOT, cwd, home) — the file
+  //    is not necessarily resolvable from process.cwd().
+  let browsersJson: string | null = null;
+  for (const root of depRoots()) {
+    browsersJson = resolveDepFrom("playwright-core/browsers.json", root);
+    if (browsersJson) break;
+  }
   if (browsersJson) {
     try {
       const spec = JSON.parse(readFileSync(browsersJson, "utf8"));
       const rev = spec.browsers?.find((b: any) => b.name === "chromium")?.revision;
       if (rev) {
-        const exact = exeOf(`chromium-${rev}`);
-        if (exact) return exact;
+        for (const root of roots) {
+          const exact = exeOf(root, `chromium-${rev}`);
+          if (exact) return exact;
+        }
       }
     } catch {
       // browsers.json unreadable — fall through to newest-revision scan
     }
   }
 
-  // 2. newest chromium-<rev> present in the browsers path
-  const revs = readdirSync(root)
-    .map((d) => /^chromium-(\d+)$/.exec(d))
-    .filter((m): m is RegExpExecArray => !!m)
-    .map((m) => Number(m[1]))
-    .sort((a, b) => b - a);
+  // 2. newest chromium-<rev> present across every global browser root
+  const revs = [
+    ...new Set(
+      roots.flatMap((root) =>
+        existsSync(root)
+          ? readdirSync(root)
+              .map((d) => /^chromium-(\d+)$/.exec(d))
+              .filter((m): m is RegExpExecArray => !!m)
+              .map((m) => Number(m[1]))
+          : []
+      )
+    ),
+  ].sort((a, b) => b - a);
   for (const rev of revs) {
-    const exe = exeOf(`chromium-${rev}`);
-    if (exe) return exe;
+    for (const root of roots) {
+      const exe = exeOf(root, `chromium-${rev}`);
+      if (exe) return exe;
+    }
   }
   return null;
 }
@@ -476,8 +513,9 @@ export default function (pi: ExtensionAPI) {
 
             const vp = p.viewport || randomViewport();
 
-            // Launch with stealth args. The binary comes from PLAYWRIGHT_BROWSERS_PATH
-            // (see resolveChromiumExecutable). headless:false is tried first so
+            // Launch with stealth args. The binary comes from the user's global
+            // Playwright install (see resolveChromiumExecutable).
+            // headless:false is tried first so
             // window.chrome, plugins and WebGL behave like a real desktop
             // Chrome; it silently degrades to headless when no DISPLAY exists.
             const launchOpts: any = {
@@ -485,12 +523,13 @@ export default function (pi: ExtensionAPI) {
               args: browserType === "chromium" ? STEALTH_ARGS : undefined,
             };
             if (browserType === "chromium") {
-              // Pin the binary explicitly to PLAYWRIGHT_BROWSERS_PATH
-              // ($HOME/playwright-browsers) instead of asking playwright to look
-              // up its registry: the env var may not reach a spawned subagent,
-              // and the newest revision there (e.g. chromium-1243) differs from
-              // the one this playwright build expects (1234) — asking for a
-              // missing revision fails with an opaque "Executable doesn't exist".
+              // Pin the binary explicitly to the user's global Playwright
+              // install (see resolveChromiumExecutable) instead of asking
+              // playwright to look up its registry: the env var may not reach a
+              // spawned subagent, and the newest revision there (e.g.
+              // chromium-1243) differs from the one this playwright build
+              // expects (1234) — asking for a missing revision fails with an
+              // opaque "Executable doesn't exist".
               const exe = resolveChromiumExecutable();
               if (exe) launchOpts.executablePath = exe;
             }
@@ -529,8 +568,8 @@ export default function (pi: ExtensionAPI) {
             // navigator.userAgent and the HTTP headers disagree — a split far
             // more detectable than either value alone.
             const userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${fullVersion} Safari/537.36`;
-            // Client-Hints brands must match the binary: the pinned
-            // $PLAYWRIGHT_BROWSERS_PATH build is Chromium, which never sends a
+            // Client-Hints brands must match the binary: the pinned globally
+            // installed build is Chromium, which never sends a
             // "Google Chrome" brand — only the real chrome channel does.
             const brands = launchOpts.executablePath
               ? `"Chromium";v="${majorVersion}", "Not-A.Brand";v="99"`
