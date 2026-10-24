@@ -54,6 +54,8 @@ const TOKEN_FILE = path.join(ROOT, "tmp", "scope_token");
 const OUT_DIR = path.join(ROOT, "tmp", "video");
 const FRAME_DIR = path.join(ROOT, "tmp", "video-frames");
 const OUT_MP4 = path.join(ROOT, "docs", "video", "Pi-Scope-showcase.mp4");
+/** First-frame poster for the inline player on the site (a frame from the chat scene). */
+const OUT_POSTER = path.join(ROOT, "docs", "video", "Pi-Scope-showcase-poster.jpg");
 const VW = 1600, VH = 900;
 /** The hero demo session: the coder adding dark mode (see docs/seed-demo.mjs). */
 const HERO = "sess-darkmode-9f3a2b";
@@ -620,6 +622,7 @@ function verifyVideo(ffmpeg) {
   rmSync(FRAME_DIR, { recursive: true, force: true });
   mkdirSync(FRAME_DIR, { recursive: true });
   const total = (scenes.at(-1)?.end ?? 0) / 1000;
+  let posterFrame = "";
   for (const s of scenes) {
     const end = s.end ?? total * 1000;
     const mid = ((s.start + end) / 2) / 1000;
@@ -632,6 +635,17 @@ function verifyVideo(ffmpeg) {
     const blank = st.colors < 150 || st.dominant > 0.985 || st.meanLum < 6;
     console.log(`  ${blank ? "BLANK" : "ok   "} ${s.label.padEnd(12)} @${at.toFixed(1)}s  ${st.colors} colours  dominant ${(st.dominant * 100).toFixed(1)}%  lum ${st.meanLum.toFixed(1)}  ${kb}KB`);
     if (blank) problems.push(`scene ${s.label} is a blank frame at ${at.toFixed(1)}s`);
+    if (s.label === "chat" && !blank) posterFrame = png;
+  }
+
+  // 3. The inline player's poster is that verified chat frame, so it can never
+  //    show a view the current recording no longer contains.
+  if (!problems.length) {
+    if (!posterFrame) problems.push("no chat frame to use as the inline player poster");
+    else {
+      execSync(`"${ffmpeg}" -y -v error -i "${posterFrame}" -q:v 4 "${OUT_POSTER}"`);
+      log("wrote poster", path.relative(ROOT, OUT_POSTER), `(${Math.round(statSync(OUT_POSTER).size / 1024)} KB)`);
+    }
   }
   return problems;
 }

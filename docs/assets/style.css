@@ -252,17 +252,18 @@ h1, h2, h3, h4, .display {
 
 .btn-lg { height: 44px; padding: 10px 22px; font-size: 0.95rem; }
 
-/* Danger-red nav pill — a different component from the hero's amber CTA. */
+/* Compact nav CTA — the hero's accent fill one size down. Red stays reserved
+   for "off"/warning states, so the one accent colour remains the only CTA. */
 .btn-nav {
-  background: var(--red);
-  color: #fff;
+  background: var(--accent);
+  color: var(--on-accent);
   height: 27px;
   padding: 4px 11px;
   border-radius: var(--r-control);
   font-size: 0.79rem;
   font-weight: 700;
 }
-.btn-nav:hover { background: #b91c1c; }
+.btn-nav:hover { background: var(--accent-strong); color: var(--on-accent); }
 
 /* ── Navbar: flush, square, edge-to-edge, sticky ────────────────────────── */
 
@@ -310,13 +311,13 @@ h1, h2, h3, h4, .display {
 }
 
 .nav-links { margin-left: auto; display: flex; align-items: center; gap: 22px; min-width: 0; }
-.nav-links a {
+.nav-links a:not(.btn) {
   color: var(--text-subtle);
   font-size: 0.88rem;
   font-weight: 500;
   transition: color var(--dur-fast) var(--ease-std);
 }
-.nav-links a:hover { color: var(--text); text-decoration: none; }
+.nav-links a:not(.btn):hover { color: var(--text); text-decoration: none; }
 
 .nav-status {
   display: inline-flex;
@@ -774,6 +775,17 @@ h1, h2, h3, h4, .display {
   color: var(--text-faint);
 }
 .frame img { width: 100%; border-bottom: 1px solid var(--hairline); }
+/* Inline showcase video: reserve the 16:9 box from the poster, stream only on play. */
+.frame video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--hairline);
+}
+/* The card clips overflow, so keep the focus ring inside the frame. */
+.frame video:focus-visible { outline-offset: -3px; }
 
 /* ── Three equal explainer panels ───────────────────────────────────────── */
 

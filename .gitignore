@@ -51,3 +51,4 @@ apps/scope-desktop/pi-scope.desktop
 apps/scope-desktop/scope.env
 nul
 .tauri-sysroot/
+out/
