@@ -405,7 +405,17 @@ describe("wallpaper", () => {
     // A pasted URL replaces it.
     await page.fill("#wp-url", "https://example.com/paper.jpg");
     await page.click("#wp-url-apply");
-    await page.waitForFunction(() => localStorage.getItem("scope-wallpaper")?.includes("example.com"));
+    await page.waitForFunction(() => {
+      try {
+        const stored = localStorage.getItem("scope-wallpaper");
+        if (!stored) return false;
+        const parsed = JSON.parse(stored);
+        if (!parsed || typeof parsed.value !== "string") return false;
+        return new URL(parsed.value).hostname === "example.com";
+      } catch {
+        return false;
+      }
+    });
     layer = await wallpaperLayer(page);
     assert.equal(JSON.parse(layer.stored).kind, "image");
     assert.match(layer.image, /url\("https:\/\/example\.com\/paper\.jpg"\)/);
