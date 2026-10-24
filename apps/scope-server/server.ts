@@ -3582,9 +3582,7 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ error: `unknown action: ${action}` }, 400);
     } catch (err: any) {
       console.error("POST /pi-update failed:", err);
-      // Surface the underlying failure (e.g. npm's stderr) so a client that
-      // started the install learns why it failed, not just "internal error".
-      return jsonResponse({ error: String(err?.message ?? err) }, 500);
+      return jsonResponse({ error: "internal error" }, 500);
     }
   }
 
@@ -3635,7 +3633,7 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ error: `unknown action: ${action}` }, 400);
     } catch (err: any) {
       console.error("POST /harness-update failed:", err);
-      return jsonResponse({ error: String(err?.message ?? err), update: harnessUpdateState() }, 500);
+      return jsonResponse({ error: "internal error", update: harnessUpdateState() }, 500);
     }
   }
 
