@@ -151,7 +151,7 @@ ${tableRows}
   const memorySection = args.memory && (args.memory.dir || (args.memory.files && args.memory.files.length))
     ? "\n## Project Memory\nMemory directory = `" + args.memory.dir + "`:\n" +
     args.memory.files.map(f => "- `" + relativeToDir(f.path, args.memory.dir) + "` - " + f.heading).join("\n") +
-    "\n**VERY IMPORTANT** Read memory files to understand Repo before working on any Task.\n"
+    "\n\n**VERY IMPORTANT** Read memory files to understand Repo before working on any Task.\n"
     : "";
 
   const enabledTools = (args.orchestratorTools && args.orchestratorTools.length) ? args.orchestratorTools : ctx.activeToolList();
@@ -180,7 +180,10 @@ ${agentMdSection}${skillsSection}${memorySection}
 - Design Check (UI only): <distinctive styling + visual polish confirmation, or N/A>
 - Remaining / Next Steps: <blockers, unverified items, or recommended follow-ups>
 
-Date: ${args.date} | CWD: ${args.cwd} | Tmp: ${join(args.cwd, "tmp")} | Python: ${venvHint(args.cwd)}
+Date: ${args.date}
+CWD: ${args.cwd}
+Tmp: ${join(args.cwd, "tmp")}
+Python: ${venvHint(args.cwd)}
 `;
 
   return { systemPrompt: raw.replace(/\n{3,}/g, "\n\n").trim() + "\n" };

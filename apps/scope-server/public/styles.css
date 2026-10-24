@@ -1282,8 +1282,7 @@
 
     /* Ghost panel-icon toggle matching the chat rails (Claude-style) — same
        28px size as the chat page's show button. */
-    #sidebar-toggle,
-    #sidebar-show {
+    #sidebar-toggle {
       width: 28px;
       height: 28px;
       border-radius: var(--r-btn);
@@ -1296,8 +1295,7 @@
       padding: 0;
     }
 
-    #sidebar-toggle:hover,
-    #sidebar-show:hover {
+    #sidebar-toggle:hover {
       opacity: 1;
       color: var(--text);
     }
@@ -11280,13 +11278,6 @@ body.layout-form .at-sec-head {
 }
 
 body.layout-form .at-sec-head:hover { background: transparent; }
-
-body.layout-form .ws-team-card{
-  border-radius: 4px;
-  box-shadow: none;
-  background: var(--surface-2);
-  border-color: var(--border);
-}
 
 /* ── Inspector-style side panels (trajectory inspector, git/files side) ──── */
 

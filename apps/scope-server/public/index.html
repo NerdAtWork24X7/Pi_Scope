@@ -13,6 +13,12 @@
 </head>
 
 <body class="layout-form">
+  <!-- Apply the deep-linked view's layout before first paint. The Chat tab
+       hard-reloads the document, and until app.js's setView() ran the body only
+       had `layout-form` — so the legacy global Workspaces aside (hidden by
+       `body.layout-chat`) painted for a frame on every reload. setView()
+       reconciles this against the real plugin spec once the app boots. -->
+  <script>(function () { try { var v = new URLSearchParams(location.hash.replace(/^#/, '')).get('view') || 'chat'; if (v === 'chat') document.body.classList.add('layout-chat'); else if (v === 'settings') document.body.classList.add('layout-settings'); } catch (e) { document.body.classList.add('layout-chat'); } })();</script>
   <script>(function () { try { var t = localStorage.getItem('scope-theme'); if (t !== 'dark') t = 'light'; document.documentElement.style.colorScheme = t === 'dark' ? 'dark' : 'light'; if (t === 'dark') document.body.setAttribute('data-ds-dark-theme', ''); } catch (e) { } })();</script>
   <!-- Wallpaper, applied before first paint so the picked background never
        flashes in after boot. wallpaper.js owns every later change; keep the

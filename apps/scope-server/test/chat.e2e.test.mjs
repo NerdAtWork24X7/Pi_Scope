@@ -1953,6 +1953,27 @@ describe("chat sidebar toggle", () => {
     assert.match(await toggle.getAttribute("title"), /Collapse sidebar/);
   });
 
+  test("a Chat deep link never paints the legacy global sidebar before app.js boots", async () => {
+    // The Chat nav hard-reloads the document. app.js used to add `layout-chat`
+    // (which hides the global <aside>) only after boot, so a slow or failed
+    // load painted the old sidebar for a frame. The inline layout bootstrap in
+    // index.html must hide it without app.js running at all.
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const p = await ctx.newPage();
+    try {
+      await p.route("**/app.js*", (route) => route.abort());
+      await p.goto(`${mock.base}/?token=test-token#view=chat`, { waitUntil: "domcontentloaded" });
+      assert.equal(await p.evaluate(() => document.body.classList.contains("layout-chat")), true);
+      assert.equal(
+        await p.evaluate(() => getComputedStyle(document.getElementById("workspace-sidebar")).display),
+        "none",
+        "the legacy sidebar is hidden from the first paint",
+      );
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test("leaving Chat hands the same button back to the global aside", async () => {
     await boot({ sessions: [makeSession(SESS_A)] });
     await page.click("#sidebar-toggle");
