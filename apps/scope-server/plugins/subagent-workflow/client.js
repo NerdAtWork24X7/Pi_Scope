@@ -1830,19 +1830,31 @@
         `<input class="set-input" id="sw-f-model" value="${escAttr(value)}" placeholder="passed to the command as $SW_MODEL"></label>`;
     }
     const pi = hid === "pi";
-    const list = harnessModels(hid);
+    // The provider's own CLI is the truthful source of its list, and this app
+    // only curates a suggestion. Until that CLI has answered, the dropdown says
+    // it is waiting instead of dressing the aliases up as the provider's models.
+    const waiting = !pi && cliPending.has(hid);
+    const list = waiting ? [] : harnessModels(hid);
     // Group the options by provider whenever the entries are `provider/id` keys —
     // always for Pi, and for a harness whose CLI reports its own catalogue (one
     // optgroup per provider keeps a thousand opencode ids navigable).
     const grouped = pi || providerKeyed(list);
     // What the select shows as chosen: for Pi the catalogue key the stored value
-    // resolves to, otherwise the stored value itself when the list knows it.
-    const resolved = pi ? resolveModelKey(list, value) : (list.includes(value) ? value : "");
+    // resolves to, otherwise the stored value itself when the list knows it — or
+    // while the list is on its way, the value this node already stores.
+    const resolved = pi ? resolveModelKey(list, value) : (list.includes(value) ? value : (waiting ? value : ""));
     const known = !!resolved;
-    const opts = [`<option value=""${value ? "" : " selected"}>${pi ? "— agent default —" : "— harness default —"}</option>`]
+    // While waiting, the control's own label is the wait (unless this node
+    // already stores a model, which is its setting and keeps the label).
+    const head = `<option value=""${value || waiting ? "" : " selected"}>${pi ? "— agent default —" : "— harness default —"}</option>`;
+    const opts = [head]
       .concat(grouped
         ? modelOptionGroups(list, resolved)
         : list.map((m) => `<option value="${escAttr(m)}"${m === resolved ? " selected" : ""}>${esc(m)}</option>`))
+      // A node's stored model is its own setting, not a suggestion: it stays
+      // selectable while the list is loading.
+      .concat(waiting && value ? `<option value="${escAttr(value)}" selected>${esc(value)}</option>` : [])
+      .concat(waiting ? [`<option value=""${value ? "" : " selected"} disabled>Loading models…</option>`] : [])
       .concat([`<option value="${MODEL_CUSTOM}"${known || !value ? "" : " selected"}>Custom…</option>`])
       .join("");
     const meta = harnessMeta(hid) || {};
@@ -1856,6 +1868,8 @@
       : "";
     const hint = pi
       ? `Every model this app can run, grouped by provider — pi is given <code>provider/model</code>, so two providers offering the same name never clash. <b>Custom…</b> takes anything else.`
+      : waiting
+        ? `Asking <code>${esc(cmd || "its CLI")}</code> for the models this provider is set up for — <b>Custom…</b> takes a model of your own in the meantime.`
       : reported.length
         ? `The models <code>${esc(cmd)}</code> reports for this provider. <b>Custom…</b> takes a model of your own — it is kept with this node.`
         : list.length

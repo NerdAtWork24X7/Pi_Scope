@@ -2861,7 +2861,10 @@ describe("subagent workflow plugin (client)", () => {
     assert.ok((await page.$$eval("#sw-f-harness option", (o) => o.map((e) => e.value))).includes("gemini"));
     await page.fill("#sw-f-name", "planner");
     await page.selectOption("#sw-f-harness", "gemini");
-    // The model field is a dropdown of what the harness documents…
+    // The model field is a dropdown of what the harness documents, shown once
+    // that harness's CLI has answered (it waits in the meantime).
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll("#sw-f-model option")].some((o) => o.value === "gemini-2.5-flash"));
     await page.selectOption("#sw-f-model", "gemini-2.5-flash");
     await page.fill("#sw-f-prompt", "Plan: {task}");
     await page.click("#sw-save");
@@ -3119,8 +3122,14 @@ describe("subagent workflow plugin (client)", () => {
     );
 
     // Switching harness swaps in that harness's list without touching the rest
-    // of the form.
+    // of the form — and until that harness's own CLI has answered, the dropdown
+    // says it is waiting rather than showing the aliases this app curates.
     await page.selectOption("#sw-f-harness", "claude");
+    const waiting = await page.$$eval("#sw-f-model option", (o) => o.map((x) => x.textContent.trim()));
+    assert.ok(waiting.includes("Loading models…"), `the picker waits for the CLI (${waiting.join(", ")})`);
+    assert.ok(!waiting.includes("sonnet"), "the curated aliases are not offered as Claude's own models");
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll("#sw-f-model option")].some((o) => o.value === "sonnet"));
     assert.deepEqual(
       await page.$$eval("#sw-f-model option", (o) => o.map((x) => x.value)),
       ["", "sonnet", "opus", "haiku", "claude-sonnet-4-5", "claude-opus-4-1", "__custom__"],
@@ -4976,8 +4985,8 @@ describe("subagent workflow plugin (client)", () => {
     const { page, context, errors } = await openWorkflow(solo);
     await page.click(`.sw-node[data-id="${agent.id}"] .sw-node-config`);
     await page.waitForSelector("#sw-f-harness");
-    // The curated list is there at once; the provider's own catalogue arrives a
-    // round trip later and is folded into the same dropdown.
+    // The picker waits for the provider's own catalogue, then folds it into the
+    // dropdown (the curated aliases only come back if the CLI has nothing).
     await page.waitForFunction(
       () => Array.from(document.querySelectorAll("#sw-f-model option")).some((o) => o.value === "local/qwen3"),
       null, { timeout: 15_000 });

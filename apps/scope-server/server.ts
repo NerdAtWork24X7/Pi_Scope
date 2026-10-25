@@ -42,7 +42,7 @@ import { buildSessionSeed } from "./session-seed.ts";
 import { noteExternalProcess, externalProcessFor, killExternalProcess, findProcessBySessionFile } from "./external-process.ts";
 import { trackProcess, stopTrackedProcesses, stopTrackedProcessesSync, isProcessAlive } from "./process-registry.ts";
 import { startStt, stopStt, sttStatus, abortStt, loadSttConfig } from "./stt.ts";
-import { checkPiUpdate, updatePi, updateState } from "./pi-update.ts";
+import { checkPiUpdate, updatePi, updatePiExtensions, updateState } from "./pi-update.ts";
 import { checkHarnessUpdates, updateHarness, updateAllHarnesses, harnessUpdateState, harnessStatusSnapshot } from "./harness-update.ts";
 import {
   MODELS_STORE_PATH, modelCatalogStatus, refreshModelCatalog, startModelCatalogScheduler, modelCatalogAutoEnabled,
@@ -3570,6 +3570,11 @@ async function handle(req: Request): Promise<Response> {
       }
       if (action === "update") {
         const result = await updatePi();
+        // Optional second step: reconcile the packages the agent's settings.json
+        // configures, so extensions track the agent that now loads them. It runs
+        // after the install (a package may target the new agent) and reports its
+        // own outcome without turning a successful agent update into a failure.
+        const extensions = body?.extensions === true ? await updatePiExtensions() : undefined;
         // A newer agent may add or change providers; drop the cached auth
         // runtime so the Authentication tab reads the fresh bundle.
         resetAuthRuntime();
@@ -3577,12 +3582,14 @@ async function handle(req: Request): Promise<Response> {
         void refreshModelCatalog({ force: true }).catch(() => { /* reported by status */ });
         // And re-read the runtime's available models from the fresh bundle.
         void loadRuntimeModels(true);
-        return jsonResponse({ ...result, update: updateState() });
+        return jsonResponse({ ...result, ...(extensions ? { extensions } : {}), update: updateState() });
       }
       return jsonResponse({ error: `unknown action: ${action}` }, 400);
     } catch (err: any) {
       console.error("POST /pi-update failed:", err);
-      return jsonResponse({ error: "internal error" }, 500);
+      // The Settings card shows this message, so keep the updater's reason
+      // (npm's output, a timeout) rather than a generic "internal error".
+      return jsonResponse({ error: String(err?.message || err) || "internal error" }, 500);
     }
   }
 

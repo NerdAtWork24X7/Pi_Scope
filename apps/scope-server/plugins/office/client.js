@@ -895,6 +895,190 @@
     return office && Array.isArray(office.tasks) ? office.tasks.slice() : [];
   }
 
+  // ── Per-task harness ─────────────────────────────────────────────────────
+  // The board dispatches each task as a chat turn; the harness is which coding
+  // agent takes that turn (Pi by default, or any CLI Chat can drive). The
+  // catalogue comes from the plugin's own snapshot, so the picker and the runner
+  // read the same list, resolved on this machine.
+  const DEFAULT_TASK_HARNESS = "pi";
+  function harnessChoices() {
+    const list = office && Array.isArray(office.harnesses) ? office.harnesses : [];
+    const out = list.filter((h) => h && h.id);
+    if (!out.some((h) => h.id === DEFAULT_TASK_HARNESS)) {
+      out.unshift({ id: DEFAULT_TASK_HARNESS, label: "Pi (built-in)", available: true });
+    }
+    return out;
+  }
+  function taskHarness(task) {
+    return (task && task.harness) || DEFAULT_TASK_HARNESS;
+  }
+  function harnessLabel(id) {
+    const found = harnessChoices().find((h) => h.id === id);
+    return found ? found.label : String(id || DEFAULT_TASK_HARNESS);
+  }
+  /** The task dialog's picker: Pi first, then every installed CLI. An absent
+   *  CLI is listed but not selectable, so the board cannot queue a run that is
+   *  guaranteed to fail on dispatch. */
+  function harnessOptions(selected) {
+    const want = selected || DEFAULT_TASK_HARNESS;
+    return harnessChoices().map((h) =>
+      `<option value="${escAttr(h.id)}"${h.id === want ? " selected" : ""}` +
+      `${h.available === false && h.id !== want ? " disabled" : ""}>` +
+      `${esc(h.label)}${h.available === false ? " (not installed)" : ""}</option>`).join("");
+  }
+  /** The model a task names for its harness, or "" for the harness default. */
+  function taskModel(task) {
+    return String((task && task.model) || "");
+  }
+  /** A model id as the board shows it: no provider prefix. */
+  function modelName(id) {
+    return String(id || "").split("/").pop() || String(id || "");
+  }
+
+  // ── Per-task model ────────────────────────────────────────────────────────
+  // Alongside the harness, a task may name the model that harness should run.
+  // Pi's catalogue is the app's own model registry (the same `<optgroup>` list
+  // the desk pickers use); every other harness is its own CLI's list, asked for
+  // when the task dialog opens and cached here for a few minutes.
+  const harnessModelCache = new Map(); // harness id → { models, source, error, at }
+  const harnessModelFetches = new Map();
+  const HARNESS_MODELS_TTL = 5 * 60 * 1000;
+
+  /** What a harness can be pointed at: "app default" for Pi, "its own default"
+   *  for a CLI, plus the models that CLI reports — or, when it reports none, the
+   *  aliases the catalogue documents for it. The CLI's answer WINS outright
+   *  rather than being merged with the aliases, exactly like the Chat pill: a
+   *  list the CLI gave us is the whole truth, and a curated id the CLI no longer
+   *  runs is a model this task would fail on. */
+  function harnessModelIds(id) {
+    const found = harnessModelCache.get(id);
+    const reported = ((found && found.models) || []).filter(Boolean);
+    if (reported.length) return [...new Set(reported)];
+    const curated = (harnessChoices().find((h) => h.id === id) || {}).models;
+    return Array.isArray(curated) ? [...new Set(curated.filter(Boolean))] : [];
+  }
+
+  /** Can this harness's CLI be asked for its model list at all? A harness
+   *  nothing can be asked about has no wait to show: its aliases are the best
+   *  knowledge there is. */
+  function harnessCanList(id) {
+    const found = harnessChoices().find((h) => h.id === id);
+    return !!(found && found.canList);
+  }
+
+  /** Is the picker still waiting for this harness's real list? True only until
+   *  something has ANSWERED (an empty or refused answer included): from then on
+   *  the cached answer — or the curated aliases behind it — is what it shows. */
+  function modelsLoading(id) {
+    if (!id || id === DEFAULT_TASK_HARNESS) return false;
+    return harnessCanList(id) && !harnessModelCache.has(id);
+  }
+
+  /** Ask the harness's own CLI which models it is configured for. Pi is skipped:
+   *  its list is already here. Every outcome is cached — an empty or refused one
+   *  included — so the picker stops waiting and falls back to the aliases the
+   *  catalogue documents rather than spinning forever. */
+  async function loadHarnessModels(id) {
+    if (!id || id === DEFAULT_TASK_HARNESS) return;
+    const cached = harnessModelCache.get(id);
+    if (cached && Date.now() - cached.at < HARNESS_MODELS_TTL) return;
+    if (harnessModelFetches.has(id)) return harnessModelFetches.get(id);
+    const pending = (async () => {
+      try {
+        const { res, data } = await S.api("/office/models", { harness: id });
+        if (!res.ok || !data) {
+          harnessModelCache.set(id, { models: [], source: null, error: `HTTP ${res.status}`, at: Date.now() });
+          return;
+        }
+        harnessModelCache.set(id, {
+          models: Array.isArray(data.models) ? data.models.filter((m) => typeof m === "string" && m) : [],
+          source: typeof data.source === "string" ? data.source : null,
+          error: typeof data.error === "string" ? data.error : null,
+          at: Date.now(),
+        });
+      } catch {
+        harnessModelCache.set(id, { models: [], source: null, error: "could not reach the server", at: Date.now() });
+      }
+      finally { harnessModelFetches.delete(id); }
+    })();
+    harnessModelFetches.set(id, pending);
+    return pending;
+  }
+
+  /** A CLI model id split into its provider half and its name, when it has the
+   *  `provider/model` shape every agent CLI uses. '/' after the first belongs to
+   *  the model's own id (`kilo/inclusionai/ling-3.0`). */
+  function modelParts(id) {
+    const m = /^([A-Za-z0-9._-]+)\/(.+)$/.exec(String(id || ""));
+    return m ? { provider: m[1], name: m[2] } : null;
+  }
+
+  /** A CLI's models as `<optgroup>`s, one per provider, with the model name alone
+   *  on each row — the shape the Chat picker uses, so the two read the same: the
+   *  provider is the heading (and the icon), not a prefix repeated on every row.
+   *  Ids with no provider half (Claude's `sonnet`/`opus` aliases) stay a flat
+   *  list in the order the CLI reported them. The option VALUE is always the
+   *  whole id: it is what the CLI is handed. */
+  function cliModelOptions(ids, want) {
+    const byProvider = new Map(); // provider → [{ id, name }]
+    const bare = [];
+    for (const id of ids) {
+      const parts = modelParts(id);
+      if (!parts) { bare.push(id); continue; }
+      if (!byProvider.has(parts.provider)) byProvider.set(parts.provider, []);
+      byProvider.get(parts.provider).push({ id, name: parts.name });
+    }
+    const row = (value, label) =>
+      `<option value="${escAttr(value)}"${value === want ? " selected" : ""}>${esc(label)}</option>`;
+    let html = "";
+    for (const provider of [...byProvider.keys()].sort((a, b) => a.localeCompare(b))) {
+      const rows = byProvider.get(provider).sort((a, b) => a.name.localeCompare(b.name));
+      html += `<optgroup label="${escAttr(provider)}">` +
+        rows.map((r) => row(r.id, r.name)).join("") +
+      `</optgroup>`;
+    }
+    html += bare.map((id) => row(id, id)).join("");
+    return html;
+  }
+
+  /** The model `<select>`'s options for a harness: "app default" (Pi) or "harness
+   *  default" (a CLI), then the models grouped by provider. Pi's come from the
+   *  app's registry (the desk pickers' own list), a CLI's from its own answer. */
+  function modelSelectOptions(harness, selected) {
+    const want = String(selected || "");
+    if (harness === DEFAULT_TASK_HARNESS) {
+      const fallback = orchModel();
+      const head = `<option value=""${want ? "" : " selected"}>app default${fallback ? ` (${esc(modelName(fallback))})` : ""}</option>`;
+      return head + modelOptionsHtml(want);
+    }
+    // Until the harness's own CLI has answered, the picker says it is waiting
+    // rather than presenting this app's alias suggestions as the CLI's list.
+    if (modelsLoading(harness)) return `<option value="" selected disabled>Loading models…</option>`;
+    const ids = harnessModelIds(harness);
+    // Never drop the stored choice: a model the CLI no longer lists is still what
+    // this task names until the user changes it.
+    if (want && !ids.includes(want)) ids.push(want);
+    ids.sort((a, b) => a.localeCompare(b));
+    const head = `<option value=""${want ? "" : " selected"}>harness default</option>`;
+    return head + cliModelOptions(ids, want);
+  }
+
+  /** Repaint one task dialog's model picker (on open, and when the harness
+   *  changes — a model chosen for another agent means nothing here). */
+  function paintTaskModel(select, harness, selected) {
+    if (!select) return;
+    const opts = modelSelectOptions(harness, selected);
+    // A picker with nothing but a wait in it cannot be used until the answer
+    // lands; the dialog's own submit still works on the harness default.
+    select.disabled = modelsLoading(harness);
+    if (select.dataset.options !== opts) {
+      select.innerHTML = opts;
+      select.dataset.options = opts;
+    }
+    const want = String(selected || "");
+    if (select.value !== want && [...select.options].some((o) => o.value === want)) select.value = want;
+  }
+
   const TASK_COLUMNS = [
     { id: "todo", label: "Todo" },
     { id: "planned", label: "Planned" },
@@ -1192,6 +1376,20 @@
         live +
         waiting +
         failed +
+        // The coding agent this card will be handed to, and the model it names
+        // for it. Pi is the default and is left unlabelled, so only an explicit
+        // external choice (or a chosen model) takes a line.
+        (task.harness || task.model
+          ? (() => {
+              const who = harnessLabel(taskHarness(task));
+              const model = taskModel(task);
+              const text = model ? `${who} · ${modelName(model)}` : who;
+              const title = model
+                ? `This task runs on ${who}, model ${model}`
+                : `This task runs on ${who}`;
+              return `<span class="office-task-harness" title="${escAttr(title)}">${esc(text)}</span>`;
+            })()
+          : "") +
         // A card the board adopted from the orchestrator's own run: say so, so
         // it is never mistaken for a task the user wrote on the board.
         (task.source === "run"
@@ -1262,20 +1460,53 @@
           `value="${escAttr(editing ? task.title : "")}">`) +
         dialogField("Brief", "the details the orchestrator works from (optional)",
           `<textarea class="office-textarea office-task-brief" id="office-task-note" spellcheck="false" ` +
-          `placeholder="Context, constraints, acceptance criteria…">${esc(editing ? task.note || "" : "")}</textarea>`),
+          `placeholder="Context, constraints, acceptance criteria…">${esc(editing ? task.note || "" : "")}</textarea>`) +
+        // The two dispatch choices share a row: they are one decision (which
+        // agent, on which model), and the dialog has the width for it.
+        `<div class="office-field-row">` +
+          dialogField("Harness", "which coding agent runs this task",
+            `<select class="office-input office-task-select" id="office-task-harness" aria-label="Harness for this task">` +
+            `${harnessOptions(editing ? taskHarness(task) : DEFAULT_TASK_HARNESS)}</select>`) +
+          // `data-model-select` gives it the app's searchable model picker (the
+          // same one the Chat composer and the workflow panel use): a few hundred
+          // provider ids cannot be reached by scrolling a native dropdown.
+          dialogField("Model", "the harness's own default otherwise",
+            `<select class="office-input office-task-select" id="office-task-model" data-model-select aria-label="Model for this task">` +
+            `${modelSelectOptions(editing ? taskHarness(task) : DEFAULT_TASK_HARNESS, editing ? taskModel(task) : "")}</select>`) +
+        `</div>`,
       submitLabel: editing ? "Save" : "Add task",
+      // A model is only meaningful to the harness it was chosen for (a pi
+      // `provider/model` id says nothing to Claude Code). Switching the agent
+      // therefore re-seeds the model picker at that agent's default, and asks
+      // its own CLI for the list it is actually set up for.
+      onMount: (root) => {
+        const harnessSel = root.querySelector("#office-task-harness");
+        const modelSel = root.querySelector("#office-task-model");
+        if (!harnessSel || !modelSel) return;
+        harnessSel.addEventListener("change", () => {
+          const id = harnessSel.value || DEFAULT_TASK_HARNESS;
+          paintTaskModel(modelSel, id, "");
+          void loadHarnessModels(id).then(() => paintTaskModel(modelSel, id, ""));
+        });
+        const id = harnessSel.value || DEFAULT_TASK_HARNESS;
+        const keep = editing ? taskModel(task) : "";
+        paintTaskModel(modelSel, id, keep);
+        void loadHarnessModels(id).then(() => paintTaskModel(modelSel, id, keep));
+      },
       onSubmit: async (root) => {
         const titleEl = root.querySelector("#office-task-title");
         const title = String((titleEl && titleEl.value) || "").trim();
         const note = String((root.querySelector("#office-task-note") || {}).value || "").trim();
+        const harness = String((root.querySelector("#office-task-harness") || {}).value || DEFAULT_TASK_HARNESS);
+        const model = String((root.querySelector("#office-task-model") || {}).value || "");
         if (!title) {
           if (titleEl) titleEl.focus();
           if (S.toast) S.toast("Give the task a title", "warn");
           return false;
         }
         try {
-          if (editing) await officePost({ action: "updateTask", id: task.id, title, note }, `Task updated: ${title}`);
-          else await officePost({ action: "addTask", title, note }, `Task added: ${title}`);
+          if (editing) await officePost({ action: "updateTask", id: task.id, title, note, harness, model }, `Task updated: ${title}`);
+          else await officePost({ action: "addTask", title, note, harness, model }, `Task added: ${title}`);
           return true;
         } catch (err) {
           if (S.toast) S.toast(`Could not ${editing ? "save" : "add"} the task: ${errMsg(err)}`, "err");
@@ -2608,7 +2839,7 @@
       `<div class="office-lib-panel office-board-panel" role="dialog" aria-modal="true" aria-label="Task board">` +
         `<div class="office-lib-head">` +
           `<span class="office-lib-hd-title">Task board</span>` +
-          `<span class="office-lib-hd-sub">Todo → Planned → In Progress → Waiting → Done. Drag a card to another column (or focus it and use ← →); drop it into Planned at a position to resequence the queue. Planned tasks run one at a time when the runner is running — a task whose run asks you a question parks in Waiting until you answer it. A card marked <b>chat run</b> is work started outside the board (a prompt in Chat): the board shows it while it runs and keeps it once it is done.</span>` +
+          `<span class="office-lib-hd-sub">Todo → Planned → In Progress → Waiting → Done. Drag a card to another column (or focus it and use ← →); drop it into Planned at a position to resequence the queue. Planned tasks run one at a time when the runner is running — a task whose run asks you a question parks in Waiting until you answer it. Each task can name the harness that runs it, and the model that harness should use. A card marked <b>chat run</b> is work started outside the board (a prompt in Chat): the board shows it while it runs and keeps it once it is done.</span>` +
           `<span class="office-lib-hd-spacer"></span>` +
           // The runner starts paused; this is where the queue is started or held.
           `<button class="btn-sm office-run-toggle" id="office-run-toggle" type="button"></button>` +
@@ -2945,11 +3176,19 @@
       res = await fetch(window.apiUrl("/chat", {}), {
         method: "POST",
         headers: { ...window.authHeaders(), "content-type": "application/json" },
-        // The model the user picked on the orchestrator's desk rides with every
-        // dispatch, so the floor runs the agent they chose it to be. The session
-        // id is ours: it is recorded on the task before dispatch, so the run is
-        // reclaimable if this page goes away mid-run.
-        body: JSON.stringify({ cwd: state().cwd || "", prompt, model: orchModel() || undefined, sessionId: sessionId || undefined }),
+        // The task names the coding agent and model that run it; Pi is the
+        // default. Without a model Pi takes the orchestrator's (the app default),
+        // and an external CLI runs with whatever it is configured for, since
+        // Pi's model id means nothing to another agent. The session id is ours:
+        // it is recorded on the task before dispatch, so the run is reclaimable
+        // if this page goes away mid-run.
+        body: JSON.stringify({
+          cwd: state().cwd || "",
+          prompt,
+          harness: taskHarness(task),
+          model: taskModel(task) || (taskHarness(task) === DEFAULT_TASK_HARNESS ? (orchModel() || undefined) : undefined),
+          sessionId: sessionId || undefined,
+        }),
         signal: ctrl.signal,
       });
     } catch {

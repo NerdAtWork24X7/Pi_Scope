@@ -46,7 +46,7 @@ afterEach(async () => {
 });
 
 /** Seed sessions + team, then load the app directly on the Office view. */
-async function boot({ sessions = [], team, events, defs, office } = {}) {
+async function boot({ sessions = [], team, events, defs, office, theme = "dark", wallpaper = null } = {}) {
   mock.setSessions(sessions);
   mock.setTeam(team || defaultTeam());
   if (office) mock.setOffice(office);
@@ -58,11 +58,16 @@ async function boot({ sessions = [], team, events, defs, office } = {}) {
   // one wall tile of the ring (and a missing one is a doorway). Observing the
   // draw calls is what makes "which rooms are walled" testable without a pixel
   // diff.
-  await context.addInitScript(() => {
+  await context.addInitScript(({ theme, wallpaper }) => {
     // The office floor is a fixed illustration; its chrome follows the app
-    // theme. Pin the dark theme so the two-theme contrast test measures a real
-    // switch (the desktop shell itself now boots light).
-    try { localStorage.setItem("scope-theme", "dark"); } catch { /* private mode */ }
+    // theme. Pin the dark theme by default so the two-theme contrast test
+    // measures a real switch (the desktop shell itself now boots light).
+    try { localStorage.setItem("scope-theme", theme); } catch { /* private mode */ }
+    // A stored background (`scope-wallpaper`) is re-applied by index.html
+    // before first paint, so seeding it here boots the app with it on.
+    if (wallpaper) {
+      try { localStorage.setItem("scope-wallpaper", JSON.stringify(wallpaper)); } catch { /* private mode */ }
+    }
     window.__officeWallDraws = [];
     const proto = CanvasRenderingContext2D.prototype;
     const orig = proto.drawImage;
@@ -72,7 +77,7 @@ async function boot({ sessions = [], team, events, defs, office } = {}) {
       }
       return orig.apply(this, [img, ...args]);
     };
-  });
+  }, { theme, wallpaper });
   page = await context.newPage();
   pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(String(e)));
@@ -798,6 +803,169 @@ describe("office view", () => {
     // Escape closes it.
     await page.keyboard.press("Escape");
     await page.waitForSelector("#office-lib-backdrop", { state: "detached" });
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("the board, library and agent popup stay readable when the shell turns to glass over a wallpaper", async () => {
+    await boot();
+    await page.click("#btn-wallpaper");
+    await page.click('.wp-swatch[data-preset="dusk"]');
+    await page.waitForFunction(() => document.body.classList.contains("has-wallpaper"));
+    // The picker stays open over the office; close it before using the floor.
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#wallpaper-panel", { state: "hidden" });
+
+    /** The painted background's alpha (1 for an opaque colour). */
+    const alphaOf = (sel) => page.evaluate((s) => {
+      const c = getComputedStyle(document.querySelector(s)).backgroundColor;
+      const m = c.match(/\/\s*([\d.]+)\s*\)$/) || c.match(/rgba?\([^)]*,\s*([\d.]+)\s*\)$/);
+      return m ? Number(m[1]) : 1;
+    }, sel);
+
+    // The board and the library get their readability from their own surface,
+    // not from the busy floor: keep them close to opaque in wallpaper mode,
+    // both as the floor's signs and as the full-screen managers.
+    for (const sel of ["#office-board-open", "#office-library-open"]) {
+      const alpha = await alphaOf(sel);
+      assert.ok(alpha >= 0.9, `${sel} stays readable on the floor (alpha ${alpha})`);
+    }
+
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop .office-lib-panel");
+    const boardAlpha = await alphaOf("#office-board-backdrop .office-lib-panel");
+    assert.ok(boardAlpha >= 0.9, `the board stays a reading surface (alpha ${boardAlpha})`);
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#office-board-backdrop", { state: "detached" });
+
+    await page.click("#office-library-open");
+    await page.waitForSelector("#office-lib-backdrop .office-lib-panel");
+    const libAlpha = await alphaOf("#office-lib-backdrop .office-lib-panel");
+    assert.ok(libAlpha >= 0.9, `the library stays a reading surface (alpha ${libAlpha})`);
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#office-lib-backdrop", { state: "detached" });
+
+    // The agent hover popup is the same kind of reading surface: its terminal
+    // lines must not sit on the floor's moving pixel art.
+    await page.locator("#office-pane .office-pod").first().hover();
+    await page.waitForSelector("#office-pop:not([hidden])", { timeout: 10_000 });
+    const popAlpha = await alphaOf("#office-pop");
+    assert.ok(popAlpha >= 0.9, `the hover popup stays readable (alpha ${popAlpha})`);
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("the hover popup keeps its text readable over a photo wallpaper in the light theme", async () => {
+    // Not a wash: a bright checkerboard with the veil turned off is the busiest
+    // thing a reading surface can sit on, so it is the real test of the popup's
+    // fill. Stored the way the picker stores one — a data URL, no network.
+    const photo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAPElEQVR4nO3PIRIAAAgCQf7/aa0Gq+FuJFIWkpEauegf2HvmahfgesMEmKtdgOsNE2CudgGuN0yAuVoFNMuz+ky/iWYEAAAAAElFTkSuQmCC";
+    await boot({
+      theme: "light",
+      wallpaper: { kind: "image", value: photo, dim: 0, blur: 0 },
+      sessions: [makeSession({ session_id: SID, cwd: WS, agent_name: "builder", last_turn_event: "turn_start" })],
+      events: {
+        [SID]: agentEvents([
+          { type: "assistant_message", payload: { text: "All green — shipping it." } },
+        ]),
+      },
+      defs: [{ file: "builder.md", name: "builder", description: "Builds things", model: "", tools: "", thinking: "", content: "---\nname: builder\n---\n" }],
+    });
+    await page.waitForFunction(() => document.body.classList.contains("has-wallpaper"));
+    assert.equal(await page.getAttribute("body", "data-ds-dark-theme"), null, "the light theme, as asked");
+    const painted = await page.evaluate(() => getComputedStyle(document.body, "::before").backgroundImage);
+    assert.match(painted, /data:image\/png/, "the picture is the fixed layer behind the app");
+
+    await pod("builder").hover();
+    await page.waitForSelector("#office-pop:not([hidden])", { timeout: 10_000 });
+    await page.waitForFunction(() =>
+      document.getElementById("office-pop")?.textContent.includes("All green"),
+    );
+
+    // Read the popup the way it composites: each layer's own fill stacked over
+    // the two extremes a photo can be under it (black and white). A surface
+    // that is opaque enough passes both; one that lets the picture through
+    // fails the darker case, which is what "unreadable over a photo" looks like.
+    const measured = await page.evaluate(() => {
+      const pop = document.getElementById("office-pop");
+      const px = (color, under) => {
+        const c = document.createElement("canvas");
+        c.width = c.height = 1;
+        const g = c.getContext("2d");
+        g.fillStyle = under;
+        g.fillRect(0, 0, 1, 1);
+        g.fillStyle = color;
+        g.fillRect(0, 0, 1, 1);
+        return `rgb(${[...g.getImageData(0, 0, 1, 1).data].slice(0, 3).join(",")})`;
+      };
+      const lum = (rgb) => {
+        const [r, g, b] = rgb.match(/\d+/g).map(Number);
+        const f = (v) => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; };
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+      };
+      const alphaOf = (color) => {
+        const m = color.match(/rgba?\([^)]*,\s*([\d.]+)\s*\)$/);
+        return m ? Number(m[1]) : 1;
+      };
+      // The popup and everything between it and the line: their fills, in
+      // paint order, over the picture.
+      const chain = (el) => {
+        const colors = [];
+        for (let n = el; n && n !== pop.parentElement; n = n.parentElement) colors.unshift(getComputedStyle(n).backgroundColor);
+        return colors;
+      };
+      const worstRatio = (el, under) => {
+        let bg = under;
+        for (const c of chain(el)) bg = px(c, bg);
+        const fg = px(getComputedStyle(el).color, bg);
+        const a = lum(fg), b = lum(bg);
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      };
+      const targets = {
+        name: ".office-pop-name",
+        role: ".office-pop-role",
+        status: ".office-pop-meta",
+        timestamp: ".office-pop-time",
+        reply: ".office-pop-line.say .office-pop-text",
+      };
+      const out = { alpha: alphaOf(getComputedStyle(pop).backgroundColor), ratios: {} };
+      for (const [what, sel] of Object.entries(targets)) {
+        const el = pop.querySelector(sel);
+        out.ratios[what] = el
+          ? Math.min(worstRatio(el, "#000"), worstRatio(el, "#fff"))
+          : -1;
+      }
+      return out;
+    });
+
+    assert.ok(measured.alpha >= 0.94, `the popup keeps a near-opaque fill over the picture (alpha ${measured.alpha})`);
+    // Every line clears AA against the worst pixel a photo can put under it. The
+    // two `.say` lines paint in the de-emphasised ramp (--text-subtle), which is
+    // 4.9:1 on the plain surface — the 6% the glass fill lets through costs it a
+    // little, so those keep 4:1 while the ink around them keeps 4.5:1.
+    const floorOf = (what) => (what === "timestamp" || what === "reply" ? 4 : 4.5);
+    for (const [what, ratio] of Object.entries(measured.ratios)) {
+      const want = floorOf(what);
+      assert.ok(ratio >= want, `${what} stays legible over the photo's darkest pixel: ${ratio.toFixed(2)}:1 (want ${want}:1)`);
+    }
+
+    // The markdown editor the Office opens is the app's shared full-bleed
+    // surface (`.def-editor`), and it is prose you type into: it keeps the same
+    // near-opaque fill rather than turning into a window onto the picture.
+    await page.mouse.move(4, 4);
+    await page.waitForFunction(() => document.getElementById("office-pop")?.hidden === true);
+    await pod("builder").locator('.office-act[data-act="settings"]').click();
+    await page.waitForSelector("#office-settings-backdrop");
+    await page.click("#office-settings-backdrop .office-set-md");
+    await page.waitForSelector("#office-md-backdrop .def-editor-text");
+    const editor = await page.evaluate(() => {
+      const alphaOf = (sel) => {
+        const c = getComputedStyle(document.querySelector(sel)).backgroundColor;
+        const m = c.match(/rgba?\([^)]*,\s*([\d.]+)\s*\)$/);
+        return m ? Number(m[1]) : 1;
+      };
+      return { surface: alphaOf("#office-md-backdrop .def-editor"), head: alphaOf("#office-md-backdrop .def-editor-head") };
+    });
+    assert.ok(editor.surface >= 0.9, `the markdown editor stays a reading surface (alpha ${editor.surface})`);
+    assert.ok(editor.head >= 0.9, `…including its head (alpha ${editor.head})`);
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 
@@ -2130,6 +2298,151 @@ describe("office view", () => {
     // Escape closes the board, as it does the other full-screen surfaces.
     await page.keyboard.press("Escape");
     await page.waitForSelector("#office-board-backdrop", { state: "detached" });
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a task names the harness that runs it", async () => {
+    await boot();
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop");
+    await page.click("#office-task-new");
+    await page.waitForSelector("#office-dlg-backdrop #office-task-harness");
+
+    // Pi is the default; every catalogue entry is listed, and a CLI this host
+    // cannot find is present but not queueable.
+    assert.equal(await page.inputValue("#office-task-harness"), "pi");
+    const options = await page.locator("#office-task-harness option").allTextContents();
+    assert.ok(options.some((label) => /Claude Code/.test(label)), `the installed harness is offered (${options.join(", ")})`);
+    assert.equal(
+      await page.locator('#office-task-harness option[value="codex"]').evaluate((e) => e.disabled),
+      true,
+      "a missing CLI is not selectable",
+    );
+
+    await page.fill("#office-task-title", "review on claude");
+    await page.selectOption("#office-task-harness", "claude");
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await page.waitForSelector("#office-dlg-backdrop", { state: "detached" });
+    await until(() => (mock.officeState().tasks || []).some((t) => t.title === "review on claude"), "the task is stored");
+    const added = mock.officeState().tasks.find((t) => t.title === "review on claude");
+    assert.equal(added.harness, "claude", "the chosen harness is stored on the task");
+
+    const card = page.locator("#office-board-backdrop .office-task", { hasText: "review on claude" });
+    assert.match(await card.textContent(), /Claude Code/, "the card names the harness it will use");
+
+    // Editing while it is still in Todo changes the choice in place.
+    await card.locator("[data-edit]").click();
+    await page.waitForSelector("#office-dlg-backdrop #office-task-harness");
+    assert.equal(await page.inputValue("#office-task-harness"), "claude", "the editor opens on the stored choice");
+    await page.selectOption("#office-task-harness", "opencode");
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await page.waitForSelector("#office-dlg-backdrop", { state: "detached" });
+    await until(() => mock.officeState().tasks.find((t) => t.title === "review on claude")?.harness === "opencode", "the edit is stored");
+    assert.match(await card.textContent(), /opencode/, "the card follows the new choice");
+    assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+  });
+
+  test("a task names the model its harness should run", async () => {
+    await boot();
+    // A CLI takes a moment to answer; pin that wait so the loading state is
+    // something the test can actually see.
+    mock.setHarnessModelsDelay(600);
+    // Open a desk's picker first: it creates the shared model panel, and a panel
+    // created before a dialog opens must still stack above it. (A page that has
+    // used any model picker is the normal case, not the fresh one.)
+    await page.locator("#office-pane .office-model-select").first().click();
+    await page.waitForSelector(".scope-sel-pop:not([hidden])");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector(".scope-sel-pop")?.hidden === true);
+
+    await page.click("#office-board-open");
+    await page.waitForSelector("#office-board-backdrop");
+    await page.click("#office-task-new");
+    await page.waitForSelector("#office-dlg-backdrop #office-task-model");
+
+    // The two dispatch choices sit side by side on one row, not stacked.
+    const boxes = await page.evaluate(() => ["#office-task-harness", "#office-task-model"].map((sel) => {
+      const r = document.querySelector(sel).getBoundingClientRect();
+      return { top: Math.round(r.top), left: Math.round(r.left), right: Math.round(r.right) };
+    }));
+    assert.ok(Math.abs(boxes[0].top - boxes[1].top) <= 2, `the harness and model share a row (${JSON.stringify(boxes)})`);
+    assert.ok(boxes[1].left >= boxes[0].right - 1, "the model sits beside the harness");
+
+    // Pi leads with its own default (the app's model), then the registry.
+    const first = await page.locator("#office-task-model option").first().textContent();
+    assert.match(first, /^app default/, `Pi's picker leads with the app default (${first})`);
+    assert.equal(await page.inputValue("#office-task-model"), "", "and starts on it");
+
+    // Pi's list opens in the same searchable panel, with a heading and icon per
+    // provider — this is the app's registry, grouped exactly like Chat's.
+    await page.click("#office-task-model");
+    await page.waitForSelector(".scope-sel-pop:not([hidden])");
+    assert.ok((await page.locator(".scope-sel-pop .scope-sel-opt").count()) >= 2,
+      "Pi's catalogue is offered");
+    assert.ok((await page.locator(".scope-sel-pop .scope-sel-provider-ico").count()) >= 1,
+      "each provider heading carries its icon");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector(".scope-sel-pop")?.hidden === true);
+
+    // Another harness drops the Pi choice and waits for its own CLI's answer:
+    // until then the picker says so instead of offering the app's aliases.
+    await page.selectOption("#office-task-harness", "opencode");
+    assert.equal(await page.locator("#office-task-model").isDisabled(), true, "nothing to pick yet");
+    const waiting = await page.$$eval("#office-task-model option", (els) => els.map((o) => o.textContent.trim()));
+    assert.deepEqual(waiting, ["Loading models…"], `the picker waits for the CLI (${waiting.join(", ")})`);
+
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll("#office-task-model option")].some((o) => o.value === "acme/discovered-coder"),
+    { timeout: 5000 });
+    assert.equal(await page.locator("#office-task-model").isDisabled(), false, "and is usable once it has one");
+    assert.equal(await page.inputValue("#office-task-model"), "", "a new harness starts at its own default");
+    assert.equal(
+      await page.locator('#office-task-model option[value="sonnet"]').count(),
+      0,
+      "the list is the harness's models, not Pi's",
+    );
+
+    await page.fill("#office-task-title", "model on opencode");
+
+    // The picker is the app's searchable model control, exactly like the Chat
+    // composer's: opening it lists the models grouped by provider, each provider
+    // with its own icon, and typing narrows the list.
+    await page.click("#office-task-model");
+    await page.waitForSelector(".scope-sel-pop:not([hidden])");
+    const groups = await page.$$eval(".scope-sel-pop .scope-sel-group-name", (els) => els.map((e) => e.textContent.trim()));
+    assert.deepEqual(groups, ["acme", "openai"], `one heading per provider (${groups.join(", ")})`);
+    assert.ok((await page.locator(".scope-sel-pop .scope-sel-provider-ico").count()) >= 2,
+      "each provider heading carries its icon");
+    await page.keyboard.type("discovered-fast");
+    const rows = await page.locator(".scope-sel-pop .scope-sel-opt .scope-sel-name").allInnerTexts();
+    assert.deepEqual(rows, ["discovered-fast"], `typing filters the list (${rows.join(", ")})`);
+    // A real mouse click on the row: a panel painted BEHIND the dialog's backdrop
+    // would still answer the keyboard, but not the pointer.
+    await page.locator(".scope-sel-pop .scope-sel-opt").first().click();
+    await page.waitForFunction(() => document.querySelector(".scope-sel-pop")?.hidden === true);
+    assert.equal(await page.inputValue("#office-task-model"), "acme/discovered-fast", "the row picked the match");
+
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await page.waitForSelector("#office-dlg-backdrop", { state: "detached" });
+    await until(() => (mock.officeState().tasks || []).some((t) => t.title === "model on opencode"), "the task is stored");
+    const added = mock.officeState().tasks.find((t) => t.title === "model on opencode");
+    assert.equal(added.model, "acme/discovered-fast", "the chosen model is stored on the task");
+
+    const card = page.locator("#office-board-backdrop .office-task", { hasText: "model on opencode" });
+    assert.match(await card.textContent(), /opencode · discovered-fast/, "the card names the harness and model");
+
+    // Reopening the editor shows the stored choice, still selectable.
+    await card.locator("[data-edit]").click();
+    await page.waitForSelector("#office-dlg-backdrop #office-task-model");
+    await until(() => page.inputValue("#office-task-model").then((v) => v === "acme/discovered-fast"), "the editor opens on the stored model");
+    assert.equal(await page.inputValue("#office-task-model"), "acme/discovered-fast");
+
+    // Clearing it goes back to the harness's own default (no stored model).
+    await page.selectOption("#office-task-model", "");
+    await page.click("#office-dlg-backdrop .office-dialog-ok");
+    await page.waitForSelector("#office-dlg-backdrop", { state: "detached" });
+    await until(() => mock.officeState().tasks.find((t) => t.title === "model on opencode")?.model === undefined, "the model is cleared");
+    assert.doesNotMatch(await card.textContent(), /discovered-fast/);
     assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
   });
 

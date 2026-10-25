@@ -11558,8 +11558,28 @@ body.has-wallpaper #terminal-pane,
 body.has-wallpaper #files-pane,
 body.has-wallpaper #checkpoints-pane,
 body.has-wallpaper #git-pane,
-body.has-wallpaper #settings-pane {
+body.has-wallpaper #settings-pane,
+/* A plugin view pane is created by plugins.js inside <main>, so it is not in
+   the list above: without its own scrim the workflow canvas (and any other
+   plugin canvas) sat on the picture at card opacity and read as one wash. */
+body.has-wallpaper .plugin-pane {
   background: color-mix(in srgb, var(--bg) 74%, transparent);
+}
+
+/* Popups are reading surfaces, not cards on a page. Each one already sits on
+   the dark scrim, so the shell's translucent card fill only let the picture
+   bleed through the prose inside it; the near-opaque glass fill keeps every
+   panel legible while the scrim still frames it. The markdown editor is the
+   one full-bleed surface and gets the same treatment for the same reason. */
+body.has-wallpaper #sp-box,
+body.has-wallpaper .cp-modal-box,
+body.has-wallpaper .git-modal-box,
+body.has-wallpaper .plugin-settings-modal,
+body.has-wallpaper .def-editor {
+  background: var(--glass-bg-strong);
+}
+body.has-wallpaper .def-editor-head {
+  background: var(--glass-bg-strong);
 }
 
 /* Chat is a conversation column flanked by two rails, all siblings inside

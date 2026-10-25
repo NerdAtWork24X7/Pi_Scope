@@ -3472,12 +3472,13 @@
       // A remembered harness that this install no longer knows (or that was
       // removed) falls back to Pi instead of sending an id the server rejects.
       if (!harnessInfo(CH.harness)) CH.harness = "pi";
+      // Ask BEFORE the first paint: the pill shows the wait until this harness's
+      // CLI answers, so it must never paint the curated aliases first and swap
+      // them out a moment later.
+      void loadHarnessModels(CH.harness);
       renderComposerHarness();
       renderComposerModel();
       updateHeader();
-      // The catalogue lists the curated aliases; the selected harness's own CLI
-      // is asked for its real list in the background.
-      void loadHarnessModels(CH.harness);
     } catch { /* server unreachable — keep the single Pi fallback option */ }
   }
 
@@ -3508,20 +3509,31 @@
     const pending = (async () => {
       try {
         const { res, data } = await window.SCOPE.api("/chat/harness-models", { harness: id });
-        if (!res.ok || !data) return;
-        const models = Array.isArray(data.models)
-          ? data.models.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
-          : [];
         // A Settings refresh started while this request was in flight: its
         // bypass-the-cache answer is the one that must win.
         if (epoch !== CH.harnessModelsEpoch) return;
+        // Every outcome is recorded, an empty or refused one included: the pill
+        // shows a wait only until something has ANSWERED, so a failure must end
+        // the wait too (and fall back to the curated aliases) rather than leave
+        // it spinning forever.
+        if (!res.ok || !data) {
+          CH.harnessModels.set(id, { models: [], source: null, error: `HTTP ${res.status}`, at: Date.now() });
+          return;
+        }
+        const models = Array.isArray(data.models)
+          ? data.models.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
+          : [];
         CH.harnessModels.set(id, {
           models,
           source: typeof data.source === "string" ? data.source : null,
           error: typeof data.error === "string" ? data.error : null,
           at: Date.now(),
         });
-      } catch { /* keep the curated list */ }
+      } catch {
+        if (epoch === CH.harnessModelsEpoch) {
+          CH.harnessModels.set(id, { models: [], source: null, error: "could not reach the server", at: Date.now() });
+        }
+      }
       finally {
         CH.harnessModelFetches.delete(id);
         if (epoch === CH.harnessModelsEpoch && id === currentHarness()) {
@@ -3670,7 +3682,14 @@
       const id = currentHarness();
       const h = harnessInfo(id);
       const found = CH.harnessModels.get(id);
-      const list = found && found.models.length ? found.models : (h?.models || []);
+      // Nothing has answered for this harness yet, and its own CLI CAN be asked
+      // for a list: show the wait. The curated aliases are a suggestion, not a
+      // list, and offering them as if they were the CLI's models is exactly the
+      // lie this pill must not tell. A harness nothing can be asked about has no
+      // wait to show — its aliases are the best knowledge there is.
+      const canList = !!(h && (h.canListModels ?? h.modelsArgs));
+      const loading = !found && canList;
+      const list = loading ? [] : (found && found.models.length ? found.models : (h?.models || []));
       // A model chosen for ANOTHER harness is meaningless to this CLI (a pi
       // `provider/model` id, a Claude alias, …). Drop it back to this harness's
       // default instead of appending it to the list — the pill must only ever
@@ -3686,13 +3705,19 @@
       if (CH.chatModel) models.add(CH.chatModel);
       // Rebuilding thousands of <option>s on every poll is the expensive part,
       // so only touch the DOM when the list or the selection actually changed.
-      const sig = `${id}\u0000${found?.at || 0}\u0000${list.length}\u0000${list[0] || ""}\u0000${CH.chatModel || ""}`;
+      const sig = `${id}\u0000${found?.at || 0}\u0000${loading ? "wait" : ""}\u0000${list.length}\u0000${list[0] || ""}\u0000${CH.chatModel || ""}`;
       if (CH.modelSig !== sig) {
         CH.modelSig = sig;
-        const title = `the ${harnessLabel(id)} default`;
-        let html = `<option value=""${CH.chatModel ? "" : " selected"} title="${esc(title)}">default</option>`;
-        html += modelOptionsHtml([...models], CH.chatModel || "");
-        el.model.innerHTML = html;
+        if (loading) {
+          // One greyed row: the pill says what it is waiting for instead of
+          // offering models the CLI has not confirmed.
+          el.model.innerHTML = `<option value="" selected disabled>Loading models…</option>`;
+        } else {
+          const title = `the ${harnessLabel(id)} default`;
+          let html = `<option value=""${CH.chatModel ? "" : " selected"} title="${esc(title)}">default</option>`;
+          html += modelOptionsHtml([...models], CH.chatModel || "");
+          el.model.innerHTML = html;
+        }
       }
       fitComposerSelects();
       renderComposerThinking();

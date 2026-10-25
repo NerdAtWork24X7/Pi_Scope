@@ -107,7 +107,13 @@ one — `opencode models`, `kilo models`, `cursor-agent --list-models` — or th
 metadata protocol it already speaks (`claude` initialize, Codex app-server
 `model/list`, ACP `session/new` for Gemini/Cline). The pill therefore shows the
 providers/models that CLI is actually set up for, not a baked-in list. Aider,
-which publishes neither, shows its documented aliases. The list is cached for
+which publishes neither, shows its documented aliases. Until the first answer
+arrives every model picker — the Chat pill, the Office task dialog's model
+field, a Workflow node's Model dropdown — says it is loading instead of passing
+those documented aliases off as the CLI's list; an empty or refused answer ends
+the wait and falls back to them. All of them are the same picker (`select[data-model-select]`
+in `helpers.js`): typing filters the list, the models are grouped and sorted by
+provider under a heading carrying that provider's icon. The list is cached for
 five minutes and is re-asked after a failure, so signing in or editing the CLI's
 configuration shows up without a restart. **Settings → Models → Refresh all
 models** bypasses that cache and re-asks every installed harness at once, so
@@ -296,8 +302,8 @@ address the token is required anyway (see the LAN notes in the root README).
 | POST | `/git/stash` | Push/pop/drop a stash |
 | GET | `/git/submodules` | List submodules |
 | POST | `/git/submodule` | Add/remove/update/init/deinit/sync a submodule |
-| GET | `/pi-update` | Compare the bundled Pi coding agent against the npm latest, plus `modelCatalog` (pi's model store + release cache; `cacheModels`/`cacheProviders` describe models.dev's whole release catalogue, not the providers the cost table lists) |
-| POST | `/pi-update` | `{ action: "check"|"update"|"refresh-models" }` — check, install the newest bundled agent, or fetch the model catalogs. `refresh-models` (Settings → Models → Refresh all models) also re-reads the runtime's provider catalogue and re-asks every installed harness for its model list (`harnessModels` in the response) |
+| GET | `/pi-update` | Compare the bundled Pi coding agent against the npm latest, plus `modelCatalog` (pi's model store + release cache; `cacheModels`/`cacheProviders` describe models.dev's whole release catalogue, not the providers the cost table lists) and `update` (live install state for the agent and its optional `extensions` step, so a reloaded page restores both) |
+| POST | `/pi-update` | `{ action: "check"|"update"|"refresh-models" }` — check, install the newest bundled agent, or fetch the model catalogs. `update` accepts `extensions: true` to also run `pi update --extensions` for the packages in `settings.json`; the step's own outcome comes back as `extensions` without failing a successful agent install. `refresh-models` (Settings → Models → Refresh all models) also re-reads the runtime's provider catalogue and re-asks every installed harness for its model list (`harnessModels` in the response) |
 | GET | `/harness-update` | Installed external coding harnesses (Claude Code, Codex, Gemini, opencode, …) with the version each reports, its registry's latest release and the install state (`update`) |
 | POST | `/harness-update` | `{ action: "check"|"update"|"update-all", id? }` — re-check every harness, update one through its own updater, or update every harness with a pending release |
 | GET | `/auth/providers` | Provider catalogue (methods + status) and stored credentials, read live from the bundled agent |

@@ -41,6 +41,9 @@ let browser;
 let slowFile;
 let failFile;
 let runsLog;
+let extRunsLog;
+let extFailFile;
+let extSlowFile;
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -78,10 +81,33 @@ before(async () => {
   const pkgDir = path.join(bundleDir, "node_modules", ...PKG.split("/"));
   const cli = path.join(pkgDir, "dist", "bundle", "cli.js");
   fs.mkdirSync(path.dirname(cli), { recursive: true });
+  fs.mkdirSync(path.join(tmpDir, "agent"), { recursive: true });
   fs.writeFileSync(path.join(bundleDir, "package.json"),
     JSON.stringify({ name: "pi-scope-pi-bundle", private: true, dependencies: { [PKG]: INSTALLED } }, null, 2));
   fs.writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ name: PKG, version: INSTALLED }, null, 2));
-  fs.writeFileSync(cli, "// stub pi cli\n");
+
+  // Stub "pi update --extensions": record each call, optionally fail, and say
+  // what it reconciled. PI_EXT_RUNS_LOG counts invocations; PI_EXT_FAIL_FILE
+  // makes it exit non-zero.
+  extRunsLog = path.join(tmpDir, "pi-ext-runs.log");
+  extFailFile = path.join(tmpDir, "pi-ext-fail");
+  extSlowFile = path.join(tmpDir, "pi-ext-slow");
+  fs.writeFileSync(cli,
+    "const fs = require('node:fs');\n" +
+    "if (!process.argv.includes('--extensions')) {\n" +
+    "  console.log('model store refreshed');\n" +
+    "  process.exit(0);\n" +
+    "}\n" +
+    "if (process.env.PI_EXT_RUNS_LOG) fs.appendFileSync(process.env.PI_EXT_RUNS_LOG, 'run\\n');\n" +
+    "if (process.env.PI_EXT_SLOW_FILE && fs.existsSync(process.env.PI_EXT_SLOW_FILE)) {\n" +
+    "  const seconds = Number(fs.readFileSync(process.env.PI_EXT_SLOW_FILE, 'utf8')) || 0;\n" +
+    "  if (seconds > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);\n" +
+    "}\n" +
+    "if (process.env.PI_EXT_FAIL_FILE && fs.existsSync(process.env.PI_EXT_FAIL_FILE)) {\n" +
+    "  console.error('simulated extension failure');\n" +
+    "  process.exit(1);\n" +
+    "}\n" +
+    "console.log('reconciled configured packages');\n");
 
   // Stub "npm install": rewrite the installed package version to 1.1.0.
   // NPM_SLOW_FILE makes it sleep that many seconds (a real install takes
@@ -135,6 +161,9 @@ before(async () => {
       NPM_RUNS_LOG: runsLog,
       NPM_SLOW_FILE: slowFile,
       NPM_FAIL_FILE: failFile,
+      PI_EXT_RUNS_LOG: extRunsLog,
+      PI_EXT_FAIL_FILE: extFailFile,
+      PI_EXT_SLOW_FILE: extSlowFile,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -181,6 +210,73 @@ describe("pi update", () => {
     const after = await api("/pi-update");
     assert.equal(after.data.installed, LATEST);
     assert.equal(after.data.updateAvailable, false);
+  });
+
+  test("update with extensions also reconciles the configured packages", async () => {
+    const extRuns = () => (fs.existsSync(extRunsLog) ? fs.readFileSync(extRunsLog, "utf8").trim().split("\n").filter(Boolean).length : 0);
+    const before = extRuns();
+    const { res, data } = await api("/pi-update", { method: "POST", body: JSON.stringify({ action: "update", extensions: true }) });
+    assert.ok(res.ok, data?.error);
+    assert.equal(data.installed, LATEST);
+    assert.equal(data.extensions.ok, true);
+    assert.match(data.extensions.output, /reconciled configured packages/);
+    assert.ok(data.extensions.at, "the extension step is timestamped");
+    assert.equal(extRuns(), before + 1, "pi update --extensions ran exactly once");
+  });
+
+  test("an extension failure is reported without losing the agent update", async () => {
+    const extRuns = () => (fs.existsSync(extRunsLog) ? fs.readFileSync(extRunsLog, "utf8").trim().split("\n").filter(Boolean).length : 0);
+    fs.writeFileSync(extFailFile, "1");
+    try {
+      const before = extRuns();
+      const { res, data } = await api("/pi-update", { method: "POST", body: JSON.stringify({ action: "update", extensions: true }) });
+      assert.ok(res.ok, "the agent update itself still succeeded");
+      assert.equal(data.installed, LATEST);
+      assert.equal(data.extensions.ok, false);
+      assert.match(data.extensions.error, /simulated extension failure/);
+      assert.equal(extRuns(), before + 1);
+    } finally {
+      fs.rmSync(extFailFile, { force: true });
+    }
+  });
+
+  test("a reloaded page can read the extension step while it is running", async () => {
+    const updateState = async () => (await api("/pi-update")).data.update;
+    fs.writeFileSync(extSlowFile, "3");
+    const started = api("/pi-update", { method: "POST", body: JSON.stringify({ action: "update", extensions: true }) });
+    try {
+      const t0 = Date.now();
+      let running = null;
+      while (Date.now() - t0 < 15_000) {
+        const up = await updateState();
+        if (up?.extensions?.running) { running = up; break; }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      assert.ok(running, "the extension step is reported as running");
+      assert.ok(running.extensions.startedAt, "the running step is timestamped");
+
+      const result = await started;
+      assert.ok(result.res.ok, result.data?.error);
+      assert.equal(result.data.extensions.ok, true);
+
+      const snap = await updateState();
+      assert.equal(snap.extensions.running, false);
+      assert.equal(snap.extensions.startedAt, null);
+      assert.equal(snap.extensions.last.ok, true);
+      assert.ok(snap.extensions.last.at, "the extension outcome is timestamped");
+    } finally {
+      await started.catch(() => {});
+      fs.rmSync(extSlowFile, { force: true });
+    }
+  });
+
+  test("update without the option leaves extensions alone", async () => {
+    const extRuns = () => (fs.existsSync(extRunsLog) ? fs.readFileSync(extRunsLog, "utf8").trim().split("\n").filter(Boolean).length : 0);
+    const before = extRuns();
+    const { res, data } = await api("/pi-update", { method: "POST", body: JSON.stringify({ action: "update" }) });
+    assert.ok(res.ok, data?.error);
+    assert.equal(data.extensions, undefined);
+    assert.equal(extRuns(), before, "pi update --extensions did not run");
   });
 
   test("an install outlives the request that started it, and a second request joins it", async () => {
@@ -249,6 +345,7 @@ describe("pi update", () => {
     assert.ok(data.piInstall, "snapshot has piInstall");
     assert.equal(data.piInstall.running, false);
     assert.equal(typeof data.piInstall.last?.ok, "boolean");
+    assert.equal(typeof data.piInstall.extensions?.running, "boolean");
     assert.equal(data.piUpdate, undefined, "the install state never shadows the status field");
   });
 
@@ -262,6 +359,84 @@ describe("pi update", () => {
 
     const bad = await api("/pi-update", { method: "POST", body: JSON.stringify({ action: "nope" }) });
     assert.equal(bad.res.status, 400);
+  });
+});
+
+describe("Settings → Update extension option", () => {
+  test("the card offers it, checked by default, and sends it with the update", async () => {
+    // Make a newer agent available again so Update pi is enabled (the previous
+    // test left a failure outcome behind; the card still checks on entering).
+    const pkgFile = path.join(bundleDir, "node_modules", ...PKG.split("/"), "package.json");
+    fs.writeFileSync(pkgFile, JSON.stringify({ name: PKG, version: INSTALLED }, null, 2));
+    const extRuns = () => (fs.existsSync(extRunsLog) ? fs.readFileSync(extRunsLog, "utf8").trim().split("\n").filter(Boolean).length : 0);
+    const before = extRuns();
+
+    const page = await browser.newPage();
+    try {
+      await page.goto(`${base}/?token=${TOKEN}#view=settings`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector('.settings-nav-item[data-sec="update"]', { timeout: 15_000 });
+      await page.click('.settings-nav-item[data-sec="update"]');
+      await page.waitForSelector("#set-update-extensions", { timeout: 15_000 });
+      assert.equal(await page.isChecked("#set-update-extensions"), true, "extensions update is on by default");
+      assert.match(
+        await page.evaluate(() => document.querySelector("#set-update-extensions")?.closest("label")?.textContent || ""),
+        /Also update extensions/,
+      );
+
+      try {
+        await page.waitForSelector("#set-update-run:not([disabled])", { timeout: 15_000 });
+      } catch (err) {
+        console.log("[ui] update card:", await page.textContent(".settings-panel"));
+        throw err;
+      }
+      await page.click("#set-update-run");
+      await page.waitForFunction(
+        () => /Up to date/i.test(document.querySelector(".set-update-verdict")?.textContent || ""),
+        null,
+        { timeout: 30_000 },
+      );
+      await page.waitForSelector(".set-field-hint .set-update-verdict.ok", { timeout: 15_000 });
+      assert.match(await page.textContent(".set-field-hint"), /Extensions reconciled/i);
+      assert.equal(extRuns(), before + 1, "the update request carried the extension step");
+    } finally {
+      await page.close();
+    }
+  });
+
+  test("a page opened during the extension step restores it and adopts the outcome", async () => {
+    const updateState = async () => (await api("/pi-update")).data.update;
+    fs.writeFileSync(extSlowFile, "5");
+    const started = api("/pi-update", { method: "POST", body: JSON.stringify({ action: "update", extensions: true }) });
+    const page = await browser.newPage();
+    try {
+      // Wait until the agent install is done and only the extension step is left:
+      // exactly the window a reload used to lose.
+      const t0 = Date.now();
+      let running = null;
+      while (Date.now() - t0 < 15_000) {
+        const up = await updateState();
+        if (up?.extensions?.running) { running = up; break; }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      assert.ok(running, "the extension step is running before the page opens");
+
+      await page.goto(`${base}/?token=${TOKEN}#view=settings`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector('.settings-nav-item[data-sec="update"]', { timeout: 15_000 });
+      await page.click('.settings-nav-item[data-sec="update"]');
+      await page.waitForSelector(".set-update-verdict.busy", { timeout: 10_000 });
+      assert.match(await page.textContent(".set-update-verdict.busy"), /Updating extensions/i);
+      assert.equal(await page.isDisabled("#set-update-run"), true, "no parallel update while extensions reconcile");
+
+      // The page follows it to the adopted outcome without being re-driven.
+      await page.waitForSelector(".set-field-hint .set-update-verdict.ok", { timeout: 30_000 });
+      assert.match(await page.textContent(".set-field-hint"), /Extensions reconciled/i);
+      const result = await started;
+      assert.ok(result.res.ok, result.data?.error);
+    } finally {
+      await page.close();
+      await started.catch(() => {});
+      fs.rmSync(extSlowFile, { force: true });
+    }
   });
 });
 

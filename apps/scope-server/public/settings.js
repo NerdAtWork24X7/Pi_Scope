@@ -52,8 +52,15 @@
   // snapshot (seeded by GET /pi-update) while an install is in flight.
   let piUpdateChecking = false;
   let piUpdating = false;
+  // The optional second step (`pi update --extensions`). It runs after the agent
+  // install, so it can still be in flight when the agent part is already done.
+  let piExtensionUpdating = false;
+  // Whether "Update pi" also reconciles the pi packages in settings.json
+  // (`pi update --extensions`). Opt-out, so the default is the coupled update.
+  let piUpdateExtensions = true;
   let piModelsRefreshing = false;
   let piAppliedAt = "";   // install outcome already surfaced by this page
+  let piExtensionAppliedAt = ""; // extension outcome already surfaced
   let piAdoptTimer = null; // poll handle while adopting an install we did not start
   let piAdoptFails = 0;   // consecutive unreadable install states
 
@@ -448,7 +455,9 @@
     // The Update tab needs registry round trips, so kick them off the first
     // time (and only then) the section is shown; the refresh fns re-render.
     if (sec === "update") {
-      if (!SET.piUpdate && !piUpdateChecking) void refreshPiUpdate();
+      // A status object (not just an adopted outcome) is what makes a check
+      // unnecessary; the install state can arrive without one.
+      if (!(SET.piUpdate && SET.piUpdate.package) && !piUpdateChecking) void refreshPiUpdate();
       if (harnessRows === null && !harnessChecking) void refreshHarnessUpdates(false);
     }
     // Resume polling a login that was left running (setSection loads the
@@ -1527,6 +1536,8 @@
     let verdict;
     if (piUpdating) {
       verdict = `<span class="set-update-verdict busy">Installing update…</span>`;
+    } else if (piExtensionUpdating) {
+      verdict = `<span class="set-update-verdict busy">Updating extensions…</span>`;
     } else if (piUpdateChecking && !u) {
       verdict = `<span class="set-update-verdict">Checking npm for the latest version…</span>`;
     } else if (!u) {
@@ -1541,8 +1552,14 @@
       verdict = `<span class="set-update-verdict">Installed version reported.</span>`;
     }
 
-    const canUpdate = !!u && u.updateAvailable && u.updatable && !piUpdating;
-    const busy = piUpdating || piUpdateChecking;
+    const canUpdate = !!u && u.updateAvailable && u.updatable && !piUpdating && !piExtensionUpdating;
+    const busy = piUpdating || piExtensionUpdating || piUpdateChecking;
+    const extCount = strList(SET && SET.packages).length;
+    const extLabel = extCount
+      ? `Also update extensions (${extCount} package${extCount === 1 ? "" : "s"})`
+      : "Also update extensions";
+    const extResult = u && u.extensions;
+    const extError = extResult && !extResult.ok ? String(extResult.error || "update failed") : "";
 
     return (
       `<div class="settings-group">` +
@@ -1550,7 +1567,8 @@
       `<h2 class="settings-group-title">update ${scopeBadge("global")}</h2>` +
       `<div class="settings-intro">Pi Scope runs its own copy of the Pi coding agent. ` +
       `Check npm for a newer release and install it here — the next Chat prompt picks it up, ` +
-      `no server restart required.</div>` +
+      `no server restart required. The option below also reconciles the pi packages ` +
+      `(<code>settings.json</code> → <code>packages</code>) with the new agent.</div>` +
       `<div class="set-update-card${u && u.updateAvailable ? " avail" : ""}">` +
         statusRow("Installed", ver(u && u.installed)) +
         statusRow("Latest on npm", u && u.latest ? ver(u.latest)
@@ -1566,9 +1584,17 @@
         `<button type="button" class="btn-sm" id="set-update-check"${busy ? " disabled" : ""}>` +
           `${piUpdateChecking && !piUpdating ? "Checking…" : "Check for updates"}</button>` +
         `<button type="button" class="btn-sm primary" id="set-update-run"${canUpdate ? "" : " disabled"}>` +
-          `${piUpdating ? "Updating…" : "Update pi"}</button>` +
+          `${piUpdating || piExtensionUpdating ? "Updating…" : "Update pi"}</button>` +
+        miniToggle(piUpdateExtensions, "", extLabel,
+          `id="set-update-extensions"${busy ? " disabled" : ""}`) +
         (u && u.checkedAt ? `<span class="set-update-when">checked ${esc(fmtWhen(u.checkedAt))}</span>` : "") +
       `</div>` +
+      (extResult
+        ? extResult.ok
+          ? `<div class="set-field-hint"><span class="set-update-verdict ok">Extensions reconciled</span></div>`
+          : `<div class="set-field-hint"><span class="set-update-verdict err">Extensions: ${esc(extError.split("\n")[0])}</span></div>` +
+            (extError.includes("\n") ? `<pre class="set-update-log">${esc(extError)}</pre>` : "")
+        : "") +
       (u && u.error && u.output ? `<pre class="set-update-log">${esc(u.output)}</pre>` : "") +
       `</div>` +
       renderHarnessUpdates()
@@ -1726,11 +1752,15 @@
   /** Fold the server's install state into the card. Idempotent per outcome. */
   function adoptPiUpdateState(up) {
     if (!up) return;
-    if (up.running) {
-      if (!piUpdating) {
-        piUpdating = true;
-        if (activeSec === "update") setSection("update", true);
-      }
+    const ext = up.extensions || null;
+    const agentRunning = !!up.running;
+    const extRunning = !!(ext && ext.running);
+    if (agentRunning !== piUpdating || extRunning !== piExtensionUpdating) {
+      piUpdating = agentRunning;
+      piExtensionUpdating = extRunning;
+      if (activeSec === "update") setSection("update", true);
+    }
+    if (agentRunning || extRunning) {
       if (!piAdoptTimer) {
         piAdoptFails = 0;
         piAdoptTimer = setInterval(() => { void pollPiUpdateState(); }, 2000);
@@ -1741,27 +1771,50 @@
       return;
     }
     stopPiAdopt();
-    // Did THIS page watch the install? Only a watcher announces it — a page
+    // Did THIS page watch the update? Only a watcher announces it — a page
     // opened after the fact would otherwise re-toast the same outcome.
-    const watched = piUpdating;
-    if (piUpdating) {
-      piUpdating = false;
-      if (activeSec === "update") setSection("update", true);
-    }
+    const watched = piUpdating || piExtensionUpdating;
+    piUpdating = false;
+    piExtensionUpdating = false;
+    if (activeSec === "update") setSection("update", true);
+
+    let agentAnnounced = false;
     const last = up.last;
-    if (!last || !last.at || last.at === piAppliedAt) return;
-    piAppliedAt = last.at;
-    // Nothing to do for an outcome from an earlier session.
-    if (Date.now() - Date.parse(last.at) > PI_OUTCOME_FRESH_MS) return;
-    if (last.ok) {
-      if (watched) toast("Pi coding agent updated");
-      // A live pi session keeps the binary it started with; re-arm it so the
-      // very next prompt runs the freshly installed agent. Cheap and idempotent,
-      // so a page that merely noticed the install also does it.
-      rearmChat();
-    } else {
-      SET.piUpdate = { ...(SET.piUpdate || {}), error: last.error || "Update failed" };
-      if (watched) toast(last.error || "Update failed", true);
+    if (last && last.at && last.at !== piAppliedAt) {
+      piAppliedAt = last.at;
+      // Nothing to do for an outcome from an earlier session.
+      if (Date.now() - Date.parse(last.at) <= PI_OUTCOME_FRESH_MS) {
+        if (last.ok) {
+          agentAnnounced = true;
+          if (watched) toast("Pi coding agent updated");
+          // A live pi session keeps the binary it started with; re-arm it so the
+          // very next prompt runs the freshly installed agent. Cheap and idempotent,
+          // so a page that merely noticed the install also does it.
+          rearmChat();
+        } else {
+          SET.piUpdate = { ...(SET.piUpdate || {}), error: last.error || "Update failed" };
+          if (watched) toast(last.error || "Update failed", true);
+        }
+      }
+    }
+
+    // The optional extension step finishes after the agent install, so a page
+    // reloaded in that window restores its own busy state and adopts this.
+    const extLast = ext && ext.last;
+    if (extLast && extLast.at && extLast.at !== piExtensionAppliedAt) {
+      piExtensionAppliedAt = extLast.at;
+      if (Date.now() - Date.parse(extLast.at) <= PI_OUTCOME_FRESH_MS) {
+        SET.piUpdate = { ...(SET.piUpdate || {}), extensions: extLast };
+        if (extLast.ok) {
+          // One combined update reads as one announcement; a lone extension
+          // reconcile (the agent step finished before the reload) gets its own.
+          if (watched && !agentAnnounced) toast("Extensions updated");
+          rearmChat();
+        } else if (watched) {
+          const why = String(extLast.error || "update failed").split("\n")[0];
+          toast(`Extensions failed: ${why}`, true);
+        }
+      }
     }
   }
 
@@ -1779,6 +1832,7 @@
       if (++piAdoptFails < 5) return;
       stopPiAdopt();
       piUpdating = false;
+      piExtensionUpdating = false;
       piAdoptFails = 0;
       SET.piUpdate = { ...(SET.piUpdate || {}), error: `Could not read the update state — ${String(e?.message || e)}` };
       if (activeSec === "update") setSection("update", true);
@@ -1791,7 +1845,7 @@
   }
 
   async function refreshPiUpdate() {
-    if (piUpdateChecking || piUpdating) return;
+    if (piUpdateChecking || piUpdating || piExtensionUpdating) return;
     piUpdateChecking = true;
     if (activeSec === "update") setSection("update", true);
     try {
@@ -1812,19 +1866,31 @@
   // bundle, npm missing, registry down) comes back as a message we surface in
   // the card rather than a silent no-op.
   async function runPiUpdate() {
-    if (piUpdating || piUpdateChecking) return;
+    if (piUpdating || piExtensionUpdating || piUpdateChecking) return;
     piUpdating = true;
+    const withExtensions = piUpdateExtensions;
     stopPiAdopt(); // this page owns the outcome now
     if (activeSec === "update") setSection("update", true);
     try {
-      const { res, data } = await S.api("/pi-update", {}, { action: "update" });
+      const { res, data } = await S.api("/pi-update", {}, { action: "update", extensions: withExtensions });
       // This page started the install, so its own result is the one to show —
       // mark the outcome as applied so the adopter (which polls the same state)
       // does not announce it a second time.
       piAppliedAt = data?.update?.last?.at || "";
+      piExtensionAppliedAt = data?.update?.extensions?.last?.at || "";
       if (res.ok && data) {
         SET.piUpdate = data;
-        toast(data.updateAvailable ? "Installed, but a newer version is still reported" : "Pi coding agent updated");
+        const ext = withExtensions ? data.extensions : null;
+        if (ext && !ext.ok) {
+          const why = String(ext.error || "update failed").split("\n")[0];
+          toast(`Pi updated, but extensions failed: ${why}`, true);
+        } else if (ext) {
+          toast(data.updateAvailable
+            ? "Updated, but a newer version is still reported"
+            : "Pi coding agent and extensions updated");
+        } else {
+          toast(data.updateAvailable ? "Installed, but a newer version is still reported" : "Pi coding agent updated");
+        }
       } else {
         const msg = data?.error || "Update failed";
         SET.piUpdate = { ...(SET.piUpdate || {}), error: msg };
@@ -1836,6 +1902,7 @@
       toast(msg, true);
     } finally {
       piUpdating = false;
+      piExtensionUpdating = false;
       if (activeSec === "update") setSection("update", true);
       // A live pi session keeps the binary it started with; re-arm it so the
       // very next prompt runs the freshly installed agent.
@@ -1980,6 +2047,8 @@
   function wireUpdate(panel) {
     panel.querySelector("#set-update-check")?.addEventListener("click", () => void refreshPiUpdate());
     panel.querySelector("#set-update-run")?.addEventListener("click", () => void runPiUpdate());
+    const extBox = panel.querySelector("#set-update-extensions");
+    extBox?.addEventListener("change", () => { piUpdateExtensions = extBox.checked; });
     panel.querySelector("#set-harness-check")?.addEventListener("click", () => void refreshHarnessUpdates(true));
     panel.querySelector("#set-harness-all")?.addEventListener("click", () => void runHarnessUpdate("all"));
     panel.querySelectorAll("[data-harness-update]").forEach((btn) =>

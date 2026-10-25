@@ -111,11 +111,16 @@ after(async () => {
 });
 
 /** Open a page on a view with the shared cwd restored, and no page errors. */
-async function openView(view, contextOptions = {}) {
+async function openView(view, contextOptions = {}, { wallpaper = null } = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ...contextOptions });
-  await context.addInitScript((cwd) => {
+  await context.addInitScript(({ cwd, wallpaper }) => {
     try { localStorage.setItem("scope-cwd", cwd); } catch { /* private mode */ }
-  }, repoDir);
+    // A stored background is re-applied before first paint, so seeding it here
+    // boots the app with the wallpaper already on.
+    if (wallpaper) {
+      try { localStorage.setItem("scope-wallpaper", JSON.stringify(wallpaper)); } catch { /* private mode */ }
+    }
+  }, { cwd: repoDir, wallpaper });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e?.message ?? e)));
@@ -418,6 +423,93 @@ describe("popup design system (superdesign-alpha)", () => {
     assert.equal(conn.ends, 2, "both endpoints are drawn");
     assert.ok(conn.endsInside, "and stay inside the panel");
     assert.equal(conn.notesRight, conn.contentRight, "the note and readout end on the content edge");
+    assert.deepEqual(wf.errors, []);
+    await wf.context.close();
+  });
+
+  test("popups keep a reading surface over a wallpaper, not the shell's card fill", async () => {
+    // A photo (a bright checkerboard, veil off) is the busiest thing a popup can
+    // sit on. A panel painted with the shell's translucent card fill let it
+    // through the prose; every popup must stay near-opaque anyway.
+    const photo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAPElEQVR4nO3PIRIAAAgCQf7/aa0Gq+FuJFIWkpEauegf2HvmahfgesMEmKtdgOsNE2CudgGuN0yAuVoFNMuz+ky/iWYEAAAAAElFTkSuQmCC";
+    const wallpaper = { kind: "image", value: photo, dim: 0, blur: 0 };
+
+    // Alpha is read off a canvas rather than the computed string: a
+    // `color-mix()` fill resolves to `color(srgb … / a)`, which no rgba regex
+    // catches, and a canvas composites every syntax the same way.
+    const fillAlpha = (page, css) => page.evaluate((value) => {
+      const c = document.createElement("canvas");
+      c.width = c.height = 1;
+      const g = c.getContext("2d");
+      g.fillStyle = value;
+      g.fillRect(0, 0, 1, 1);
+      return g.getImageData(0, 0, 1, 1).data[3] / 255;
+    }, css);
+    /** Alpha of a painted fill (1 when it is an opaque colour). */
+    const alphaOf = (page, sel) => page.evaluate((s) => {
+      const c = document.createElement("canvas");
+      c.width = c.height = 1;
+      const g = c.getContext("2d");
+      g.fillStyle = getComputedStyle(document.querySelector(s)).backgroundColor;
+      g.fillRect(0, 0, 1, 1);
+      return g.getImageData(0, 0, 1, 1).data[3] / 255;
+    }, sel);
+    /** The shell's card fill (`--surface`), which is translucent in glass mode. */
+    const cardAlpha = (page) => page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.cssText = "position:fixed;left:-9999px;background:var(--surface)";
+      document.body.appendChild(probe);
+      const value = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return value;
+    }).then((value) => fillAlpha(page, value));
+
+    // The Git confirm, from the Push button of the real repository.
+    const git = await openView("git", {}, { wallpaper });
+    await git.page.waitForFunction(() => document.body.classList.contains("has-wallpaper"));
+    const card = await cardAlpha(git.page);
+    assert.ok(card < 0.6, `the shell really is in glass mode (card alpha ${card})`);
+    await git.page.click("#btn-git-push");
+    await git.page.waitForSelector(".git-modal-backdrop .git-modal-box");
+    const gitAlpha = await alphaOf(git.page, ".git-modal-box");
+    assert.ok(gitAlpha >= 0.9, `the Git confirm stays opaque over the picture (alpha ${gitAlpha})`);
+    assert.deepEqual(git.errors, []);
+    await git.context.close();
+
+    // Settings → Plugins opens the plugin settings popup over the same glass.
+    const st = await openView("settings", {}, { wallpaper });
+    await st.page.waitForFunction(() => document.body.classList.contains("has-wallpaper"));
+    await st.page.click('.settings-nav-item[data-sec="plugins"]');
+    await st.page.waitForSelector('[data-plugin-config="git"]');
+    await st.page.click('[data-plugin-config="git"]');
+    await st.page.waitForSelector(".plugin-settings-modal");
+    const pluginAlpha = await alphaOf(st.page, ".plugin-settings-modal");
+    assert.ok(pluginAlpha >= 0.9, `the plugin settings popup stays opaque (alpha ${pluginAlpha})`);
+
+    // The markdown editor is the full-bleed reading surface: its panel and its
+    // head, not just the text field, have to hold the picture out.
+    await st.page.keyboard.press("Escape");
+    await st.page.click('.settings-nav-item[data-sec="agent"]');
+    await st.page.waitForSelector("[data-agentdef-edit]");
+    await st.page.click('[data-agentdef-edit="demo.md"]');
+    await st.page.waitForSelector("#def-editor-backdrop .def-editor");
+    const editorAlpha = await alphaOf(st.page, "#def-editor-backdrop .def-editor");
+    const editorHeadAlpha = await alphaOf(st.page, "#def-editor-backdrop .def-editor-head");
+    assert.ok(editorAlpha >= 0.9, `the markdown editor stays opaque (alpha ${editorAlpha})`);
+    assert.ok(editorHeadAlpha >= 0.9, `…and so does its head (alpha ${editorHeadAlpha})`);
+    assert.deepEqual(st.errors, []);
+    await st.context.close();
+
+    // The workflow's node panel is the other overlay that carries a form.
+    const wf = await openView("subagent-workflow", { reducedMotion: "reduce" }, { wallpaper });
+    await wf.page.waitForFunction(() => document.body.classList.contains("has-wallpaper"));
+    await wf.page.waitForSelector("#subagent-workflow-pane .sw-node");
+    await wf.page.click("#subagent-workflow-pane .sw-node.sw-t-agent .sw-node-config");
+    await wf.page.waitForSelector(".sw-modal-backdrop:not([hidden]) .sw-dlg-name");
+    const modalAlpha = await alphaOf(wf.page, ".sw-modal");
+    const bodyAlpha = await alphaOf(wf.page, ".sw-dlg-body");
+    assert.ok(modalAlpha >= 0.9, `the workflow panel stays opaque (alpha ${modalAlpha})`);
+    assert.ok(bodyAlpha >= 0.9, `…and its form body too (alpha ${bodyAlpha})`);
     assert.deepEqual(wf.errors, []);
     await wf.context.close();
   });

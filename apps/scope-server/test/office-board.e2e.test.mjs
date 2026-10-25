@@ -120,7 +120,16 @@ describe("the office plugin's own state", () => {
     for (const key of ["officeName", "tasks", "runnerPaused"]) {
       assert.equal(key in team, false, `/agent-team no longer reports ${key}`);
     }
-    assert.deepEqual(await snapshot(), { tasks: [], runnerPaused: true, serverRunner: true }, "an untouched office starts empty and paused, and the server runs the queue");
+    const empty = await snapshot();
+    assert.deepEqual(
+      { tasks: empty.tasks, runnerPaused: empty.runnerPaused, serverRunner: empty.serverRunner },
+      { tasks: [], runnerPaused: true, serverRunner: true },
+      "an untouched office starts empty and paused, and the server runs the queue",
+    );
+    // The board's harness picker rides along: the catalog this host resolved,
+    // and the default a task gets when none is chosen.
+    assert.ok(Array.isArray(empty.harnesses) && empty.harnesses.length > 0, "the state carries the harness catalog");
+    assert.equal(empty.defaultHarness, "pi", "and the default harness");
 
     // And the state lands in the plugin's own store, beside the plugins dir.
     await post({ action: "setRunnerPaused", paused: false });

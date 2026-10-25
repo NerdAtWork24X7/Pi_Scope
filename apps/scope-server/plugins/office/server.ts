@@ -66,6 +66,12 @@ const HELD_STATUSES = new Set(["in_progress", "waiting"]);
 const isHeld = (t: any) => HELD_STATUSES.has(String(t?.status ?? ""));
 const TASK_MAX = 200;
 const TASK_NOTE_MAX = 4000;
+/** The built-in agent every task runs on unless it names another harness. */
+const DEFAULT_HARNESS = "pi";
+/** A model id is a token the harness's own CLI understands (`provider/model`,
+ *  `sonnet`, `gpt-5-codex`, …). Long enough for the longest real ids, short
+ *  enough that a paste cannot bloat the board file. */
+const TASK_MODEL_MAX = 120;
 const NAME_MAX = 60;
 const TITLE_MAX = 200;
 /** Runs the board never adopts: a Workflow node's own `pi` run is that view's
@@ -85,6 +91,15 @@ const SWEEP_MS = 4_000;
 const SWEEP_EVENT_MS = 1_000;
 
 const collapse = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
+/** A model id, cleaned: one line, no control characters, bounded. Empty means
+ *  "the harness's own default". A leading dash is refused because the id is
+ *  handed to a CLI as the value after its `--model` flag, and an argv parser
+ *  would read `-…` as another flag. */
+function cleanModel(raw: unknown): string {
+  const one = collapse(raw).replace(/[\u0000-\u001f\u007f]+/g, "").slice(0, TASK_MODEL_MAX);
+  if (!one || one.startsWith("-")) return "";
+  return one;
+}
 
 /** Clean stored tasks: keep usable rows, drop anything unreadable. */
 function normaliseTasks(raw: unknown): Record<string, any>[] {
@@ -108,6 +123,14 @@ function normaliseTasks(raw: unknown): Record<string, any>[] {
       const v = Number(r[k]);
       if (Number.isFinite(v) && v > 0) task[k] = v;
     }
+    // The coding-agent CLI this task is dispatched to. Omitted for the default
+    // (Pi), so existing boards and the common case stay unchanged.
+    const harness = String(r.harness ?? "").trim().toLowerCase();
+    if (harness && harness !== DEFAULT_HARNESS) task.harness = harness.slice(0, 48);
+    // The model the task names for that harness, or absent for the harness's
+    // own default (Pi: settings.json `defaultModel`; a CLI: as configured).
+    const model = cleanModel(r.model);
+    if (model) task.model = model;
     // The chat session of the run this task is (or was) dispatched as. Persisted
     // so a page that reloads away can tell a still-running task from an orphan
     // instead of re-dispatching it (see runStates / `beginRun`).
@@ -161,6 +184,69 @@ export function activate(api: any): void {
 
   /** The workspace this request's office state belongs to. */
   const workspaceOf = (cwd: unknown) => String(resolveProjectDir(cwd ? String(cwd) : null) ?? "default");
+
+  // ── Harnesses a task can be dispatched to ─────────────────────────────────
+  // The host's Chat catalogue is the one source of truth (Pi + every external
+  // CLI it can drive). Feature-detected: an older host without it still runs the
+  // board, with Pi as the only choice.
+  const harnessCatalogue = (): any[] => {
+    const fn = api.kit.chatHarnesses;
+    if (typeof fn !== "function") return [];
+    try { return fn() || []; } catch { return []; }
+  };
+  /** The picker's shape — ids/labels/availability, plus the harness's curated
+   *  model aliases so the task dialog can seed its model list before the CLI's
+   *  own list arrives (Pi's models live in the app registry, not here). */
+  function harnessChoices(): { id: string; label: string; available: boolean; models: string[]; modelFlag: boolean; canList: boolean }[] {
+    const out = harnessCatalogue()
+      .filter((h) => h && typeof h.id === "string" && h.id)
+      .map((h) => ({
+        id: String(h.id),
+        label: String(h.label || h.id),
+        available: h.available !== false,
+        models: Array.isArray(h.models) ? h.models.filter((m: unknown) => typeof m === "string" && m).slice(0, 60) : [],
+        modelFlag: !!h.modelFlag,
+        // Whether the CLI can be asked for its list at all (see /office/models):
+        // the dialog shows a wait only for the harnesses that have an answer
+        // coming, never for one whose aliases are all there is to know.
+        canList: h.canListModels === true,
+      }));
+    if (!out.some((h) => h.id === DEFAULT_HARNESS)) {
+      out.unshift({ id: DEFAULT_HARNESS, label: "Pi (built-in)", available: true, models: [], modelFlag: true, canList: false });
+    }
+    return out;
+  }
+  /** The models a harness's own CLI reports, for the task dialog's model picker.
+   *  Feature-detected: an older host without the hook answers an empty list, and
+   *  the dialog keeps offering the curated aliases the catalogue carries. */
+  async function harnessModels(id: string): Promise<{ models: string[]; source: string | null; error?: string }> {
+    const fn = api.kit.harnessModelsFor;
+    if (typeof fn !== "function") return { models: [], source: null, error: "this host cannot list harness models" };
+    try {
+      const res = await fn(id);
+      const models = Array.isArray(res?.models) ? res.models.filter((m: unknown) => typeof m === "string" && m) : [];
+      return { models, source: typeof res?.source === "string" ? res.source : null, ...(res?.error ? { error: String(res.error) } : {}) };
+    } catch (err) {
+      return { models: [], source: null, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  /** Validate a requested harness. `unknown` is set rather than silently
+   *  falling back, so a typo is reported instead of running another agent. */
+  function requestedHarness(value: unknown): { id?: string; unknown?: string } {
+    const id = String(value ?? "").trim().toLowerCase();
+    if (!id || id === DEFAULT_HARNESS) return {};
+    if (harnessCatalogue().some((h) => h && String(h.id) === id)) return { id };
+    return { unknown: id };
+  }
+  /** Validate a requested model. The id is stored as the user chose it (only
+   *  cleaned), never checked against a list: the model catalogues belong to the
+   *  installed CLIs and change with them, and the CLI itself rejects an id it
+   *  does not know. An id starting with `-` is dropped rather than handed to a
+   *  CLI's argv, where it would read as another flag. */
+  function requestedModel(value: unknown): { id?: string } {
+    const id = cleanModel(value);
+    return id ? { id } : {};
+  }
 
   // ── Storage ───────────────────────────────────────────────────────────────
   // The board is project state, so it lives in the project: `api.projectStore`
@@ -249,7 +335,12 @@ export function activate(api: any): void {
    *  that tells the client whether the SERVER runs the queue (vs the client
    *  falling back to dispatching it itself). */
   function withRuns(state: any) {
-    const out: any = { ...state, serverRunner: typeof api.kit.startChat === "function" };
+    const out: any = {
+      ...state,
+      serverRunner: typeof api.kit.startChat === "function",
+      harnesses: harnessChoices(),
+      defaultHarness: DEFAULT_HARNESS,
+    };
     const runs = runStates(state);
     if (Object.keys(runs).length) out.runStates = runs;
     return out;
@@ -547,10 +638,15 @@ export function activate(api: any): void {
 
     RUNNERS.set(workspace, { sessionId });
     try {
-      const model = String(api.kit.readSettingsJson?.().defaultModel || "");
+      // A task may name its own harness and model. Without a model, Pi runs on
+      // the app's default model and an external CLI on whatever it is configured
+      // for — never Pi's model, which means nothing to another agent.
+      const harness = String(next.harness || DEFAULT_HARNESS);
+      const model = String(next.model || "")
+        || (harness === DEFAULT_HARNESS ? String(api.kit.readSettingsJson?.().defaultModel || "") : "");
       const prompt = next.note ? `${next.title}\n\n${next.note}` : String(next.title);
       const libraryBlock = api.kit.libraryBlockFor ? api.kit.libraryBlockFor(workspace) : "";
-      const res = api.kit.startChat({ cwd: workspace, model, prompt, sessionId, libraryBlock });
+      const res = api.kit.startChat({ cwd: workspace, model, harness, prompt, sessionId, libraryBlock });
       settleRun(workspace, next.id, await consumeRun(res));
     } catch {
       settleRun(workspace, next.id, "error");
@@ -596,6 +692,21 @@ export function activate(api: any): void {
     return snapshot(workspace);
   });
 
+  // The models a task's harness can be pointed at. Chat's own route serves the
+  // composer; the board needs the same list from its own prefix (a disabled
+  // Office plugin must answer 403 like the rest of its routes), and it is asked
+  // on demand — a task dialog opening must not spawn a CLI for every harness.
+  api.route("GET", "/office/models", async (ctx) => {
+    const id = String(ctx.url.searchParams.get("harness") ?? "").trim().toLowerCase() || DEFAULT_HARNESS;
+    const known = harnessCatalogue().some((h) => h && String(h.id) === id) || id === DEFAULT_HARNESS;
+    if (!known) return jsonResponse({ error: `unknown harness: ${id}` }, 400);
+    // The built-in agent has no CLI to ask: its models are the app's registry,
+    // which the client already holds (settings → modelsMeta), so nothing is
+    // invented here.
+    if (id === DEFAULT_HARNESS) return jsonResponse({ harness: id, models: [], source: null });
+    return jsonResponse({ harness: id, ...(await harnessModels(id)) });
+  });
+
   api.route("POST", "/office", async (ctx) => {
     let body: any;
     try { body = JSON.parse(await readBody(ctx.req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
@@ -618,6 +729,9 @@ export function activate(api: any): void {
         const note = collapse(body.note).slice(0, TASK_NOTE_MAX);
         if (!title) return jsonResponse({ error: "missing title" }, 400);
         if (title.length > TITLE_MAX) return jsonResponse({ error: `task titles may be up to ${TITLE_MAX} characters` }, 400);
+        const harness = requestedHarness(body.harness);
+        if (harness.unknown) return jsonResponse({ error: `unknown harness: ${harness.unknown}` }, 400);
+        const model = requestedModel(body.model);
         let full = false;
         const state = commit(workspace, (current) => {
           if (current.tasks.length >= TASK_MAX) { full = true; return current; }
@@ -628,6 +742,8 @@ export function activate(api: any): void {
             createdAt: Date.now(),
           };
           if (note) task.note = note;
+          if (harness.id) task.harness = harness.id;
+          if (model.id) task.model = model.id;
           current.tasks.push(task);
           return current;
         });
@@ -678,14 +794,23 @@ export function activate(api: any): void {
         return jsonResponse(state);
       }
       case "updateTask": {
-        // Rewrite a task's title and brief in place. The status is untouched:
-        // the board only offers this while the task is still in Todo.
+        // Rewrite a task's title, brief and harness in place. The status is
+        // untouched: the board only offers this while the task is still in Todo.
         const id = String(body.id ?? "").trim();
         const title = collapse(body.title);
         const note = collapse(body.note).slice(0, TASK_NOTE_MAX);
         if (!id) return jsonResponse({ error: "missing id" }, 400);
         if (!title) return jsonResponse({ error: "missing title" }, 400);
         if (title.length > TITLE_MAX) return jsonResponse({ error: `task titles may be up to ${TITLE_MAX} characters` }, 400);
+        // An absent field preserves the stored choice (older clients); an empty
+        // one clears it back to the default.
+        const harnessGiven = body.harness !== undefined;
+        const harness = harnessGiven ? requestedHarness(body.harness) : {};
+        if (harness.unknown) return jsonResponse({ error: `unknown harness: ${harness.unknown}` }, 400);
+        // Same rule for the model: absent keeps the stored choice, empty clears
+        // it back to the harness's own default.
+        const modelGiven = body.model !== undefined;
+        const model = modelGiven ? requestedModel(body.model) : {};
         let found = false;
         const state = commit(workspace, (current) => {
           const task = current.tasks.find((t: any) => t.id === id);
@@ -693,6 +818,20 @@ export function activate(api: any): void {
           found = true;
           task.title = title;
           if (note) task.note = note; else delete task.note;
+          const wasHarness = String(task.harness || DEFAULT_HARNESS);
+          if (harnessGiven) {
+            if (harness.id) task.harness = harness.id;
+            else delete task.harness;
+          }
+          if (modelGiven) {
+            if (model.id) task.model = model.id;
+            else delete task.model;
+          } else if (harnessGiven && String(harness.id || DEFAULT_HARNESS) !== wasHarness) {
+            // A model belongs to the agent it was chosen for: a Claude alias or a
+            // pi `provider/model` id says nothing to the next harness, and would
+            // either fail the run or quietly run the wrong thing.
+            delete task.model;
+          }
           return current;
         });
         if (!found) return jsonResponse({ error: "no such task" }, 404);

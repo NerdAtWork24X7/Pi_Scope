@@ -690,6 +690,16 @@
 }
 .sw-dlg-body p { margin: 0; }
 .sw-dlg-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px var(--sw-col-x); border-top: 1px solid var(--hairline); }
+
+/* Wallpaper (glass) mode makes the shell's cards translucent. This panel is a
+   reading surface opened over the canvas: at the shell's card opacity the
+   graph (and the picture behind it) showed through the form it exists to let
+   you fill in, so the panel and its body keep a near-opaque fill. The body's
+   blueprint grid rides on top of it. */
+body.has-wallpaper .sw-modal,
+body.has-wallpaper .sw-dlg-body {
+  background-color: var(--glass-bg-strong);
+}
 /* The surface's actions read as one group in the bottom-right corner; closing
    is the head's ✕, so no Close button competes with them here. */
 

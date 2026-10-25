@@ -15,6 +15,11 @@
  *      subagent) runs the new agent. No server restart is required: the shim
  *      re-execs the bundle's CLI on every spawn.
  *
+ * It can also reconcile the packages (extensions) configured in the agent's
+ * `settings.json` with the freshly installed agent, using pi's own
+ * `pi update --extensions` (see updatePiExtensions). That is opt-in: a client asks
+ * for it with `{ action: "update", extensions: true }`.
+ *
  * Only a bundle Pi Scope owns can be updated. When `pi` resolves to an operator
  * override or a global install the status is reported as not updatable with a
  * reason, rather than silently touching someone else's install.
@@ -22,8 +27,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { compareVersions } from "./semver.ts";
-import { npmCommand, runCommand } from "./cli-run.ts";
-import { PI_BUNDLE } from "./pi-bundle.ts";
+import { npmCommand, runCommand, type CommandSpec } from "./cli-run.ts";
+import { AGENT_DIR } from "./agent-dir.ts";
+import { PI_BIN, PI_BUNDLE } from "./pi-bundle.ts";
 
 /** The npm package Pi Scope bundles. */
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -35,6 +41,9 @@ const DEFAULT_REGISTRY = "https://registry.npmjs.org";
 const CHECK_TIMEOUT_MS = 10_000;
 /** How long `npm install` may run before it is killed. */
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
+/** How long `pi update --extensions` may run before it is killed (it may fetch
+ *  npm/git packages, but it is not a full agent install). */
+const EXTENSIONS_TIMEOUT_MS = 5 * 60_000;
 
 interface PiUpdateStatus {
   /** npm package under management. */
@@ -164,6 +173,11 @@ let updateStartedAt: string | null = null;
 /** How the last install ended. Kept after the request that started it is gone,
  *  so a page that reloaded mid-install can still learn the outcome. */
 let updateLast: PiUpdateOutcome | null = null;
+/** When the running extension reconcile started (null when none is running). */
+let extensionsStartedAt: string | null = null;
+/** How the last extension reconcile ended. Kept for the same reason as
+ *  `updateLast`: the optional second step also outlives the request. */
+let extensionsLast: PiExtensionsOutcome | null = null;
 
 interface PiUpdateOutcome {
   /** When the install reached its terminal state. */
@@ -175,14 +189,40 @@ interface PiUpdateOutcome {
   error: string;
 }
 
+/** The extension reconcile state carried beside the agent install state. */
+export interface PiExtensionsState {
+  running: boolean;
+  startedAt: string | null;
+  /** The last finished reconcile, or null when none has run in this process. */
+  last: PiExtensionsOutcome | null;
+}
+
 /**
  * The install state a client can read at any time: is one running, and how did
  * the last one end? `npm install` takes minutes and outlives the request that
  * started it, so the Settings → Update card recovers from a reload with this
  * instead of showing a stale "update available".
+ *
+ * `extensions` is the optional second step's state, carried alongside so a page
+ * reloaded while extensions reconcile restores the busy card and adopts the
+ * outcome exactly like the agent install.
  */
-export function updateState(): { running: boolean; startedAt: string | null; last: PiUpdateOutcome | null } {
-  return { running: inFlight !== null, startedAt: updateStartedAt, last: updateLast };
+export function updateState(): {
+  running: boolean;
+  startedAt: string | null;
+  last: PiUpdateOutcome | null;
+  extensions: PiExtensionsState;
+} {
+  return {
+    running: inFlight !== null,
+    startedAt: updateStartedAt,
+    last: updateLast,
+    extensions: {
+      running: extensionsInFlight !== null,
+      startedAt: extensionsStartedAt,
+      last: extensionsLast,
+    },
+  };
 }
 
 /** Install the newest Pi coding agent into the bundled npm project and return
@@ -204,6 +244,76 @@ export function updatePi(): Promise<PiUpdateStatus> {
     })
     .finally(() => { inFlight = null; updateStartedAt = null; });
   return inFlight;
+}
+
+/** Result of reconciling the configured pi packages/extensions. */
+export interface PiExtensionsOutcome {
+  /** True when `pi update --extensions` succeeded. */
+  ok: boolean;
+  /** ISO timestamp of the attempt. */
+  at: string;
+  /** Tail of pi's output on success. */
+  output?: string;
+  /** Failure reason (including the command's output) on error. */
+  error?: string;
+}
+
+/** Deduplicate concurrent extension updates — pi's package manager must not be
+ *  asked to reconcile the same tree twice. */
+let extensionsInFlight: Promise<PiExtensionsOutcome> | null = null;
+
+/** How to ask pi to reconcile its configured packages. The bundle's CLI entry is
+ *  used directly: the shim passes `--extension` before the subcommand, and pi's
+ *  package manager reads everything after `update` as its own arguments. */
+function extensionUpdateCommand(): CommandSpec | null {
+  if (PI_BUNDLE.cli) return { file: process.execPath, args: [PI_BUNDLE.cli], label: "pi" };
+  if (PI_BUNDLE.source === "bundled") return null;
+  return { file: PI_BIN, args: [], label: PI_BIN };
+}
+
+/**
+ * Reconcile the packages (extensions) configured in the agent's settings.json
+ * with the installed agent by running pi's own `pi update --extensions`.
+ *
+ * Never throws: the agent update already succeeded, so an extension failure is
+ * reported alongside it rather than turning the whole operation into an error.
+ * `PI_OFFLINE` is dropped for this child only (updates need the network), and
+ * `PI_CODING_AGENT_DIR` is pinned so pi edits the very settings the app reads.
+ */
+export function updatePiExtensions(): Promise<PiExtensionsOutcome> {
+  if (extensionsInFlight) return extensionsInFlight;
+  extensionsStartedAt = new Date().toISOString();
+  extensionsInFlight = runExtensionsUpdate()
+    .then((outcome) => {
+      extensionsLast = outcome;
+      return outcome;
+    })
+    .finally(() => { extensionsInFlight = null; extensionsStartedAt = null; });
+  return extensionsInFlight;
+}
+
+async function runExtensionsUpdate(): Promise<PiExtensionsOutcome> {
+  const at = new Date().toISOString();
+  const command = extensionUpdateCommand();
+  if (!command) {
+    return { ok: false, at, error: "No pi executable is available to update extensions with." };
+  }
+  const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: AGENT_DIR };
+  delete env.PI_OFFLINE;
+  delete env.PI_SCOPE_FORCE_EXTENSION;
+  try {
+    const output = await runCommand(command, ["update", "--extensions"], {
+      cwd: AGENT_DIR,
+      timeoutMs: EXTENSIONS_TIMEOUT_MS,
+      timeoutMessage: `pi update --extensions timed out after ${EXTENSIONS_TIMEOUT_MS / 60_000} minutes`,
+      exitLabel: "pi update --extensions",
+      missingHint: "install pi or set SCOPE_PI_BIN",
+      env,
+    });
+    return { ok: true, at, output };
+  } catch (err: any) {
+    return { ok: false, at, error: String(err?.message ?? err) };
+  }
 }
 
 async function runUpdate(): Promise<PiUpdateStatus> {

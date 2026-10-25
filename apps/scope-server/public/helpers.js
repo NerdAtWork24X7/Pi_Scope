@@ -1073,8 +1073,12 @@
     if (document.getElementById("scope-sel-filter-css")) return;
     const style = document.createElement("style");
     style.id = "scope-sel-filter-css";
+    // The panel sits ONE step above the modal tier: it is opened from inside
+    // dialogs (the Office task board, a workflow node, the agents panel), where
+    // sharing the backdrop's z-index puts it *behind* the backdrop — visible to
+    // the keyboard, but with every click landing on the backdrop instead.
     style.textContent =
-      `.scope-sel-pop{position:fixed;z-index:var(--z-modal,1200);display:flex;flex-direction:column;gap:4px;` +
+      `.scope-sel-pop{position:fixed;z-index:calc(var(--z-modal,1200) + 10);display:flex;flex-direction:column;gap:4px;` +
       `padding:6px;box-sizing:border-box;background:var(--glass-bg-strong,var(--surface,#fff));color:var(--text,#242423);` +
       `border:1px solid var(--border,var(--border-subtle,#e3e3df));border-radius:var(--r-card,6px);` +
       `box-shadow:var(--shadow-panel,0 18px 48px rgba(0,0,0,.2));font-family:var(--font-body,system-ui,sans-serif);` +
@@ -1308,7 +1312,9 @@
     const modelSelectOf = (target) => (target && target.closest ? target.closest("select[data-model-select]") : null);
     document.addEventListener("mousedown", (e) => {
       const select = modelSelectOf(e.target);
-      if (select) { e.preventDefault(); selOpen(select, ""); return; }
+      // A disabled picker has nothing to offer — a model list still loading, for
+      // one — so it must not open its panel either.
+      if (select && !select.disabled) { e.preventDefault(); selOpen(select, ""); return; }
       if (SEL.for && SEL.pop && !SEL.pop.contains(e.target)) selClose(false);
     }, true);
     document.addEventListener("keydown", (e) => {

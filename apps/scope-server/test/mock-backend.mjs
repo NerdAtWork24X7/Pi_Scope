@@ -56,12 +56,13 @@ export const MODEL_META = {
 /** The harness catalogue GET /chat/harnesses serves. Claude Code is installed,
  *  Codex CLI is not — the picker must show both states. */
 export const DEFAULT_HARNESSES = [
-  { id: "pi", label: "Pi (built-in)", bin: null, resolved: null, available: true, models: [], modelFlag: "--model", promptStdin: false, hasCommands: true },
-  { id: "claude", label: "Claude Code", bin: "claude", resolved: "/usr/local/bin/claude", available: true, models: ["sonnet", "opus", "haiku"], modelFlag: "--model", promptStdin: false, hasCommands: true },
-  { id: "codex", label: "Codex CLI", bin: "codex", resolved: null, available: false, models: ["gpt-5-codex", "gpt-5"], modelFlag: "--model", promptStdin: false, hasCommands: true },
-  { id: "opencode", label: "opencode", bin: "opencode", resolved: "/usr/local/bin/opencode", available: true, models: ["anthropic/claude-sonnet-4-5"], modelFlag: "--model", promptStdin: true, hasCommands: true },
-  // No command interface: the composer must not offer a made-up menu.
-  { id: "aider", label: "Aider", bin: "aider", resolved: null, available: false, models: ["gpt-5"], modelFlag: "--model", promptStdin: false, hasCommands: false },
+  { id: "pi", label: "Pi (built-in)", bin: null, resolved: null, available: true, models: [], modelFlag: "--model", promptStdin: false, hasCommands: true, canListModels: false },
+  { id: "claude", label: "Claude Code", bin: "claude", resolved: "/usr/local/bin/claude", available: true, models: ["sonnet", "opus", "haiku"], modelFlag: "--model", promptStdin: false, hasCommands: true, canListModels: true },
+  { id: "codex", label: "Codex CLI", bin: "codex", resolved: null, available: false, models: ["gpt-5-codex", "gpt-5"], modelFlag: "--model", promptStdin: false, hasCommands: true, canListModels: true },
+  { id: "opencode", label: "opencode", bin: "opencode", resolved: "/usr/local/bin/opencode", available: true, models: ["anthropic/claude-sonnet-4-5"], modelFlag: "--model", promptStdin: true, hasCommands: true, canListModels: true },
+  // No command interface: the composer must not offer a made-up menu, and no
+  // model list can be asked of it either — its aliases ARE its list.
+  { id: "aider", label: "Aider", bin: "aider", resolved: null, available: false, models: ["gpt-5"], modelFlag: "--model", promptStdin: false, hasCommands: false, canListModels: false },
 ];
 
 /** What each harness "advertises" for GET /chat/harness-commands. */
@@ -267,6 +268,15 @@ export async function startMockBackend() {
       // Paused is the default: anything but an explicit false means paused.
       runnerPaused: s.runnerPaused !== false,
       runStates,
+      // What a task can be dispatched to, shaped like the plugin's snapshot
+      // (curated model aliases included: the task dialog seeds its model picker
+      // from them before the CLI's own list arrives).
+      harnesses: state.harnesses.map((h) => ({
+        id: h.id, label: h.label, available: h.available !== false,
+        models: (h.models || []).slice(), modelFlag: h.modelFlag !== null,
+        canList: h.canListModels === true,
+      })),
+      defaultHarness: "pi",
       // The real server runs the queue itself; a test can opt in so the client
       // defers to it. Off by default, so the client-runner path is still tested.
       serverRunner: state.serverRunner === true,
@@ -478,8 +488,9 @@ export async function startMockBackend() {
       pathname === "/sessions" || pathname.startsWith("/sessions/") ||
       pathname === "/health" ||
       pathname === "/agent-team" ||
-      // The Office plugin's own routes (its name / Kanban queue / runner).
-      pathname === "/office" ||
+      // The Office plugin's own routes (its name / Kanban queue / runner, and
+      // the models a task's harness reports).
+      pathname === "/office" || pathname === "/office/models" ||
       pathname === "/events/stream" ||
       pathname === "/settings" || pathname.startsWith("/settings/") ||
       pathname === "/plugins" ||
@@ -759,12 +770,18 @@ export async function startMockBackend() {
     if (pathname === "/chat/harness-models" && method === "GET") {
       const harness = String(parsed.searchParams.get("harness") || "").trim();
       const found = state.harnessModels[harness] || { models: [], source: null };
-      return sendJSON(res, {
+      const payload = {
         harness,
         models: found.models,
         source: found.source ?? null,
         ...(found.error ? { error: found.error } : {}),
-      });
+      };
+      // A real CLI takes a moment to answer; a test can pin the wait
+      // (setHarnessModelsDelay) to see what the pickers show meanwhile.
+      const delay = state.harnessModelsDelayMs | 0;
+      if (delay > 0) setTimeout(() => sendJSON(res, payload), delay).unref?.();
+      else return sendJSON(res, payload);
+      return;
     }
     if (pathname === "/chat/harness-commands" && method === "GET") {
       const harness = String(parsed.searchParams.get("harness") || "").trim();
@@ -945,6 +962,22 @@ export async function startMockBackend() {
     if (pathname === "/office" && method === "GET") {
       return sendJSON(res, officeSnapshot(parsed.searchParams.get("cwd")));
     }
+    // The models a task's harness can be pointed at — the board's own prefix.
+    if (pathname === "/office/models" && method === "GET") {
+      const harness = String(parsed.searchParams.get("harness") || "").trim().toLowerCase() || "pi";
+      if (harness !== "pi" && !state.harnesses.some((h) => h.id === harness)) {
+        return sendJSON(res, { error: `unknown harness: ${harness}` }, 400);
+      }
+      const payload = (() => {
+        if (harness === "pi") return { harness, models: [], source: null };
+        const found = state.harnessModels[harness] || { models: [], source: null };
+        return { harness, ...(found.error ? { error: found.error } : {}), models: found.models, source: found.source };
+      })();
+      const delay = state.harnessModelsDelayMs | 0;
+      if (delay > 0) setTimeout(() => sendJSON(res, payload), delay).unref?.();
+      else return sendJSON(res, payload);
+      return;
+    }
     if (pathname === "/office" && method === "POST") {
       const action = String(body.action || "");
       const bucket = officeBucket(body.cwd);
@@ -958,8 +991,15 @@ export async function startMockBackend() {
         const note = collapse(body.note);
         if (!title) return sendJSON(res, { error: "missing title" }, 400);
         if (title.length > 200) return sendJSON(res, { error: "task titles may be up to 200 characters" }, 400);
+        const harness = String(body.harness || "").trim().toLowerCase();
+        if (harness && !state.harnesses.some((h) => h.id === harness)) {
+          return sendJSON(res, { error: `unknown harness: ${harness}` }, 400);
+        }
         const task = { id: `task_${(bucket.tasks || []).length + 1}`, title, status: "todo", createdAt: Date.now() };
         if (note) task.note = note;
+        if (harness && harness !== "pi") task.harness = harness;
+        const model = collapse(body.model);
+        if (model) task.model = model;
         bucket.tasks = [...(bucket.tasks || []), task];
       } else if (action === "moveTask") {
         const id = String(body.id || "").trim();
@@ -995,6 +1035,22 @@ export async function startMockBackend() {
         if (!task) return sendJSON(res, { error: "no such task" }, 404);
         task.title = title;
         if (note) task.note = note; else delete task.note;
+        const wasHarness = String(task.harness || "pi");
+        if (body.harness !== undefined) {
+          const harness = String(body.harness || "").trim().toLowerCase();
+          if (harness && !state.harnesses.some((h) => h.id === harness)) {
+            return sendJSON(res, { error: `unknown harness: ${harness}` }, 400);
+          }
+          if (harness && harness !== "pi") task.harness = harness;
+          else delete task.harness;
+        }
+        if (body.model !== undefined) {
+          const model = collapse(body.model);
+          if (model) task.model = model; else delete task.model;
+        } else if (body.harness !== undefined && String(task.harness || "pi") !== wasHarness) {
+          // A model belongs to the harness it was chosen for (see the plugin).
+          delete task.model;
+        }
       } else if (action === "placeTask") {
         const id = String(body.id || "").trim();
         const status = String(body.status || "");
@@ -1110,6 +1166,8 @@ export async function startMockBackend() {
     setSessions(list) { state.sessions = list.map(makeSession); },
     /** Delay GET /sessions by `ms` (a slow first fetch, e.g. a big DB). */
     setSessionsDelay(ms) { state.sessionsDelayMs = Math.max(0, ms | 0); },
+    /** Delay the harness model lists by `ms` (a CLI answering takes a moment). */
+    setHarnessModelsDelay(ms) { state.harnessModelsDelayMs = Math.max(0, ms | 0); },
     setTeam(team) {
       state.team = team;
       // chatWorkspaces live in their own slot on the snapshot; mirror the
@@ -1197,6 +1255,7 @@ export async function startMockBackend() {
       // A test that slowed /sessions (setSessionsDelay) must not slow every
       // later test in the file.
       state.sessionsDelayMs = 0;
+      state.harnessModelsDelayMs = 0;
       requests.length = 0;
       fails.length = 0;
       turns.length = 0;

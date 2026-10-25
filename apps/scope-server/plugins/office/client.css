@@ -1062,6 +1062,28 @@ body[data-ds-dark-theme] {
 .office-settings-panel { width: min(920px, 100%); }
 .office-board-panel { width: 100%; }
 
+/* Wallpaper (glass) mode makes the shell's cards translucent. These office
+   surfaces are *reading* surfaces, not cards on a page: they sit over the
+   dark backdrop scrim and the animated pixel floor, so at the shell's card
+   opacity the floor showed through and the board/library text lost contrast.
+   Keep the panel and its modal forms nearly opaque; the floor still frames
+   them around the edges. */
+body.has-wallpaper .office-lib-panel,
+body.has-wallpaper .office-dialog,
+body.has-wallpaper .office-empty,
+body.has-wallpaper .office-pop {
+  background: var(--glass-bg-strong);
+}
+/* The floor's own Kanban sign and library shelf: the pixel art behind them is
+   decorative and busy, so they keep the solid card fill they have without a
+   wallpaper instead of tinting to it. */
+body.has-wallpaper .office-kanban-mini,
+body.has-wallpaper .office-library,
+body.has-wallpaper .office-kanban-mini:hover,
+body.has-wallpaper .office-library:hover {
+  background: var(--glass-bg-strong);
+}
+
 .office-lib-head {
   display: flex; align-items: center; gap: 12px;
   padding: 12px 16px;
@@ -1268,6 +1290,18 @@ body[data-ds-dark-theme] {
   font-family: var(--mono); font-size: 10px; letter-spacing: .4px;
   text-transform: uppercase; color: var(--text-subtle);
 }
+/* The task's chosen harness: a small badge beside its source, only when it is
+   not the default Pi (a board of Pi tasks stays unadorned). */
+.office-task-harness {
+  grid-column: 1;
+  width: fit-content;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: var(--r-pill, 999px);
+  font-family: var(--mono); font-size: 10px; letter-spacing: .4px;
+  text-transform: uppercase; color: var(--accent-ink);
+}
+.office-task-select { width: 100%; }
 .office-task-acts { grid-column: 2; grid-row: 1 / span 3; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
 .office-task-del,
 .office-task-edit {
@@ -1443,6 +1477,11 @@ body[data-ds-dark-theme] {
 .office-hire-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .office-hire-grid > .office-field,
 .office-hire-grid > .office-check { min-width: 0; }
+/* The task dialog's harness + model: one decision, so one row. Same two-column
+   grid as the hire form, but a narrow dialog wraps it back to a column. */
+.office-field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.office-field-row > .office-field { min-width: 0; }
+@media (max-width: 520px) { .office-field-row { grid-template-columns: minmax(0, 1fr); } }
 .office-hire-md { align-self: center; }
 .office-check {
   display: inline-flex; align-items: center; gap: 8px;

@@ -66,6 +66,10 @@ test("choosing a harness repaints the model pill and persists the choice", async
   await page.selectOption("#chat-harness", "claude");
   await page.waitForFunction(() => document.getElementById("chat-header-model").textContent.includes("Claude Code"));
   assert.equal(await page.inputValue("#chat-model"), "", "default: let the CLI use its configured model");
+  // Claude's own CLI cannot list its models here, so the pill falls back to the
+  // catalogue's aliases once it has answered — never before.
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll("#chat-model option")].some((o) => o.value === "sonnet"));
   const models = await page.$$eval("#chat-model option", (els) => els.map((el) => el.value));
   assert.deepEqual(models, ["", "sonnet", "opus", "haiku"]);
   assert.equal(await page.evaluate(() => localStorage.getItem("scope-chat-harness")), "claude");
@@ -84,6 +88,26 @@ test("the model pill shows the models the harness's own CLI reports", async () =
   assert.equal(await page.inputValue("#chat-model"), "", "default stays selected");
   const asked = mock.requestsFor("/chat/harness-models", "GET").at(-1);
   assert.equal(asked.query.harness, "opencode", "the CLI was asked for its own list");
+});
+
+test("the model pill waits for the CLI instead of offering curated models", async () => {
+  await boot();
+  // A CLI takes a moment to answer; pin that wait.
+  mock.setHarnessModelsDelay(800);
+  await page.selectOption("#chat-harness", "opencode");
+  // While nothing has answered, the pill says so and offers none of the
+  // catalogue's suggestions (opencode's curated `anthropic/…` id included).
+  const shown = await page.$$eval("#chat-model option", (els) =>
+    els.map((el) => ({ value: el.value, text: (el.textContent || "").trim(), disabled: el.disabled })));
+  assert.equal(shown.length, 1, `only the wait is offered (${JSON.stringify(shown)})`);
+  assert.match(shown[0].text, /Loading models/);
+  assert.equal(shown[0].disabled, true, "the wait is not a choice");
+
+  // …then the real list arrives and replaces it.
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll("#chat-model option")].some((o) => o.value === "acme/discovered-coder"));
+  const after = await page.$$eval("#chat-model option", (els) => els.map((el) => el.value));
+  assert.deepEqual(after, ["", "acme/discovered-coder", "acme/discovered-fast", "openai/gpt-5"]);
 });
 
 test("the model pill is searchable, and the picked model rides on the next prompt", async () => {
@@ -272,6 +296,8 @@ test("a model picked for one harness never leaks into another's list", async () 
 
   await page.selectOption("#chat-harness", "claude");
   await page.waitForFunction(() => document.getElementById("chat-header-model").textContent.includes("Claude Code"));
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll("#chat-model option")].some((o) => o.value === "sonnet"));
   let models = await page.$$eval("#chat-model option", (els) => els.map((el) => el.value));
   assert.deepEqual(models, ["", "sonnet", "opus", "haiku"], "only Claude Code's own models");
   assert.equal(await page.inputValue("#chat-model"), "", "back to the harness default");

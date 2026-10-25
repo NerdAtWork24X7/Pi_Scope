@@ -396,6 +396,11 @@ export interface ChatHarnessInfo {
   promptStdin: boolean;
   /** The CLI's own model listing command, when it has one. */
   modelsArgs: string[] | null;
+  /** Whether this CLI can be asked for its model list at all — a listing
+   *  command or a metadata protocol (`discoverHarnessModels`). The model
+   *  pickers use it to tell "no answer yet" (show a wait) apart from "no list
+   *  to ask for" (the curated aliases ARE the list). */
+  canListModels: boolean;
   /** Whether the CLI publishes its commands (the `/` menu asks it on demand). */
   hasCommands: boolean;
   /** Defined in Settings → Plugins → Workflow. */
@@ -422,6 +427,7 @@ export function chatHarnessList(settings: HarnessSettings = EMPTY_HARNESS_SETTIN
       modelFlag: spec.modelFlag,
       promptStdin: spec.promptStdin,
       modelsArgs: spec.modelsArgs ? spec.modelsArgs.slice() : null,
+      canListModels: !!spec.modelsArgs || !!spec.modelsVia,
       hasCommands: !!spec.commandsVia,
       user: !!spec.user,
     };

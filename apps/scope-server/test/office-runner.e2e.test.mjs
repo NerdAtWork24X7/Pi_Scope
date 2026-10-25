@@ -67,6 +67,7 @@ let ws;
 let agentDir;
 let pluginsDir;
 let stubBin; // the stub `pi` wrapper, reused by the restart test
+let claudeMarker; // written by the stub Claude Code CLI when a task uses it
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -150,6 +151,14 @@ before(async () => {
   fs.chmodSync(wrapper, 0o755);
   stubBin = wrapper;
 
+  // A stub external harness: proves a task's chosen harness reaches the
+  // dispatch. Chat launches Claude Code in print mode and reads its stdout.
+  claudeMarker = path.join(stubDir, "claude-args.txt");
+  const claudeStub = path.join(stubDir, "claude");
+  fs.writeFileSync(claudeStub,
+    `#!/bin/sh\nprintf '%s\\n' "$*" > ${JSON.stringify(claudeMarker)}\necho 'harness ok'\n`);
+  fs.chmodSync(claudeStub, 0o755);
+
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, [SERVER], {
@@ -160,6 +169,7 @@ before(async () => {
       SCOPE_DB_PATH: path.join(ws, "scope.db"), SCOPE_AUTH_TOKEN: TOKEN,
       SCOPE_PLUGINS_DIR: pluginsDir, SCOPE_FILE_ROOT: ws,
       SCOPE_AGENT_DIR: agentDir, SCOPE_PI_BIN: wrapper,
+      SCOPE_HARNESS_BIN_CLAUDE: claudeStub,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -188,6 +198,58 @@ describe("the server-side queue runner", () => {
     assert.equal(byTitle(s, "first task").status, "done");
     assert.equal(byTitle(s, "second task").status, "done");
     assert.equal(byTitle(s, "first task").failedAt, undefined, "a clean run is not marked failed");
+  });
+
+  test("a task runs on the harness it names", async () => {
+    await clearBoard();
+    fs.rmSync(claudeMarker, { force: true });
+    const added = await post({ action: "addTask", title: "harness task", harness: "claude" });
+    assert.ok(added.res.ok, added.data?.error);
+    const task = byTitle(await snapshot(), "harness task");
+    assert.equal(task.harness, "claude", "the choice is stored on the task");
+    const catalogue = (await snapshot()).harnesses;
+    assert.ok(catalogue.some((h) => h.id === "claude" && h.available), "the snapshot offers the installed harness");
+
+    await post({ action: "moveTask", id: task.id, status: "planned" });
+    await post({ action: "setRunnerPaused", paused: false });
+    await until(async () => byTitle(await snapshot(), "harness task").status === "done", "the task runs to Done");
+    assert.ok(fs.existsSync(claudeMarker), "the chosen CLI was launched");
+    assert.match(fs.readFileSync(claudeMarker, "utf8"), /harness task/, "it received the task prompt");
+  });
+
+  test("addTask refuses an unknown harness", async () => {
+    const bad = await post({ action: "addTask", title: "bad harness", harness: "not-a-harness" });
+    assert.equal(bad.res.status, 400);
+    assert.match(String(bad.data.error), /unknown harness/);
+  });
+
+  test("a task's model reaches the harness it dispatches to", async () => {
+    await clearBoard();
+    fs.rmSync(claudeMarker, { force: true });
+    const added = await post({ action: "addTask", title: "model task", harness: "claude", model: "opus" });
+    assert.ok(added.res.ok, added.data?.error);
+    const task = byTitle(await snapshot(), "model task");
+    assert.equal(task.model, "opus", "the model is stored on the task");
+
+    await post({ action: "moveTask", id: task.id, status: "planned" });
+    await post({ action: "setRunnerPaused", paused: false });
+    await until(async () => byTitle(await snapshot(), "model task").status === "done", "the task runs to Done");
+    const args = fs.readFileSync(claudeMarker, "utf8");
+    assert.match(args, /--model opus/, `the CLI is asked for that model (${args.trim()})`);
+
+    // A model belongs to the agent it was chosen for: switching the harness
+    // without naming a model drops the old one instead of handing "opus" to Pi.
+    const edited = await post({ action: "updateTask", id: task.id, title: "model task", harness: "pi" });
+    assert.ok(edited.res.ok, edited.data?.error);
+    const cleared = byTitle(await snapshot(), "model task");
+    assert.equal(cleared.harness, undefined);
+    assert.equal(cleared.model, undefined, "the old harness's model goes with it");
+  });
+
+  test("a model starting with a dash is refused rather than handed to a CLI", async () => {
+    const added = await post({ action: "addTask", title: "flag model", model: "--dangerously" });
+    assert.ok(added.res.ok, added.data?.error);
+    assert.equal(byTitle(await snapshot(), "flag model").model, undefined, "the flag-shaped id is dropped");
   });
 
   test("Pause stops the run in flight and returns its task to Planned", async () => {
