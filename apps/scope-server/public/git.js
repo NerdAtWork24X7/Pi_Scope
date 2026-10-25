@@ -575,15 +575,41 @@
     setStatus(kind + " ok" + (data.out ? " — " + data.out.split("\n")[0].slice(0, 120) : ""));
     await loadStatus();
   }
-  async function branchOp(action, name) {
+  async function branchOp(action, name, { confirmed = false } = {}) {
     const cwd = selectedCwd(); if (!cwd) return;
-    if (action === "delete" && !confirm(`Delete branch '${name}'?`)) return;
+    if (!confirmed && action === "delete" && !confirm(`Delete branch '${name}'?`)) return;
+    if (!confirmed && action === "delete-remote" &&
+        !confirm(`Delete remote branch '${name}'?\n\nThis deletes it for everyone using that remote.`)) return;
     setStatus(action + " branch " + name + "…");
     const { res, data } = await api("/git/branch", {}, { cwd, action, name });
     if (!res.ok || !data.ok) { setStatus("branch " + action + " failed: " + (data.error || res.status), true); return; }
     setStatus("branch " + action + " ok");
     await loadStatus();
     loadBranches();
+    // Deleting (or creating/switching) a branch changes the ref badges in the
+    // history list, so refresh it when that list is the visible tab.
+    if (activeTab === "history") loadHistory();
+  }
+  // Shared confirmations for the two branch-delete entry points (history
+  // context menu / badge menu / Branches tab), so every path says the same
+  // thing before touching a ref.
+  async function deleteLocalBranch(name) {
+    const ok = await showGitModal({
+      title: "Delete Branch",
+      message: `Delete local branch “${name}”? Commits reachable only from it will be lost.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (ok) branchOp("delete", name, { confirmed: true });
+  }
+  async function deleteRemoteBranch(name) {
+    const ok = await showGitModal({
+      title: "Delete Remote Branch",
+      message: `Delete remote branch “${name}”?\n\nThis deletes it for everyone using that remote.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (ok) branchOp("delete-remote", name, { confirmed: true });
   }
   async function remoteOp2(action, name, url) {
     const cwd = selectedCwd(); if (!cwd) return;
@@ -687,10 +713,15 @@
     if (!refs) return "";
     return refs.split(",").map((s) => s.trim()).filter(Boolean).map((p) => {
       const isHead = p.startsWith("HEAD ->");
-      const name = isHead ? p.slice("HEAD ->".length) : p;
+      const isTag = p.startsWith("tag:");
+      // `git log --decorate` writes "HEAD -> main" with a space after the arrow.
+      const name = isHead ? p.slice("HEAD ->".length).trim() : p;
+      // The badge shows the decorated name (tags keep their prefix), while the
+      // ref itself is what the context menu resolves and deletes.
+      const ref = (isTag ? p.replace(/^tag:\s*/, "") : name).trim();
       const c = badgeColor(name);
       const check = isHead ? '<span class="git-ref-check">✓</span>' : "";
-      return `<span class="git-ref-badge" style="background:${c}26;color:${c};border:1px solid ${c}66" title="${esc(p)}">${check}${esc(name)}</span>`;
+      return `<span class="git-ref-badge" data-ref="${esc(ref)}" data-ref-tag="${isTag ? "1" : "0"}" style="background:${c}26;color:${c};border:1px solid ${c}66" title="${esc(p)}">${check}${esc(name)}</span>`;
     }).join("");
   }
 
@@ -722,7 +753,19 @@
     const msg = document.createElement("div");
     msg.className = "git-msg-cell";
     const refs = refBadges(c.refs);
-    if (refs) msg.appendChild(el(`<span class="git-msg-refs">${refs}</span>`));
+    if (refs) {
+      const refsEl = el(`<span class="git-msg-refs">${refs}</span>`);
+      // Each badge is its own right-click target: a branch can be deleted right
+      // where it is labelled, without hunting for it in the Branches tab.
+      refsEl.querySelectorAll(".git-ref-badge").forEach((badge) => {
+        badge.oncontextmenu = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          showRefMenu(badge.getAttribute("data-ref"), badge.getAttribute("data-ref-tag") === "1", e.clientX, e.clientY);
+        };
+      });
+      msg.appendChild(refsEl);
+    }
     const subj = el('<span class="git-msg-subject"></span>');
     subj.textContent = c.subject;
     subj.title = c.subject;
@@ -1149,11 +1192,12 @@
     closeMenu();
     menuEl = document.createElement("div");
     menuEl.className = "git-menu";
-    const add = (label, fn, danger) => {
+    const add = (label, fn, danger, disabled) => {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "git-menu-item" + (danger ? " danger" : "");
       b.textContent = label;
+      b.disabled = !!disabled;
       b.onclick = () => { closeMenu(); fn(); };
       menuEl.appendChild(b);
     };
@@ -1163,6 +1207,43 @@
     const rect = menuEl.getBoundingClientRect();
     menuEl.style.left = Math.min(x, window.innerWidth - rect.width - 8) + "px";
     menuEl.style.top = Math.min(y, window.innerHeight - rect.height - 8) + "px";
+  }
+
+  function copyRefName(ref) {
+    navigator.clipboard.writeText(ref).catch(() => {});
+    setStatus("copied " + ref);
+  }
+
+  // Right-click menu for a ref badge on a history row. The badge only carries the
+  // ref name, so the branch list is fetched to decide whether that name is a
+  // local branch (deletable), a remote-tracking branch (deletable on the remote),
+  // or something else (e.g. a tag, where copying is the only safe action).
+  async function showRefMenu(ref, isTag, x, y) {
+    if (!ref) return;
+    if (isTag) {
+      showMenu(x, y, (add) => add("Copy tag name", () => copyRefName(ref)));
+      return;
+    }
+    const cwd = selectedCwd(); if (!cwd) return;
+    const { res, data } = await api("/git/branches", { cwd });
+    if (!res.ok) { setStatus("load branches failed: " + (data.error || res.status), true); return; }
+    const local = (data.branches || []).find((b) => b.name === ref);
+    const remote = (data.remoteBranches || []).find((b) => b.name === ref);
+    if (!local && !remote) {
+      showMenu(x, y, (add) => add("Copy ref name", () => copyRefName(ref)));
+      return;
+    }
+    showMenu(x, y, (add, sep) => {
+      if (local) {
+        const isCurrent = local.name === data.current;
+        add(isCurrent ? `current branch “${ref}”` : `Delete branch “${ref}”…`,
+          () => { if (!isCurrent) deleteLocalBranch(ref); }, true, isCurrent);
+      } else {
+        add(`Delete remote branch “${remote.name}”…`, () => deleteRemoteBranch(remote.name), true);
+      }
+      sep();
+      add("Copy branch name", () => copyRefName(ref));
+    });
   }
 
   // Right-click menu for a working-tree file row: navigate (Review / ignore)
@@ -1232,6 +1313,57 @@
       const n = await showGitModal({ title: "Create Branch", input: { placeholder: "New branch name…" }, confirmLabel: "Create" });
       if (n && n.trim()) gitAction("branch", sha, n.trim());
     });
+    // Delete a local branch pointing at this commit. The branch list is fetched
+    // because the decorations only carry ref names — abbreviated shas are what
+    // tie a local branch to the row that was right-clicked. The checked-out
+    // branch is never offered (git refuses to delete it).
+    add("Delete branch…", async () => {
+      const cwd = selectedCwd(); if (!cwd) return;
+      const { res, data } = await api("/git/branches", { cwd });
+      if (!res.ok) { setStatus("load branches failed: " + (data.error || res.status), true); return; }
+      const local = data.branches || [];
+      const atCommit = local.filter((b) => b.name && b.name !== data.current && sha.startsWith(b.sha));
+      if (!atCommit.length) {
+        const isCurrent = local.some((b) => b.name === data.current && sha.startsWith(b.sha));
+        setStatus(isCurrent
+          ? "the checked-out branch points at this commit — switch to another branch to delete it"
+          : "no local branch points at this commit");
+        return;
+      }
+      let name = atCommit[0].name;
+      if (atCommit.length > 1) {
+        const pick = await showGitModal({
+          title: "Delete Branch",
+          select: { options: atCommit.map((b) => ({ value: b.name, label: b.name })), value: name },
+          confirmLabel: "Delete",
+          danger: true,
+        });
+        if (!pick) return;
+        name = pick;
+      }
+      await deleteLocalBranch(name);
+    }, true);
+    // The same commit may also carry remote-tracking refs; deleting one of those
+    // is a push, so it gets its own item and a warning that it affects everyone.
+    add("Delete remote branch…", async () => {
+      const cwd = selectedCwd(); if (!cwd) return;
+      const { res, data } = await api("/git/branches", { cwd });
+      if (!res.ok) { setStatus("load branches failed: " + (data.error || res.status), true); return; }
+      const atCommit = (data.remoteBranches || []).filter((b) => b.name && sha.startsWith(b.sha));
+      if (!atCommit.length) { setStatus("no remote-tracking branch points at this commit"); return; }
+      let name = atCommit[0].name;
+      if (atCommit.length > 1) {
+        const pick = await showGitModal({
+          title: "Delete Remote Branch",
+          select: { options: atCommit.map((b) => ({ value: b.name, label: b.name })), value: name },
+          confirmLabel: "Delete",
+          danger: true,
+        });
+        if (!pick) return;
+        name = pick;
+      }
+      await deleteRemoteBranch(name);
+    }, true);
     add("Create tag here…", async () => {
       const n = await showGitModal({ title: "Create Tag", input: { placeholder: "New tag name…" }, confirmLabel: "Create" });
       if (n && n.trim()) gitAction("tag", sha, n.trim());
@@ -1357,7 +1489,13 @@
       row.appendChild(nm);
       row.appendChild(meta);
       row.appendChild(listBtn(br.name === data.current ? "✓" : "switch", () => branchOp("switch", br.name)));
-      row.appendChild(listBtn("del", () => branchOp("delete", br.name), true));
+      // A branch you are on cannot be deleted, so only the other rows get the
+      // delete button (the server would refuse with git's own error).
+      if (br.name !== data.current) {
+        const del = listBtn("delete", () => branchOp("delete", br.name), true);
+        del.title = `Delete branch ${br.name}`;
+        row.appendChild(del);
+      }
       panes.branches.appendChild(row);
     }
 
@@ -1379,6 +1517,13 @@
         row.appendChild(nm);
         row.appendChild(meta);
         row.appendChild(listBtn(local ? "✓ " + local : "checkout", () => branchOp("checkout-remote", br.name)));
+        // Remote-tracking branches are deletable too — that is a push, so the
+        // confirmation spells out that it affects everyone using the remote.
+        if (br.remote && br.short) {
+          const del = listBtn("delete", () => deleteRemoteBranch(br.name), true);
+          del.title = `Delete remote branch ${br.name}`;
+          row.appendChild(del);
+        }
         panes.branches.appendChild(row);
       }
     }

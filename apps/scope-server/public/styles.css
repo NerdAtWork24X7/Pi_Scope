@@ -2420,6 +2420,14 @@
       border-width: 2.5px;
     }
 
+    /* Changed and impacted at once: the change overlay's fill inside, the
+       impact overlay's red ring outside — mirrors `.dnode.changed.impact`. */
+    .dsw.both {
+      background: var(--tint-orange);
+      border-color: var(--red);
+      border-width: 2.5px;
+    }
+
     .diagram-hint {
       position: absolute;
       right: 10px;
@@ -4668,6 +4676,17 @@ body.layout-form #trajectory-inspector {
 
     .git-menu-item:hover {
       background: var(--accent-hover);
+    }
+
+    /* A menu row that explains why the action is unavailable (e.g. deleting the
+       checked-out branch) rather than pretending it can run. */
+    .git-menu-item:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    .git-menu-item:disabled:hover {
+      background: none;
     }
 
     .git-menu-item.danger {

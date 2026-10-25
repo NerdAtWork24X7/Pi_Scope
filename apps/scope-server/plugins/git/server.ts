@@ -572,6 +572,22 @@ export function activate(api: any): void {
       r = gitTry(absCwd, ["switch", "-c", name, ...(startPoint ? [startPoint] : [])]);
     } else if (action === "delete") {
       r = gitTry(absCwd, ["branch", "-D", name]);
+    } else if (action === "delete-remote") {
+      // `name` is a remote-tracking ref ("origin/feature"): delete the branch on
+      // the remote itself. The remote and branch are split here and re-checked
+      // because both become arguments to `git push`.
+      const slash = name.indexOf("/");
+      const remote = slash > 0 ? name.slice(0, slash) : "";
+      const branch = slash > 0 ? name.slice(slash + 1) : "";
+      if (!remote || !branch || branch === "HEAD") {
+        return jsonResponse({ error: "invalid remote branch name" }, 400);
+      }
+      if (rejectOptionLike(remote, branch)) return jsonResponse({ error: "invalid branch name" }, 400);
+      r = gitTry(absCwd, ["push", remote, "--delete", branch]);
+      // Pushing the deletion normally prunes the remote-tracking ref too, but
+      // not every git version does it; remove it explicitly so the Branches
+      // list cannot keep showing a branch that is gone on the remote.
+      if (r.ok) gitTry(absCwd, ["branch", "-dr", `${remote}/${branch}`]);
     } else if (action === "checkout-remote") {
       // `name` is a remote-tracking ref ("origin/feature"). Check out a local
       // branch that tracks it — reusing an existing local branch of the same

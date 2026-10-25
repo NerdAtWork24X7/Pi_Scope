@@ -171,4 +171,25 @@ describe("git branches (local + remote)", () => {
     assert.equal(data.ok, true);
     assert.equal(git(repoDir, ["branch", "--show-current"]), "feature");
   });
+
+  test("deleting a remote-tracking branch deletes it on the remote and locally", async () => {
+    // A dedicated remote branch, so the earlier tests' branches stay put.
+    git(repoDir, ["push", "-q", "origin", "main:doomed"]);
+    git(repoDir, ["fetch", "-q", "origin"]);
+    const before = await api(`/git/branches?cwd=${encodeURIComponent(repoDir)}`);
+    assert.ok(before.data.remoteBranches.some((b) => b.name === "origin/doomed"));
+
+    const { res, data } = await api("/git/branch", {
+      method: "POST",
+      body: JSON.stringify({ cwd: repoDir, action: "delete-remote", name: "origin/doomed" }),
+    });
+    assert.ok(res.ok, `HTTP ${res.status}`);
+    assert.equal(data.ok, true);
+
+    const after = await api(`/git/branches?cwd=${encodeURIComponent(repoDir)}`);
+    assert.ok(!after.data.remoteBranches.some((b) => b.name === "origin/doomed"),
+      "the remote-tracking ref is gone from the listing");
+    assert.equal(git(remoteDir, ["branch", "--list", "doomed"]), "",
+      "the branch is gone on the remote itself");
+  });
 });

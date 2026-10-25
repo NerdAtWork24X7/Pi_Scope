@@ -1033,6 +1033,7 @@
   const diagramStatsEl = $("#diagram-stats");
   const diagramSearchIn = $("#diagram-search");
   const diagramChangedEl = $("#diagram-changed-only");
+  const diagramChangedLabel = $("#diagram-changed-label");
   const diagramImpactEl = $("#diagram-impact");
   const btnDiagram = $("#btn-files-diagram");
 
@@ -1048,7 +1049,38 @@
   // what depends on it (and the wires between them), without hunting for a
   // checkbox. The toggle remains for temporarily turning the overlay off.
   let diagramImpact = true;
+  // The two diagram overlays are remembered per workspace (like review
+  // progress): switching back to a project restores the view you left it in.
+  const DIAGRAM_STORE = "scope-diagram-toggles";
+  let diagramPrefsCwd = null;
   const LAY = { nodes: [], edges: [], clusters: [], folders: [], w: 800, h: 560, tx: 0, ty: 0, scale: 1 };
+
+  // ── Diagram overlay prefs (persisted per cwd) ────────────────────────────
+  /** Apply the stored toggles for the current workspace. Returns true when the
+   *  workspace changed (and therefore the selection no longer applies). */
+  function loadDiagramPrefs() {
+    const cwd = selectedCwd();
+    if (cwd === diagramPrefsCwd) return false;
+    diagramPrefsCwd = cwd;
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(DIAGRAM_STORE) || "{}")[cwd] || null; } catch { saved = null; }
+    diagramChangedOnly = !!(saved && saved.changedOnly);
+    diagramImpact = !saved || saved.impact !== false; // impact is on unless turned off
+    if (diagramChangedEl) diagramChangedEl.checked = diagramChangedOnly;
+    if (diagramImpactEl) diagramImpactEl.checked = diagramImpact;
+    selNodeId = null;
+    syncChangedLabel();
+    return true;
+  }
+  function saveDiagramPrefs() {
+    const cwd = selectedCwd();
+    if (!cwd) return;
+    try {
+      const all = JSON.parse(localStorage.getItem(DIAGRAM_STORE) || "{}");
+      all[cwd] = { changedOnly: diagramChangedOnly, impact: diagramImpact };
+      localStorage.setItem(DIAGRAM_STORE, JSON.stringify(all));
+    } catch { /* storage unavailable — the toggles still work for this session */ }
+  }
 
   // ── Review progress (persisted per cwd) ──────────────────────────────────
   function reviewedFor(cwd) {
@@ -1083,6 +1115,7 @@
 
   // ── Fetch + model ─────────────────────────────────────────────────────────
   async function ensureGraph(force) {
+    loadDiagramPrefs();
     const cwd = selectedCwd();
     if (!cwd) { graph = null; graphCwd = ""; renderDiagram(true); return; }
     if (!force && graph && graphCwd === cwd) return;
@@ -1099,10 +1132,14 @@
     } finally {
       graphLoading = false;
     }
+    // A workspace remembered with both overlays on may have no selection yet;
+    // anchor it now that the graph is available so the impacted references are
+    // visible immediately instead of only after the first click.
+    ensureImpactAnchor();
     renderDiagram(true);
   }
 
-  function graphModel() {
+  function graphModel(opts) {
     if (!graph) return { nodes: [], edges: [], total: 0, capped: false };
     const useFiles = gran === "files";
     const srcNodes = useFiles ? (graph.fileNodes || []) : (graph.modules || []);
@@ -1135,7 +1172,21 @@
     let nodes = [...byId.values()];
     const f = diagramFilter.trim().toLowerCase();
     if (f) nodes = nodes.filter((n) => n.full.toLowerCase().includes(f) || n.label.toLowerCase().includes(f));
-    if (diagramChangedOnly) nodes = nodes.filter((n) => n.changed);
+    // "changed only" keeps the change overlay AND, while impact is on, the
+    // selected node's dependents: the two overlays are meant to compose, so a
+    // ticked box still shows the changed files *and* the unchanged references
+    // the change reaches (status fill for changed, red ring/tint for impacted;
+    // a node that is both keeps its status fill and gains the ring). Filtering
+    // to changed nodes alone hid every impacted reference the moment this box
+    // was ticked.
+    if (diagramChangedOnly && !(opts && opts.ignoreChangedOnly)) {
+      const keep = new Set(nodes.filter((n) => n.changed).map((n) => n.id));
+      if (diagramImpact && selNodeId && byId.has(selNodeId)) {
+        keep.add(selNodeId);
+        for (const id of transitiveDependents(selNodeId, edges)) if (byId.has(id)) keep.add(id);
+      }
+      nodes = nodes.filter((n) => keep.has(n.id));
+    }
     const ids = new Set(nodes.map((n) => n.id));
     edges = edges.filter((e) => ids.has(e.from) && ids.has(e.to));
     return { nodes, edges, total, capped: total > CAP };
@@ -1464,7 +1515,10 @@
    * left the whole floor grey with nothing highlighted.
    */
   function defaultImpactNode() {
-    const model = graphModel();
+    // The anchor is picked for its blast radius, so ignore the changed-only
+    // filter here: its dependents are often unchanged and are only re-added to
+    // the floor once the node is selected.
+    const model = graphModel({ ignoreChangedOnly: true });
     if (!model.nodes.length) return null;
     const onFloor = new Set(model.nodes.map((n) => n.id));
     for (const c of (graph && graph.changed) || []) {
@@ -1600,7 +1654,10 @@
       // nothing — the floor was already darkened before the box was ticked.)
       if (sel && nd.id === sel.id) cls.push("sel");
       else if (blast && blast.has(nd.id)) cls.push("impact");
-      else if (blast) cls.push("dim");
+      // With "changed only" on, every node on the floor is a changed node or
+      // part of the highlighted radius, so dimming the rest would hide the
+      // changed files the user explicitly asked to keep beside the impact.
+      else if (blast && !diagramChangedOnly) cls.push("dim");
       const tip = `${nd.full}${nd.changed ? " · " + (nd.status || "modified") : ""}${nd.fanIn ? " · " + nd.fanIn + " dependents" : ""}${isReviewed(nd.full) ? " · reviewed" : ""}${gran === "files" ? " · double-click to open diff" : ""}`;
       const sub = nodeSubLabel(nd);
       nodeHtml += `<g class="${cls.join(" ")}" data-node="${esc(nd.id)}" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})">`
@@ -1641,7 +1698,10 @@
       + `<span class="dlg"><span class="dsw done"></span>reviewed ${reviewed}/${changed.length}</span>`
       // The impact chip only appears while the blast radius is being shown, so
       // the legend always answers "what is the red outline?".
-      + (diagramImpact ? `<span class="dlg"><span class="dsw impact"></span>impact</span>` : "");
+      + (diagramImpact ? `<span class="dlg" title="Dependents of the selected node — including unchanged references"><span class="dsw impact"></span>${diagramChangedOnly ? "impacted" : "impact"}</span>` : "")
+      // Both overlays at once: a changed block that also sits in the radius
+      // keeps its status colour inside and gains the red ring outside.
+      + (diagramChangedOnly && diagramImpact ? `<span class="dlg" title="A changed file or folder that is also in the blast radius: status fill plus the red ring"><span class="dsw both"></span>changed + impacted</span>` : "");
   }
 
   // ── Side panel ─────────────────────────────────────────────────────────────
@@ -1935,8 +1995,8 @@
 
   // ── Diagram controls ─────────────────────────────────────────────────────
   if (btnDiagram) btnDiagram.onclick = () => setViewMode(viewMode === "diagram" ? "diff" : "diagram");
-  $("#diagram-gran-files")?.addEventListener("click", () => { gran = "files"; selNodeId = null; setGranButtons(); renderDiagram(true); });
-  $("#diagram-gran-modules")?.addEventListener("click", () => { gran = "modules"; selNodeId = null; setGranButtons(); renderDiagram(true); });
+  $("#diagram-gran-files")?.addEventListener("click", () => { gran = "files"; selNodeId = null; ensureImpactAnchor(); setGranButtons(); renderDiagram(true); });
+  $("#diagram-gran-modules")?.addEventListener("click", () => { gran = "modules"; selNodeId = null; ensureImpactAnchor(); setGranButtons(); renderDiagram(true); });
   $("#diagram-relayout")?.addEventListener("click", () => { for (const n of LAY.nodes) { n.x = undefined; n.y = undefined; } renderDiagram(true); });
   $("#diagram-fit")?.addEventListener("click", () => { fitView(); applyTransform(); });
   if (diagramSearchIn) {
@@ -1947,15 +2007,36 @@
       searchTimer = setTimeout(() => { diagramFilter = diagramSearchIn.value; renderDiagram(true); }, 150);
     });
   }
-  if (diagramChangedEl) diagramChangedEl.addEventListener("change", () => { diagramChangedOnly = diagramChangedEl.checked; renderDiagram(true); });
+  // When both overlays are on, ticking "changed only" with nothing selected
+  // still has to show an impact radius — anchor on the default node so the
+  // changed files and their impacted references appear together.
+  function ensureImpactAnchor() {
+    if (diagramChangedOnly && diagramImpact && !selNodeId) selNodeId = defaultImpactNode();
+  }
+  // The checkbox label has to be honest: with impact on it shows the changed
+  // nodes *plus* their impacted references, not "changed only".
+  function syncChangedLabel() {
+    if (!diagramChangedLabel) return;
+    diagramChangedLabel.textContent = diagramChangedOnly && diagramImpact ? "changed + impacted" : "changed only";
+  }
+  if (diagramChangedEl) diagramChangedEl.addEventListener("change", () => {
+    diagramChangedOnly = diagramChangedEl.checked;
+    ensureImpactAnchor();
+    syncChangedLabel();
+    saveDiagramPrefs();
+    renderDiagram(true);
+  });
   if (diagramImpactEl) diagramImpactEl.checked = diagramImpact;
   if (diagramImpactEl) diagramImpactEl.addEventListener("change", () => {
     diagramImpact = diagramImpactEl.checked;
     // Ticking impact with nothing selected highlights the review queue's top
     // entry, so the toggle always shows a blast radius the moment it is on.
     if (diagramImpact && !selNodeId) selNodeId = defaultImpactNode();
+    syncChangedLabel();
+    saveDiagramPrefs();
     renderDiagram();
   });
+  syncChangedLabel();
 
   // Defaults for the Review page: diagram view, file list collapsed, and
   // `.gitignore`d files hidden.
@@ -1966,11 +2047,13 @@
 
   window.__filesOnView = function () {
     refreshCwd();
+    loadDiagramPrefs();
     loadModified();
     if (viewMode === "diagram") ensureGraph(true);
   };
   window.__filesOnSessions = function () {
     refreshCwd();
+    loadDiagramPrefs();
     const cwd = selectedCwd();
     if (cwd && cwd !== current.cwd) {
       loadModified();
