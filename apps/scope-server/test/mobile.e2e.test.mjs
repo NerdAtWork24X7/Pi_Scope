@@ -247,7 +247,7 @@ describe("the phone gets the mobile document, the desktop gets the app", () => {
     await page.goto(`${base}/m?token=${TOKEN}`, { waitUntil: "domcontentloaded" });
     // The client reads ?token= and uses it: the drawer fills from /sessions.
     await page.waitForFunction(() => document.querySelector("#m-sessions")?.textContent?.length > 0, null, { timeout: 15_000 });
-    assert.equal(await page.evaluate(() => localStorage.getItem("scope-token")), TOKEN, "the token is remembered for the next visit");
+    assert.equal(await page.evaluate(() => localStorage.getItem("scope-access-token")), TOKEN, "the token is remembered for the next visit");
     await page.close();
   });
 });
@@ -1139,6 +1139,209 @@ describe("the mobile skin (Amber Terminal Noir)", () => {
     await hero.page.close();
   });
 
+  test("the chrome scales down with the screen, so a small phone still fits", async () => {
+    // The report this covers: on a 320×480 phone the hero's CTA sat below the
+    // fold, and the two-row composer foot ate a third of the screen. Both are
+    // driven by viewport size now, with the 14px reading baseline and the 44px
+    // touch targets left alone.
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m?token=${TOKEN}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#m-transcript .m-empty");
+
+    const at = async (width, height, { showJump = false } = {}) => {
+      await page.setViewportSize({ width, height });
+      await page.waitForTimeout(200);
+      return page.evaluate((show) => {
+        const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+        const transcript = document.querySelector("#m-transcript");
+        const t = transcript.getBoundingClientRect();
+        const jump = document.querySelector("#m-jump");
+        if (show) jump.hidden = false;
+        return {
+          overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          heroFits: transcript.scrollHeight <= Math.ceil(t.height),
+          ctaBottom: Math.round(document.querySelector(".m-empty .m-btn-primary").getBoundingClientRect().bottom),
+          transcriptBottom: Math.round(t.bottom),
+          header: Math.round(box("#m-top").height),
+          composer: Math.round(box("#m-composer").height),
+          heroBody: getComputedStyle(document.querySelector(".m-hero-body")).display,
+          jumpBottom: Math.round(jump.getBoundingClientRect().bottom),
+          composerTop: Math.round(box("#m-composer").top),
+          toggleRight: Math.round(box(".m-view-toggle").right),
+          composerInnerRight: Math.round(
+            box("#m-composer").right - parseFloat(getComputedStyle(document.querySelector("#m-composer")).paddingRight)
+          ),
+        };
+      }, showJump);
+    };
+
+    const small = await at(320, 480, { showJump: true });
+    assert.equal(small.overflowX, 0, "nothing scrolls sideways at 320px");
+    assert.ok(small.heroFits, "the hero needs no scrolling on a 480px-tall phone");
+    assert.ok(small.ctaBottom <= small.transcriptBottom, `its CTA is on screen (${small.ctaBottom} <= ${small.transcriptBottom})`);
+    assert.ok(small.header <= 50, `the navbar is compact (${small.header}px)`);
+    assert.ok(small.composer <= 100, `and so is the composer (${small.composer}px)`);
+    assert.ok(small.jumpBottom <= small.composerTop, `the jump pill stays clear of the composer (${small.jumpBottom} <= ${small.composerTop})`);
+    assert.ok(small.toggleRight <= small.composerInnerRight, `the composer foot fits its row (${small.toggleRight} <= ${small.composerInnerRight})`);
+
+    // A tall reference phone keeps the full composition, but the composer is
+    // still one row shorter than the stacked version it used to be.
+    const reference = await at(390, 844, { showJump: true });
+    assert.equal(reference.overflowX, 0);
+    assert.ok(reference.composer <= 115, `the composer is single-row (${reference.composer}px)`);
+    assert.ok(reference.jumpBottom <= reference.composerTop, "the jump pill clears it here too");
+    assert.ok(reference.toggleRight <= reference.composerInnerRight, `the composer foot fits its row (${reference.toggleRight} <= ${reference.composerInnerRight})`);
+
+    // Landscape: the body copy is dropped, so the wordmark, the readouts and
+    // the CTA still land on one screen instead of a page of scrolling.
+    const landscape = await at(844, 390);
+    assert.equal(landscape.heroBody, "none", "the hero body copy stands down in landscape");
+    assert.ok(landscape.heroFits, "and the hero fits the short screen");
+    assert.ok(landscape.header <= 46 && landscape.composer <= 96, `the chrome is at its floor (${landscape.header}/${landscape.composer}px)`);
+
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("a long draft gives its space back to the transcript on a short screen", async () => {
+    // Typing a paragraph is when the transcript matters most and the composer is
+    // least interesting. On a short screen the growth cap steps down and the
+    // foot row (model chip, Markdown/Raw switch) stands aside until the draft
+    // shrinks, instead of the composer eating half the phone.
+    await seedSession("composer-long-seed", { cwd: tmpDir });
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m?token=${TOKEN}&sid=composer-long-seed`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => document.querySelector("#m-input") && !document.querySelector("#m-input").disabled,
+      null,
+      { timeout: 15_000 }
+    );
+
+    const DRAFT = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight";
+    const measure = async (width, height) => {
+      await page.setViewportSize({ width, height });
+      await page.fill("#m-input", "");
+      await page.waitForTimeout(150);
+      const empty = await page.evaluate(() => ({
+        composer: Math.round(document.querySelector("#m-composer").getBoundingClientRect().height),
+        foot: getComputedStyle(document.querySelector(".m-foot")).display,
+      }));
+      await page.fill("#m-input", DRAFT);
+      await page.waitForTimeout(200);
+      const long = await page.evaluate(() => {
+        const composer = document.querySelector("#m-composer").getBoundingClientRect();
+        const transcript = document.querySelector("#m-transcript").getBoundingClientRect();
+        const input = document.querySelector("#m-input");
+        return {
+          composer: Math.round(composer.height),
+          transcript: Math.round(transcript.height),
+          input: Math.round(input.getBoundingClientRect().height),
+          scrolls: input.scrollHeight > input.clientHeight + 2,
+          foot: getComputedStyle(document.querySelector(".m-foot")).display,
+          tall: document.querySelector("#m-composer").hasAttribute("data-tall"),
+          overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
+      });
+      return { empty, long };
+    };
+
+    for (const [w, h] of [[320, 480], [360, 640], [844, 390]]) {
+      const { long } = await measure(w, h);
+      assert.equal(long.tall, true, `${w}x${h}: the grown draft is flagged`);
+      assert.equal(long.foot, "none", `${w}x${h}: the foot row stands down while a paragraph is open`);
+      assert.ok(long.composer <= Math.round(h * 0.3), `${w}x${h}: the composer keeps to 30% of the screen (${long.composer}px of ${h})`);
+      assert.ok(long.transcript >= Math.round(h * 0.5), `${w}x${h}: the transcript keeps at least half (${long.transcript}px)`);
+      assert.ok(long.input >= 60 && long.scrolls, `${w}x${h}: the draft scrolls inside a readable field (${long.input}px)`);
+      assert.equal(long.overflowX, 0, `${w}x${h}: nothing scrolls sideways`);
+
+      // Clearing it gives the foot row back: nothing stays hidden.
+      await page.fill("#m-input", "");
+      await page.waitForTimeout(150);
+      assert.equal(
+        await page.evaluate(() => getComputedStyle(document.querySelector(".m-foot")).display),
+        "flex",
+        `${w}x${h}: the foot row returns when the draft is gone`
+      );
+    }
+
+    // A tall reference phone has room for both, so only short screens stand the
+    // foot row down — the model chip is the only place the model is visible.
+    const tall = await measure(390, 844);
+    assert.equal(tall.long.foot, "flex", "the model chip stays on a tall phone");
+    assert.ok(tall.long.composer > tall.empty.composer, "and the composer still grows with the draft");
+
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("the drawer and the sheet stay as compact as the rest of a small screen", async () => {
+    // Two-line session rows and 16px of air around every sheet field are a
+    // 390-wide luxury. Below 375px both surfaces step down to the same density,
+    // without dropping a row under the 44px touch floor.
+    await seedSession("density-seed", { cwd: tmpDir });
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m?token=${TOKEN}&sid=density-seed`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelector("#m-input") && !document.querySelector("#m-input").disabled, null, { timeout: 15_000 });
+
+    const density = async (width, height) => {
+      await page.setViewportSize({ width, height });
+      await page.waitForTimeout(150);
+
+      await page.click("#m-menu");
+      await page.waitForTimeout(400);
+      const drawer = await page.evaluate(() => {
+        const row = document.querySelector(".m-sess");
+        const meta = document.querySelector(".m-sess-meta");
+        return {
+          row: Math.round(row.getBoundingClientRect().height),
+          ws: Math.round(document.querySelector(".m-ws-name").getBoundingClientRect().height),
+          metaSize: parseFloat(getComputedStyle(meta).fontSize),
+        };
+      });
+      await page.click("#m-drawer-close");
+      await page.waitForTimeout(400);
+
+      await page.click("#m-new");
+      await page.waitForTimeout(400);
+      const sheet = await page.evaluate(() => {
+        const body = document.querySelector(".m-sheet-body");
+        const bcs = getComputedStyle(body);
+        return {
+          bodyPad: bcs.paddingTop,
+          gap: bcs.rowGap,
+          fieldGap: getComputedStyle(document.querySelector(".m-field")).rowGap,
+          opt: Math.round(document.querySelector(".m-opt").getBoundingClientRect().height),
+          select: Math.round(document.querySelector(".m-select").getBoundingClientRect().height),
+        };
+      });
+      await page.click("#m-sheet-close");
+      await page.waitForTimeout(400);
+      return { drawer, sheet };
+    };
+
+    for (const [w, h] of [[320, 568], [360, 640]]) {
+      const { drawer, sheet } = await density(w, h);
+      assert.ok(drawer.row >= 44 && drawer.row <= 52, `${w}px: a session row is compact but still a touch target (${drawer.row}px)`);
+      assert.ok(drawer.ws <= 34, `${w}px: the workspace eyebrow tightens too (${drawer.ws}px)`);
+      assert.equal(drawer.metaSize, 10, `${w}px: the row's readout steps down with it`);
+      assert.equal(sheet.bodyPad, "12px", `${w}px: the sheet body loses its 16px gutter`);
+      assert.equal(sheet.gap, "12px");
+      assert.equal(sheet.fieldGap, "8px", `${w}px: and so does the gap inside a field`);
+      assert.ok(sheet.opt >= 44 && sheet.opt <= 44, `${w}px: workspace rows sit on the touch floor (${sheet.opt}px)`);
+      assert.ok(sheet.select >= 44 && sheet.select <= 44, `${w}px: selects sit on it as well (${sheet.select}px)`);
+    }
+
+    // The reference phone is untouched: this is a small-screen tier, not a
+    // global shrink.
+    const reference = await density(390, 844);
+    assert.ok(reference.drawer.row >= 54, `the reference rows stay roomy (${reference.drawer.row}px)`);
+    assert.equal(reference.sheet.bodyPad, "16px");
+    assert.equal(reference.sheet.opt, 48);
+
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
   test("off the phone the layout keeps its phone shape instead of stretching", async () => {
     // ?ui=mobile in a desktop browser, or a phone in landscape, used to paint
     // this single column across the whole window — the mobile page reading as
@@ -1220,6 +1423,10 @@ describe("the mobile skin (Amber Terminal Noir)", () => {
     for (const width of [360, 393, 412, 673, 980]) {
       const page = await browser.newPage({
         viewport: { width, height: 800 },
+        // Desktop-site mode keeps the physical screen and widens the layout
+        // viewport to ~980px; without that split the emulation would describe a
+        // 980px-wide panel (a tablet) instead of a phone.
+        screen: { width: width > 700 ? 412 : width, height: 800 },
         userAgent: SAMSUNG_UA,
         isMobile: true,
         hasTouch: true,
@@ -1238,10 +1445,12 @@ describe("the mobile skin (Amber Terminal Noir)", () => {
           bodyW: Math.round(r.width),
           left: Math.round(r.left),
           over: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          desktopSite: document.documentElement.hasAttribute("data-desktop-site"),
         };
       });
       assert.equal(seen.fine, false, `the viewport is not mouse-driven at ${width}px`);
       assert.equal(seen.coarse, true, `it is a touch pointer at ${width}px`);
+      assert.equal(seen.desktopSite, width > 700, `desktop-site mode is recognised at ${width}px`);
       assert.equal(seen.bodyW, width, `the layout is full-bleed at ${width}px`);
       assert.equal(seen.left, 0, `flush to both edges at ${width}px, no gutter`);
       assert.equal(seen.over, 0, `and nothing scrolls sideways at ${width}px`);
@@ -1804,15 +2013,16 @@ describe("deleting a session from the phone", () => {
 });
 
 describe("the pairing panel", () => {
-  test("the QR URL points at the mobile layout and keeps the token", async () => {
+  test("the QR URL carries the short-lived pairing code, never the auth token", async () => {
     const { page } = await phonePage();
     await page.goto(`${base}/?token=${TOKEN}&ui=desktop`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => typeof window.SCOPE?.mobileUrlFor === "function", null, { timeout: 15_000 });
 
-    const url = await page.evaluate(() => window.SCOPE.mobileUrlFor("http://192.168.1.44:43190/?token=deadbeef"));
+    const url = await page.evaluate(() => window.SCOPE.mobileUrlFor("https://192.168.1.44:43201/"));
     const parsed = new URL(url);
     assert.equal(parsed.pathname, "/m", "the phone opens the mobile entry");
-    assert.equal(parsed.searchParams.get("token"), "deadbeef", "the token rides along");
+    assert.equal(parsed.searchParams.get("pair"), null, "the QR encodes no pairing code");
+    assert.equal(parsed.searchParams.get("token"), null, "the auth token is never in the URL");
     assert.equal(parsed.searchParams.get("ui"), "mobile", "the layout is explicit, not sniffed");
 
     // The panel encodes that URL in the QR: stub /lan as a LAN-bound server
@@ -1825,19 +2035,215 @@ describe("the pairing panel", () => {
           lan_exposed: true,
           port: 43190,
           bind_host: "0.0.0.0",
+          platform: "linux",
+          pair_code: "123 456",
+          pair_expires_at: Date.now() + 2 * 60_000,
+          addresses: [{ address: "192.168.1.44", iface: "wlan0", virtual: false, default_route: true }],
           ips: ["192.168.1.44"],
-          urls: ["http://192.168.1.44:43190/?token=deadbeef"],
+          tls: true,
+          tls_port: 43201,
+          tls_error: null,
+          urls: ["https://192.168.1.44:43201/m"],
         }),
       }));
     await page.click("#btn-phone");
     await page.waitForSelector("#phone-modal", { state: "visible", timeout: 10_000 });
     await page.waitForSelector("#phone-url", { timeout: 10_000 });
+    const shown = await page.locator("#phone-url").textContent();
     assert.equal(
-      await page.locator("#phone-url").textContent(),
-      "http://192.168.1.44:43190/m?token=deadbeef&ui=mobile",
-      "the QR points at the mobile layout, with the token and the explicit ui hint"
+      shown,
+      "https://192.168.1.44:43201/m?ui=mobile",
+      "the QR is the mobile entry over HTTPS — no code, so pairing always means typing it"
     );
+    assert.doesNotMatch(shown, /token=/, "the QR never carries the auth token");
+    assert.doesNotMatch(shown, /pair=/, "and never the pairing code: a photo of the QR is not a way in");
+    assert.equal(await page.locator("#phone-code").textContent(), "123 456", "the six-digit code is shown for typing");
+    assert.match(await page.locator("#phone-code-expiry").textContent(), /expires in \d:\d\d/);
     assert.ok(await page.locator(".phone-qr-wrap svg").count(), "a QR was rendered for that URL");
+    // The certificate is self-signed, so the panel has to warn about the one
+    // interstitial the phone will show — otherwise it reads as a dead link.
+    const tlsNote = await page.locator(".phone-tls").textContent();
+    assert.match(tlsNote, /Encrypted/, "the panel says the phone hop is encrypted");
+    assert.match(tlsNote, /Advanced → Proceed/, "and how to accept the certificate once");
+
+    // The fallback: no HTTPS listener (its port is taken, or SCOPE_TLS=0). An
+    // http:// link must not look identical to an encrypted one — the panel names
+    // the exposure and the reason.
+    await page.unroute("**/lan*");
+    await page.route("**/lan*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          lan_exposed: true,
+          port: 43190,
+          bind_host: "0.0.0.0",
+          platform: "linux",
+          pair_code: "123 456",
+          pair_expires_at: Date.now() + 2 * 60_000,
+          addresses: [{ address: "192.168.1.44", iface: "wlan0", virtual: false, default_route: true }],
+          ips: ["192.168.1.44"],
+          tls: false,
+          tls_port: null,
+          tls_error: "port 43201 is already in use — set SCOPE_TLS_PORT",
+          urls: ["http://192.168.1.44:43190/m"],
+        }),
+      }));
+    await page.click("#phone-close");
+    await page.click("#btn-phone");
+    await page.waitForSelector("#phone-url", { timeout: 10_000 });
+    assert.match(await page.locator("#phone-url").textContent(), /^http:\/\//, "it falls back to plain http");
+    const plainNote = await page.locator(".phone-tls.plain").textContent();
+    assert.match(plainNote, /Not encrypted/, "the panel says the hop is readable on the Wi-Fi");
+    assert.match(plainNote, /already in use/, "and why HTTPS is not up");
+    await page.close();
+  });
+});
+
+describe("pairing by code", () => {
+  /** The live code, straight from the endpoint the desktop panel reads. */
+  async function pairCode() {
+    const res = await fetch(`${base}/lan?token=${TOKEN}`);
+    assert.ok(res.ok, `GET /lan answered ${res.status}`);
+    return (await res.json()).pair_code;
+  }
+
+  /** Pair from the test process instead of the page, and hand back the pair a
+   *  phone would have stored — the setup for the renewal tests below. */
+  async function pairViaApi() {
+    const code = await pairCode();
+    const res = await fetch(`${base}/pair`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ code }),
+    });
+    assert.equal(res.status, 200, `POST /pair answered ${res.status}`);
+    return res.json();
+  }
+
+  test("a plain /m with no token stops at the gate instead of a 401 wall", async () => {
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#m-pair:not([hidden])", { timeout: 10_000 });
+    assert.equal(await page.locator("#m-pair-code").isVisible(), true, "the code field is offered");
+    // Nothing behind the gate was fetched with an empty token: the drawer is
+    // still the shipped empty markup, not a 401 error list.
+    assert.doesNotMatch(await page.locator("#m-hint").textContent(), /load sessions/i);
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("the code from the panel pairs the phone, and is not kept afterwards", async () => {
+    const code = await pairCode();
+    assert.match(code, /^\d{3} \d{3}$/, `the panel shows a six-digit code (${code})`);
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#m-pair:not([hidden])", { timeout: 10_000 });
+
+    // A wrong code is refused, with the server's verdict shown on the gate.
+    const wrong = code === "000 000" ? "111111" : "000000";
+    await page.fill("#m-pair-code", wrong);
+    await page.waitForFunction(() => !document.querySelector("#m-pair-hint").hidden, null, { timeout: 10_000 });
+    assert.match(await page.locator("#m-pair-hint").textContent(), /not right/i);
+    assert.equal(await page.locator("#m-pair").evaluate((n) => n.hidden), false, "a bad code does not open the app");
+
+    // The real code (the sixth digit triggers the submit) opens it.
+    await page.fill("#m-pair-code", code);
+    await page.waitForFunction(() => document.querySelector("#m-pair").hidden === true, null, { timeout: 10_000 });
+    await page.waitForFunction(() => (document.querySelector("#m-sessions")?.textContent || "").trim().length > 0, null, { timeout: 15_000 });
+
+    const stored = await page.evaluate(() => ({
+      access: localStorage.getItem("scope-access-token"),
+      refresh: localStorage.getItem("scope-refresh-token"),
+      legacy: localStorage.getItem("scope-token"),
+    }));
+    assert.match(stored.access, /^[\w-]+\.[\w-]+\.[\w-]+$/, "the phone keeps a JWT access token, not the code");
+    assert.notEqual(stored.access, TOKEN, "and never the server's master token");
+    assert.ok(stored.refresh && stored.refresh.length >= 32, "plus the refresh token that keeps it paired");
+    assert.equal(stored.legacy, null, "nothing is left in the old single-token slot");
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("scanning the QR alone does not pair: the URL carries no code", async () => {
+    // What the phone's camera gets is an address. Opening it — which is exactly
+    // what a scan does — leaves the gate up until the code from the panel is
+    // typed, so a photo of the QR is not a way in.
+    const lan = await (await fetch(`${base}/lan?token=${TOKEN}`)).json();
+    for (const u of lan.urls) assert.doesNotMatch(u, /pair=|token=/, `no credential in ${u}`);
+
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m?ui=mobile`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#m-pair:not([hidden])", { timeout: 10_000 });
+    assert.equal(
+      await page.evaluate(() => localStorage.getItem("scope-access-token")),
+      null,
+      "nothing is stored until the code is typed"
+    );
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("a stale stored token asks for a new code instead of failing", async () => {
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m?token=not-this-runs-token`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#m-pair:not([hidden])", { timeout: 10_000 });
+    assert.match(await page.locator("#m-pair-hint").textContent(), /reissued|expired/i);
+    assert.equal(await page.evaluate(() => localStorage.getItem("scope-access-token")), null, "the dead token is dropped");
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("a lapsed access token is renewed from the refresh token, with no new code", async () => {
+    // The point of the pair: the access token is short-lived, so a phone that
+    // sat in a pocket overnight comes back without the user typing anything.
+    const pair = await pairViaApi();
+    const { page, errors } = await phonePage();
+    await page.addInitScript(([access, refresh]) => {
+      localStorage.setItem("scope-access-token", access);
+      localStorage.setItem("scope-refresh-token", refresh);
+      localStorage.setItem("scope-access-expires", String(Date.now() - 60_000));
+    }, [pair.access_token, pair.refresh_token]);
+
+    await page.goto(`${base}/m`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => (document.querySelector("#m-sessions")?.textContent || "").trim().length > 0, null, { timeout: 15_000 });
+
+    assert.equal(await page.locator("#m-pair").evaluate((n) => n.hidden), true, "the pairing gate never appears");
+    const stored = await page.evaluate(() => ({
+      access: localStorage.getItem("scope-access-token"),
+      refresh: localStorage.getItem("scope-refresh-token"),
+      expires: Number(localStorage.getItem("scope-access-expires")),
+    }));
+    assert.notEqual(stored.access, pair.access_token, "a fresh access token replaced the lapsed one");
+    assert.notEqual(stored.refresh, pair.refresh_token, "and the refresh token rotated with it");
+    assert.ok(stored.expires > Date.now(), "the new expiry is in the future");
+
+    // The pair it replaced cannot be replayed: rotation, not reuse.
+    const replay = await fetch(`${base}/pair/refresh`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ refresh_token: pair.refresh_token }),
+    });
+    assert.equal(replay.status, 401, "the rotated-out refresh token is spent");
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("a refused refresh sends the phone back to the gate, not a 401 wall", async () => {
+    // The server restarted (its signing key is per boot) or the phone was
+    // disconnected from the panel: the only way forward is a fresh code.
+    const { page, errors } = await phonePage();
+    await page.addInitScript(() => {
+      localStorage.setItem("scope-access-token", "stale.access.token");
+      localStorage.setItem("scope-refresh-token", "not-a-live-refresh-token");
+      localStorage.setItem("scope-access-expires", String(Date.now() - 60_000));
+    });
+
+    await page.goto(`${base}/m`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#m-pair:not([hidden])", { timeout: 10_000 });
+    assert.match(await page.locator("#m-pair-hint").textContent(), /reissued|expired/i);
+    assert.equal(await page.evaluate(() => localStorage.getItem("scope-refresh-token")), null, "the dead pairing is forgotten");
+    assert.deepEqual(errors, []);
     await page.close();
   });
 });
@@ -1852,4 +2258,221 @@ test("/index.html stays the desktop document even on a phone UA", async () => {
   assert.ok(await page.locator("#chat-composer").count());
   assert.deepEqual(errors, []);
   await page.close();
+});
+
+describe("wide touch screens (foldables and tablets)", () => {
+  /** A touch context: no hover, coarse pointer — what a tablet actually reports,
+   *  and what keeps the desktop-preview branch out of the way. */
+  async function touchPage(width, height) {
+    const page = await browser.newPage({
+      viewport: { width, height },
+      hasTouch: true,
+      isMobile: true,
+      deviceScaleFactor: 2,
+    });
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e?.message ?? e)));
+    return { page, errors };
+  }
+
+  function measure(page) {
+    return page.evaluate(() => {
+      const body = document.body.getBoundingClientRect();
+      const composer = document.querySelector("#m-composer").getBoundingClientRect();
+      return {
+        body: Math.round(body.width),
+        gutterLeft: Math.round(body.left),
+        gutterRight: Math.round(window.innerWidth - body.right),
+        transcript: Math.round(document.querySelector("#m-transcript").getBoundingClientRect().width),
+        composer: Math.round(composer.height),
+        sendRight: Math.round(document.querySelector("#m-send").getBoundingClientRect().right),
+        composerRight: Math.round(composer.right),
+        overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        pointerIsMouse: matchMedia("(hover: hover) and (pointer: fine)").matches,
+      };
+    });
+  }
+
+  test("a tablet keeps a reading column, not 90-odd characters a line", async () => {
+    await seedSession("tablet-seed", { cwd: tmpDir });
+    // 800×1280 is a 10" Android tablet in portrait, 1280×800 the same panel in
+    // landscape; both used to paint this one column edge to edge.
+    for (const [w, h] of [[800, 1280], [1280, 800], [1024, 768]]) {
+      const { page, errors } = await touchPage(w, h);
+      await page.goto(`${base}/m?token=${TOKEN}&sid=tablet-seed`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => document.querySelector("#m-input") && !document.querySelector("#m-input").disabled, null, { timeout: 15_000 });
+
+      const m = await measure(page);
+      assert.equal(m.pointerIsMouse, false, `${w}x${h}: a tablet is not a mouse viewport`);
+      assert.equal(m.body, 760, `${w}x${h}: the column is 760px wide (${m.body})`);
+      assert.equal(m.transcript, 758, `${w}x${h}: the transcript fills that column, not the panel`);
+      assert.ok(Math.abs(m.gutterLeft - m.gutterRight) <= 1, `${w}x${h}: and it is centered (${m.gutterLeft}/${m.gutterRight})`);
+      assert.equal(m.overflowX, 0, `${w}x${h}: nothing scrolls sideways`);
+      assert.ok(m.composer <= 115, `${w}x${h}: the composer is still one row (${m.composer}px)`);
+      assert.ok(m.sendRight <= m.composerRight, `${w}x${h}: and its controls stay inside it`);
+
+      // The overlays belong to the column, not the panel: the drawer comes to
+      // rest against its left edge and the sheet is capped to its width.
+      await page.click("#m-menu");
+      await page.waitForTimeout(400);
+      const drawer = await page.evaluate(() => {
+        const d = document.querySelector("#m-drawer").getBoundingClientRect();
+        return { left: Math.round(d.left), width: Math.round(d.width) };
+      });
+      assert.equal(drawer.left, m.gutterLeft, `${w}x${h}: the drawer rests against the column`);
+      assert.ok(drawer.width < m.body, `${w}x${h}: and does not cover it (${drawer.width} < ${m.body})`);
+      await page.click("#m-drawer-close");
+      await page.waitForTimeout(400);
+
+      await page.click("#m-new");
+      await page.waitForTimeout(400);
+      const sheet = await page.evaluate(() => {
+        const s = document.querySelector(".m-sheet-card").getBoundingClientRect();
+        return { width: Math.round(s.width), left: Math.round(s.left), right: Math.round(window.innerWidth - s.right) };
+      });
+      assert.equal(sheet.width, 760, `${w}x${h}: the sheet is capped to the column (${sheet.width}px)`);
+      assert.ok(Math.abs(sheet.left - sheet.right) <= 1, `${w}x${h}: and centered in it`);
+      await page.click("#m-sheet-close");
+      await page.waitForTimeout(400);
+
+      assert.deepEqual(errors, []);
+      await page.close();
+    }
+  });
+
+  test("an unfolded foldable stays full-bleed: its inner display is not a tablet", async () => {
+    // ~673px is what a Z Fold reports with the inner screen open. It is under the
+    // 700px breakpoint, so the phone layout keeps the whole panel: squaring it
+    // into a stripe with gutters would be the wrong trade on a device that is
+    // held like a phone.
+    await seedSession("fold-seed", { cwd: tmpDir });
+    const { page, errors } = await touchPage(673, 841);
+    await page.goto(`${base}/m?token=${TOKEN}&sid=fold-seed`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelector("#m-input") && !document.querySelector("#m-input").disabled, null, { timeout: 15_000 });
+
+    const m = await measure(page);
+    assert.equal(m.body, 673, `the layout uses the full inner display (${m.body}px)`);
+    assert.equal(m.gutterLeft, 0);
+    assert.equal(m.overflowX, 0, "nothing scrolls sideways");
+    assert.equal(m.composer <= 115, true, `the composer is one row (${m.composer}px)`);
+
+    // The folded cover screen (~344px) is a small phone, and gets the small-phone
+    // density rather than the tablet column.
+    await page.setViewportSize({ width: 344, height: 882 });
+    await page.waitForTimeout(200);
+    const folded = await measure(page);
+    assert.equal(folded.body, 344, "the cover screen is full-bleed phone width");
+    assert.equal(folded.overflowX, 0);
+    assert.ok(folded.composer <= 115, `one row there too (${folded.composer}px)`);
+
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+});
+
+describe("installable as an app (PWA)", () => {
+  test("the manifest, icons, worker and offline card are served without a token", async () => {
+    // The browser fetches these itself: no Authorization header, and no ?token=
+    // it could carry, which is why they sit above the auth wall.
+    const res = await fetch(`${base}/manifest.webmanifest`);
+    assert.equal(res.status, 200, "the manifest is public");
+    assert.match(res.headers.get("content-type") ?? "", /application\/manifest\+json/);
+    const manifest = await res.json();
+    assert.equal(manifest.name, "Pi Scope");
+    assert.ok(manifest.short_name.length <= 12, "the home-screen label stays readable");
+    assert.equal(manifest.start_url, "/m", "an install opens the phone layout");
+    assert.equal(manifest.scope, "/m", "and never the desktop app");
+    assert.equal(manifest.display, "standalone", "no address bar once installed");
+    assert.match(manifest.background_color, /^#[0-9a-f]{6}$/i, "the splash has a colour");
+    assert.match(manifest.theme_color, /^#[0-9a-f]{6}$/i);
+    assert.ok(manifest.icons.some((i) => i.sizes === "192x192" && i.purpose === "any"), "Chrome needs a 192");
+    assert.ok(manifest.icons.some((i) => i.sizes === "512x512" && i.purpose === "any"), "and a 512");
+    assert.ok(manifest.icons.some((i) => i.purpose === "maskable"), "Android's adaptive mask needs its own");
+
+    // A manifest can lie about its icons; installability does not. Every entry
+    // has to be a real PNG of the size it declares.
+    for (const icon of manifest.icons) {
+      const img = await fetch(new URL(icon.src, base));
+      assert.equal(img.status, 200, `${icon.src} is served`);
+      assert.equal(img.headers.get("content-type"), "image/png");
+      const bytes = Buffer.from(await img.arrayBuffer());
+      assert.equal(bytes.subarray(1, 4).toString(), "PNG", `${icon.src} is a PNG`);
+      const [w, h] = icon.sizes.split("x").map(Number);
+      assert.equal(bytes.readUInt32BE(16), w, `${icon.src} is ${w}px wide`);
+      assert.equal(bytes.readUInt32BE(20), h, `${icon.src} is ${h}px tall`);
+    }
+
+    // The worker has to be fetchable from the root without a credential, and it
+    // must not be cached for a day: it changes with the build.
+    const sw = await fetch(`${base}/sw.js`);
+    assert.equal(sw.status, 200);
+    assert.match(sw.headers.get("content-type") ?? "", /javascript/);
+    assert.match(sw.headers.get("cache-control") ?? "", /no-cache/);
+    const body = await sw.text();
+    assert.match(body, /addEventListener\("fetch"/, "Chrome requires a fetch handler");
+    assert.match(body, /mode !== "navigate"/, "and it decides not to touch anything but a navigation");
+
+    // This suite binds loopback, where the phone-facing listener (and so the CA
+    // that signs its certificate) does not exist: the route says so rather than
+    // handing back an empty file.
+    const ca = await fetch(`${base}/scope-ca.crt`);
+    assert.equal(ca.status, 404);
+    assert.match(await ca.text(), /no local CA/);
+
+    // The fallback that worker serves when the launch cannot reach this machine.
+    const offline = await fetch(`${base}/mobile-offline.html`);
+    assert.equal(offline.status, 200, "the worker asks for it before any page exists");
+    assert.match(await offline.text(), /Can't reach your computer/);
+  });
+
+  test("the phone page installs, and the worker stays out of the app's way", async () => {
+    await seedSession("pwa-seed", { cwd: tmpDir });
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m?token=${TOKEN}&sid=pwa-seed`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelector("#m-transcript")?.textContent?.includes("hi there"), null, { timeout: 15_000 });
+
+    assert.equal(await page.getAttribute('link[rel="manifest"]', "href"), "/manifest.webmanifest");
+    assert.equal(await page.getAttribute('link[rel="apple-touch-icon"]', "href"), "/icons/apple-touch-icon.png");
+
+    const scope = await page.evaluate(async () => (await navigator.serviceWorker.ready).scope);
+    assert.equal(new URL(scope).pathname, "/m", `the worker is scoped to the mobile entry (${scope})`);
+
+    // It is a pass-through: once it controls the page, the token-gated API and
+    // the live stream still answer through it (nothing is cached or replayed).
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 10_000 });
+    await page.waitForFunction(() => document.querySelector("#m-transcript")?.textContent?.includes("hi there"), null, { timeout: 15_000 });
+
+    const cached = await page.evaluate(async () => {
+      for (const name of await caches.keys()) {
+        const hit = await (await caches.open(name)).match("/mobile-offline.html");
+        if (hit) return hit.text();
+      }
+      return null;
+    });
+    assert.match(cached || "", /Can't reach your computer/, "the offline card is cached at install");
+
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+
+  test("a launch that cannot reach the server lands on that card", async () => {
+    const { page, errors } = await phonePage();
+    await page.goto(`${base}/m?token=${TOKEN}`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 10_000 });
+
+    await page.context().setOffline(true);
+    try {
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => /Can't reach your computer/.test(document.body.textContent || ""), null, { timeout: 10_000 });
+      assert.equal(await page.title(), "Pi Scope — offline");
+    } finally {
+      await page.context().setOffline(false);
+    }
+
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
 });

@@ -9,13 +9,17 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as https from "node:https";
 import * as net from "node:net";
+import * as dgram from "node:dgram";
 import { Readable, type Duplex } from "node:stream";
 import { AGENT_DIR } from "./agent-dir.ts";
 import { createDb, prepare, toRow, toSessionRow, rowToSession, rowToEvent, canonicalSessionId } from "./db.ts";
 import { MAX_REQUEST_BYTES } from "../../shared/types.ts";
 import type { ObsEvent } from "../../shared/types.ts";
 import { createTerminalTransport } from "./terminal.ts";
+import { ensureTlsMaterial } from "./tls.ts";
+import { issueTokens, refreshTokens, revokeRefreshToken, verifyAccessToken } from "./auth-jwt.ts";
 import {
   discover as discoverPlugins,
   activate as activatePlugins,
@@ -119,6 +123,40 @@ const ALLOWED_ORIGINS = new Set([
 function corsOrigin(req: Request): string {
   const o = req.headers.get("origin");
   return o && ALLOWED_ORIGINS.has(o) ? o : `http://127.0.0.1:${PORT}`;
+}
+
+// ─── Phone-facing HTTPS ─────────────────────────────────────────────────────
+// A phone reaches this server over Wi-Fi, so everything it carries — the pairing
+// code the user types, and the access/refresh tokens that code is traded for —
+// would otherwise be readable by anything else on the network. Phones get their own HTTPS listener
+// on the next port up. The desktop window, the launcher's health probes and the
+// test suite keep using plain http:// on loopback, where there is no network in
+// between to listen on (and where a certificate warning would be pure friction).
+//
+// SCOPE_TLS=0 disables the listener; SCOPE_TLS_CERT/SCOPE_TLS_KEY serve a pair you
+// already trust instead of the self-signed one minted in ~/.pi-scope/tls.
+const PHONE_TLS_PORT = parseInt(process.env.SCOPE_TLS_PORT ?? "", 10) || PORT + 1;
+const PHONE_TLS = {
+  // Only meaningful on a LAN-reachable bind — a loopback-only server is not
+  // something a phone can connect to in the first place.
+  enabled: LAN_EXPOSED && process.env.SCOPE_TLS !== "0",
+  active: false,
+  port: PHONE_TLS_PORT,
+  error: "",
+  // PEM of the local CA that signs the phone-facing certificate, served at
+  // /scope-ca.crt so a phone can trust it once (see tls.ts). Empty when the
+  // listener is off or the user supplied their own certificate.
+  caCert: "",
+};
+
+/** Scheme a phone should use — falls back to http only if HTTPS could not start. */
+function phoneScheme(): string {
+  return PHONE_TLS.active ? "https" : "http";
+}
+
+/** Port a phone should dial; the plain HTTP port when the TLS listener is down. */
+function phonePort(): number {
+  return PHONE_TLS.active ? PHONE_TLS.port : PORT;
 }
 
 /** True when a Host header names this machine's loopback interface. Used to keep
@@ -1538,16 +1576,158 @@ const startTime = Date.now();
 // conversation in the workspace rail and makes its transcript replayable.
 setHarnessRecorder((record) => recordHarnessTurn(record));
 
-// External IPv4 addresses a phone on the same Wi-Fi could actually reach.
-// Filters out loopback/internal and non-IPv4 interfaces, and prefers a
-// routable-looking address over docker/bridge ranges when several exist.
-function lanIpv4Addrs(): string[] {
-  const all = Object.values(os.networkInterfaces())
-    .flatMap((ifaces) => ifaces ?? [])
-    .filter((i) => i.family === "IPv4" && !i.internal && !i.address.startsWith("169.254."));
-  const isVirtual = (ip: string) => ip.startsWith("172.17.") || ip.startsWith("192.168.56.") || ip.startsWith("10.0.2.");
-  return [...new Set([...all.filter((i) => !isVirtual(i.address)), ...all.filter((i) => isVirtual(i.address))])]
-    .map((i) => i.address);
+// One external IPv4 address a phone on the same Wi-Fi might reach.
+interface LanAddress {
+  address: string;
+  /** OS interface name ("wlan0", "Wi-Fi", "utun3", "docker0"), so the panel
+   *  can tell the user which address is which. */
+  iface: string;
+  /** A VPN tunnel, docker/bridge or VM host-only adapter: routable from this
+   *  machine, but almost never from a phone on the Wi-Fi. Still offered (the
+   *  user may know better), ranked last and flagged in the panel. */
+  virtual: boolean;
+  /** The interface the OS would use for outbound traffic — the best guess for
+   *  "the network this machine is really on". */
+  default_route: boolean;
+}
+
+// Interface names that are not the Wi-Fi/Ethernet a phone shares. Name-based
+// because that is what actually identifies the adapter on every platform;
+// address ranges alone would misflag a corporate 172.16/12 LAN.
+const VIRTUAL_IFACE_RE = /^(docker|br-|veth|virbr|vmnet|vboxnet|tun|tap|utun|wg|zt|tailscale|hyper-v|vethernet|wsl|awdl|llw|local area connection\*)/i;
+// The narrow ranges those adapters hand out (docker's default bridge, VirtualBox
+// host-only, QEMU slirp). Not proof — the interface name still decides.
+const VIRTUAL_IP_RE = /^(172\.17\.|192\.168\.56\.|10\.0\.2\.)/;
+
+/**
+ * External IPv4 addresses, best guess first: the default-route address, then
+ * other physical adapters, then VPN/virtual ones. A phone on the same Wi-Fi
+ * needs one of the physics — ordering the QR's picker this way means the
+ * address the user scans by default is the one most likely to answer.
+ */
+function lanAddresses(defaultIp: string | null): LanAddress[] {
+  const out: LanAddress[] = [];
+  for (const [iface, ifaces] of Object.entries(os.networkInterfaces())) {
+    for (const i of ifaces ?? []) {
+      if (i.family !== "IPv4" || i.internal) continue;
+      // 169.254/16 is link-local: a DHCP lease that never arrived. No phone can
+      // reach it, so it is left out rather than ranked last.
+      if (i.address.startsWith("169.254.")) continue;
+      out.push({
+        address: i.address,
+        iface,
+        virtual: VIRTUAL_IFACE_RE.test(iface) || VIRTUAL_IP_RE.test(i.address),
+        default_route: i.address === defaultIp,
+      });
+    }
+  }
+  // Non-virtual beats virtual, and the default route wins inside each group.
+  const rank = (a: LanAddress) => (a.virtual ? 4 : 0) + (a.default_route ? 0 : 2);
+  const seen = new Set<string>();
+  return out
+    .sort((a, b) => rank(a) - rank(b))
+    .filter((a) => (seen.has(a.address) ? false : (seen.add(a.address), true)));
+}
+
+/**
+ * The local address the OS routes outbound traffic through, or null.
+ *
+ * A UDP connect() sends nothing: it only asks the kernel which source address
+ * it would use, which is exactly the interface a phone on the same network
+ * reaches. Bounded, so a host with no route at all cannot stall the panel, and
+ * cached briefly so opening the panel twice does not re-probe every time.
+ */
+let routeProbe: { at: number; ip: string | null } | null = null;
+function defaultRouteIpv4(): Promise<string | null> {
+  if (routeProbe && Date.now() - routeProbe.at < 10_000) return Promise.resolve(routeProbe.ip);
+  return new Promise((resolve) => {
+    const sock = dgram.createSocket("udp4");
+    let settled = false;
+    const finish = (ip: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      routeProbe = { at: Date.now(), ip };
+      try { sock.close(); } catch { /* already closed */ }
+      resolve(ip);
+    };
+    const timer = setTimeout(() => finish(null), 300);
+    sock.once("error", () => finish(null));
+    sock.connect(80, "8.8.8.8", () => {
+      try {
+        const { address } = sock.address();
+        // Loopback means there is no real outbound route.
+        finish(address && !address.startsWith("127.") ? address : null);
+      } catch {
+        finish(null);
+      }
+    });
+  });
+}
+
+// ─── Phone pairing codes ────────────────────────────────────────────────────
+//
+// The QR must not carry AUTH_TOKEN: a screenshot of it (a screen share, a photo
+// of the monitor) would then hand out every read and write this server has, for
+// the life of the process. Instead the panel shows a code, the phone types it,
+// and POST /pair trades it for a JWT access token (plus a rotating refresh
+// token — see auth-jwt.ts), never for AUTH_TOKEN itself. The code behaves like
+// an OTP: six digits, two minutes, and spent the moment it is accepted — one
+// code, one phone. The panel reads the next one straight after.
+const PAIR_TTL_MS = 2 * 60_000;
+const PAIR_DIGITS = 6;
+// Six digits is a million possibilities across a two-minute life. Eight failures
+// per peer per minute caps a caller at 16 tries inside that window (one chance in
+// ~62,000) and the budget is per address, so distributing the guess needs a
+// botnet — not something a Wi-Fi holds.
+const PAIR_MAX_FAILURES = 8;
+const PAIR_FAILURE_WINDOW_MS = 60_000;
+let pairSession: { code: string; expiresAt: number } | null = null;
+// The last code a phone spent, kept only so a replayed or re-typed one can be
+// told apart from a wrong guess ("already used" is a different thing to fix).
+let pairSpent: { code: string; at: number } | null = null;
+const pairFailures = new Map<string, { count: number; resetAt: number }>();
+
+/** Printed as two groups of three ("123 456"): readable at a glance, and the
+ *  separator is stripped on the way in, so typing it either way works. */
+function formatPairCode(code: string): string {
+  return `${code.slice(0, 3)} ${code.slice(3)}`;
+}
+
+/** Digits only, with the look-alikes folded: "123 456", "123-456" and a code
+ *  typed with O for 0 all compare alike. */
+function normalisePairCode(input: string): string {
+  return String(input).toUpperCase().replace(/O/g, "0").replace(/[IL]/g, "1").replace(/[^0-9]/g, "");
+}
+
+/** The live code, minting one when there is none or the current one expired. */
+function currentPairCode(): { code: string; expires_at: number } {
+  if (!pairSession || pairSession.expiresAt <= Date.now()) {
+    // randomInt is rejection-sampled, so every value in the range is equally
+    // likely — `randomBytes()[0] % 10` would bias the low digits.
+    const code = String(crypto.randomInt(0, 10 ** PAIR_DIGITS)).padStart(PAIR_DIGITS, "0");
+    pairSession = { code, expiresAt: Date.now() + PAIR_TTL_MS };
+  }
+  return { code: pairSession.code, expires_at: pairSession.expiresAt };
+}
+
+/** Constant-time compare of two codes, already normalised. */
+function codeEquals(a: string, b: string): boolean {
+  const want = Buffer.from(a, "utf8");
+  const got = Buffer.from(b, "utf8");
+  if (want.length !== got.length) return false;
+  return crypto.timingSafeEqual(want, got);
+}
+
+/** Constant-time compare against the live code; false once it has expired. */
+function pairCodeMatches(input: string): boolean {
+  if (!pairSession || pairSession.expiresAt <= Date.now()) return false;
+  return codeEquals(pairSession.code, normalisePairCode(input));
+}
+
+/** The real TCP peer, for the pairing endpoint's per-caller failure budget. */
+function peerKey(req: Request): string {
+  return (req.headers.get(PEER_HEADER) ?? "").replace(/^::ffff:/i, "").replace(/%.*$/, "").trim() || "unknown";
 }
 
 const tokenMasked = AUTH_TOKEN.length > 8 ? `${AUTH_TOKEN.slice(0,4)}…${AUTH_TOKEN.slice(-4)}` : "****";
@@ -1555,21 +1735,9 @@ console.log(`\n  pi-scope server v${VERSION}`);
 console.log(`  UI:    ${OPEN_URL}`);
 console.log(`  Token: ${tokenMasked}`);
 console.log(`  DB:    ${DB_PATH}`);
-if (LAN_EXPOSED) {
-  // A wildcard bind prints a useless 0.0.0.0 URL, so resolve a real LAN address
-  // for the phone. Skip internal/loopback and non-IPv4 interfaces — a phone
-  // cannot route to 127.0.0.1 or a docker bridge.
-  const lanIps = lanIpv4Addrs();
-  if (lanIps.length === 0) {
-    console.log("  LAN:   no external IPv4 interface found — reachable on loopback only.");
-  } else {
-    // Print the MOBILE entry (`/m`), not the bare origin: that is what a phone
-    // should open, and it does not depend on the phone's User-Agent being
-    // recognised. A hand-typed origin still resolves to the right layout.
-    console.log(`  Phone: ${lanIps.map((ip) => `http://${ip}:${PORT}/m?token=${encodeURIComponent(AUTH_TOKEN)}`).join("\n         ")}`);
-    console.log("         (opens the mobile layout from a phone on the same Wi-Fi; token required)");
-  }
-}
+// The LAN/phone line is printed at the end of boot instead: it has to report
+// whether the HTTPS listener actually came up, which is known only once that
+// listener has been started (after the plugins behind it are active).
 console.log("");
 
 // ─── SSE subscriber registry ────────────────────────────────────────────────
@@ -1671,6 +1839,17 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/** A JSON response carrying credentials: never cached, by the browser or by an
+ *  intermediary. `no-store` also keeps a token out of the back/forward cache,
+ *  where a second phone-layout open would otherwise revive a dead access token
+ *  from disk. */
+function authJson(body: unknown, status = 200): Response {
+  const res = jsonResponse(body, status);
+  res.headers.set("cache-control", "no-store");
+  res.headers.set("pragma", "no-cache");
+  return res;
+}
+
 function textResponse(body: string, status: number, contentType: string): Response {
   return new Response(body, {
     status,
@@ -1689,16 +1868,37 @@ function tokenMatches(candidate: string | null): boolean {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function checkAuth(req: Request): boolean {
-  // Check Authorization header
+/** The credential a request presents, from either place it can arrive: an
+ *  Authorization header (fetch, EventSource polyfills) or `?token=` (an <img>
+ *  src, an EventSource URL — neither can send a header). */
+function presentedSecret(req: Request): string | null {
   const auth = req.headers.get("authorization");
   if (auth) {
     const parts = auth.split(" ");
-    if (parts.length === 2 && parts[0].toLowerCase() === "bearer") return tokenMatches(parts[1]);
-    return false;
+    if (parts.length === 2 && parts[0].toLowerCase() === "bearer") return parts[1];
+    return null;
   }
-  // Check ?token= query param
-  return tokenMatches(new URL(req.url).searchParams.get("token"));
+  return new URL(req.url).searchParams.get("token");
+}
+
+/** The master token only — no JWTs. Routes that hand out or end the server's
+ *  own authority (`/shutdown`) must not accept a phone's scoped credential. */
+function checkServerToken(req: Request): boolean {
+  return tokenMatches(presentedSecret(req));
+}
+
+/**
+ * The auth wall's one question: may this caller proceed?
+ *
+ * Two credentials answer yes. The master token (the desktop, the pi extension,
+ * CLI callers) and a mobile access JWT minted by this process after a pairing
+ * code was typed on the phone (see auth-jwt.ts). The JWT expires on its own and
+ * dies with the process; the master token does neither, which is exactly why the
+ * phone no longer gets it.
+ */
+function checkAuth(req: Request): boolean {
+  const presented = presentedSecret(req);
+  return tokenMatches(presented) || verifyAccessToken(presented);
 }
 
 /**
@@ -1759,7 +1959,10 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer):
   }
   const auth = req.headers.authorization;
   const bearer = auth && /^Bearer\s+/i.test(auth) ? auth.replace(/^Bearer\s+/i, "").trim() : null;
-  if (!tokenMatches(url.searchParams.get("token") ?? bearer)) {
+  // Same two credentials as checkAuth: a plugin transport (the terminal) opened
+  // from the borrowed desktop layout on a phone carries that phone's JWT.
+  const presented = url.searchParams.get("token") ?? bearer;
+  if (!tokenMatches(presented) && !verifyAccessToken(presented)) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     socket.destroy();
     return;
@@ -1971,6 +2174,7 @@ const MIME: Record<string, string> = {
   ".js": "application/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".json": "application/json",
+  ".webmanifest": "application/manifest+json",
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".ico": "image/x-icon",
@@ -3004,13 +3208,89 @@ async function handle(req: Request): Promise<Response> {
     // delivered by the browser even though its reply can't be read, so on a
     // loopback bind the caller must also not be another origin (see
     // originSameServer) — otherwise any website could stop the server.
-    if ((LAN_EXPOSED || !originSameServer(req)) && !checkAuth(req)) {
+    if ((LAN_EXPOSED || !originSameServer(req)) && !checkServerToken(req)) {
       return jsonResponse({ error: "unauthorized" }, 401);
     }
     const response = jsonResponse({ ok: true, message: "shutting down" });
     // Defer shutdown so the caller receives the response before we close.
     setImmediate(() => { void gracefulShutdown("shutdown request"); });
     return response;
+  }
+
+  // ── POST /pair (pairing code → mobile access + refresh tokens) ───────────
+  // Above the auth wall by necessity: this is how a phone that has never seen
+  // the token gets one. It carries its own gate instead of the token wall — a
+  // six-digit code with a two-minute life, a constant-time compare, a same-origin
+  // requirement, and a per-caller failure budget so the code cannot be
+  // brute-forced inside its window.
+  if (pathname === "/pair" && method === "POST") {
+    if (!originSameServer(req)) return jsonResponse({ error: "forbidden" }, 403);
+    const now = Date.now();
+    const peer = peerKey(req);
+    const failures = pairFailures.get(peer);
+    if (failures && failures.resetAt > now && failures.count >= PAIR_MAX_FAILURES) {
+      return jsonResponse({ error: "rate_limited" }, 429);
+    }
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    if (!pairCodeMatches(String(body?.code ?? ""))) {
+      // A code this server already spent: say so instead of "wrong", because
+      // the fix is a fresh code from the panel, not a closer look at the screen.
+      // Not counted as a failure — it is not a guess at the secret.
+      if (pairSpent && pairSpent.at > now - PAIR_TTL_MS && codeEquals(pairSpent.code, normalisePairCode(String(body?.code ?? "")))) {
+        return jsonResponse({ error: "used" }, 401);
+      }
+      pairFailures.set(peer, failures && failures.resetAt > now
+        ? { count: failures.count + 1, resetAt: failures.resetAt }
+        : { count: 1, resetAt: now + PAIR_FAILURE_WINDOW_MS });
+      // Keep the ledger from growing with every caller a long-running server sees.
+      if (pairFailures.size > 256) {
+        for (const [key, entry] of pairFailures) if (entry.resetAt <= now) pairFailures.delete(key);
+      }
+      const expired = !pairSession || pairSession.expiresAt <= Date.now();
+      return jsonResponse({ error: expired ? "expired" : "invalid" }, 401);
+    }
+    // Single use, like an OTP: spending it here destroys it, so the same code
+    // cannot pair a second device (nor be reused by someone who watched it being
+    // typed). The panel's next /lan read mints the following one.
+    pairSpent = pairSession ? { code: pairSession.code, at: now } : null;
+    pairSession = null;
+    pairFailures.delete(peer);
+    // Not the master token. The phone gets a JWT that expires on its own and a
+    // refresh token that can be revoked, so a phone left on a desk (or stolen)
+    // is not holding the key to every file this server can reach.
+    return authJson({ ok: true, ...issueTokens(now) });
+  }
+
+  // ── POST /pair/refresh (refresh token → a new access/refresh pair) ──────
+  // Above the auth wall by necessity: the access token has typically just
+  // expired, which is why the phone is here. The refresh token is the
+  // credential under test — 256 random bits, hashed at rest, spent on use. A
+  // guessed or replayed one is refused outright; there is no failure budget
+  // because there is no searchable secret (unlike the six-digit code).
+  //
+  // Under /pair rather than /auth: `/auth/*` belongs to the provider sign-in
+  // routes further down (login, logout), and a phone's pairing lifecycle must
+  // not shadow them.
+  if (pathname === "/pair/refresh" && method === "POST") {
+    if (!originSameServer(req)) return jsonResponse({ error: "forbidden" }, 403);
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); } catch { return jsonResponse({ error: "invalid JSON" }, 400); }
+    const pair = refreshTokens(String(body?.refresh_token ?? ""));
+    if (!pair) return authJson({ error: "invalid_refresh" }, 401);
+    return authJson({ ok: true, ...pair });
+  }
+
+  // ── POST /pair/revoke (forget this phone) ──────────────────────────────
+  // Idempotent: an already-forgotten phone still gets 200, so the client does
+  // not have to tell "revoked" apart from "never paired". Knowing the refresh
+  // token is already authority to use it, so nothing else is required here.
+  if (pathname === "/pair/revoke" && method === "POST") {
+    if (!originSameServer(req)) return jsonResponse({ error: "forbidden" }, 403);
+    let body: any;
+    try { body = JSON.parse(await readBody(req)); } catch { /* an empty body is fine */ }
+    revokeRefreshToken(String(body?.refresh_token ?? ""));
+    return authJson({ ok: true });
   }
 
   if (pathname === "/favicon.ico") {
@@ -3030,6 +3310,44 @@ async function handle(req: Request): Promise<Response> {
   }
   if (pathname === "/index.html") {
     return (await serveDocument("index.html", req, url)) ?? textResponse("not found", 404, "text/plain");
+  }
+
+  // ── Install surface: manifest, service worker, offline card ─────────────
+  // The browser fetches these on its own — no Authorization header and no
+  // ?token=, because the manifest and the worker are read by the browser, not by
+  // app code. They therefore sit above the auth wall with the documents above.
+  // None of them carries session data, and the worker caches exactly one static
+  // card: it never stores an API response or a credential.
+  // ── GET /scope-ca.crt (the certificate a phone can be told to trust) ────
+  // The phone-facing listener serves a leaf signed by a CA minted on this
+  // machine. Installing that CA is what turns the hop into a plain HTTPS origin,
+  // and Chrome only registers the service worker — so only offers to install the
+  // app — on an origin whose certificate it trusts. A self-signed certificate
+  // accepted through the interstitial is not enough: the worker fetch fails with
+  // "An SSL certificate error occurred when fetching the script". The certificate
+  // is public by nature, and the phone needs it *before* it can talk to this
+  // server without a warning, so it sits above the auth wall.
+  if (pathname === "/scope-ca.crt" && method === "GET") {
+    if (!PHONE_TLS.caCert) {
+      return textResponse("no local CA: TLS is off, or SCOPE_TLS_CERT supplies your own", 404, "text/plain");
+    }
+    return new Response(PHONE_TLS.caCert, {
+      headers: {
+        "content-type": "application/x-x509-ca-cert",
+        "content-disposition": 'attachment; filename="pi-scope-ca.crt"',
+        "access-control-allow-origin": "*",
+      },
+    });
+  }
+
+  if (method === "GET" && (pathname === "/manifest.webmanifest" || pathname === "/sw.js" || pathname === "/mobile-offline.html")) {
+    const asset = serveStatic(pathname.slice(1), req);
+    if (!asset) return textResponse("not found", 404, "text/plain");
+    // A worker script is re-fetched on update checks, and browsers otherwise
+    // keep one for up to a day: a cached copy here would outlive the build that
+    // wrote it.
+    if (pathname === "/sw.js") asset.headers.set("cache-control", "no-cache");
+    return asset;
   }
 
   // ── User plugin client bundles ─────────────────────────────────────────
@@ -3172,22 +3490,39 @@ async function handle(req: Request): Promise<Response> {
 
   // ── GET /lan (phone pairing) ─────────────────────────────────────────────
   // Backs the "scan from your phone" QR panel. Token-gated like every other
-  // read: the response contains the auth token itself, so it must never be
-  // handed to an unauthenticated caller.
+  // read: the response contains the pairing code, which is a credential — it
+  // must never be handed to an unauthenticated caller.
   if (pathname === "/lan" && method === "GET") {
-    const ips = lanIpv4Addrs();
+    const addresses = lanAddresses(await defaultRouteIpv4());
+    // The code the panel shows beside the QR, and the only credential that URL
+    // carries. Still token-gated: whoever can read this can drive the server.
+    const pair = currentPairCode();
     return jsonResponse({
       lan_exposed: LAN_EXPOSED,
       port: PORT,
       bind_host: HOST,
+      // The host OS, so the panel can name the firewall the user actually has.
+      platform: process.platform,
+      pair_code: formatPairCode(pair.code),
+      pair_expires_at: pair.expires_at,
       // Always report the machine's real IPv4s so the panel can name the exact
       // address to rebind to — but only advertise scannable URLs when the
       // server is genuinely reachable off-box. A 127.0.0.1 QR would scan fine
       // on the desktop and then open nothing at all on the phone.
-      ips,
+      addresses,
+      ips: addresses.map((a) => a.address),
+      // The QR is an address, not a credential: `?pair=` used to ride along so a
+      // scan paired silently, which meant a photo of the screen was enough and
+      // the code was never actually typed. The phone now lands on the pairing
+      // screen and the code beside the QR has to be entered there.
       urls: LAN_EXPOSED
-        ? ips.map((ip) => `http://${ip}:${PORT}/?token=${encodeURIComponent(AUTH_TOKEN)}`)
+        ? addresses.map((a) => `${phoneScheme()}://${a.address}:${phonePort()}/m`)
         : [],
+      tls: PHONE_TLS.active,
+      tls_port: PHONE_TLS.active ? PHONE_TLS.port : null,
+      // Why HTTPS is off when it should have been on (a taken port, an unwritable
+      // cert dir). Surfaced instead of silently handing out an http link.
+      tls_error: PHONE_TLS.error || null,
     });
   }
 
@@ -4688,7 +5023,11 @@ async function handle(req: Request): Promise<Response> {
 
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
-const server = http.createServer(async (req, res) => {
+// One handler for both listeners: the phone-facing HTTPS port must expose
+// exactly the API surface the desktop sees, with the same auth wall and the same
+// loopback-vs-LAN rules (those read the peer address carried below, not the
+// scheme).
+async function serveRequest(req: http.IncomingMessage, res: http.ServerResponse) {
   const host = req.headers.host ?? `${HOST}:${PORT}`;
   const url = new URL(req.url ?? "/", `http://${host}`);
   let body: Buffer | undefined;
@@ -4748,7 +5087,9 @@ const server = http.createServer(async (req, res) => {
   } else {
     res.end();
   }
-});
+}
+
+const server = http.createServer(serveRequest);
 
 // One host-owned upgrade listener for every plugin transport. The terminal
 // plugin registers `/terminal` on activation; a disabled plugin's transport is
@@ -4893,6 +5234,73 @@ void loadRuntimeModels();
     console.log(`  Plugins: ${active.filter((p) => p.enabled).map((p) => p.id).join(", ") || "none"}`);
   }
 }
+
+// ─── Phone-facing HTTPS listener ────────────────────────────────────────────
+// Started here rather than beside the HTTP server above: a phone that connected
+// mid-boot would reach routes before the plugins behind them were active.
+// Awaiting the listen lets the banner print what actually happened.
+if (PHONE_TLS.enabled) {
+  const material = ensureTlsMaterial({ ips: lanAddresses(null).map((a) => a.address) });
+  if (!material.ok) {
+    PHONE_TLS.error = material.error;
+    console.error(`  HTTPS: off — ${material.error}`);
+    console.error("         Phones fall back to http:// on the LAN. Set SCOPE_TLS_CERT/SCOPE_TLS_KEY to supply a usable pair.");
+  } else {
+    const phoneServer = https.createServer({ key: material.material.key, cert: material.material.cert }, serveRequest);
+    phoneServer.on("upgrade", handleUpgrade);
+    // A failed listen (EADDRINUSE on PORT+1) must not take the whole server
+    // down: the desktop app still works, and /lan reports the reason.
+    const started = await new Promise<boolean>((resolve) => {
+      phoneServer.once("error", (err: any) => {
+        PHONE_TLS.error = err?.code === "EADDRINUSE"
+          ? `port ${PHONE_TLS.port} is already in use — set SCOPE_TLS_PORT`
+          : String(err?.message ?? err);
+        resolve(false);
+      });
+      phoneServer.listen(PHONE_TLS.port, HOST, () => resolve(true));
+    });
+    if (started) {
+      PHONE_TLS.active = true;
+      PHONE_TLS.caCert = material.material.caCert ?? "";
+      // Same-origin checks already accept `https://<the Host the caller used>`;
+      // these keep the CORS echo correct for a phone caller too.
+      for (const a of lanAddresses(null)) ALLOWED_ORIGINS.add(`https://${a.address}:${PHONE_TLS.port}`);
+      ALLOWED_ORIGINS.add(`https://${DISPLAY_HOST}:${PHONE_TLS.port}`);
+      ALLOWED_ORIGINS.add(`https://localhost:${PHONE_TLS.port}`);
+      if (material.material.regenerated) {
+        console.log(`  HTTPS: minted a certificate signed by the local CA in ${material.material.dir}`);
+      }
+    } else {
+      console.error(`  HTTPS: off — ${PHONE_TLS.error}`);
+    }
+  }
+}
+
+if (LAN_EXPOSED) {
+  // A wildcard bind prints a useless 0.0.0.0 URL, so resolve a real LAN address
+  // for the phone. Skip internal/loopback and non-IPv4 interfaces — a phone
+  // cannot route to 127.0.0.1 or a docker bridge.
+  const lanIps = lanAddresses(null).map((a) => a.address);
+  if (lanIps.length === 0) {
+    console.log("  LAN:   no external IPv4 interface found — reachable on loopback only.");
+  } else {
+    // Print the MOBILE entry (`/m`), not the bare origin: that is what a phone
+    // should open, and it does not depend on the phone's User-Agent being
+    // recognised. A hand-typed origin still resolves to the right layout. The
+    // URL carries no token — the phone asks for the pairing code the desktop's
+    // phone panel shows.
+    console.log(`  Phone: ${lanIps.map((ip) => `${phoneScheme()}://${ip}:${phonePort()}/m`).join("\n         ")}`);
+    console.log(PHONE_TLS.active
+      ? "         (mobile layout over HTTPS; the phone asks you to accept the local certificate once)"
+      : "         (mobile layout for a phone on the same Wi-Fi; enter the pairing code from the phone panel)");
+    if (PHONE_TLS.caCert) {
+      // The one-time step that turns the warning into a clean origin — and the
+      // only way Chrome will offer to install the app (see /scope-ca.crt).
+      console.log(`  CA:    http://${lanIps[0]}:${PORT}/scope-ca.crt  (install it on the phone once to trust this server)`);
+    }
+  }
+}
+console.log("");
 
 server.listen(PORT, HOST, () => {
   console.log(`  Listening on http://${HOST}:${PORT}`);

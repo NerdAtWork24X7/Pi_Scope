@@ -80,17 +80,198 @@
     if (sun) sun.toggleAttribute("hidden", dark);
   }
 
-  // ─── Token + API ──────────────────────────────────────────────────────────
-  // The token arrives in the URL (the QR carries it). It is also kept in
-  // localStorage so a bookmark, a reload, or a re-open from history still works
-  // on the phone itself — the phone is the user's own device and the URL they
-  // were told to bookmark already contains it.
+  // ─── Credentials + API ────────────────────────────────────────────────────
+  // The QR carries only the address. The phone has to be given the short-lived
+  // code that is printed beside it, trades that for a credential pair once
+  // (POST /pair): a JWT access token that expires in half an hour, and a rotating
+  // refresh token that keeps the phone paired for weeks. The server's own master
+  // token is never handed out, so a lost phone is not a standing key to every
+  // file the server can reach.
+  //
+  // Both live in localStorage so a bookmark, a reload or a re-open from history
+  // still works, and the access token is renewed in the background before it
+  // lapses. `?token=` stays supported for links that already carry one. There is
+  // deliberately no `?pair=` shortcut: pairing silently on scan made a photograph
+  // of the QR as good as the code.
   const qp = new URLSearchParams(location.search);
-  let TOKEN = qp.get("token") || "";
-  try {
-    if (TOKEN) localStorage.setItem("scope-token", TOKEN);
-    else TOKEN = localStorage.getItem("scope-token") || "";
-  } catch { /* private mode — the URL token still works */ }
+  const STORE = { access: "scope-access-token", refresh: "scope-refresh-token", expires: "scope-access-expires" };
+  // The legacy key a pre-JWT build stored the master token in. Read once so an
+  // already-paired phone keeps working until that server restarts.
+  const LEGACY_STORE = "scope-token";
+  let TOKEN = "";     // the access token in use (a JWT, or a legacy ?token= link)
+  let EXPIRES_AT = 0; // ms epoch when TOKEN lapses; 0 when we were not told
+  let REFRESH = "";   // the rotating refresh token
+  let refreshing = null; // in-flight refresh, so a burst of 401s rotates once
+  let refreshTimer = 0;
+
+  function loadCredentials() {
+    try {
+      const fromUrl = qp.get("token") || "";
+      TOKEN = fromUrl || localStorage.getItem(STORE.access) || localStorage.getItem(LEGACY_STORE) || "";
+      REFRESH = localStorage.getItem(STORE.refresh) || "";
+      EXPIRES_AT = Number(localStorage.getItem(STORE.expires)) || 0;
+      // A ?token= link is an access token we were not told the expiry of; the
+      // 401 path covers it if it turns out to be stale. It is kept for the next
+      // visit, the way the old single token was, so stripping the query from a
+      // bookmark does not lose it.
+      if (fromUrl) {
+        EXPIRES_AT = 0;
+        localStorage.setItem(STORE.access, fromUrl);
+      }
+    } catch {
+      // Private mode: the URL token still works, nothing survives a reload.
+      TOKEN = qp.get("token") || "";
+    }
+  }
+
+  function storeCredentials(data) {
+    TOKEN = data.access_token || "";
+    EXPIRES_AT = Date.now() + (Number(data.expires_in) || 0) * 1000;
+    REFRESH = data.refresh_token || "";
+    try {
+      localStorage.setItem(STORE.access, TOKEN);
+      localStorage.setItem(STORE.refresh, REFRESH);
+      localStorage.setItem(STORE.expires, String(EXPIRES_AT));
+      localStorage.removeItem(LEGACY_STORE);
+    } catch { /* private mode */ }
+  }
+
+  function clearCredentials() {
+    TOKEN = "";
+    REFRESH = "";
+    EXPIRES_AT = 0;
+    clearTimeout(refreshTimer);
+    try {
+      localStorage.removeItem(STORE.access);
+      localStorage.removeItem(STORE.refresh);
+      localStorage.removeItem(STORE.expires);
+      localStorage.removeItem(LEGACY_STORE);
+    } catch { /* private mode */ }
+  }
+
+  /** True when the access token is known to lapse within `margin` ms. An unknown
+   *  expiry (a `?token=` link) is never "expired" — there is nothing to renew
+   *  against until a refresh token exists. */
+  function expiresSoon(margin = 0) {
+    return EXPIRES_AT > 0 && Date.now() >= EXPIRES_AT - margin;
+  }
+
+  /**
+   * Trade the refresh token for a fresh pair. Single-flight: a screenful of
+   * parallel 401s must not rotate twice — the second rotation would spend the
+   * token the first one just received.
+   *
+   * A refusal (the server restarted, or this phone was revoked) ends the
+   * pairing and clears storage; a network failure does not, because the phone
+   * being out of Wi-Fi for a minute is not a reason to make the user type a new
+   * code.
+   */
+  function refreshAccess() {
+    if (!REFRESH) return Promise.resolve(false);
+    if (refreshing) return refreshing;
+    refreshing = (async () => {
+      let res;
+      try {
+        res = await fetch(apiUrl("/pair/refresh"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ refresh_token: REFRESH }),
+        });
+      } catch {
+        return false; // offline — keep the pair, try again on the next 401
+      }
+      let data = {};
+      try { data = await res.json(); } catch { /* non-JSON */ }
+      if (!res.ok || !data.access_token) {
+        clearCredentials();
+        return false;
+      }
+      storeCredentials(data);
+      scheduleRefresh();
+      return true;
+    })().finally(() => { refreshing = null; });
+    return refreshing;
+  }
+
+  /** Renew shortly before the access token lapses. The event stream cannot
+   *  change its URL, so it is reopened with the new token — otherwise it would
+   *  reconnect with a dead one every four seconds and never recover. */
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    if (!REFRESH || !EXPIRES_AT) return;
+    const untilExpiry = EXPIRES_AT - Date.now();
+    // Five minutes of lead time, or half the remaining life for a token issued
+    // with less than that left (a test server, a clock that jumped).
+    const delay = Math.max(0, untilExpiry - Math.min(5 * 60_000, untilExpiry / 2));
+    refreshTimer = setTimeout(async () => {
+      const ok = await refreshAccess();
+      if (ok && S.sid) connectLive(S.sid);
+    }, delay);
+  }
+
+  /**
+   * Trade a pairing code for a credential pair. The code is short-lived and
+   * single-purpose; only the tokens it returns are stored, so the code itself
+   * never has to survive a reload.
+   */
+  async function exchangePairCode(code) {
+    let res;
+    try {
+      res = await fetch(apiUrl("/pair"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+    } catch {
+      setPairHint("Could not reach the server — check the Wi-Fi and the address.", true);
+      return false;
+    }
+    let data = {};
+    try { data = await res.json(); } catch { /* non-JSON */ }
+    if (res.ok && data.access_token) {
+      storeCredentials(data);
+      scheduleRefresh();
+      return true;
+    }
+    setPairHint(
+      res.status === 429
+        ? "Too many attempts — wait a minute, then try again."
+        : data.error === "used"
+          ? "That code was already used by another phone — the panel shows the next one."
+          : data.error === "expired"
+            ? "That code expired — the phone panel shows the current one."
+            : "That code is not right — check the phone panel and try again.",
+      true
+    );
+    return false;
+  }
+
+  // ─── Pairing gate ─────────────────────────────────────────────────────────
+
+  function setPairHint(msg, isError) {
+    if (!el.pairHint) return;
+    el.pairHint.textContent = msg || "";
+    el.pairHint.hidden = !msg;
+    el.pairHint.style.color = isError ? "var(--danger)" : "";
+  }
+
+  function showPairGate(message) {
+    if (!el.pair) return;
+    const alreadyOpen = !el.pair.hidden;
+    // The live stream was authorised by the token we are replacing; stop it
+    // rather than letting it retry a credential the server has forgotten.
+    if (es) { es.close(); es = null; }
+    setLive(false);
+    el.pair.hidden = false;
+    if (message) setPairHint(message, true);
+    // Only focus on the transition: the session poll keeps calling this while the
+    // gate is up, and stealing focus every 15s would fight the typing.
+    if (!alreadyOpen) setTimeout(() => { try { el.pairCode.focus(); } catch { /* not focusable */ } }, 60);
+  }
+
+  function hidePairGate() {
+    if (el.pair) el.pair.hidden = true;
+  }
 
   function authHeaders() {
     return TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
@@ -122,6 +303,17 @@
     return `/media?${q.toString()}`;
   }
 
+  /** fetch that renews once on a 401 and replays the request. Centralised
+   *  because a phone sits idle past the access token's life all the time, and
+   *  every call site would otherwise need its own refresh-then-retry dance.
+   *  Replaying is safe here: every body this passes is a string we still hold. */
+  async function authedFetch(url, opts = {}) {
+    const res = await fetch(url, opts);
+    if (res.status !== 401 || !REFRESH) return res;
+    if (!(await refreshAccess())) return res;
+    return fetch(url, { ...opts, headers: { ...(opts.headers || {}), ...authHeaders() } });
+  }
+
   /** fetch + JSON, the same contract as window.SCOPE.api in app.js. A 4th
    *  `method` argument overrides the verb (used for DELETE); with no body the
    *  request is a GET. */
@@ -134,7 +326,7 @@
       opts.body = JSON.stringify(body);
     }
     if (method) opts.method = method;
-    const res = await fetch(apiUrl(path, query), opts);
+    const res = await authedFetch(apiUrl(path, query), opts);
     let data = {};
     try { data = await res.json(); } catch { /* non-JSON (empty/stream) */ }
     return { res, data };
@@ -191,6 +383,7 @@
     el.sessions = $("#m-sessions");
     el.drawerCount = $("#m-drawer-count");
     el.transcript = $("#m-transcript");
+    el.composer = $("#m-composer");
     el.jump = $("#m-jump");
     el.hint = $("#m-hint");
     el.input = $("#m-input");
@@ -217,6 +410,10 @@
     el.modeSel = $("#m-mode-select");
     el.applyModel = $("#m-apply-model");
     el.start = $("#m-start");
+    el.pair = $("#m-pair");
+    el.pairCode = $("#m-pair-code");
+    el.pairHint = $("#m-pair-hint");
+    el.pairGo = $("#m-pair-go");
     // The no-session empty state, captured before any render so a cleared
     // transcript (deleted session) can restore exactly the shipped markup.
     EMPTY_TRANSCRIPT = el.transcript.innerHTML;
@@ -335,6 +532,7 @@
     el.stop.title = S.streaming ? "Stop the agent" : "Stop the agent running in your terminal";
     el.stop.setAttribute("aria-label", el.stop.title);
     if (el.attach) el.attach.disabled = !ready;
+    markComposerHeight();
     if (el.modelChip) {
       // The chip names what the next message runs with and opens the sheet to
       // change it — on a phone it is the only place the model is visible.
@@ -499,9 +697,40 @@
     if (el.attachInput) el.attachInput.click();
   }
 
+  /** How tall the textarea may grow. The share shrinks with the screen: 40% of a
+   *  480px-tall phone left the transcript with barely half the screen while a
+   *  long draft was open, which is the one moment the transcript matters most. */
+  function inputCap() {
+    const h = window.innerHeight;
+    const share = h <= 560 ? 0.2 : h <= 720 ? 0.26 : 0.4;
+    return Math.round(h * share);
+  }
+
+  /** Visual rows in the draft, measured rather than counted: a wrapped line and
+   *  a typed newline both take a row, and only the field knows which. */
+  function inputRows() {
+    const style = getComputedStyle(el.input);
+    const line = parseFloat(style.lineHeight) || 22;
+    const pad = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+    return Math.round((el.input.scrollHeight - pad) / line);
+  }
+
+  /** Flag a draft that has grown past two rows, so a short screen can give the
+   *  words the space the foot row was using (see #m-composer[data-tall]). */
+  function markComposerHeight() {
+    if (!el.composer || !el.input) return;
+    el.composer.toggleAttribute("data-tall", inputRows() >= 3 || S.attachments.length > 0);
+  }
+
   function autoGrow() {
+    // An empty field is one row. The placeholder is not content, but Chromium
+    // still counts its wrapped lines in scrollHeight — and "Pick a session
+    // first" wraps on a 320px phone, which silently made the composer two rows
+    // taller (and moved the jump pill with it).
+    if (!el.input.value) { el.input.style.height = ""; markComposerHeight(); return; }
     el.input.style.height = "auto";
-    el.input.style.height = Math.min(el.input.scrollHeight, Math.round(window.innerHeight * 0.4)) + "px";
+    el.input.style.height = Math.min(el.input.scrollHeight, inputCap()) + "px";
+    markComposerHeight();
   }
 
   // ─── Scrolling ────────────────────────────────────────────────────────────
@@ -767,9 +996,21 @@
 
   async function fetchSessions() {
     if (document.hidden) return;
+    // Nothing to fetch before the phone has a token; the gate owns the screen.
+    if (el.pair && !el.pair.hidden) return;
     const { res, data } = await api("/sessions", { limit: 100 });
     if (!res.ok) {
-      hint(res.status === 401 ? "Session expired — rescan the QR." : `Could not load sessions (HTTP ${res.status}).`, "err");
+      if (res.status === 401) {
+        // api() already tried a refresh, so a 401 that survives it means this
+        // pairing is over: the server restarted (its signing key is per boot)
+        // or the phone was disconnected from the desktop panel. Drop the
+        // credentials and ask for a code rather than leaving an empty list
+        // behind a wall of 401s.
+        clearCredentials();
+        showPairGate("This server reissued its credentials — enter the code from the phone panel.");
+        return;
+      }
+      hint(`Could not load sessions (HTTP ${res.status}).`, "err");
       return;
     }
     S.sessions = (Array.isArray(data.sessions) ? data.sessions : []).filter(isChatSession);
@@ -915,7 +1156,19 @@
     es.onerror = () => {
       setLive(false);
       if (es) { es.close(); es = null; }
-      setTimeout(() => { if (S.sid === sid && !S.streaming) connectLive(sid); }, 4000);
+      setTimeout(async () => {
+        if (S.sid !== sid || S.streaming) return;
+        // A stream authorised by a lapsed token 401s on every retry, so renew
+        // before reconnecting — the loop would otherwise never end.
+        if (expiresSoon(30_000)) {
+          const ok = await refreshAccess();
+          if (!ok && !TOKEN) {
+            showPairGate("This server reissued its credentials — enter the code from the phone panel.");
+            return;
+          }
+        }
+        if (S.sid === sid && !S.streaming) connectLive(sid);
+      }, 4000);
     };
   }
 
@@ -1264,7 +1517,7 @@
    *  twice once the stream delivered it again. */
   async function attachStream(sid) {
     try {
-      const res = await fetch(apiUrl("/chat/attach", { sessionId: sid }), { headers: authHeaders() });
+      const res = await authedFetch(apiUrl("/chat/attach", { sessionId: sid }), { headers: authHeaders() });
       const ct = res.headers.get("content-type") || "";
       if (res.ok && ct.includes("ndjson")) {
         await consumeStream(res);
@@ -1356,7 +1609,7 @@
     beginLiveTurn();
 
     try {
-      const res = await fetch(apiUrl("/chat"), {
+      const res = await authedFetch(apiUrl("/chat"), {
         method: "POST",
         headers: { ...authHeaders(), "content-type": "application/json" },
         body: JSON.stringify({
@@ -1890,7 +2143,11 @@
     });
 
     // Back to the desktop UI, explicitly — the same URL, with `ui=desktop` so
-    // the server does not send the phone layout again.
+    // the server does not send the phone layout again. The access token rides
+    // along because the desktop bundle has no refresh of its own: the borrowed
+    // layout lives as long as that token does (half an hour), and the phone
+    // layout picks up where it left off afterwards. The master token is never in
+    // the phone's hands to pass on.
     el.desktop.addEventListener("click", () => {
       const p = new URLSearchParams();
       if (TOKEN) p.set("token", TOKEN);
@@ -1930,6 +2187,16 @@
       else closeDrawer();
     });
 
+    // The jump pill floats just above the composer, which grows with the
+    // textarea, the staged attachments and the safe-area inset. Publish its
+    // height so the CSS can anchor to it instead of guessing a constant.
+    const trackComposer = () => {
+      document.documentElement.style.setProperty("--composer-h", `${el.composer.offsetHeight}px`);
+    };
+    trackComposer();
+    if (typeof ResizeObserver === "function") new ResizeObserver(trackComposer).observe(el.composer);
+    else window.addEventListener("resize", trackComposer);
+
     // The composer must not sit under the keyboard: iOS shrinks the visual
     // viewport, so re-measure and re-stick to the newest row when it changes.
     if (window.visualViewport) {
@@ -1948,17 +2215,60 @@
       void fetchSessions();
       if (S.sid && !es && !S.streaming) connectLive(S.sid);
     });
+
+    // The pairing gate's only way out: a code, exchanged for a token pair.
+    if (el.pairGo) {
+      el.pairGo.addEventListener("click", async () => {
+        const code = (el.pairCode.value || "").trim();
+        if (!code) {
+          setPairHint("Type the code shown in the phone panel.", true);
+          el.pairCode.focus();
+          return;
+        }
+        el.pairGo.disabled = true;
+        setPairHint("Pairing…", false);
+        const paired = await exchangePairCode(code);
+        el.pairGo.disabled = false;
+        if (!paired) return;
+        el.pairCode.value = "";
+        hidePairGate();
+        await resumeAfterPair();
+      });
+      el.pairCode.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); el.pairGo.click(); }
+      });
+      // A complete code (six digits, separators optional) submits itself: on a
+      // phone keyboard there is nothing else to do after the last digit.
+      el.pairCode.addEventListener("input", () => {
+        if (el.pairCode.value.replace(/\D/g, "").length === 6) el.pairGo.click();
+      });
+    }
   }
 
-  async function boot() {
-    cache();
-    wire();
-    // The inline bootstrap already applied the stored theme; sync the button's
-    // glyph/label to whatever it chose.
-    syncThemeButton();
-    updateViewToggle();
-    refreshComposer();
-    renderHeader();
+  /**
+   * Register the worker that makes this page installable (see sw.js). It does
+   * nothing but answer a failed launch with the offline card — the API and the
+   * event stream are left to the browser — and it is scoped to `/m` so the
+   * desktop app at `/` is never under it.
+   */
+  function registerServiceWorker() {
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("/sw.js", { scope: "/m" }).catch(() => {
+      /* http:// on the LAN, or a browser without workers: the page still runs */
+    });
+  }
+
+  // ─── Boot ─────────────────────────────────────────────────────────────────
+  // Two phases: `boot` decides whether this phone may proceed (stored
+  // credentials, renewed first if the access token has lapsed), and `start` does
+  // the first paint + polling. They are separate because the gate can be reached
+  // later, when a pairing ends — re-pairing then resumes the app without
+  // re-wiring its listeners.
+  let started = false;
+
+  async function start() {
+    if (started) return;
+    started = true;
     await fetchSessions();
     // Enabled models + the workspace lists the sheet offers.
     await fetchTeam(true);
@@ -1970,6 +2280,46 @@
     if (sid && S.sessions.some((s) => s.session_id === sid)) void openSession(sid);
 
     setInterval(() => { void fetchSessions(); }, 15000);
+  }
+
+  /** After a successful pairing: pick the app back up where it was left. */
+  async function resumeAfterPair() {
+    if (started) {
+      await fetchSessions();
+      if (S.sid && !es && !S.streaming) connectLive(S.sid);
+      return;
+    }
+    await start();
+  }
+
+  async function boot() {
+    cache();
+    loadCredentials();
+    wire();
+    registerServiceWorker();
+    // The inline bootstrap already applied the stored theme; sync the button's
+    // glyph/label to whatever it chose.
+    syncThemeButton();
+    updateViewToggle();
+    refreshComposer();
+    renderHeader();
+
+    // No credential means no app: the gate owns the screen until the code from
+    // the desktop's phone panel is typed in.
+    if (!TOKEN && !REFRESH) { showPairGate(); return; }
+
+    // A phone that sat overnight renews before the first paint, so the gate does
+    // not flash on a pairing that is perfectly fine.
+    if (REFRESH && (!TOKEN || expiresSoon(30_000))) {
+      const ok = await refreshAccess();
+      if (!ok && !TOKEN) {
+        showPairGate("This server reissued its credentials — enter the code from the phone panel.");
+        return;
+      }
+    }
+    scheduleRefresh();
+
+    await start();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

@@ -446,9 +446,47 @@ node docs/seed-demo.mjs</code></pre>
       <p>
         Start Pi Scope and click the phone icon in the header. A QR appears — point your phone's
         camera at it and Pi Scope opens <strong>in a mobile layout</strong>, not a shrunk copy of
-        the desktop screen. The QR already carries this run's auth token, so bookmark it rather
-        than sharing it. If the machine has more than one network interface (Wi-Fi, ethernet,
-        docker), pick the address the phone can actually reach.
+        the desktop screen. The QR carries only the address; the phone then asks for the
+        <strong>short-lived pairing code</strong> printed beside it, and trades that code for a
+        short-lived access token plus a refresh token it keeps. It works like a one-time password:
+        six digits, two minutes, spent by the first phone that uses it — the panel then shows the
+        next one — so one code pairs exactly one device, and a photo of the QR alone is not a way
+        in. The phone never receives this server's master token: its access token lapses in half an
+        hour and is renewed silently from the refresh token, which the panel can disconnect. The same URL can be opened by
+        hand at <code>https://&lt;lan-ip&gt;:43201/m</code> (the HTTPS port is the HTTP port + 1).
+        If the machine has more than one network interface (Wi-Fi, ethernet, docker), pick the
+        address the phone can actually reach.
+      </p>
+      <p>
+        The link is HTTPS, so the code and the tokens it buys are encrypted on the Wi-Fi. This
+        machine signs its own certificate — no authority issues one for a LAN address — so the phone
+        shows <em>“your connection is not private”</em> on the first open: tap
+        <strong>Advanced → Proceed</strong> (Safari: <em>Show Details → visit this website</em>) and
+        the phone layout works. That warning is expected once per browser session and is not a
+        connection failure; <code>SCOPE_TLS=0</code> turns the HTTPS listener off.
+      </p>
+      <p>
+        To drop the warning for good — and to be allowed to <strong>install</strong> the app, which
+        Chrome only offers on an origin it trusts — trust the local CA once. Open
+        <code>http://&lt;lan-ip&gt;:&lt;port&gt;/scope-ca.crt</code> (the plain-HTTP port; the
+        certificate is public), then on Android: <em>Settings → Security → Encryption &amp;
+        credentials → Install a certificate → CA certificate</em>, and pick the downloaded file. On
+        iOS: install the profile under <em>Settings → General → VPN &amp; Device Management</em>, then
+        enable it in <em>General → About → Certificate Trust Settings</em>. The CA survives restarts
+        and address changes — only the server certificate behind it is re-minted. Point
+        <code>SCOPE_TLS_CERT</code>/<code>SCOPE_TLS_KEY</code> at a certificate the phone already
+        trusts to skip this step entirely.
+      </p>
+
+      <h4>2. Install it like an app</h4>
+      <p>
+        With the CA trusted (above — the install is not offered without it), add the phone layout to
+        the home screen — Chrome: <em>⋮ → Add to Home screen</em>; iOS Safari: <em>Share → Add to
+        Home Screen</em>. It then launches full-screen
+        without an address bar, with its own icon and splash screen, straight into the phone
+        layout. Nothing extra is downloaded for this: the app stays live from this machine, so the
+        service worker behind it caches exactly one thing — a “can’t reach your computer” card
+        shown when a launch cannot find the server, instead of a blank page.
       </p>
 
       <h4>Keep it on this machine only (optional)</h4>
@@ -492,8 +530,9 @@ node docs/seed-demo.mjs</code></pre>
           </thead>
           <tbody>
             <tr>
-              <th scope="row"><code>/m?token=…</code> (the QR)</th>
-              <td style="text-align:left">The mobile layout, always</td>
+              <th scope="row"><code>/m</code> (the QR)</th>
+              <td style="text-align:left">The pairing screen, then the mobile layout once the code is
+                typed</td>
             </tr>
             <tr>
               <th scope="row"><code>/?token=…</code> on a phone</th>
@@ -519,8 +558,13 @@ node docs/seed-demo.mjs</code></pre>
           retarget a project's team/mode, and it can delete sessions — and the desktop layout
           (reachable with <code>ui=desktop</code>) adds <strong>Terminal</strong>, a real shell, plus
           file edits and git operations. Only run on a network you trust (or set
-          <code>SCOPE_HOST=127.0.0.1</code> to stay local). The token is minted randomly at boot;
-          pin <code>SCOPE_AUTH_TOKEN</code> in <code>scope.env</code> if you want a stable URL.
+          <code>SCOPE_HOST=127.0.0.1</code> to stay local). The QR carries no credential at all —
+          it is the address, and the six-digit code beside it is typed on the phone (two minutes,
+          single use: it dies the moment a phone spends it), which then keeps the token in its own
+          storage. The phone hop is HTTPS (self-signed), so the code and token are encrypted on the
+          Wi-Fi — that stops a passive listener on the network, not someone who controls the access
+          point. The token is minted randomly at boot; pin <code>SCOPE_AUTH_TOKEN</code> in
+          <code>scope.env</code> if you want a stable value across restarts.
         </p>
       </div>
 
@@ -555,6 +599,31 @@ node docs/seed-demo.mjs</code></pre>
               <td style="text-align:left"><code>0.0.0.0</code></td>
               <td style="text-align:left">Bind address. Defaults to all interfaces (serves your LAN, so
                 the phone QR works); <code>127.0.0.1</code> keeps it local-only</td>
+            </tr>
+            <tr>
+              <th scope="row"><code>SCOPE_TLS_PORT</code></th>
+              <td style="text-align:left"><code>SCOPE_PORT</code> + 1</td>
+              <td style="text-align:left">Port of the phone-facing HTTPS listener. The desktop window,
+                the launcher's health probes and the tests keep using the plain-HTTP port</td>
+            </tr>
+            <tr>
+              <th scope="row"><code>SCOPE_TLS</code></th>
+              <td style="text-align:left">enabled</td>
+              <td style="text-align:left"><code>0</code> disables the phone-facing HTTPS listener; phones
+                then get a plain <code>http://</code> link</td>
+            </tr>
+            <tr>
+              <th scope="row"><code>SCOPE_TLS_CERT</code> /
+                <code>SCOPE_TLS_KEY</code></th>
+              <td style="text-align:left">generated</td>
+              <td style="text-align:left">Serve this certificate/key pair instead of the self-signed one
+                (set both) — e.g. a <code>mkcert</code> or internal-CA pair the phone already trusts</td>
+            </tr>
+            <tr>
+              <th scope="row"><code>SCOPE_TLS_DIR</code></th>
+              <td style="text-align:left"><code>~/.pi-scope/tls</code></td>
+              <td style="text-align:left">Where the generated pair is cached; re-minted when the machine's
+                LAN addresses change, because the certificate names them</td>
             </tr>
             <tr>
               <th scope="row"><code>SCOPE_DB_PATH</code></th>

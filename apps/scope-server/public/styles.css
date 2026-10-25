@@ -2890,6 +2890,40 @@
       align-items: center;
     }
 
+    /* The pairing code, shown beside the QR: short-lived, human-typable, and
+       the only credential the QR itself carries. */
+    .phone-code-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .phone-code-label {
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .phone-code {
+      font-family: var(--mono), var(--emoji);
+      font-size: 15px;
+      letter-spacing: 0.12em;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r-control);
+      padding: 4px 8px;
+    }
+
+    .phone-code-expiry {
+      margin-left: auto;
+      font-size: 11.5px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
     .phone-picker {
       display: flex;
       flex-wrap: wrap;
@@ -2956,6 +2990,89 @@
       overflow-x: auto;
       white-space: pre;
       margin: 8px 0;
+    }
+
+    /* An address on a VPN/bridge adapter: still pickable, visibly not the
+       Wi-Fi one, because choosing it is how the QR fails on the phone. */
+    .phone-chip.virtual {
+      border-style: dashed;
+      color: var(--muted);
+    }
+
+    /* "Phone says the site can't be reached" — the connection never reached
+       our server, so these are the network-side checks that fix it. */
+    .phone-trouble {
+      margin-top: 12px;
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
+    .phone-trouble summary {
+      cursor: pointer;
+      font-size: 12.5px;
+      color: var(--text);
+    }
+
+    .phone-trouble ul {
+      margin: 8px 0 10px;
+      padding-left: 18px;
+    }
+
+    .phone-trouble li {
+      margin-bottom: 7px;
+    }
+
+    .phone-trouble strong {
+      color: var(--text);
+    }
+
+    .phone-trouble code {
+      font-family: var(--mono), var(--emoji);
+      font-size: 11.5px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sharp);
+      padding: 1px 5px;
+    }
+
+    /* The scheme badge under the phone URL. HTTPS means the code in the QR (and
+       the token it is traded for) is encrypted on the Wi-Fi; HTTP means it is
+       not, and the panel says so instead of the two looking equally fine. */
+    .phone-tls {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r-control);
+      padding: 8px 10px;
+      margin-bottom: 10px;
+    }
+
+    .phone-tls.plain {
+      border-color: color-mix(in srgb, var(--danger, #c2410c) 45%, var(--border));
+    }
+
+    .phone-tls-badge {
+      flex: 0 0 auto;
+      font-family: var(--mono), var(--emoji);
+      font-size: 10.5px;
+      letter-spacing: 0.06em;
+      padding: 1px 6px;
+      border-radius: var(--r-sharp);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    .phone-tls.plain .phone-tls-badge {
+      color: var(--danger, #c2410c);
+      border-color: currentColor;
     }
 
     /* ─── Trajectory view: turn-aware event ledger ─────────────────────── */

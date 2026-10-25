@@ -14,11 +14,33 @@
   <meta name="apple-mobile-web-app-title" content="Pi Scope">
   <title>Pi Scope</title>
   <link rel="icon" type="image/png" href="logo.png">
+  <!-- Installable as an app. The manifest carries the icons and the standalone
+       display; `scope` is the mobile entry, so an install never opens the
+       desktop app and the worker never touches a desktop request. iOS ignores
+       the manifest's icons, hence the apple-touch-icon it does read. -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="application-name" content="Pi Scope">
   <link rel="stylesheet" href="mobile.css">
 </head>
 
 <body>
   <script>(function () { try { var t = localStorage.getItem('scope-theme'); if (t !== 'light') t = 'dark'; document.documentElement.style.colorScheme = t === 'dark' ? 'dark' : 'light'; if (t === 'dark') document.body.setAttribute('data-ds-dark-theme', ''); } catch (e) { } })();</script>
+
+  <!-- A phone in the browser's "Desktop site" mode reports a ~980px layout
+       viewport while the screen it is drawn on is still ~400px wide. That is not
+       a tablet — the tablet column would be a narrow strip with gutters on a
+       screen that cannot show it — so the layout stays full-bleed. A tablet
+       reports its own width, the ratio is ~1, and the flag stays off. Set before
+       first paint so the column never flashes on a desktop-site phone. -->
+  <script>(function () {
+    try {
+      var screenW = window.screen && window.screen.width ? window.screen.width : 0;
+      if (screenW > 0 && window.innerWidth > screenW * 1.3) {
+        document.documentElement.setAttribute('data-desktop-site', '');
+      }
+    } catch (e) { }
+  })();</script>
 
   <header id="m-top">
     <button id="m-menu" class="m-icon-btn" type="button" aria-label="Sessions" aria-expanded="false">
@@ -104,6 +126,33 @@
       </div>
     </div>
   </footer>
+
+  <!-- Pairing gate. The QR carries only the address; every phone arrives here
+       and types the short-lived code the desktop's phone panel shows, which is
+       traded for a short-lived JWT access token plus a rotating refresh token
+       (POST /pair). Nothing behind this gate fetches data: the access token that
+       exchange produces is what every request needs, and it is renewed
+       (POST /auth/refresh) without asking for another code. -->
+  <div id="m-pair" hidden>
+    <div class="m-pair-card" role="dialog" aria-modal="true" aria-labelledby="m-pair-title">
+      <div class="m-chrome">
+        <span class="m-chrome-dots" aria-hidden="true"><i class="danger"></i><i class="accent"></i><i class="success"></i></span>
+        <span class="m-chrome-label">Pi Scope</span>
+      </div>
+      <div class="m-pair-body">
+        <div id="m-pair-title" class="m-pair-title">Pair this phone</div>
+        <p class="m-pair-copy">Open the phone panel on your computer — the phone icon in Pi Scope's
+          header — and type the code it shows beside the QR.</p>
+        <!-- inputmode=numeric + autocomplete=one-time-code give the phone a
+             digit keypad and let it offer the code straight from a message. -->
+        <input id="m-pair-code" class="m-text-input m-pair-input" type="text" inputmode="numeric"
+          autocomplete="one-time-code" autocorrect="off" autocapitalize="off" spellcheck="false"
+          maxlength="7" placeholder="123 456" aria-label="Pairing code">
+        <div id="m-pair-hint" class="m-hint" hidden></div>
+        <button id="m-pair-go" class="m-btn m-btn-primary" type="button">Connect</button>
+      </div>
+    </div>
+  </div>
 
   <!-- New-session / model sheet. One container, two modes (see openSheet in
        mobile.js): "new" picks a workspace + model and starts a conversation,

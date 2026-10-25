@@ -35,7 +35,11 @@ wherever the agent was started from.
 | Var | Default | Description |
 |-----|---------|-------------|
 | `SCOPE_PORT` | `43190` | HTTP port |
-| `SCOPE_HOST` | `127.0.0.1` | Bind address |
+| `SCOPE_HOST` | `0.0.0.0` | Bind address. All interfaces by default, so the phone QR is reachable; `127.0.0.1` keeps it local-only |
+| `SCOPE_TLS_PORT` | `SCOPE_PORT` + 1 | Port of the phone-facing HTTPS listener. The desktop UI, the launcher's health probes and the tests keep using the plain-HTTP port |
+| `SCOPE_TLS` | *(enabled)* | `0` turns the phone-facing HTTPS listener off; phones then get a plain `http://` link |
+| `SCOPE_TLS_CERT` / `SCOPE_TLS_KEY` | *(generated)* | Serve this certificate/key pair instead of the self-signed one (set both) — e.g. a `mkcert` or internal-CA pair the phone already trusts |
+| `SCOPE_TLS_DIR` | `~/.pi-scope/tls` | Where the generated pair is cached (`cert.pem`, `key.pem` mode 0600). Re-minted when the machine's LAN addresses change, because the certificate names them |
 | `SCOPE_DB_PATH` | `db/scope.db` | SQLite database path |
 | `SCOPE_AUTH_TOKEN` | *(random UUID)* | Bearer token for auth. When unset a random one is generated per run and written to `tmp/scope_token` (mode 0600) so the launcher and the pi extension can find it |
 | `SCOPE_FILE_ROOT` | project root | Comma-separated allowed roots for `/files/*` and `/checkpoints/*` |
@@ -80,6 +84,76 @@ every chat-spawned `pi` subprocess, so an extension that reads `process.env`
 living in a shell profile. A stored key overrides the inherited environment; the
 Settings page shows each key's effective source. Secrets never leave the server
 — the UI only receives a masked preview.
+
+## Phones connect over HTTPS
+
+When the server is LAN-reachable it starts a second listener on `SCOPE_TLS_PORT`,
+whose certificate is minted on first use and cached in `SCOPE_TLS_DIR`. `GET /lan`
+hands the phone `https://…` URLs, so the pairing code you type on the phone —
+and the credentials it is traded for — travel encrypted instead of readable by
+anything else on the Wi-Fi. The QR itself carries no credential: it is the
+address only, and the phone's pairing screen asks for the code the panel shows.
+That code behaves like an OTP — six digits, two minutes of life, and single use:
+`POST /pair` spends it, so one code pairs exactly one phone and the panel
+immediately shows the next.
+
+What the code buys is not the server's own `SCOPE_AUTH_TOKEN`. It is a pair of
+mobile credentials (`auth-jwt.ts`): an HS256 JWT access token that expires in 30
+minutes, and an opaque refresh token that stays valid for 30 days, hashed at
+rest and rotated on every use. `POST /pair/refresh` renews the pair without
+another code, `POST /pair/revoke` revokes it, and both die with the process — a
+restarted server asks for a new code, exactly as a per-run token did. The access
+token is accepted everywhere the master token is, so the mobile page's SSE stream
+and workspace media work with `?token=`; it cannot stop the server, which still
+insists on the master token.
+
+### Installing the phone layout as an app
+
+The mobile entry is a PWA. `public/manifest.webmanifest` declares `start_url` and
+`scope` as `/m`, a standalone display, and the icons in `public/icons/` (any and
+maskable, plus the `apple-touch-icon` iOS actually reads), so Chrome and Safari
+offer "Add to Home Screen" once the page is open over the HTTPS listener.
+
+`public/sw.js` is a deliberate pass-through. Installability requires a service
+worker with a fetch handler, and this one never caches an app response or API
+call — the view is live data from this machine behind a per-run token, so a cache
+would only serve a stale UI or a dead credential. The single thing it stores is
+`public/mobile-offline.html`, shown in place of a navigation that cannot reach
+the server, because a standalone install has no address bar to explain itself.
+It is registered with scope `/m`, so the desktop app at `/` is never under it.
+
+No public authority issues a certificate for `192.168.x.x`, and the address
+changes with the network, so this machine mints its own trust: a long-lived local
+CA in `~/.pi-scope/tls/ca-cert.pem` (about eight years) signs a 397-day server
+certificate for the LAN addresses in use. Chrome still shows "your connection is
+not private" until the CA is known, and `Advanced → Proceed` accepts it for that
+browser session — enough to use the phone layout, but **not enough to install it**:
+Chrome refuses to register a service worker on an origin with a certificate
+error, and the install needs a worker.
+
+Installing that CA one time fixes both. `GET /scope-ca.crt` serves it on the
+plain-HTTP port too (the certificate is public, and the phone has to fetch it
+before it can trust this server):
+
+- **Android**: open `http://<lan-ip>:<port>/scope-ca.crt`, then Settings → Security
+  → Encryption & credentials → Install a certificate → **CA certificate** → the
+  downloaded file.
+- **iOS**: open the link in Safari and allow the profile, install it under
+  Settings → General → VPN & Device Management, then enable it in Settings →
+  General → About → **Certificate Trust Settings** (`Pi Scope Local CA`).
+
+After that the warning is gone, the origin is clean, and "Add to Home screen"
+offers the install. A network change re-mints the *server* certificate only; the
+CA — the part the phone trusts — is kept. To skip all of this, point
+`SCOPE_TLS_CERT`/`SCOPE_TLS_KEY` at a pair the phone already trusts and make sure
+its SANs include the LAN address the QR uses.
+
+The plain-HTTP port still listens: the desktop window, `stop.sh`, the launcher's
+health probes and the extension's `--obs-server-url` keep using
+`http://127.0.0.1:<SCOPE_PORT>`, so nothing on loopback pays for TLS it does not
+need. Encryption covers the network hop only — it is not proof of who is on the
+other end, and it does not make the LAN bind safe to expose on a network you do
+not trust.
 
 ## Chat harnesses
 
@@ -280,6 +354,14 @@ address the token is required anyway (see the LAN notes in the root README).
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check + version + platform + uptime + totals (no auth) |
+| GET | `/lan` | Phone pairing: bind state, ranked LAN IPv4 addresses (interface, virtual-flag, default-route), the short-lived `pair_code`, the credential-free `/m` URLs and the HTTPS state (`tls`, `tls_port`, `tls_error`). Never contains the auth token |
+| GET | `/scope-ca.crt` | The local CA that signs the phone-facing certificate, for the phone to trust once (no auth: a certificate is public, and the phone needs it before it can talk to this server cleanly). 404 when TLS is off or a certificate is supplied |
+| GET | `/manifest.webmanifest` | PWA manifest for the phone layout (no auth: the browser fetches it itself) |
+| GET | `/sw.js` | Service worker behind installability — pass-through plus one cached offline card (no auth, `no-cache`) |
+| GET | `/mobile-offline.html` | The offline card `sw.js` serves when a launch cannot reach the server (no auth) |
+| POST | `/pair` | Exchange a `pair_code` for a mobile credential pair (JWT access token + rotating refresh token) — six digits, single use, two-minute life (unauthenticated, same-origin, rate-limited). Never returns the master token |
+| POST | `/pair/refresh` | Rotate a refresh token into a new access/refresh pair; the presented token is spent (unauthenticated, same-origin) |
+| POST | `/pair/revoke` | Forget a phone's refresh token (unauthenticated, same-origin, idempotent) |
 | POST | `/shutdown` | Graceful server shutdown (loopback-trusted) |
 | GET | `/` | Scope UI (no auth) |
 | POST | `/events` | Ingest single event or array (loopback-trusted) |

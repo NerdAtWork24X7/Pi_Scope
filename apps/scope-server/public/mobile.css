@@ -110,7 +110,9 @@
   --gap: 16px;
   --pad-x: 14px;
   /* The app column: past 700px the phone layout keeps this width and centers
-   * instead of stretching across a monitor. */
+   * instead of stretching across a monitor. A mouse viewport previews the phone
+   * stripe at 430px; a touch tablet widens it to a reading column (see the
+   * wide-screen block at the end of this file). */
   --app-col: 430px;
   --app-col-half: 215px;
 
@@ -1169,6 +1171,9 @@ body {
   gap: 6px;
   padding: 2px 0 8px;
 }
+/* `.m-attachments`'s own `display` beats the UA `[hidden]` rule, so the empty
+ * row still cost the composer 10px of padding on every screen. */
+.m-attachments[hidden] { display: none; }
 .m-attach-chip {
   display: inline-flex;
   align-items: center;
@@ -1248,12 +1253,16 @@ body {
 .m-hint.warn { color: var(--warn); }
 
 /* The model/workspace readout under the composer, and the reply-view switch:
- * mono, ghost, tappable. */
+ * mono, ghost, tappable. They share one row — stacked, they cost the composer
+ * ~76px of vertical space on every phone, which is a tenth of a small screen.
+ * The chip is the part that yields: it elides, the toggle never wraps. */
 .m-foot {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 8px;
   padding: 6px 2px 0;
 }
 
@@ -1261,6 +1270,7 @@ body {
 .m-view-toggle {
   display: inline-flex;
   align-items: stretch;
+  flex: 0 0 auto;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-sharp);
@@ -1275,16 +1285,18 @@ body {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   padding: 0 10px;
-  min-height: 32px;
+  min-height: 30px;
   cursor: pointer;
 }
 .m-view-btn + .m-view-btn { border-left: 1px solid var(--border-subtle); }
 .m-view-btn.on { color: var(--accent); }
 
 .m-model-chip {
-  max-width: 100%;
-  min-height: 32px;
-  padding: 5px 12px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: calc(100% - 136px);
+  min-height: 30px;
+  padding: 4px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-sharp);
   background: transparent;
@@ -1302,7 +1314,10 @@ body {
 .m-jump {
   position: fixed;
   right: calc(12px + env(safe-area-inset-right));
-  bottom: calc(104px + env(safe-area-inset-bottom));
+  /* Sits above the composer, whose height moves with the textarea, the attach
+   * chips and the safe-area inset — mobile.js keeps --composer-h in sync. The
+   * fallback matches a full base composer so the pill never lands on it. */
+  bottom: calc(var(--composer-h, 150px) + 10px);
   z-index: 15;
   min-height: 36px;
   padding: 8px 14px;
@@ -1469,25 +1484,193 @@ body {
   border-top: 1px solid var(--border-panel);
 }
 .m-sheet-foot .m-btn { flex: 1 1 auto; }
+
+/* ── Pairing gate ───────────────────────────────────────────────────────────
+ * The first screen on a phone that has no token: type the short-lived code the
+ * desktop's phone panel shows. A full-screen surface, not a dismissible sheet —
+ * there is no session data behind it, because every request needs the token the
+ * exchange produces. */
+#m-pair {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  padding-top: calc(20px + env(safe-area-inset-top));
+  padding-bottom: calc(20px + env(safe-area-inset-bottom));
+  background: var(--bg);
+}
+#m-pair[hidden] { display: none; }
+
+.m-pair-card {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--surface);
+  background-image: var(--texture);
+  background-size: var(--texture-size);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--r-panel);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
+
+.m-pair-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px var(--pad-x) 20px;
+}
+
+.m-pair-title {
+  font-family: var(--font-display);
+  font-size: 19px;
+  color: var(--text);
+}
+
+.m-pair-copy {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* The code is read off a screen and typed on a phone: mono, tracked out,
+ * centred, and >=16px so iOS does not zoom the page when it takes focus. */
+.m-pair-input {
+  width: 100%;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 20px;
+}
+
+#m-pair-go { width: 100%; }
 .m-sheet-foot .m-btn[hidden] { display: none; }
 .m-sheet-foot .m-btn-soft { flex: 0 1 auto; }
+
+/* ── Adaptive density ────────────────────────────────────────────────────────
+ * The rules above are drawn at a 390×844 reference. Phones are not all that
+ * size: a 320×568 SE or an Android in landscape used to get the exact same
+ * chrome, which put the empty-state CTA below the fold and let the composer
+ * eat a third of the screen. These tiers step the layout down as the viewport
+ * shrinks — spacing and fixed chrome first, display type next — while the 14px
+ * prose and the 44px touch targets stay put: those are the floor for reading
+ * and for a thumb, not something to shrink.
+ *
+ * The height tiers key off the LAYOUT viewport, so a soft keyboard (which only
+ * shrinks the visual viewport in Safari) cannot reshuffle the chrome mid-typing.
+ */
+
+/* Small phones: 320–374px wide (SE 1st gen, older Androids). */
+@media (max-width: 374px) {
+  :root { --pad-x: 12px; --gap: 12px; }
+  #m-title { font-size: 15px; }
+  #m-sub { font-size: 10px; letter-spacing: 0.04em; }
+  .m-hero-title { font-size: clamp(24px, 7.4vw, 27px); }
+  .m-hero-body { max-width: 30ch; }
+  .m-msg { padding: 9px var(--pad-x); }
+  .m-sess-name, .m-opt-name { font-size: 14.5px; }
+  .m-ask { margin: 10px var(--pad-x); }
+  .m-code pre { font-size: 12px; }
+
+  /* The drawer and the sheet keep the same density as the rest of a small
+   * screen: a 56px two-line session row and 16px of air around every sheet
+   * field is a 390-wide luxury. Rows stay 44px touch targets — the floor does
+   * not move — but their padding, gaps and the model chip give way. */
+  .m-ws-name { padding: 10px 12px 4px; }
+  .m-sess { min-height: 44px; padding: 6px 2px 6px 12px; gap: 8px; }
+  .m-sess-meta, .m-sess-model { font-size: 10px; }
+  .m-sess-model { max-width: 34%; padding: 1px 5px; }
+  .m-drawer-scroll { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .m-sheet-body {
+    padding: 12px var(--pad-x);
+    padding-left: calc(var(--pad-x) + env(safe-area-inset-left));
+    padding-right: calc(var(--pad-x) + env(safe-area-inset-right));
+    gap: 12px;
+  }
+  .m-field { gap: 8px; }
+  .m-opt { min-height: 44px; padding: 6px 10px; }
+  .m-select { min-height: 44px; padding: 8px 10px; }
+  .m-add-ws { gap: 6px; }
+  .m-sheet-foot { padding: 10px var(--pad-x) 12px; }
+}
+
+/* Short phones: 480–720px tall (SE portrait, compact Androids). The composer's
+ * two foot rows become one, and the hero tightens so its CTA lands on screen. */
+@media (max-height: 720px) {
+  #m-top { min-height: 50px; }
+  #m-composer { padding-top: 6px; padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
+  .m-composer-row { gap: 6px; }
+  .m-foot { gap: 6px; padding-top: 4px; }
+  .m-model-chip { min-height: 28px; padding: 2px 10px; }
+  .m-view-btn { min-height: 28px; }
+  .m-empty { padding: 14px 16px; gap: 6px; }
+  .m-empty-ic { font-size: 15px; }
+  .m-hero-title { font-size: clamp(24px, 7.6vw, 30px); }
+  .m-hero-body { font-size: 13px; }
+  .m-stats { gap: 12px; margin: 2px 0; }
+  .m-stat-v { font-size: 16px; }
+  .m-jump { min-height: 32px; padding: 6px 12px; }
+}
+
+/* A draft that has grown past two rows on a short screen: the composer hands
+ * the foot row (model chip, Markdown/Raw switch) back to the words until the
+ * draft shrinks or is sent. Typing a paragraph is the one moment the model chip
+ * is not what the user is reading, and on a 480–700px screen its 30-odd pixels
+ * come straight out of the transcript. */
+@media (max-height: 700px) {
+  #m-composer[data-tall] {
+    padding-top: 3px;
+    padding-bottom: calc(3px + env(safe-area-inset-bottom));
+  }
+  #m-composer[data-tall] .m-foot { display: none; }
+}
+
+/* Landscape, or a phone barely taller than its chrome: the hero keeps the
+ * wordmark, the readouts and the CTA and drops the body copy (the same
+ * information the sessions drawer and the composer placeholders carry). */
+@media (max-height: 430px) {
+  #m-top { min-height: 44px; }
+  #m-composer { padding-top: 4px; padding-bottom: calc(4px + env(safe-area-inset-bottom)); }
+  .m-empty { padding: 8px 16px; gap: 4px; }
+  .m-hero-body, .m-empty-sub { display: none; }
+  .m-stats { gap: 14px; margin: 0; }
+  .m-attachments { padding-bottom: 4px; }
+}
 
 /* ── Wide screens ────────────────────────────────────────────────────────────
  * The phone layout opened in a desktop browser (?ui=mobile) used to stretch
  * across the whole monitor — that is what reads as "the mobile page is huge and
- * needs zooming out". On a mouse-driven viewport it keeps its phone width as a
- * centered column, and the overlay surfaces (drawer, scrim, jump pill) belong
- * to the column instead of the window.
+ * needs zooming out". On a wide viewport it keeps a column and centers, and the
+ * overlay surfaces (drawer, scrim, sheet, jump pill) belong to the column rather
+ * than the window.
  *
- * It is deliberately gated on the POINTER, not just the width: an Android phone
- * or foldable reports a wide layout viewport (Desktop-site mode is 980px, an
- * unfolded Fold is ~673px), and those must keep the full-bleed phone layout
- * rather than be squeezed into a 430px strip on their own screen. Touch input
- * therefore never takes this branch. */
+ * The column has two widths, because the two cases are different devices:
+ *
+ *   • a TOUCH screen this wide is a tablet (800–1280px) or a foldable opened
+ *     across its inner display. Full-bleed there ran a message to 90–113
+ *     characters a line — a wall of mono at arm's length. 760px keeps it around
+ *     65, wide enough that the layout still reads as an app rather than a phone
+ *     stripe pinned to the middle of a tablet.
+ *   • a MOUSE viewport is `?ui=mobile` in a desktop browser, where the point is
+ *     to preview the phone layout at the width it was drawn at: 430px.
+ *
+ * A phone itself stays under 700px (and an unfolded Fold's ~673px inner width
+ * does too), so it keeps the full-bleed layout it was designed for. So does a
+ * phone in the browser's "Desktop site" mode: it reports ~980px but is drawn on
+ * a ~400px screen, which mobile.html flags as `data-desktop-site` before first
+ * paint — letterboxing it into a 760px column would shrink the text further on a
+ * screen that cannot show it. */
 
-@media (min-width: 700px) and (hover: hover) and (pointer: fine) {
+@media (min-width: 700px) {
+  /* Tablet default; the mouse block below takes it back to a phone stripe. */
+  :root { --app-col: 760px; --app-col-half: 380px; }
   html, body { background: var(--bg-deep); }
-  body {
+  html:not([data-desktop-site]) body {
     max-width: var(--app-col);
     margin: 0 auto;
     border-left: 1px solid var(--border-subtle);
@@ -1500,14 +1683,19 @@ body {
     left: 0;
     transition: transform 300ms var(--ease-settle), left 300ms var(--ease-settle);
   }
-  #m-drawer.open { left: max(0px, calc(50% - var(--app-col-half))); }
-  #m-scrim,
-  #m-sheet {
+  html:not([data-desktop-site]) #m-drawer.open { left: max(0px, calc(50% - var(--app-col-half))); }
+  html:not([data-desktop-site]) #m-scrim,
+  html:not([data-desktop-site]) #m-sheet {
     left: max(0px, calc(50% - var(--app-col-half)));
     right: max(0px, calc(50% - var(--app-col-half)));
   }
-  .m-jump { right: calc(max(0px, 50% - var(--app-col-half)) + 12px); }
-  .m-sheet-card { max-width: var(--app-col); margin: 0 auto; border-radius: var(--r-panel); }
+  html:not([data-desktop-site]) .m-jump { right: calc(max(0px, 50% - var(--app-col-half)) + 12px); }
+  html:not([data-desktop-site]) .m-sheet-card { max-width: var(--app-col); margin: 0 auto; border-radius: var(--r-panel); }
+}
+
+/* The desktop preview keeps the phone width it is previewing. */
+@media (min-width: 700px) and (hover: hover) and (pointer: fine) {
+  :root { --app-col: 430px; --app-col-half: 215px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
