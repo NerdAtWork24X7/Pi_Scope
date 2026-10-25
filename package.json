@@ -11,7 +11,7 @@
   "license": "MIT",
   "//": "Pi Scope keeps no node_modules in the checkout: apps/scope-desktop/app-deps-install.mjs installs these (plus the bundled pi agent and the server's runtime packages) into ~/.pi-scope/pi and everything resolves from there. The runtime packages are declared in apps/scope-desktop/pi-bundle/package.json, not here — that manifest is what ships inside the packaged app's read-only seed.",
   "devDependencies": {
-    "electron": "43.7.7",
+    "electron": "43.8.1",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
     "ffmpeg-static": "^5.3.0",
