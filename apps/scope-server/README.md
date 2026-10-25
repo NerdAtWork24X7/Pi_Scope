@@ -148,10 +148,11 @@ command sent from the menu is passed to `session/prompt` **verbatim** — no
 reference-library or transcript preamble is prepended, because the agent only
 expands a native command when it opens the prompt. Names ACP marks as skills
 (`$skill`) stay out of the `/` menu, since they are not slash commands. When no
-session is open yet, the same list is discovered over a short-lived ACP session
-(as the table describes) and cached for five minutes.
+session is open yet — and always for Cline, whose turns run headless — the same
+list is discovered over a short-lived ACP session (as the table describes) and
+cached for five minutes.
 
-The ACP harnesses (Gemini CLI, opencode, Kilo Code, Cline) are driven as **live
+The ACP harnesses (Gemini CLI, opencode, Kilo Code) are driven as **live
 sessions**, not one-shot print runs: `acp-client.ts` starts the CLI's ACP server,
 creates a session in the chat's workspace, streams `agent_message_chunk` /
 `tool_call` updates, and keeps the session for the next message — so the agent
@@ -162,6 +163,25 @@ answer goes back over JSON-RPC, and an unanswered card is cancelled on Stop or
 when the session is closed. Calls the agent makes to the *client* (fs, terminal)
 are refused: the harness runs its own tools. Claude Code and Codex CLI have no
 ACP server and keep their native protocols.
+
+Cline is the exception: its ACP server (CLI 3.0.x) answers a prompt with an empty
+`end_turn` — no text and no tool calls — and a `session/load`ed conversation
+replays its old turns but never answers the next one. Its turns therefore run
+**headless** (`cline`, no subcommand), with the prompt written to a temp file
+whose descriptor becomes the child's stdin: Node's `stdio: "pipe"` is a
+socketpair, and Cline only recognises a redirected prompt when stdin is a real
+file (over a socket it refuses with "interactive mode requires a TTY"). `--acp`
+is still how its model list and command menu are discovered. A turn is one
+process, so a follow-up carries the transcript preamble, exactly as the other
+print-mode harnesses do. `ChatHarness.promptViaFile` marks the harnesses that
+need this route; `acpRun: false` keeps ACP for metadata only.
+
+Cline writes its reasoning to stdout painted with the SGR *dim* attribute and
+labelled `[thinking] `. `harness-output.ts` reads that styling as the turn
+streams: dim text goes to the chat's thinking lane (and to a `thinking: …` row in
+a Workflow run log), everything else is the answer — so a node's `{input}` and
+the assistant bubble carry only what Cline answered. `ChatHarness.dimThinking`
+marks the harnesses whose stdout is split this way.
 
 The session id is kept in the agent dir (`chat-acp-sessions.json`, keyed by the
 chat session), so a **server restart** continues the same agent session. The
@@ -185,7 +205,8 @@ lists only what its own CLI implements, so a workaround for one harness cannot
 alter another; print-mode harnesses keep their per-harness `modelFlag`. The modes
 the agent advertises get their own composer pill (Gemini's Plan/YOLO, opencode's
 build/plan). A workflow node also runs an ACP harness as a live session
-(`createAcpSession` through the plugin kit); because a run is unattended, it
+(`createAcpSession` through the plugin kit) — Cline excepted, whose nodes take
+the headless mode described above; because a run is unattended, it
 answers the agent's permission request with the offered allow option and writes
 the decision to the run log.
 

@@ -32,6 +32,7 @@ import { DEFAULT_CHAT_HARNESS, buildHarnessLaunch, chatHarness, normalizeHarness
 import { AcpSession } from "./acp-client.ts";
 import { trackProcess } from "./process-registry.ts";
 import { normalizeHarnessCommands, rememberHarnessCommands } from "./harness-commands.ts";
+import { createThinkingSplitter, type SplitChunk } from "./harness-output.ts";
 import type { HarnessRecord, HarnessRecordTool } from "./harness-record.ts";
 import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 // Importing this resolves the bundled Pi coding agent and puts its `pi` shim on
@@ -1154,10 +1155,14 @@ function startHarnessChat(
       // an answerable card instead of being silently refused. Claude Code and
       // Codex have no ACP server, so they keep the one-shot adapters below.
       const spec = chatHarness(harnessId, workflowHarnessSettings());
+      // A turn runs as a live ACP session only when the CLI can hold one: Cline
+      // answers the ACP prompt with an empty turn, so it keeps `acpArgs` for its
+      // metadata (models, commands) while the turn itself is headless.
+      const acpTurn = !!spec?.acpArgs?.length && spec?.acpRun !== false;
       // A native command must open the prompt. Prepending a library/transcript
       // block would turn `/compact` into ordinary prose the agent never
       // dispatches, so a command skips the preamble even on a fresh session.
-      const isSlashCommand = spec?.commandsVia === "acp" && /^\s*\//.test(prompt);
+      const isSlashCommand = acpTurn && /^\s*\//.test(prompt);
 
       // Compose the message: an optional reference library on a new conversation,
       // the bounded transcript of the earlier turns, then this prompt.
@@ -1172,7 +1177,7 @@ function startHarnessChat(
       parts.push(prompt);
       const message = parts.join("\n\n");
 
-      if (spec?.commandsVia === "acp") {
+      if (acpTurn) {
         const file = resolveHarnessBin(spec.id, workflowHarnessSettings());
         if (!file) {
           owned.run = null;
@@ -1351,7 +1356,23 @@ function startHarnessChat(
       }
 
       let child: ChildProcess;
+      // A harness that cannot read Node's piped stdin (`promptViaFile`) gets its
+      // prompt on a temp file whose descriptor becomes the child's stdin — see
+      // `ChatHarness.promptViaFile`. The file is removed once the child is gone.
+      let promptFile: string | null = null;
+      let stdinFd: number | null = null;
+      const dropPromptFile = () => {
+        if (!promptFile) return;
+        try { fs.rmSync(promptFile, { force: true }); } catch { /* already gone */ }
+        promptFile = null;
+      };
       try {
+        if (launch.promptOnFile) {
+          promptFile = path.join(os.tmpdir(), `scope-chat-prompt-${crypto.randomUUID()}.txt`);
+          fs.writeFileSync(promptFile, launch.prompt, { encoding: "utf8", mode: 0o600 });
+          stdinFd = fs.openSync(promptFile, "r");
+        }
+        const stdin: "pipe" | "ignore" | number = stdinFd ?? (launch.promptOnStdin ? "pipe" : "ignore");
         child = spawnCli(launch.file, launch.args, {
           cwd: owned.cwd,
           // The same child env a pi chat gets: stored API keys, the workspace's
@@ -1360,12 +1381,18 @@ function startHarnessChat(
           env: chatChildEnv(owned.cwd),
           // A stdin harness needs a pipe; an argv harness gets `ignore` so it can
           // never block waiting on input that will not arrive.
-          stdio: [launch.promptOnStdin ? "pipe" : "ignore", "pipe", "pipe"],
+          stdio: [stdin, "pipe", "pipe"],
           // Own process group on POSIX: a harness that starts a shell tool or an
           // MCP server takes those children with it when the app closes.
           detached: process.platform !== "win32",
         });
+        // The child holds its own copy of the descriptor now, so this side's can
+        // go; the file itself is unlinked when the child ends (Windows refuses
+        // to remove a file another process still has open).
+        if (stdinFd !== null) { fs.closeSync(stdinFd); stdinFd = null; }
       } catch (err: any) {
+        if (stdinFd !== null) { try { fs.closeSync(stdinFd); } catch { /* already closed */ } }
+        dropPromptFile();
         owned.run = null;
         owned.runState = null;
         owned.lastRun = { outcome: "error", at: Date.now() };
@@ -1393,13 +1420,35 @@ function startHarnessChat(
       }
 
       let output = "";
+      // The assistant's words when the CLI styles its reasoning (see
+      // `dimThinking`); `output` still carries every byte for other harnesses.
+      let answer = "";
       let errBuf = "";
+      const thinkingSplit = launch.harness.dimThinking ? createThinkingSplitter() : null;
       const decoder = new TextDecoder();
+      // One chunk of the split stream: reasoning into the thinking lane, the
+      // answer into the bubble and the run's replay buffer.
+      const emitPart = (part: SplitChunk) => {
+        if (part.thinking) {
+          owned.runThinking = (owned.runThinking + part.thinking).slice(-HARNESS_OUTPUT_MAX_CHARS);
+          runEmit(run, { type: "thinking", delta: part.thinking });
+        }
+        if (part.text) {
+          answer = (answer + part.text).slice(-HARNESS_OUTPUT_MAX_CHARS);
+          owned.runOutput = (owned.runOutput + part.text).slice(-HARNESS_OUTPUT_MAX_CHARS);
+          run.sawText = true;
+          runEmit(run, { type: "text", delta: part.text });
+        }
+      };
       child.stdout?.on("data", (chunk: Buffer) => {
         const text = decoder.decode(chunk, { stream: true });
         if (!text) return;
         owned.lastUsed = Date.now();
         output = (output + text).slice(-HARNESS_OUTPUT_MAX_CHARS);
+        if (thinkingSplit) {
+          emitPart(thinkingSplit.feed(text));
+          return;
+        }
         const clean = stripHarnessAnsi(text);
         if (clean) {
           owned.runOutput = (owned.runOutput + clean).slice(-HARNESS_OUTPUT_MAX_CHARS);
@@ -1418,10 +1467,15 @@ function startHarnessChat(
         // ended the run) must not emit into readers that have been closed.
         if (owned.run !== run) return;
         if (owned.child === child) owned.child = null;
+        dropPromptFile();
         // A character (or escape sequence) the streaming decoder was holding.
         const tail = decoder.decode();
         if (tail) output += tail;
-        const text = stripHarnessAnsi(output).trim();
+        if (thinkingSplit) {
+          if (tail) emitPart(thinkingSplit.feed(tail));
+          emitPart(thinkingSplit.flush());
+        }
+        const text = thinkingSplit ? answer.trim() : stripHarnessAnsi(output).trim();
         if (text) runEmit(run, { type: "final", text });
         if (text) rememberHarnessTurn(owned, prompt, text);
         const aborted = owned.stopRequested;

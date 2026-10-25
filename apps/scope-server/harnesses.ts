@@ -70,6 +70,17 @@ export interface ChatHarness {
   args: (prompt: string) => string[];
   /** The harness reads its prompt from stdin instead of argv. */
   promptStdin: boolean;
+  /** The CLI paints its reasoning with the SGR dim attribute and a
+   *  `[thinking] ` label (Cline's headless mode does): the runner splits that
+   *  style off into the chat's thinking lane instead of showing it as answer
+   *  text — see `harness-output.ts`. */
+  dimThinking?: boolean;
+  /** The prompt must arrive on a real file rather than a pipe. Node hands a
+   *  `stdio: "pipe"` child a socketpair, and Cline only recognises a redirected
+   *  prompt when stdin is a regular file: over a socket it aborts with
+   *  "interactive mode requires a TTY". The caller writes the prompt to a temp
+   *  file, opens it for reading and passes the descriptor as the child's stdin. */
+  promptViaFile?: boolean;
   /** The CLI's model flag (null when it has none). */
   modelFlag: string | null;
   /** A short curated list offered when the CLI cannot list its own models. */
@@ -84,6 +95,11 @@ export interface ChatHarness {
   commandsVia?: "pi-rpc" | "claude-control" | "codex-skills" | "acp";
   /** Arguments that start the CLI's ACP server (`commandsVia: "acp"`). */
   acpArgs?: string[];
+  /** Whether a chat turn runs as a live ACP session through `acpArgs`.
+   *  Default true. `false` keeps ACP for metadata only (the model list, the
+   *  command menu) while the turn itself runs the CLI's headless mode — for a
+   *  CLI whose ACP server answers a prompt with an empty turn. */
+  acpRun?: boolean;
   /** Defined in Settings → Plugins → Workflow rather than shipped here. */
   user?: boolean;
 }
@@ -163,11 +179,20 @@ export const CHAT_HARNESSES: Record<string, ChatHarness> = {
     bin: "cline",
     args: () => [],
     promptStdin: true,
+    promptViaFile: true,
+    dimThinking: true,
     modelFlag: "--model",
     models: [],
     modelsVia: "acp",
     commandsVia: "acp",
     acpArgs: ["--acp"],
+    // Cline 3.0.x advertises ACP but cannot hold a conversation over it: a
+    // prompt on the server's own default model resolves `end_turn` with no
+    // text and no tool calls, and a resumed session replays the old turns then
+    // answers the new one with nothing. Its headless mode (`cline`, prompt on
+    // stdin) answers on the model the CLI is configured to use, so a turn takes
+    // that route; `--acp` is still how its models and commands are discovered.
+    acpRun: false,
   },
   kilo: {
     id: "kilo",
@@ -441,6 +466,9 @@ export interface HarnessLaunch {
   args: string[];
   /** Write `prompt` to the child's stdin and close it (instead of argv). */
   promptOnStdin: boolean;
+  /** Hand `prompt` over as a temp file opened on the child's stdin (a harness
+   *  that rejects Node's pipe — see `promptViaFile`). */
+  promptOnFile: boolean;
   prompt: string;
   harness: ChatHarness;
 }
@@ -480,9 +508,11 @@ export function buildHarnessLaunch(
   }
   const prompt = String(opts.prompt ?? "");
   const model = String(opts.model ?? "").trim();
+  const promptOnFile = !!spec.promptViaFile;
+  const promptOnStdin = spec.promptStdin && !promptOnFile;
   let args = spec.args(spec.promptStdin ? "" : prompt);
   if (model && spec.modelFlag) args = [...args, spec.modelFlag, model];
-  return { ok: true, file, args, promptOnStdin: spec.promptStdin, prompt, harness: spec };
+  return { ok: true, file, args, promptOnStdin, promptOnFile, prompt, harness: spec };
 }
 
 // ─── The CLI's own model list ───────────────────────────────────────────────

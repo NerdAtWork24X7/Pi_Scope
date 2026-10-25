@@ -77,6 +77,18 @@ test("the catalogue says which harnesses publish their own commands", () => {
   assert.ok(list.every((h) => !("slashCommands" in h)), "commands are discovered, never baked in");
 });
 
+test("Cline's ACP server is metadata only; its turns run headless", () => {
+  const cline = chatHarness("cline");
+  assert.ok(cline.acpArgs?.length, "the ACP server is still how its models and commands are read");
+  assert.equal(cline.acpRun, false, "a Cline turn over ACP comes back empty, so a turn is its headless mode");
+  assert.equal(cline.promptStdin, true, "the headless turn takes its prompt on stdin");
+  assert.equal(cline.modelFlag, "--model");
+  // The harnesses whose ACP prompts do answer keep their live sessions.
+  for (const id of ["gemini", "opencode", "kilo"]) {
+    assert.notEqual(chatHarness(id).acpRun, false, `${id} still runs as an ACP session`);
+  }
+});
+
 test("harness ids normalize and unknown ids are reported instead of hidden", () => {
   assert.equal(normalizeHarnessId("  Claude "), "claude");
   assert.equal(normalizeHarnessId(""), "pi");

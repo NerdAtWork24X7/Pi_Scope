@@ -387,9 +387,12 @@ node docs/seed-demo.mjs</code></pre>
         The picker above the Chat composer switches a conversation to any installed harness, and
         every reply keeps the glyph of the CLI that produced it. A harness that publishes
         commands fills the composer's <code>/</code> menu; ACP (Agent Client Protocol) sessions
-        (Gemini CLI, opencode, Cline, Kilo Code) also advertise their own modes and take model
-        switches over the protocol. External turns are recorded like Pi's, so the conversation
-        appears in the workspace rail and replays in Single and Trajectory.
+        (Gemini CLI, opencode, Kilo Code) also advertise their own modes and take model
+        switches over the protocol. Cline's ACP server cannot answer a prompt, so its turns run
+        its headless mode instead (its models and commands are still read over ACP), with the
+        reasoning it streams dimmed into the thinking lane rather than the reply. External
+        turns are recorded like Pi's, so the conversation appears in the workspace rail and
+        replays in Single and Trajectory.
       </p>
       <p>
         The bundled agent also keeps its <strong>own agent dir</strong>

@@ -418,9 +418,19 @@ const HARNESSES: Record<string, any> = {
     // newline). `-m/--model <id>` picks the model for the run.
     label: "Cline", bin: "cline", args: () => [], modelFlag: "--model",
     promptStdin: true,
-    // ACP-capable: a node runs as a live session when the host hands over the
-    // client (see `runAcpNode`). `--acp` needs a signed-in CLI.
+    // Its reasoning arrives dim-painted and `[thinking] `-labelled on stdout:
+    // the runner keeps it out of the node's answer (see `harness-output.ts`).
+    dimThinking: true,
+    // Cline only accepts a redirected prompt when stdin is a real file; Node's
+    // `stdio: "pipe"` is a socketpair, which it refuses as "interactive mode
+    // requires a TTY". The runner therefore hands it a temp file (`promptFile`).
+    promptViaFile: true,
+    // ACP-capable for metadata only: its models come from the ACP server
+    // (`session/new`), but a *turn* over ACP comes back empty — Cline 3.0.x
+    // resolves `end_turn` on its default model with no text and no tool calls,
+    // so the node runs headless above like any print-mode harness.
     acpArgs: ["--acp"],
+    acpRun: false,
     // Cline has no command that prints a model catalogue; the host asks its ACP
     // `session/new` response for the models a signed-in CLI offers.
     models: [],
@@ -1332,6 +1342,10 @@ export function activate(api: any): void {
   // factory, and an ACP harness then falls back to its one-shot invocation.
   const createAcpSession: ((opts: any) => any) | null =
     typeof api.kit.createAcpSession === "function" ? api.kit.createAcpSession : null;
+  // Splits a harness's stdout into its answer and reasoning it painted dim
+  // (Cline's headless mode). Feature-detected like the ACP session.
+  const newThinkingSplitter: (() => any) | null =
+    typeof api.kit.createThinkingSplitter === "function" ? api.kit.createThinkingSplitter : null;
   // The host's harness-model catalogue, including the protocols that have no
   // `models` command (Claude initialize, Codex app-server, ACP session/new).
   // Feature-detected so this plugin still runs on a host that predates it; the
@@ -2934,6 +2948,9 @@ export function activate(api: any): void {
         // Whether this node's prompt travels on the child's stdin instead of the
         // command line (a `promptStdin` harness — see HARNESSES.opencode).
         let promptOnStdin = false;
+        // …or on a temp file opened as its stdin, for a CLI that rejects a pipe
+        // (`promptViaFile` — see HARNESSES.cline).
+        let promptOnFile = false;
         // A custom node's message, written beside the run for it to read (see
         // `promptFile` below). Removed however the child ends.
         let promptFile: string | null = null;
@@ -2959,11 +2976,14 @@ export function activate(api: any): void {
         } else {
           spec = allHarnesses()[node.config.harness] as any;
           if (!spec || !spec.bin) { resolve({ text: "", code: null, error: `unknown harness: ${node.config.harness}` }); return; }
-          acpArgs = Array.isArray(spec.acpArgs) ? spec.acpArgs.slice() : null;
+          // A harness may keep an ACP server for discovery while running its
+          // turns headless (`acpRun: false` — see the Cline entry).
+          acpArgs = Array.isArray(spec.acpArgs) && spec.acpRun !== false ? spec.acpArgs.slice() : null;
           // A stdin harness is launched with no message at all: its prompt is
           // written to the pipe below, where a multi-line prompt cannot be lost.
-          promptOnStdin = !!spec.promptStdin;
-          args = spec.args(promptOnStdin ? "" : prompt);
+          promptOnFile = !!spec.promptViaFile;
+          promptOnStdin = !!spec.promptStdin && !promptOnFile;
+          args = spec.args(spec.promptStdin ? "" : prompt);
           if (node.config.model && spec.modelFlag) args = [...args, spec.modelFlag, node.config.model];
           if (node.config.extraArgs) args = [...args, ...splitArgs(node.config.extraArgs)];
           args = [...args, ...capabilityArgs(spec, node.config)];
@@ -2978,6 +2998,16 @@ export function activate(api: any): void {
             resolve({ text: "", code: null, error: override
               ? `the configured binary for ${node.config.harness} is not executable: ${override}`
               : `${spec.bin} was not found on PATH — install it, or set a binary path in Settings → Plugins → Workflow` });
+            return;
+          }
+        }
+
+        // A file-stdin harness reads its prompt from a temp file, the same route a
+        // `custom` command takes through SW_PROMPT_FILE.
+        if (promptOnFile) {
+          promptFile = writePromptFile(prompt);
+          if (!promptFile) {
+            resolve({ text: "", code: null, error: "could not write the node's prompt to a temp file" });
             return;
           }
         }
@@ -3082,7 +3112,10 @@ export function activate(api: any): void {
         };
 
         let child: any;
+        // The prompt file's descriptor is the child's stdin for a file harness.
+        let stdinFd: number | null = null;
         try {
+          if (promptOnFile && promptFile) stdinFd = fs.openSync(promptFile, "r");
           // spawnCli owns the platform's launch rules: a `.cmd` shim is run
           // through cmd.exe with every argument escaped, a real image is spawned
           // directly, and POSIX is unchanged. A stdin harness needs that pipe to
@@ -3090,12 +3123,15 @@ export function activate(api: any): void {
           child = spawnCli(cmd, args, {
             cwd,
             env,
-            stdio: [promptOnStdin ? "pipe" : "ignore", "pipe", "pipe"],
+            stdio: [stdinFd ?? (promptOnStdin ? "pipe" : "ignore"), "pipe", "pipe"],
             // Its own group on POSIX so the harness's tools go down with it (and
             // so app shutdown can signal the group, not just this pid).
             detached: !isWindows(),
           });
+          // The child has its own copy now; the file goes in `dropPromptFile`.
+          if (stdinFd !== null) { fs.closeSync(stdinFd); stdinFd = null; }
         } catch (err: any) {
+          if (stdinFd !== null) { try { fs.closeSync(stdinFd); } catch { /* already closed */ } }
           dropPromptFile();
           resolve({ text: "", code: null, error: `failed to spawn ${cmd}: ${err?.message ?? err}` });
           return;
@@ -3139,8 +3175,28 @@ export function activate(api: any): void {
         const consume = (stream: string) => {
           const decoder = new TextDecoder();
           let pending = "";
+          // Cline paints its reasoning dim on stdout (see HARNESSES.cline); that
+          // text belongs in the log, never in the node's answer or in `{input}`.
+          const split = stream === "stdout" && spec?.dimThinking && newThinkingSplitter
+            ? newThinkingSplitter()
+            : null;
+          let reasoning = "";
+          const logReasoning = (append: string) => {
+            reasoning += append;
+            let nl: number;
+            while ((nl = reasoning.indexOf("\n")) >= 0) {
+              const line = reasoning.slice(0, nl);
+              reasoning = reasoning.slice(nl + 1);
+              if (line.trim()) logLine(run, node.id, "status", `thinking: ${line}`);
+            }
+          };
           const feed = (data: Buffer) => {
-            const text = decoder.decode(data, { stream: true });
+            let text = decoder.decode(data, { stream: true });
+            if (split) {
+              const part = split.feed(text);
+              logReasoning(part.thinking);
+              text = part.text;
+            }
             // The node's *output* is what the harness published on stdout: the
             // answer the messages sidebar shows as the agent's words and the
             // text a downstream node is handed as `{input}`. stderr is the
@@ -3160,8 +3216,17 @@ export function activate(api: any): void {
           // line) still reports that line — with any character or escape sequence
           // the decoder was still holding.
           const flush = () => {
-            const rest = pending + decoder.decode();
+            let rest = pending + decoder.decode();
             pending = "";
+            if (split) {
+              const tail = split.flush();
+              logReasoning(tail.thinking);
+              rest += tail.text;
+            }
+            if (reasoning.trim()) {
+              logLine(run, node.id, "status", `thinking: ${reasoning}`);
+              reasoning = "";
+            }
             if (rest.trim()) logLine(run, node.id, stream, rest);
           };
           return { feed, flush };

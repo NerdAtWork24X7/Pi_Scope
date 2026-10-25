@@ -180,7 +180,7 @@ function writeModelsStubHarness(dir, runsLog, promptLog) {
  * prompt it reads off stdin — both CLIs take the message from stdin when it is
  * not an argument, which is how the plugin sends a multi-line prompt.
  */
-function writeStdinStubHarness(dir, name, argvLog, promptLog, marker) {
+function writeStdinStubHarness(dir, name, argvLog, promptLog, marker, prelude = "") {
   const file = path.join(dir, name);
   const script = [
     "#!/bin/sh",
@@ -191,6 +191,7 @@ function writeStdinStubHarness(dir, name, argvLog, promptLog, marker) {
     "fi",
     `{ printf '%s\\n' "$@"; } >> ${JSON.stringify(argvLog)}`,
     `{ printf 'stdin: '; cat; printf '\\n'; } >> ${JSON.stringify(promptLog)}`,
+    prelude,
     `printf '${marker}\\n'`,
     "exit 0",
     "",
@@ -449,7 +450,10 @@ before(async () => {
   writeModelsStubHarness(stubDir, opencodeRuns, opencodePromptLog);
   clineArgv = path.join(tmpDir, "cline-argv.log");
   clinePrompt = path.join(tmpDir, "cline-prompt.log");
-  writeStdinStubHarness(stubDir, "cline", clineArgv, clinePrompt, "CLINE_RUN_OK");
+  // Cline paints its reasoning dim and labels it `[thinking] ` (see
+  // `harness-output.ts`): the node's answer must not carry it.
+  writeStdinStubHarness(stubDir, "cline", clineArgv, clinePrompt, "CLINE_RUN_OK",
+    "printf '\\033[2m[thinking] planning the run\\033[0m\\n'");
   kiloArgv = path.join(tmpDir, "kilo-argv.log");
   kiloPrompt = path.join(tmpDir, "kilo-prompt.log");
   writeStdinStubHarness(stubDir, "kilo", kiloArgv, kiloPrompt, "KILO_RUN_OK");
@@ -870,15 +874,16 @@ describe("subagent workflow plugin (server)", () => {
     fs.mkdirSync(solo, { recursive: true });
     const controlLog = path.join(tmpDir, "acp-control.log");
     const bin = writeAcpStub(tmpDir, controlLog);
+    // Kilo is an ACP harness whose turns really do run as a live session.
     const pinned = await api(`/${PLUGIN}/harness-paths`, {
-      method: "POST", body: JSON.stringify({ harness: "cline", path: bin }),
+      method: "POST", body: JSON.stringify({ harness: "kilo", path: bin }),
     });
     assert.ok(pinned.res.ok, pinned.data?.error);
     try {
       const s = await snapshot(solo);
       const agent = s.nodes.find((n) => n.type === "agent");
       const upd = await act("updateNode", { id: agent.id, name: "acp-node", config: {
-        harness: "cline", prompt: "do {task}", model: "cline/wf-model",
+        harness: "kilo", prompt: "do {task}", model: "kilo/wf-model",
       } }, solo);
       assert.ok(upd.res.ok, upd.data?.error);
 
@@ -886,7 +891,7 @@ describe("subagent workflow plugin (server)", () => {
       assert.ok(started.res.ok, started.data?.error);
       const run = await waitRun(solo);
       assert.equal(run.nodes[agent.id].status, "done", JSON.stringify(run.log));
-      assert.match(fs.readFileSync(controlLog, "utf8"), /set_model=cline\/wf-model/,
+      assert.match(fs.readFileSync(controlLog, "utf8"), /set_model=kilo\/wf-model/,
         "the node's selected model reached the ACP session");
       // The agent's streamed text is the node's output, exactly like stdout of a
       // print-mode harness…
@@ -900,7 +905,7 @@ describe("subagent workflow plugin (server)", () => {
     } finally {
       // Back to auto-detection for the rest of the suite.
       await api(`/${PLUGIN}/harness-paths`, {
-        method: "POST", body: JSON.stringify({ harness: "cline", path: "" }),
+        method: "POST", body: JSON.stringify({ harness: "kilo", path: "" }),
       });
     }
   });
@@ -1584,11 +1589,11 @@ describe("subagent workflow plugin (server)", () => {
     ]);
   });
 
-  test("launches Cline and Kilo Code as headless runs with the prompt on stdin", async () => {
-    // Cline (`cline [prompt]`) and Kilo (`kilo run [message]`) both read their
-    // message from stdin when it is not on the command line — the route this
-    // runner takes for every harness whose prompt is multi-line. Each keeps its
-    // own subcommand and takes `--model` for the node's model.
+  test("launches Cline as a headless run with its prompt on stdin", async () => {
+    // Cline (`cline [prompt]`) reads its message from stdin when it is not on the
+    // command line — the route this runner takes for a multi-line prompt. Kilo
+    // (`kilo run [message]`) is driven as a live ACP session instead, but keeps
+    // its own subcommand and `--model` for the headless path.
     const harnessList = (await api(`/${PLUGIN}/harnesses`)).data.harnesses;
     const byId = Object.fromEntries(harnessList.map((h) => [h.id, h]));
     assert.ok(byId.cline, "Cline is offered");
@@ -1607,7 +1612,6 @@ describe("subagent workflow plugin (server)", () => {
 
     const cases = [
       { harness: "cline", argv: clineArgv, prompt: clinePrompt, marker: "CLINE_RUN_OK", sub: [] },
-      { harness: "kilo", argv: kiloArgv, prompt: kiloPrompt, marker: "KILO_RUN_OK", sub: ["run"] },
     ];
     for (const c of cases) {
       const solo = path.join(tmpDir, `ws-${c.harness}-run`);
@@ -1624,6 +1628,12 @@ describe("subagent workflow plugin (server)", () => {
       const run = await waitRun(solo);
       assert.equal(run.status, "done", JSON.stringify(run.log));
       assert.match(run.nodes[agent.id].outputTail, new RegExp(c.marker));
+      // Cline's dim reasoning is a log row, never part of the node's answer
+      // (which a downstream node receives as `{input}`).
+      assert.doesNotMatch(run.nodes[agent.id].outputTail, /planning the run/,
+        "the dim-painted reasoning stays out of the answer");
+      assert.ok(run.log.some((l) => /thinking: planning the run/.test(l.text)),
+        JSON.stringify(run.log.map((l) => l.text)));
 
       // The launch is the CLI's own command line, with the model after it — and
       // no message (a multi-line prompt cannot ride an argv on Windows).

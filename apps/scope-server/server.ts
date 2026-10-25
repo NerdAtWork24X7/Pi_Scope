@@ -35,6 +35,7 @@ import { startChat, startChatSession, killChatSession, stopChat, chatSessionPid,
 import { harnessStartEvents, harnessEndEvents, type HarnessRecord, type NextSeq } from "./harness-record.ts";
 import { chatHarnessList, discoverHarnessModels, refreshHarnessModels } from "./harnesses.ts";
 import { discoverHarnessCommands } from "./harness-commands.ts";
+import { createThinkingSplitter } from "./harness-output.ts";
 import { AcpSession } from "./acp-client.ts";
 import { workflowHarnessSettings } from "./workflow-harness-settings.ts";
 import { buildLibraryPrompt, normaliseEntries, resolveLibraryEntry, LIBRARY_MAX_ENTRIES, LIBRARY_TARGET_RE } from "./library.ts";
@@ -4830,6 +4831,10 @@ const pluginKit = {
   // plugins are packaged outside the server bundle, so only the kit resolves
   // back into the host's modules.
   createAcpSession: (opts: any) => new AcpSession(opts),
+  // Separate a harness's answer from reasoning it painted dim (Cline's headless
+  // mode). Handed over rather than imported: plugins are packaged outside the
+  // server bundle, so only the kit resolves back into the host's modules.
+  createThinkingSplitter,
   sttStatus, startStt, stopStt,
   // The live shared cwd (mutable; the STT status fallback needs its current value).
   terminalCwd: () => TERMINAL_CWD,
