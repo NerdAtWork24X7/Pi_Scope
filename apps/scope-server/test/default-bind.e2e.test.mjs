@@ -24,6 +24,10 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..", "..");
 const SERVER = path.join(ROOT, "apps", "scope-server", "server.ts");
+
+function escapeRegExpLiteral(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 const TOKEN = "default-bind-token";
 
 let child = null;
@@ -162,7 +166,7 @@ test("the phone-facing listener serves HTTPS with a cert naming the LAN address"
 
   const lanIps = (await (await fetch(`${base}/lan?token=${TOKEN}`)).json()).ips;
   for (const ip of lanIps) {
-    assert.match(health.cert.subjectaltname, new RegExp(`IP Address:${ip.replace(/\./g, "\\.")}`), `the cert names ${ip}`);
+    assert.match(health.cert.subjectaltname, new RegExp(`IP Address:${escapeRegExpLiteral(ip)}`), `the cert names ${ip}`);
   }
   assert.match(health.cert.subjectaltname, /DNS:localhost/, "and localhost");
 });
