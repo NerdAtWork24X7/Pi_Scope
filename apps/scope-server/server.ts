@@ -3923,9 +3923,7 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ error: `unknown action: ${action}` }, 400);
     } catch (err: any) {
       console.error("POST /pi-update failed:", err);
-      // The Settings card shows this message, so keep the updater's reason
-      // (npm's output, a timeout) rather than a generic "internal error".
-      return jsonResponse({ error: String(err?.message || err) || "internal error" }, 500);
+      return jsonResponse({ error: "internal error" }, 500);
     }
   }
 
