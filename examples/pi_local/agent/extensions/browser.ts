@@ -668,7 +668,10 @@ export default function (pi: ExtensionAPI) {
             if (!p.expression) return err("expression is required for eval action");
             const pg = getActivePage();
             const result = await pg.evaluate(p.expression);
-            const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+            // JSON.stringify returns undefined for undefined/function/symbol results,
+            // which previously produced a text block with no `text` field and poisoned
+            // the whole session (pi's token estimator reads block.text.length).
+            const text = typeof result === "string" ? result : (JSON.stringify(result, null, 2) ?? String(result));
             return ok(text);
           }
           case "read": {
